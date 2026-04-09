@@ -26,7 +26,7 @@ Core modules:
     clustering     - HDBSCAN scene clustering for episode-scoped retrieval
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 from neuromem.client import Memory
 from neuromem.storage import (
