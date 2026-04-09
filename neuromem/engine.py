@@ -1186,6 +1186,7 @@ class NeuromemEngine:
         Returns:
             List of result dicts sorted by relevance.
         """
+        self._ensure_connection()
         if not self.conn:
             return []
 
@@ -1341,8 +1342,9 @@ class NeuromemEngine:
                 if use_llm_reranker and llm_fn and len(final_results) > limit:
                     try:
                         from neuromem.reranker import rerank_with_llm
+                        _llm_cap = min(limit * 2, 50)
                         final_results = rerank_with_llm(
-                            query, final_results[:limit * 2],
+                            query, final_results[:_llm_cap],
                             llm_fn=llm_fn, top_k=limit,
                         )
                     except Exception:
@@ -1355,8 +1357,9 @@ class NeuromemEngine:
         if use_llm_reranker and llm_fn and len(primary_results) > limit:
             try:
                 from neuromem.reranker import rerank_with_llm
+                _llm_cap = min(limit * 2, 50)
                 primary_results = rerank_with_llm(
-                    query, primary_results[:limit * 2],
+                    query, primary_results[:_llm_cap],
                     llm_fn=llm_fn, top_k=limit,
                 )
             except Exception:
@@ -1403,7 +1406,7 @@ class NeuromemEngine:
             content = r.get("content", "")[:150]
             sender = r.get("sender", "")
             if content:
-                context_snippets.append(f"[{sender}] {content}")
+                context_snippets.append(content)
 
         context_str = "\n".join(context_snippets)
 

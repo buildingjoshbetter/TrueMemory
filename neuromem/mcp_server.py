@@ -23,7 +23,17 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# HuggingFace offline mode — skip HTTP freshness checks when models are cached.
+# Models are already downloaded on first install; subsequent loads should be
+# pure disk reads (~170ms) instead of HTTP round-trips (~600ms+).
+# ---------------------------------------------------------------------------
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from mcp.server.fastmcp import FastMCP
 
@@ -76,9 +86,16 @@ STORING MEMORIES (neuromem_store):
 - Include the user_id parameter when you know who the user is.
 
 RECALLING MEMORIES (neuromem_search):
-- At the START of a conversation, search for relevant context about the user (preferences, past decisions, project context).
-- Before making recommendations or assumptions, check if you have stored preferences.
-- When the user asks "do you remember" or "what do you know about", always search.
+- At the START of a conversation, call neuromem_search with a broad query to load relevant context.
+- You can search multiple topics at once using | separation: "user preferences | project context | recent decisions"
+- Multiple queries run in parallel — no speed penalty for combining them.
+- Before making recommendations, check if you already have relevant context from prior searches.
+- When the user asks "do you remember" or references past conversations, search for the specific topic.
+
+DEEP SEARCH (neuromem_search_deep):
+- Use when neuromem_search doesn't find what you need, or for complex multi-part questions.
+- Also supports | separated parallel queries.
+- Retrieves 5x more candidates internally — best for questions requiring scattered evidence.
 
 FIRST-TIME SETUP:
 - When neuromem_stats shows "tier_configured": false, ask the user which tier they want:
@@ -93,14 +110,18 @@ _DB_PATH = os.path.expanduser(
     os.environ.get("NEUROMEM_DB", str(Path.home() / ".neuromem" / "memories.db"))
 )
 _memory: Memory | None = None
+_memory_lock = threading.Lock()
 
 
 def _get_memory() -> Memory:
-    """Lazy-init the Memory instance."""
+    """Lazy-init the Memory instance (thread-safe for background preloading)."""
     global _memory
-    if _memory is None:
-        _memory = Memory(path=_DB_PATH)
-    return _memory
+    if _memory is not None:
+        return _memory  # Fast path, no lock
+    with _memory_lock:
+        if _memory is None:
+            _memory = Memory(path=_DB_PATH)
+        return _memory
 
 
 # ---------------------------------------------------------------------------
@@ -123,12 +144,13 @@ def _build_llm_fn():
     if api_key:
         try:
             import anthropic
-            client = anthropic.Anthropic(api_key=api_key)
+            client = anthropic.Anthropic(api_key=api_key, timeout=30.0)
 
             def _anthropic_llm(prompt: str) -> str:
                 resp = client.messages.create(
                     model="claude-haiku-4-5-20251001",
-                    max_tokens=500,
+                    max_tokens=300,
+                    temperature=0.3,
                     messages=[{"role": "user", "content": prompt}],
                 )
                 return resp.content[0].text
@@ -195,6 +217,77 @@ def _build_llm_fn():
 
 
 # ---------------------------------------------------------------------------
+# Cached LLM function (singleton — avoids rebuilding API client per search)
+# ---------------------------------------------------------------------------
+
+_cached_llm_fn = None
+_cached_llm_fn_built = False
+
+
+def _get_llm_fn():
+    """Build and cache the LLM function. Only rebuilt on first call."""
+    global _cached_llm_fn, _cached_llm_fn_built
+    if not _cached_llm_fn_built:
+        _cached_llm_fn = _build_llm_fn()
+        _cached_llm_fn_built = True
+    return _cached_llm_fn
+
+
+# ---------------------------------------------------------------------------
+# Parallel search helper
+# ---------------------------------------------------------------------------
+
+# Benchmark-proven internal retrieval limits.
+# "Retrieve wide, rerank, present narrow."
+_SEARCH_INTERNAL_LIMIT = 100   # Benchmark sweet spot
+_DEEP_INTERNAL_LIMIT = 500     # Beyond benchmark — maximum recall
+
+# Tiered rerankers: fast for standard search, heavy for deep search.
+_SEARCH_RERANKER = "cross-encoder/ms-marco-MiniLM-L-12-v2"   # 33M, ~0.024s/query
+_DEEP_RERANKER = "BAAI/bge-reranker-v2-m3"                   # 568M, ~0.77s/query, 91.5%+
+
+
+def _set_reranker(model_name: str):
+    """Set the active reranker model (lazy-loads on first use)."""
+    try:
+        from neuromem.reranker import get_reranker
+        get_reranker(model_name=model_name)
+    except Exception:
+        pass  # Reranker unavailable — search degrades gracefully
+
+
+def _parallel_search(queries, user_id, internal_limit, llm_fn, output_limit):
+    """Run multiple agentic searches in parallel, merge and deduplicate."""
+    db_path = _get_memory()._engine.db_path
+
+    def _run_query(q):
+        thread_m = Memory(path=db_path)
+        try:
+            return thread_m.search_deep(
+                q, user_id=user_id, limit=internal_limit, llm_fn=llm_fn,
+            )
+        finally:
+            thread_m.close()
+
+    with ThreadPoolExecutor(max_workers=min(len(queries), 5)) as pool:
+        futures = [pool.submit(_run_query, q) for q in queries]
+        merged = []
+        seen_ids = set()
+        for f in futures:
+            try:
+                for r in f.result():
+                    rid = r.get("id")
+                    if rid not in seen_ids:
+                        merged.append(r)
+                        seen_ids.add(rid)
+            except Exception:
+                pass  # Individual query failure doesn't kill the batch
+
+    merged.sort(key=lambda x: -x.get("score", 0))
+    return merged[:output_limit]
+
+
+# ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 
@@ -225,17 +318,31 @@ def neuromem_search(
     user_id: str = "",
     limit: int = 10,
 ) -> str:
-    """Search memories. Use this proactively at the start of conversations to recall
-    user context, and whenever you need to check past preferences or decisions before
-    making recommendations.
+    """Search memories using the full agentic retrieval pipeline (HyDE query
+    expansion, cross-encoder reranking, multi-round retrieval).
+
+    Supports multiple queries separated by | for parallel execution.
+    Example: "user preferences | project context | recent decisions"
+    All queries run simultaneously and results are merged and deduplicated.
 
     Args:
-        query: Natural language search query.
+        query: Natural language search query. Use | to separate multiple queries.
         user_id: Filter results to this user (optional).
         limit: Maximum number of results to return.
     """
-    m = _get_memory()
-    results = m.search(query, user_id=user_id or None, limit=limit)
+    _set_reranker(_SEARCH_RERANKER)
+    llm_fn = _get_llm_fn()
+    uid = user_id or None
+    queries = [q.strip() for q in query.split("|") if q.strip()]
+
+    if len(queries) == 1:
+        m = _get_memory()
+        results = m.search_deep(
+            queries[0], user_id=uid, limit=_SEARCH_INTERNAL_LIMIT, llm_fn=llm_fn,
+        )
+        return json.dumps(results[:limit], indent=2)
+
+    results = _parallel_search(queries, uid, _SEARCH_INTERNAL_LIMIT, llm_fn, limit)
     return json.dumps(results, indent=2)
 
 
@@ -245,22 +352,31 @@ def neuromem_search_deep(
     user_id: str = "",
     limit: int = 10,
 ) -> str:
-    """Deep agentic search with multi-round retrieval (slower, higher accuracy).
+    """Maximum-depth memory search (top_k=500, multi-round, full reranking).
+    Uses the benchmark-grade reranker (91.5% LoCoMo accuracy).
 
-    Uses HyDE query expansion, refined sub-queries, and cross-encoder reranking
-    for maximum recall. Best for complex questions.
+    Use when neuromem_search doesn't find what you need, or for questions
+    requiring evidence scattered across many memories. Supports multiple
+    queries separated by | for parallel execution.
 
     Args:
-        query: Natural language search query.
+        query: Natural language search query. Use | to separate multiple queries.
         user_id: Filter results to this user (optional).
         limit: Maximum number of results to return.
     """
-    m = _get_memory()
+    _set_reranker(_DEEP_RERANKER)
+    llm_fn = _get_llm_fn()
+    uid = user_id or None
+    queries = [q.strip() for q in query.split("|") if q.strip()]
 
-    # Build llm_fn from available API keys (Anthropic first, OpenRouter fallback)
-    llm_fn = _build_llm_fn()
+    if len(queries) == 1:
+        m = _get_memory()
+        results = m.search_deep(
+            queries[0], user_id=uid, limit=_DEEP_INTERNAL_LIMIT, llm_fn=llm_fn,
+        )
+        return json.dumps(results[:limit], indent=2)
 
-    results = m.search_deep(query, user_id=user_id or None, limit=limit, llm_fn=llm_fn)
+    results = _parallel_search(queries, uid, _DEEP_INTERNAL_LIMIT, llm_fn, limit)
     return json.dumps(results, indent=2)
 
 
@@ -332,7 +448,10 @@ def neuromem_configure(tier: str) -> str:
     config["tier"] = tier
     _save_config(config)
 
-    # Apply model change
+    # Apply model change — temporarily allow downloads for tier switch
+    # (the new model may not be cached yet)
+    os.environ.pop("HF_HUB_OFFLINE", None)
+    os.environ.pop("TRANSFORMERS_OFFLINE", None)
     os.environ["NEUROMEM_EMBED_MODEL"] = tier
     from neuromem.vector_search import set_embedding_model
     set_embedding_model(tier)
@@ -357,6 +476,10 @@ def neuromem_configure(tier: str) -> str:
         except Exception:
             pass
         _memory = None  # Force re-init with new model on next call
+
+    # Restore offline mode now that the new model is downloaded/loaded
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
     result = {
         "status": "configured",
@@ -395,11 +518,73 @@ def neuromem_entity_profile(entity: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Background model preloading
+# ---------------------------------------------------------------------------
+
+def _preload_models():
+    """Pre-load ML models in background threads so the first search is fast.
+
+    Without preloading, the first search pays:
+      - sentence_transformers import: ~2,300ms
+      - CrossEncoder init: ~70ms
+      - model2vec load: ~170ms
+      Total: ~2,500ms+ on first query
+
+    With preloading, these costs are absorbed during MCP handshake/init,
+    so the first search sees the same latency as subsequent searches.
+    """
+    def _load_embedding_model_and_db():
+        """Pre-load the embedding model and initialize the DB connection.
+
+        Opening the DB + loading sqlite-vec + initializing the Memory singleton
+        adds ~50-100ms on first access. Doing it here means _get_memory() is
+        instant on the first tool call.
+        """
+        try:
+            from neuromem.vector_search import get_model
+            get_model()
+        except Exception:
+            pass  # Graceful degradation — model loads lazily on first search
+        try:
+            _get_memory()
+        except Exception:
+            pass
+
+    def _load_reranker():
+        """Pre-import sentence_transformers and load the default reranker.
+
+        The sentence_transformers import alone is ~2.3s (torch, transformers,
+        huggingface_hub). Loading it here means it's cached by the time
+        the first search needs it.
+        """
+        try:
+            from neuromem.reranker import get_reranker
+            get_reranker(model_name=_SEARCH_RERANKER)
+        except Exception:
+            pass  # Graceful degradation — reranker loads lazily on first search
+
+    # Fire both loads in parallel background threads.
+    # daemon=True so they don't block server shutdown.
+    t1 = threading.Thread(target=_load_embedding_model_and_db, daemon=True)
+    t2 = threading.Thread(target=_load_reranker, daemon=True)
+    t1.start()
+    t2.start()
+    # Don't join — let them finish in the background while the server
+    # handles the MCP handshake. The singleton locks in each module
+    # ensure thread safety if a search arrives before loading finishes.
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main():
     """Run the MCP server (stdio transport)."""
+    # Kick off model preloading before entering the event loop.
+    # Models load in background threads (~2.5s) while the MCP handshake
+    # completes (~1-3s), so by the time the first search arrives,
+    # models are already warm.
+    _preload_models()
     mcp.run(transport="stdio")
 
 

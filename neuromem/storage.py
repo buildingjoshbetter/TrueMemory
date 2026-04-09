@@ -161,8 +161,9 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
         An open ``sqlite3.Connection`` with row_factory left at default
         (callers choose their own access pattern).
     """
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(_SCHEMA_SQL)
     conn.commit()
     return conn

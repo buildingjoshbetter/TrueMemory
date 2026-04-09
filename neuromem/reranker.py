@@ -33,8 +33,9 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 _model = None
-_model_name: str = "mixedbread-ai/mxbai-rerank-large-v1"
+_model_name: str = "cross-encoder/ms-marco-MiniLM-L-12-v2"
 _lock = threading.Lock()
+_inference_lock = threading.Lock()  # Protects concurrent model.predict() calls
 
 
 def get_reranker(model_name: str | None = None, device: str | None = None):
@@ -114,8 +115,9 @@ def rerank(
     # Build (query, content) pairs
     pairs = [(query, r.get("content", "")) for r in results]
 
-    # Score all pairs
-    scores = model.predict(pairs, batch_size=batch_size, show_progress_bar=False)
+    # Score all pairs (locked for thread safety with parallel queries)
+    with _inference_lock:
+        scores = model.predict(pairs, batch_size=batch_size, show_progress_bar=False)
 
     # Attach scores and sort
     scored = []
@@ -313,7 +315,7 @@ def rerank_with_llm(
     for i, r in enumerate(results):
         content = r.get("content", "")[:200]
         sender = r.get("sender", "")
-        doc_lines.append(f"D{i+1}: [{sender}] {content}")
+        doc_lines.append(f"D{i+1}: {content}")
 
     documents = "\n".join(doc_lines)
     prompt = _RERANK_PROMPT.format(

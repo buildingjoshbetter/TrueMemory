@@ -41,11 +41,23 @@ synthetic_*.json
 .DS_Store
 Thumbs.db
 
-# Secrets
+# Secrets & credentials
 .env
 *.env
+.env.*
+config.json
+*.pem
+*.key
+*_key
+*_secret
+credentials.*
+secrets.*
 benchmark_configuration_journal.md
 benchmarks/locomo/scripts/bench_pro_run*.py
+
+# Neuromem user data (contains real memories / PII)
+~/.neuromem/
+*.db-journal
 
 # Dead code (not imported anywhere — verified 2026-04-06)
 neuromem/temporal_v2.py

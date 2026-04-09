@@ -97,7 +97,7 @@ def get_model():
         resolved = EMBEDDING_MODEL
         if resolved == "model2vec":
             from model2vec import StaticModel
-            _model = StaticModel.from_pretrained("minishlab/potion-base-8M")
+            _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
             _embedding_dim = 256
         elif resolved == "minilm":
             from sentence_transformers import SentenceTransformer
@@ -113,7 +113,7 @@ def get_model():
             _embedding_dim = 1024
         else:
             from model2vec import StaticModel
-            _model = StaticModel.from_pretrained("minishlab/potion-base-8M")
+            _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
             _embedding_dim = 256
     return _model
 

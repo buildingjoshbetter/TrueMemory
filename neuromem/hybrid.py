@@ -107,7 +107,7 @@ def reciprocal_rank_fusion(
 
 # Number of candidates to pull from each retriever before fusion.
 # Pulling many more than *limit* ensures RRF has rich lists to fuse.
-_CANDIDATE_POOL = 50
+_CANDIDATE_POOL = 200
 
 
 def search_hybrid(
