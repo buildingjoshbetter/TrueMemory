@@ -776,7 +776,7 @@ def detect_landmark_events(conn):
             match = pattern.search(content)
             if match:
                 # Extract event name from context
-                matched_text = match.group(0).strip()
+                _matched_text = match.group(0).strip()
 
                 # Get surrounding context for event name
                 start = max(0, match.start() - 30)

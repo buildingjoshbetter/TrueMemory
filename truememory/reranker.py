@@ -314,7 +314,7 @@ def rerank_with_llm(
     doc_lines = []
     for i, r in enumerate(results):
         content = r.get("content", "")[:200]
-        sender = r.get("sender", "")
+        _sender = r.get("sender", "")
         doc_lines.append(f"D{i+1}: {content}")
 
     documents = "\n".join(doc_lines)

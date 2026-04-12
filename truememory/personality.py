@@ -587,7 +587,7 @@ def extract_preferences(conn: sqlite3.Connection,
 
     for msg in messages:
         content = msg["content"]
-        lower = content.lower()
+        _lower = content.lower()
 
         # Food
         food_hits = _content_matches_any(content, _FOOD_KEYWORDS)
@@ -1187,7 +1187,6 @@ def build_dunbar_hierarchy(conn, primary_entity=None):
     """
     if primary_entity is None:
         return {}
-    from datetime import datetime, timezone
 
     # Count messages per contact
     rows = conn.execute(

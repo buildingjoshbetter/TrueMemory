@@ -49,7 +49,7 @@ def main():
     p_stats.add_argument("trace_file", help="Path to trace JSON file")
 
     # --- status command ---
-    p_status = sub.add_parser("status", help="Check whether ingestion is set up correctly")
+    _p_status = sub.add_parser("status", help="Check whether ingestion is set up correctly")
 
     # --- uninstall command ---
     p_uninstall = sub.add_parser("uninstall", help="Remove truememory-ingest hooks from Claude Code settings")
@@ -452,7 +452,7 @@ def _run_setup(args):
     # ���─ Done ──────────────────────────────────────────────────────────
     print()
     print("  \033[1;33m══════════════════════════════════════════════\033[0m")
-    print(f"  \033[1mSetup complete!\033[0m")
+    print("  \033[1mSetup complete!\033[0m")
     print(f"  Tier:     {tier}")
     print(f"  Provider: {llm_provider or 'none (basic search only)'}")
     print()
@@ -606,7 +606,7 @@ def _run_install(args):
     claude_md_path = Path.home() / ".claude" / "CLAUDE.md"
     _merge_claude_md(template_path, claude_md_path)
 
-    print(f"\nTo verify: truememory-ingest status")
+    print("\nTo verify: truememory-ingest status")
 
 
 _CLAUDE_MD_MARKER_START = "<!-- BEGIN truememory-ingest managed section -->"
@@ -751,9 +751,9 @@ def _run_status(args):
             if count is not None:
                 print(f"  [OK] Memory database accessible — {count} memories stored")
             else:
-                print(f"  [OK] Memory database accessible (count unavailable)")
+                print("  [OK] Memory database accessible (count unavailable)")
         except Exception:
-            print(f"  [OK] Memory database accessible (stats unavailable)")
+            print("  [OK] Memory database accessible (stats unavailable)")
     except Exception as e:
         print(f"  [WARN] Cannot access memory database: {e}")
 

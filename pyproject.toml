@@ -60,6 +60,16 @@ Changelog = "https://github.com/buildingjoshbetter/TrueMemory/blob/main/CHANGELO
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.ruff.lint]
+# Default ruleset is fine for the core codebase. Per-file ignores below.
+
+[tool.ruff.lint.per-file-ignores]
+# __init__.py files re-export submodule symbols as the public API. Ruff
+# flags these as F401 ("imported but unused") because they aren't consumed
+# inside the file itself — but they ARE the file's purpose. Standard
+# idiom is to ignore F401 for __init__ modules.
+"__init__.py" = ["F401"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["truememory"]
 

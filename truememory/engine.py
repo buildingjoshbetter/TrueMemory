@@ -29,8 +29,6 @@ import time
 import sqlite3
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
-
 # ───────────────────────────────────────────────────────────────────────────
 # Core modules (always available)
 # ───────────────────────────────────────────────────────────────────────────
@@ -40,6 +38,8 @@ from truememory.storage import (
 )
 from truememory.fts_search import search_fts
 
+logger = logging.getLogger(__name__)
+
 # ───────────────────────────────────────────────────────────────────────────
 # Optional modules — each import is wrapped so missing deps don't break
 # the engine.  Capability flags track what's available at runtime.
@@ -47,14 +47,14 @@ from truememory.fts_search import search_fts
 
 _HAS_VECTOR = False
 try:
-    from truememory.vector_search import init_vec_table, build_vectors, search_vector, build_separation_vectors
+    from truememory.vector_search import init_vec_table, build_vectors, build_separation_vectors
     _HAS_VECTOR = True
 except (ImportError, ModuleNotFoundError):
     pass
 
 _HAS_HYBRID = False
 try:
-    from truememory.hybrid import search_hybrid, reciprocal_rank_fusion
+    from truememory.hybrid import search_hybrid
     _HAS_HYBRID = True
 except (ImportError, ModuleNotFoundError):
     pass
@@ -116,14 +116,14 @@ except (ImportError, ModuleNotFoundError):
 
 _HAS_RERANKER = False
 try:
-    from truememory.reranker import rerank, rerank_with_fusion
+    import truememory.reranker  # noqa: F401
     _HAS_RERANKER = True
 except (ImportError, ModuleNotFoundError):
     pass
 
 _HAS_HYDE = False
 try:
-    from truememory.hyde import hyde_search, hyde_multi_search, generate_hypothetical_doc
+    from truememory.hyde import hyde_search
     _HAS_HYDE = True
 except (ImportError, ModuleNotFoundError):
     pass
@@ -1404,7 +1404,7 @@ class TrueMemoryEngine:
         context_snippets = []
         for r in top_results[:5]:
             content = r.get("content", "")[:150]
-            sender = r.get("sender", "")
+            _sender = r.get("sender", "")
             if content:
                 context_snippets.append(content)
 

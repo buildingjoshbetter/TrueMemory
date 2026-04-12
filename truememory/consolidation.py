@@ -916,7 +916,7 @@ def search_consolidated(conn: sqlite3.Connection, query: str,
 
     # Also check for time range indicators
     time_filter_start = None
-    time_filter_end = None
+    _time_filter_end = None
     year_match = re.search(r"(\d{4})", query)
     if year_match:
         year = year_match.group(1)
@@ -933,7 +933,7 @@ def search_consolidated(conn: sqlite3.Connection, query: str,
         for name, num in month_names.items():
             if name in lower_query:
                 time_filter_start = f"{year}-{num}-01"
-                time_filter_end = f"{year}-{num}-31"
+                _time_filter_end = f"{year}-{num}-31"
                 break
 
     # Fetch relevant summaries
