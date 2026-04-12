@@ -23,7 +23,7 @@ import subprocess
 import time
 import urllib.request
 import urllib.error
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 

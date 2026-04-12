@@ -35,7 +35,7 @@ from pathlib import Path
 
 from truememory.ingest.transcript import parse_transcript, format_for_extraction
 from truememory.ingest.extractor import extract_facts, ExtractedFact, extract_facts_simple
-from truememory.ingest.encoding_gate import EncodingGate, EncodingDecision
+from truememory.ingest.encoding_gate import EncodingGate
 from truememory.ingest.dedup import check_duplicate, DedupAction
 from truememory.ingest.models import LLMConfig, auto_detect
 

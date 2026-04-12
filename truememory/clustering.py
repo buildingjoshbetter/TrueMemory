@@ -216,7 +216,7 @@ def search_clustered(
     Returns:
         List of result dicts sorted by similarity.
     """
-    from truememory.vector_search import get_model, serialize_f32
+    from truememory.vector_search import get_model
 
     model = get_model()
     query_vec = model.encode([query])[0].astype(np.float32)

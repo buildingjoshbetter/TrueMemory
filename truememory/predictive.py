@@ -28,7 +28,6 @@ All functions use only ``sqlite3`` and the Python standard library.
 
 import re
 import sqlite3
-from collections import defaultdict
 
 
 # ---------------------------------------------------------------------------
