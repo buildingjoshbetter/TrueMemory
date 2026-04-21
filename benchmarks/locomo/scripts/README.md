@@ -51,16 +51,24 @@ modal run --detach bench_mem0.py          # Full run
 modal run --detach bench_mem0.py --smoke  # Smoke test
 ```
 
-### bench_truememory_base.py -- TrueMemory Base Tier
-TrueMemory Base using Model2Vec (`potion-base-8M`, 256-dim) embeddings and cross-encoder reranker (`ms-marco-MiniLM-L6-v2`, 22M params). No HyDE, no GPU required.
+### bench_truememory_edge.py -- TrueMemory Edge Tier
+TrueMemory Edge using Model2Vec (`potion-base-8M`, 256-dim) embeddings and cross-encoder reranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`, 22M params). No HyDE, no GPU required. Paper §2.0 target: 90.1% LoCoMo.
+
+```bash
+modal run --detach bench_truememory_edge.py          # Full run
+modal run --detach bench_truememory_edge.py --smoke  # Smoke test
+```
+
+### bench_truememory_base.py -- TrueMemory Base Tier (Default, GPU recommended)
+TrueMemory Base using Qwen3-Embedding-0.6B truncated to 256-dim (Matryoshka) and `Alibaba-NLP/gte-reranker-modernbert-base` (149M params). No HyDE. Paper §2.0 target: 91.5%. Runs on CPU but a T4 GPU is strongly recommended for the reranker.
 
 ```bash
 modal run --detach bench_truememory_base.py          # Full run
 modal run --detach bench_truememory_base.py --smoke  # Smoke test
 ```
 
-### bench_truememory_pro.py -- TrueMemory Pro Tier (GPU)
-TrueMemory Pro using Qwen3-Embedding-0.6B (1024-dim) embeddings, mxbai-rerank-large-v1 (435M params) reranker, and HyDE (Hypothetical Document Embeddings) via OpenRouter LLM. Requires a T4 GPU on Modal.
+### bench_truememory_pro.py -- TrueMemory Pro Tier (+HyDE, GPU)
+TrueMemory Pro uses the same embedder + reranker as Base, plus HyDE (Hypothetical Document Embeddings) via OpenRouter LLM. Paper §2.0 target: 91.8%. Requires a T4 GPU on Modal and an OpenRouter key for the HyDE call.
 
 ```bash
 modal run --detach bench_truememory_pro.py          # Full run
