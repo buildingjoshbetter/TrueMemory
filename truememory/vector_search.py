@@ -41,26 +41,42 @@ if TYPE_CHECKING:
 # Singleton model loader
 # ---------------------------------------------------------------------------
 
-# Public tier names → internal model identifiers
+# Public tier names → internal model identifiers (v0.4.0 paper-aligned Edge/Base/Pro)
 _TIER_ALIASES = {
-    "base": "model2vec",
-    "pro": "qwen3",
+    "edge": "model2vec",
+    "base": "qwen3_256",
+    "pro": "qwen3_256",
 }
 
 _MODEL_DIMS = {
     "model2vec": 256,
     "minilm": 384,
     "bge-small": 384,
-    "qwen3": 1024,
+    "qwen3_256": 256,
 }
+
+# v0.4.0 breaking change: the old internal name "qwen3" (1024d native) is gone.
+# Callers must migrate to "pro" (tier alias) or "qwen3_256" (internal name).
+_REMOVED_MODELS = {"qwen3"}
 
 
 def _resolve_model_name(name: str) -> str:
-    """Resolve a public tier name (base/pro) or internal name to an internal name."""
-    return _TIER_ALIASES.get(name.lower(), name)
+    """Resolve a public tier name (edge/base/pro) or internal model name.
+
+    Raises:
+        ValueError: if *name* refers to a model removed in v0.4.0.
+    """
+    lowered = name.lower()
+    if lowered in _REMOVED_MODELS:
+        raise ValueError(
+            f"Embedding model {name!r} was removed in TrueMemory v0.4.0. "
+            f"Migrate to 'pro' (tier alias) or 'qwen3_256' (internal name) — "
+            f"the paper-aligned Qwen3-Embedding-0.6B @ 256d Matryoshka config."
+        )
+    return _TIER_ALIASES.get(lowered, name)
 
 
-_raw_env = os.environ.get("TRUEMEMORY_EMBED_MODEL", "base")
+_raw_env = os.environ.get("TRUEMEMORY_EMBED_MODEL", "edge")
 EMBEDDING_MODEL = _resolve_model_name(_raw_env)
 
 _model = None
@@ -107,10 +123,13 @@ def get_model():
             from sentence_transformers import SentenceTransformer
             _model = SentenceTransformer("BAAI/bge-small-en-v1.5")
             _embedding_dim = 384
-        elif resolved == "qwen3":
+        elif resolved == "qwen3_256":
             from sentence_transformers import SentenceTransformer
-            _model = SentenceTransformer("Qwen/Qwen3-Embedding-0.6B")
-            _embedding_dim = 1024
+            _model = SentenceTransformer(
+                "Qwen/Qwen3-Embedding-0.6B",
+                truncate_dim=256,
+            )
+            _embedding_dim = 256
         else:
             from model2vec import StaticModel
             _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)

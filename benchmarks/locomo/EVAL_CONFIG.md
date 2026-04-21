@@ -47,3 +47,15 @@ Configuration used for all LoCoMo benchmark runs.
 | Compute platform | Modal serverless (Python 3.11) |
 | API routing | OpenRouter |
 | Recommended reproduction platform | Modal (free credits available at [modal.com](https://modal.com)) |
+
+## TrueMemory tier configurations
+
+TrueMemory v0.4.0 ships three paper-aligned tiers. All three share the same 6-layer pipeline (FTS5 + dense + RRF + cross-encoder reranker + temporal/salience layers); the tiers differ only in embedder, reranker, and whether HyDE query expansion is used. Base and Pro share the same embedder + reranker — only HyDE toggles between them.
+
+| Tier | Embedder | Reranker | HyDE | top_k | LoCoMo target | Hardware |
+|------|----------|----------|------|-------|---------------|----------|
+| Edge | Model2Vec potion-base-8M @ 256d (8M params) | `cross-encoder/ms-marco-MiniLM-L-6-v2` (22M) | off | 100 | 90.1% | CPU only, 512 MB RAM |
+| Base (Default) | `Qwen/Qwen3-Embedding-0.6B` @ 256d Matryoshka (600M) | `Alibaba-NLP/gte-reranker-modernbert-base` (149M) | off | 100 | 91.5% | CPU or GPU (T4 recommended), 4 GB RAM |
+| Pro (+HyDE) | `Qwen/Qwen3-Embedding-0.6B` @ 256d Matryoshka (600M) | `Alibaba-NLP/gte-reranker-modernbert-base` (149M) | on (gpt-4.1-mini via OpenRouter) | 100 | 91.8% | CPU or GPU (T4 recommended), 4 GB RAM, LLM API key |
+
+Qwen3-Embedding-0.6B ships at a higher native dimension; the `truncate_dim=256` Matryoshka setting is what produces the 256-dim Base/Pro vectors documented in paper §2.0. Per-tier bench scripts: `bench_truememory_edge.py`, `bench_truememory_base.py`, `bench_truememory_pro.py`.

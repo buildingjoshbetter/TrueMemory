@@ -26,6 +26,9 @@ Usage:
     # Download results
     modal volume get locomo-results / ./results --force
 """
+# ruff: noqa: E401, E701, E702, E722, F541, F841
+# Development runner — terse one-line style matches the other Modal bench
+# scripts in this directory. Style rules above are silenced for the file.
 
 import json, modal, os, re, sys, time
 from datetime import datetime, timedelta
@@ -435,11 +438,11 @@ def retrieve_truememory_base(conv_data, conv_idx):
 
 def retrieve_truememory_pro(conv_data, conv_idx):
     from truememory.vector_search import set_embedding_model
-    set_embedding_model("qwen3")
+    set_embedding_model("pro")
     from truememory.engine import TrueMemoryEngine
     from truememory.reranker import get_reranker
     import tempfile
-    get_reranker(model_name="mixedbread-ai/mxbai-rerank-large-v1")
+    get_reranker(model_name="Alibaba-NLP/gte-reranker-modernbert-base")
     llm_fn = _nm_make_hyde_fn()
     msgs = parse_conv(conv_data)
     tmp_db = tempfile.mktemp(suffix=".db", prefix=f"pro_{conv_idx}_")

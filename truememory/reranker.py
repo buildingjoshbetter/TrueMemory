@@ -6,8 +6,10 @@ Reranks retrieval results using a cross-encoder model that jointly encodes
 (query, document) pairs for more accurate relevance scoring than embedding-
 based similarity alone.
 
-Uses ``mixedbread-ai/mxbai-rerank-large-v1`` by default.  Can optionally
-use GPU if available.
+Uses ``cross-encoder/ms-marco-MiniLM-L-6-v2`` by default (paper §2.0 Edge
+reranker, 22M params, CPU-friendly).  Base/Pro bench scripts override to
+``Alibaba-NLP/gte-reranker-modernbert-base`` (149M, GPU recommended).
+Can optionally use GPU if available.
 
 Usage::
 
@@ -33,7 +35,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 _model = None
-_model_name: str = "cross-encoder/ms-marco-MiniLM-L-12-v2"
+_model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 _lock = threading.Lock()
 _inference_lock = threading.Lock()  # Protects concurrent model.predict() calls
 
@@ -44,7 +46,9 @@ def get_reranker(model_name: str | None = None, device: str | None = None):
 
     Args:
         model_name: HuggingFace model ID.  Defaults to
-                    ``mixedbread-ai/mxbai-rerank-large-v1``.
+                    ``cross-encoder/ms-marco-MiniLM-L-6-v2`` (paper §2.0 Edge
+                    reranker).  Pass ``Alibaba-NLP/gte-reranker-modernbert-base``
+                    for the paper Base/Pro reranker.
         device:     Device string (``"cpu"``, ``"cuda:0"``, etc.).
                     If None, auto-detects.
 

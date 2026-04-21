@@ -14,19 +14,19 @@ Core modules:
     engine         - Full TrueMemoryEngine with 6-layer search pipeline
     storage        - SQLite + WAL database layer with schema and CRUD operations
     fts_search     - FTS5 full-text search with BM25 ranking and score normalization
-    vector_search  - Semantic search via sqlite-vec (Base: Model2Vec potion-base-8M; Pro: Qwen3-Embedding-0.6B)
+    vector_search  - Semantic search via sqlite-vec (Edge: Model2Vec potion-base-8M @ 256d; Base/Pro: Qwen3-Embedding-0.6B @ 256d Matryoshka)
     hybrid         - Reciprocal Rank Fusion combining FTS5 + vector search
     temporal       - L2 temporal reasoning (date parsing, time-window filtering)
     salience       - L4 salience guard (noise filtering, entity disambiguation)
     personality    - L0 Personality Engram (entity profiles, preferences, communication style)
     consolidation  - L5 Consolidation (timelines, contradiction detection, summaries)
     predictive     - Predictive Coding Filter (surprise scoring, noise reduction)
-    reranker       - Cross-encoder reranking (default: mixedbread-ai/mxbai-rerank-large-v1)
+    reranker       - Cross-encoder reranking (default: cross-encoder/ms-marco-MiniLM-L-6-v2; Base/Pro override to Alibaba-NLP/gte-reranker-modernbert-base)
     hyde           - HyDE hypothetical document embeddings for query enhancement
     clustering     - HDBSCAN scene clustering for episode-scoped retrieval
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from truememory.client import Memory
 from truememory.storage import (
