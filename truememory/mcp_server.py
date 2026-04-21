@@ -82,8 +82,8 @@ mcp = FastMCP(
 FIRST-TIME SETUP (do this FIRST, before anything else):
 1. Call truememory_stats at the start of your first session.
 2. If the response contains "setup_required": true, present the "welcome" message to the user EXACTLY as written — it contains the setup instructions.
-3. Wait for the user to choose Base or Pro.
-4. If they choose Pro, ask if they have an API key for enhanced search (Anthropic, OpenRouter, or OpenAI). This is optional but recommended.
+3. Wait for the user to choose Edge, Base, or Pro.
+4. If they choose Pro, ask for an API key for HyDE query expansion (Anthropic, OpenRouter, or OpenAI) — required for Pro, optional for Edge / Base.
 5. Call truememory_configure with their choices (tier, and optionally api_key + api_provider).
 6. Present the "next_steps" from the response to the user — it shows how to use TrueMemory.
 7. Setup is done. Proceed normally.
@@ -254,8 +254,11 @@ _SEARCH_INTERNAL_LIMIT = 100   # Benchmark sweet spot
 _DEEP_INTERNAL_LIMIT = 500     # Beyond benchmark — maximum recall
 
 # Tiered rerankers: fast for standard search, heavy for deep search.
-_SEARCH_RERANKER = "cross-encoder/ms-marco-MiniLM-L-12-v2"   # 33M, ~0.024s/query
-_DEEP_RERANKER = "BAAI/bge-reranker-v2-m3"                   # 568M, ~0.77s/query, 91.5%+
+# Default is the paper §2.0 Edge reranker (ms-marco-MiniLM-L-6-v2, 22M params,
+# CPU-friendly). Bench scripts for Base/Pro explicitly override to
+# gte-reranker-modernbert-base via get_reranker(model_name=...).
+_SEARCH_RERANKER = "cross-encoder/ms-marco-MiniLM-L-6-v2"    # 22M, CPU-friendly
+_DEEP_RERANKER = "BAAI/bge-reranker-v2-m3"                   # 568M, ~0.77s/query
 
 
 def _set_reranker(model_name: str):
@@ -421,13 +424,13 @@ def truememory_forget(memory_id: int) -> str:
 def truememory_stats() -> str:
     """Get memory system statistics. On first run, returns a welcome message
     and setup instructions — present these to the user to walk them through
-    choosing Base or Pro tier."""
+    choosing Edge, Base, or Pro tier."""
     m = _get_memory()
     m._engine._ensure_connection()
     stats = m.stats()
     config = _load_config()
     stats["version"] = __version__
-    stats["tier"] = config.get("tier", "base")
+    stats["tier"] = config.get("tier", "edge")
     stats["tier_configured"] = "tier" in config
 
     if not stats["tier_configured"]:
@@ -440,14 +443,18 @@ def truememory_stats() -> str:
             "\n"
             "Choose your tier:\n"
             "\n"
-            "  Base — 88.2% accuracy on LoCoMo. Works on any machine.\n"
-            "          Lightweight (~30MB). No API key needed.\n"
+            "  Edge — 90.1% accuracy on LoCoMo. CPU-only, works anywhere.\n"
+            "          Lightweight (~30MB install). No API key needed.\n"
             "\n"
-            "  Pro  — 91.5% accuracy on LoCoMo. Needs 4GB+ RAM.\n"
-            "          Larger models (~1.5GB one-time download).\n"
-            "          Optional API key enables HyDE query expansion for even better search.\n"
+            "  Base — 91.5% accuracy on LoCoMo. GPU recommended.\n"
+            "          Paper-aligned Qwen3 @ 256d + gte-reranker (~1.5GB install).\n"
+            "          No API key needed — fully offline.\n"
             "\n"
-            "Which would you like: Base or Pro?"
+            "  Pro  — 91.8% accuracy on LoCoMo. GPU recommended.\n"
+            "          Same models as Base plus HyDE query expansion.\n"
+            "          Requires an API key (Anthropic / OpenRouter / OpenAI) for the HyDE LLM call.\n"
+            "\n"
+            "Which would you like: Edge, Base, or Pro?"
         )
         stats["has_api_key"] = bool(
             os.environ.get("ANTHROPIC_API_KEY")
@@ -471,15 +478,16 @@ def truememory_configure(
     or again to change tier or update API keys.
 
     Args:
-        tier: "base" or "pro".
-        api_key: Optional API key for enhanced search (HyDE query expansion).
-                 Supported providers: anthropic, openrouter, openai.
+        tier: "edge", "base", or "pro".
+        api_key: API key for HyDE query expansion (required for Pro,
+                 optional for Edge / Base).  Supported providers:
+                 anthropic, openrouter, openai.
         api_provider: Required if api_key is provided. One of: "anthropic", "openrouter", "openai".
     """
     global _memory
     tier = tier.lower().strip()
-    if tier not in ("base", "pro"):
-        return json.dumps({"error": "tier must be 'base' or 'pro'"})
+    if tier not in ("edge", "base", "pro"):
+        return json.dumps({"error": "tier must be 'edge', 'base', or 'pro'"})
 
     # Validate API key + provider pairing
     if api_key and not api_provider:
@@ -493,19 +501,20 @@ def truememory_configure(
                 "error": "api_provider must be one of: anthropic, openrouter, openai",
             })
 
-    # Check pro dependencies before committing
-    if tier == "pro":
+    # Check Base / Pro dependencies before committing (both need sentence-transformers
+    # for the Qwen3 embedder + gte-reranker).
+    if tier in ("base", "pro"):
         try:
             import sentence_transformers  # noqa: F401
         except ImportError:
             return json.dumps({
-                "error": "Pro tier requires an extra install. Run: pip install truememory[gpu]",
-                "current_tier": _load_config().get("tier", "base"),
+                "error": f"{tier.capitalize()} tier requires an extra install. Run: pip install truememory[gpu]",
+                "current_tier": _load_config().get("tier", "edge"),
             })
 
     # Save to persistent config
     config = _load_config()
-    old_tier = config.get("tier", "base")
+    old_tier = config.get("tier", "edge")
     config["tier"] = tier
 
     # Store API key if provided

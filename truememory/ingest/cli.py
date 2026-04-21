@@ -304,34 +304,33 @@ def _run_setup(args):
     existing_tier = config.get("tier", "")
     print("  \033[1mEmbedding Tier\033[0m")
     print("  ─────────────")
-    print("  [1] Base — 88.2% accuracy, lightweight, works anywhere (~30MB)")
-    print("  [2] Pro  — 91.5% accuracy, needs 4GB+ RAM (~1.5GB download)")
+    print("  [1] Edge — 90.1% LoCoMo, CPU-only, ~30MB install. Works anywhere.")
+    print("  [2] Base — 91.5% LoCoMo, GPU recommended, ~1.5GB install. No API key needed.")
+    print("  [3] Pro  — 91.8% LoCoMo, GPU recommended, ~1.5GB install. Requires LLM API key (HyDE).")
     print()
 
+    _TIER_NUM = {"edge": "1", "base": "2", "pro": "3"}
     if args.non_interactive:
-        tier = existing_tier or "base"
+        tier = existing_tier or "edge"
     else:
-        default_num = "2" if existing_tier == "pro" else "1"
-        choice = input(f"  Choose tier [1/2] (default: {default_num}): ").strip()
-        if choice == "2" or (not choice and default_num == "2"):
-            tier = "pro"
-        else:
-            tier = "base"
+        default_num = _TIER_NUM.get(existing_tier, "1")
+        choice = input(f"  Choose tier [1/2/3] (default: {default_num}): ").strip() or default_num
+        tier = {"1": "edge", "2": "base", "3": "pro"}.get(choice, "edge")
 
-    if tier == "pro":
+    if tier in ("base", "pro"):
         try:
             import sentence_transformers  # noqa: F401
-            print("  \033[32m✓ Pro dependencies already installed\033[0m")
+            print(f"  \033[32m✓ {tier.capitalize()} dependencies already installed\033[0m")
         except ImportError:
-            print("  \033[33m⚠ Pro tier requires: pip install truememory[gpu]\033[0m")
+            print(f"  \033[33m⚠ {tier.capitalize()} tier requires: pip install truememory[gpu]\033[0m")
             if not args.non_interactive:
                 do_install = input("  Install now? [y/N]: ").strip().lower()
                 if do_install == "y":
                     import subprocess
                     subprocess.run([sys.executable, "-m", "pip", "install", "truememory[gpu]"])
                 else:
-                    print("  Falling back to Base tier.")
-                    tier = "base"
+                    print("  Falling back to Edge tier.")
+                    tier = "edge"
 
     # Pre-download the embedding model so first search isn't slow
     print()
@@ -341,8 +340,8 @@ def _run_setup(args):
         from truememory.vector_search import set_embedding_model, get_model
         set_embedding_model(tier)
         get_model()  # triggers download if not cached
-        if tier == "pro":
-            print("  \033[32m✓ Qwen3-Embedding-0.6B (1024-dim) ready\033[0m")
+        if tier in ("base", "pro"):
+            print("  \033[32m✓ Qwen3-Embedding-0.6B @ 256d Matryoshka ready\033[0m")
         else:
             print("  \033[32m✓ potion-base-8M (256-dim) ready\033[0m")
     except Exception as e:

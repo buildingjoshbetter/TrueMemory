@@ -4,8 +4,8 @@ title: "TrueMemory"
 authors:
   - name: "@Building_Josh"
     affiliation: "Sauron"
-version: "0.3.0"
-date-released: "2026-04-11"
+version: "0.4.0"
+date-released: "2026-04-21"
 url: "https://github.com/buildingjoshbetter/TrueMemory"
 license: Apache-2.0
 keywords:

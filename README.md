@@ -10,16 +10,17 @@
   <a href="https://pypi.org/project/truememory/"><img src="https://img.shields.io/pypi/v/truememory?color=blue&label=PyPI" alt="PyPI"></a>
   <a href="https://pypi.org/project/truememory/"><img src="https://img.shields.io/pypi/pyversions/truememory?color=blue" alt="Python"></a>
   <a href="https://github.com/buildingjoshbetter/TrueMemory/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License"></a>
-  <img src="https://img.shields.io/badge/Base-88.2%25_LoCoMo-brightgreen" alt="Base Score">
-  <img src="https://img.shields.io/badge/Pro-91.5%25_LoCoMo-blue" alt="Pro Score">
+  <img src="https://img.shields.io/badge/Edge-90.1%25_LoCoMo-brightgreen" alt="Edge Score">
+  <img src="https://img.shields.io/badge/Base-91.5%25_LoCoMo-blue" alt="Base Score">
+  <img src="https://img.shields.io/badge/Pro-91.8%25_LoCoMo-blueviolet" alt="Pro Score">
 </p>
 
 <p align="center">
-  <strong>🏆 91.5% on LoCoMo · 📦 One SQLite File · ☁️ Zero Cloud · 💰 Zero Infrastructure Cost</strong>
+  <strong>🏆 91.8% on LoCoMo (Pro) · 📦 One SQLite File · ☁️ Zero Cloud · 💰 Zero Infrastructure Cost</strong>
 </p>
 
 <p align="center">
-  <a href="#-benchmark">Benchmark</a> · <a href="#-research-highlights">Highlights</a> · <a href="#-base-vs-pro">Base vs Pro</a> · <a href="#-quickstart">Install</a> · <a href="#-what-happens-on-first-run">First Run</a> · <a href="#-api">API</a>
+  <a href="#-benchmark">Benchmark</a> · <a href="#-research-highlights">Highlights</a> · <a href="#%EF%B8%8F-edge--base--pro">Edge / Base / Pro</a> · <a href="#-quickstart">Install</a> · <a href="#-what-happens-on-first-run">First Run</a> · <a href="#-api">API</a>
 </p>
 
 ---
@@ -32,7 +33,7 @@ Tested on [LoCoMo](https://github.com/snap-research/locomo), the standard benchm
   <img src="assets/charts/leaderboard-bar.png?v=2" alt="LoCoMo 8-System Comparison" />
 </p>
 
-TrueMemory achieves **state-of-the-art accuracy for fully-local memory systems** at zero ongoing infrastructure cost. Base runs entirely offline with no API keys. Pro adds one small LLM call per query for HyDE query expansion.
+TrueMemory achieves **state-of-the-art accuracy for fully-local memory systems** at zero ongoing infrastructure cost. Edge and Base run entirely offline with no API keys. Pro adds one small LLM call per query for HyDE query expansion.
 
 <p align="center">
   <img src="assets/charts/accuracy-vs-cost.png?v=2" alt="Accuracy vs Infrastructure Cost" />
@@ -44,11 +45,11 @@ All scores use the same evaluation pipeline: GPT-4.1-mini answer generation, GPT
 
 ## ⚡ Research Highlights
 
-- **30+ percentage points more accurate than Mem0** on LoCoMo (91.5% vs 61.4%)
+- **30+ percentage points more accurate than Mem0** on LoCoMo (91.8% Pro vs 61.4%)
 - **2x more cost-efficient** per correct answer than Mem0
-- **Runs offline** on any device with Python 3.10+ and 512MB RAM
-- **One SQLite file, zero API keys.** The entire 6-layer system runs offline.
-- **Within 3.0pp of EverMemOS**, the only higher-scoring system — and EverMemOS uses pre-computed retrieval rather than live search at query time.
+- **Runs offline** on any device with Python 3.10+ and 512MB RAM (Edge tier)
+- **One SQLite file, zero API keys** for Edge and Base tiers. The entire 6-layer system runs offline.
+- **Within 2.7pp of EverMemOS**, the only higher-scoring system — and EverMemOS uses pre-computed retrieval rather than live search at query time.
 
 <p align="center">
   <img src="assets/charts/category-radar.png?v=2" alt="Category Breakdown" />
@@ -56,20 +57,25 @@ All scores use the same evaluation pipeline: GPT-4.1-mini answer generation, GPT
 
 TrueMemory Pro nearly matches EverMemOS across all 4 question categories. Mem0 collapses on multi-hop reasoning (37.7% vs 90.7%).
 
+> The hero banner and charts in this README still show the v0.3.0 single-Pro-tier layout (91.5%). Chart regeneration is tracked for a later release; all numerical claims in the README text and tables reflect the v0.4.0 three-tier scores above.
+
 ---
 
-## 🏗️ Base vs Pro
+## 🏗️ Edge / Base / Pro
 
-Same features, same 6-layer pipeline. **Pro upgrades the embedding model and the cross-encoder reranker** for higher retrieval accuracy.
+Same features, same 6-layer pipeline. Three tiers trade off install size, hardware, and LoCoMo accuracy. All three use the same retrieval architecture (FTS5 + dense + RRF + cross-encoder reranker); the differences are the embedder, the reranker, and whether HyDE query expansion is used. Base and Pro share an embedder and reranker — only HyDE differs.
 
-| | Base | Pro |
-|---|------|-----|
-| **LoCoMo** | 88.2% | 91.5% |
-| **Runs on** | Any machine (CPU only) | 4GB+ RAM (CPU or GPU) |
-| **First install** | ~30MB | ~1.5GB one-time download |
-| **Speed** | Ultra-fast | Fast |
+| | Edge | Base | Pro |
+|---|------|------|-----|
+| **LoCoMo** | 90.1% | 91.5% | 91.8% |
+| **Embedder** | Model2Vec potion-base-8M (8M params, 256d) | Qwen3-Embedding-0.6B @ 256d Matryoshka (600M params) | Qwen3-Embedding-0.6B @ 256d Matryoshka (600M params) |
+| **Reranker** | ms-marco-MiniLM-L-6-v2 (22M) | gte-reranker-modernbert-base (149M) | gte-reranker-modernbert-base (149M) |
+| **HyDE** | off | off | on (requires an LLM API key) |
+| **Runs on** | Any machine, CPU only | 4GB+ RAM, CPU or GPU | 4GB+ RAM, CPU or GPU + LLM API key |
+| **First install** | ~30MB | ~1.5GB one-time download | ~1.5GB one-time download |
+| **Speed** | Ultra-fast | Fast | Fast + 1 LLM call/query |
 
-**Base** works everywhere. **Pro** remembers better.
+**Edge** works everywhere. **Base** is the strongest fully-offline tier. **Pro** adds HyDE for the highest LoCoMo score.
 
 ---
 
@@ -91,17 +97,17 @@ curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/
 
 **Step 3.** Wait ~1-2 minutes while it downloads and installs. You'll see progress messages scroll by — that's normal.
 
-**Step 4.** If Claude Desktop was already open, **quit it with `Cmd+Q` and reopen it** (a new chat window is not enough — the config is only read at launch). Then start a new Claude session and TrueMemory walks you through choosing **Base** or **Pro** on first run.
+**Step 4.** If Claude Desktop was already open, **quit it with `Cmd+Q` and reopen it** (a new chat window is not enough — the config is only read at launch). Then start a new Claude session and TrueMemory walks you through choosing **Edge**, **Base**, or **Pro** on first run.
 
 > **What this actually does:** installs [uv](https://docs.astral.sh/uv/) (Astral's Python tool manager) if needed, fetches a managed Python 3.12 into `~/.local/share/uv/`, installs TrueMemory into an isolated tool environment, and auto-configures Claude Code and Claude Desktop. **Your system Python is never touched.** No sudo, no venvs, no pip struggle. Uninstall cleanly with `uv tool uninstall truememory`.
 
 > **Want to audit the script first?** It's ~140 lines of shell, no sudo, stays entirely under `$HOME`. Read the source at [`install.sh`](install.sh), or download and inspect locally: `curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.sh -o install.sh && less install.sh && sh install.sh`.
 
-> **Want Pro (adds GPU reranker + sentence-transformers, ~1.5-2.5GB depending on OS)?**
+> **Want Base or Pro (adds Qwen3 embeddings + gte-reranker + sentence-transformers, ~1.5-2.5GB depending on OS)?**
 > ```bash
 > curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.sh | TRUEMEMORY_EXTRAS="gpu,mcp" sh
 > ```
-> The default install is **Base** (~30MB). If you pick Pro during first-run setup, TrueMemory will prompt you to install the extra models.
+> The default install is **Edge** (~30MB, the CPU-only tier). If you pick Base or Pro during first-run setup, TrueMemory will prompt you to install the extra models. Pro additionally requires an LLM API key at runtime for HyDE.
 > *(Linux CPU-only boxes will pull PyTorch's default CUDA wheel, which is larger — ~2.5GB total. Mac installs are closer to ~1.5GB.)*
 
 ### Python library (for developers)
@@ -135,8 +141,8 @@ Claude forgets you between sessions. TrueMemory fixes that.
 On your first session after installing, TrueMemory will:
 
 1. **Welcome you** and show your current version
-2. **Ask Base or Pro** — you choose your accuracy tier
-3. **Optionally accept an API key** — for enhanced search via HyDE query expansion (Anthropic, OpenRouter, or OpenAI)
+2. **Ask Edge / Base / Pro** — you choose your accuracy tier
+3. **Optionally accept an API key** — required for Pro (HyDE query expansion via Anthropic, OpenRouter, or OpenAI); optional for Edge and Base
 4. **Show you how it works** — with example prompts to try
 
 After setup, TrueMemory runs automatically. It stores what you tell it and recalls it in future sessions — no manual work needed.
@@ -223,7 +229,7 @@ Every benchmark script is self-contained and runs on [Modal](https://modal.com).
   organization = {Sauron},
   year = {2026},
   url = {https://github.com/buildingjoshbetter/TrueMemory},
-  version = {0.3.0}
+  version = {0.4.0}
 }
 ```
 

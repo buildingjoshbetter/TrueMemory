@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.4.0] - 2026-04-21
+
+Paper-aligned Edge / Base / Pro tier realignment. Pro no longer uses the cherry-picked Qwen3 1024d + mxbai-rerank-large-v1 configuration. The three tiers now match the paper §2.0 spec exactly:
+
+| Tier | Embedder | Reranker | HyDE | LoCoMo target |
+|------|----------|----------|------|---------------|
+| Edge | Model2Vec potion-base-8M @ 256d | `cross-encoder/ms-marco-MiniLM-L-6-v2` | off | 90.1% |
+| Base (Default) | `Qwen/Qwen3-Embedding-0.6B` @ 256d Matryoshka | `Alibaba-NLP/gte-reranker-modernbert-base` | off | 91.5% |
+| Pro (+HyDE) | `Qwen/Qwen3-Embedding-0.6B` @ 256d Matryoshka | `Alibaba-NLP/gte-reranker-modernbert-base` | on | 91.8% |
+
+### Breaking changes
+- **Pro tier reconfigured.** The v0.3.0 "Pro" combo (Qwen3 @ native 1024d + `mixedbread-ai/mxbai-rerank-large-v1` + HyDE on) is replaced with the paper-§2.0 +HyDE combo (Qwen3 @ 256d Matryoshka + `Alibaba-NLP/gte-reranker-modernbert-base` + HyDE on). The authoritative 56-grid sweep measured the v0.3.0 Pro config at 90.7% — below the v0.4.0 Base tier (91.5%, HyDE off). The v0.4.0 Pro reaches 91.8% with HyDE on.
+- **`TRUEMEMORY_EMBED_MODEL=qwen3` removed.** The bare internal name `qwen3` (which meant "Qwen3 at native 1024d") is gone. Setting it — via env var or `set_embedding_model("qwen3")` — raises `ValueError` at startup. Migrate to `TRUEMEMORY_EMBED_MODEL=pro` (tier alias) or `=qwen3_256` (internal name). Both map to the same paper-aligned Qwen3 @ 256d Matryoshka config.
+- **Base tier meaning changed.** In v0.3.0, "Base" meant Model2Vec + MiniLM-L-6-v2 at 88.2% LoCoMo (the old leaderboard number — the same config scores 90.1% on the authoritative 56-grid harness used for v0.4.0). That config is now called **Edge**. The new **Base** tier is Qwen3 @ 256d Matryoshka + gte-reranker-modernbert (HyDE off) at 91.5%.
+
+### Added
+- **Edge tier** formalized (was previously called Base in v0.3.0). CPU-only, ~30 MB install, ~30M total parameters, 90.1% LoCoMo target. Runs on any machine with Python 3.10+ and 512 MB RAM.
+- **Base tier** (middle tier, GPU recommended): same embedder + reranker as Pro, HyDE off. 91.5% LoCoMo target. No LLM API key required.
+- Matryoshka truncation support for Qwen3-Embedding-0.6B via `SentenceTransformer(..., truncate_dim=256)` — this is what the paper-§2.0 Base and Pro tiers use under the hood.
+- New bench scripts `benchmarks/locomo/scripts/bench_truememory_edge.py` (Edge), `bench_truememory_base.py` (Base, new content), and an updated `bench_truememory_pro.py`.
+- New unit tests in `tests/test_tier_aliases.py` covering all three aliases plus a negative test asserting the `qwen3` internal name is gone.
+
+### Removed
+- Internal embedding model name `qwen3` (1024d native). Use `pro` (tier alias) or `qwen3_256` (internal name) instead.
+- Default reranker `mixedbread-ai/mxbai-rerank-large-v1` for the Pro tier. Users who explicitly set it via `get_reranker(model_name="...")` can continue to; only the Pro tier's built-in default has changed.
+
+### Migration guide
+
+If you were using TrueMemory 0.3.0:
+
+1. **Upgrading the package.** `pip install -U truememory`. The first run will download ~1.5 GB of model weights (Qwen3-Embedding-0.6B + gte-reranker-modernbert) if you pick Base or Pro. Edge remains ~30 MB.
+2. **If you had `TRUEMEMORY_EMBED_MODEL=qwen3` set.** Change it to `TRUEMEMORY_EMBED_MODEL=pro` (recommended) or `TRUEMEMORY_EMBED_MODEL=qwen3_256`. The old value now raises `ValueError` on startup.
+3. **If you picked "Base" in v0.3.0 expecting Model2Vec.** That tier is now called **Edge**. Set `TRUEMEMORY_EMBED_MODEL=edge` to preserve the old behavior, or pick Edge at the first-run setup prompt.
+4. **Embedding table shape.** All three v0.4.0 tiers produce 256-dim vectors, so the sqlite-vec virtual table layout is unchanged versus an Edge-tier v0.3.0 database. Upgrading from a v0.3.0 Pro (1024d) database to v0.4.0 Pro (256d) requires a fresh ingestion — the vector dimensions no longer match.
+5. **Benchmark reproduction.** Three scripts replace the old two: `bench_truememory_edge.py`, `bench_truememory_base.py`, `bench_truememory_pro.py`. Each is self-contained for Modal. Smoke-run them with `--smoke` before the full 1540-question run.
+
 ## [0.3.0] - 2026-04-11
 
 ### Changed

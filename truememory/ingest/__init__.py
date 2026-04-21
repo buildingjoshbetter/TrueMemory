@@ -33,7 +33,7 @@ Quick start::
     result = ingest_text("User prefers dark mode and uses vim.", user_id="alice")
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from truememory.ingest.pipeline import IngestionPipeline, IngestionResult, save_trace
 from truememory.ingest.encoding_gate import EncodingGate, EncodingDecision

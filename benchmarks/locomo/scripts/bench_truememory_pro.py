@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-LoCoMo Benchmark — TrueMemory Pro Tier (T4 GPU)
-===============================================
-TrueMemory Pro tier using Qwen3-Embedding-0.6B (1024-dim) embeddings,
-mxbai-rerank-large-v1 (435M params) reranker, and HyDE (Hypothetical
-Document Embeddings) via OpenRouter LLM. Requires a T4 GPU on Modal.
+LoCoMo Benchmark — TrueMemory Pro Tier (+HyDE, T4 GPU)
+======================================================
+TrueMemory Pro tier using Qwen3-Embedding-0.6B @ 256d Matryoshka embeddings,
+gte-reranker-modernbert-base (149M params) reranker, and HyDE (Hypothetical
+Document Embeddings) via OpenRouter LLM. Paper §2.0 target: 91.8%.
+Requires a T4 GPU on Modal.
 
 This is a fully self-contained Modal script. No local imports required.
 
@@ -19,8 +20,17 @@ Usage:
 
     modal volume get locomo-results / ./results --force
 """
+# ruff: noqa: E701, E702, E722
+# This bench script uses a deliberately terse one-line-per-statement style
+# to keep the Modal-shipped source compact. Style rules above are silenced
+# for the file; correctness rules still apply.
 
-import json, modal, os, re, sys, time
+import json
+import modal
+import os
+import re
+import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -206,18 +216,22 @@ def _nm_make_hyde_fn():
 
 def retrieve_truememory_pro(conv_data, conv_idx):
     from truememory.vector_search import set_embedding_model
-    set_embedding_model("qwen3")
+    set_embedding_model("pro")
     from truememory.engine import TrueMemoryEngine
     from truememory.reranker import get_reranker
     import tempfile
-    get_reranker(model_name="mixedbread-ai/mxbai-rerank-large-v1")
+    get_reranker(model_name="Alibaba-NLP/gte-reranker-modernbert-base")
     llm_fn = _nm_make_hyde_fn()
     msgs = parse_conv(conv_data)
-    tmp_db = tempfile.mktemp(suffix=".db", prefix=f"pro_{conv_idx}_")
+    _tmp_db_file = tempfile.NamedTemporaryFile(suffix=".db", prefix=f"pro_{conv_idx}_", delete=False)
+    tmp_db = _tmp_db_file.name
+    _tmp_db_file.close()
     engine = TrueMemoryEngine(db_path=tmp_db)
     # Ingest
     import json as _json
-    tmp_json = tempfile.mktemp(suffix=".json")
+    _tmp_json_file = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+    tmp_json = _tmp_json_file.name
+    _tmp_json_file.close()
     msg_dicts = [{"content":m["content"],"sender":m["speaker"],"recipient":m["recipient"],
                   "timestamp":m["timestamp"],"category":m["session"],"modality":"conversation"}
                  for m in msgs]
@@ -399,14 +413,14 @@ def main(smoke: bool = False, dataset: str = None):
         data = json.load(f)
 
     print(f"\n{'='*60}")
-    print(f"LoCoMo Benchmark — TrueMemory Pro (T4 GPU) — {'SMOKE TEST' if smoke else 'FULL RUN'}")
+    print(f"LoCoMo Benchmark — TrueMemory Pro (+HyDE, T4 GPU) — {'SMOKE TEST' if smoke else 'FULL RUN'}")
     print(f"{'='*60}")
     print(f"  Mode:     {'1 conv x 5 Qs' if smoke else '10 convs x 1540 Qs'}")
     print(f"  Answer:   {ANSWER_MODEL} via OpenRouter")
     print(f"  Judge:    {JUDGE_MODEL} via OpenRouter")
-    print(f"  Volume:   locomo-results")
+    print("  Volume:   locomo-results")
     print(f"{'='*60}\n")
 
-    handle = orchestrate.spawn(data, smoke)
-    print(f"  Launched on Modal. Results save to Volume 'locomo-results'.")
-    print(f"  Download: modal volume get locomo-results / ./results --force")
+    orchestrate.spawn(data, smoke)
+    print("  Launched on Modal. Results save to Volume 'locomo-results'.")
+    print("  Download: modal volume get locomo-results / ./results --force")
