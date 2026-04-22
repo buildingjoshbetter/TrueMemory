@@ -9,7 +9,6 @@ Verifies:
 
 from __future__ import annotations
 
-import json
 import tempfile
 from pathlib import Path
 
@@ -82,7 +81,7 @@ def test_ingest_transcript_two_consecutive_runs_dont_leak_state():
 
         # First run — produces some batch facts
         pipeline.ingest_transcript(transcripts[0], session_id="run-1")
-        first_batch = set(pipeline.gate._batch_facts)
+        _first_batch = set(pipeline.gate._batch_facts)
 
         # Second run — should reset and produce a fresh batch
         pipeline.ingest_transcript(transcripts[1], session_id="run-2")
@@ -90,7 +89,7 @@ def test_ingest_transcript_two_consecutive_runs_dont_leak_state():
 
         # The two batches should be independent (second doesn't contain everything from first)
         # At minimum, the old batch should have been cleared before the second run
-        # We can't easily test this without knowing what _nm_extract_facts returns,
+        # We can't easily test this without knowing what _tm_extract_facts returns,
         # but we CAN verify that reset_batch doesn't accumulate stale state across runs
         # by checking that the method is callable and the state is finite
         assert isinstance(second_batch, set)

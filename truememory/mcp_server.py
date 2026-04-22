@@ -378,7 +378,8 @@ def truememory_search_deep(
     limit: int = 10,
 ) -> str:
     """Maximum-depth memory search (top_k=500, multi-round, full reranking).
-    Uses the benchmark-grade reranker (91.5% LoCoMo accuracy).
+    Uses a heavier cross-encoder (BAAI/bge-reranker-v2-m3, 568M params) than
+    the standard tier-selected reranker — higher recall at higher latency.
 
     Use when truememory_search doesn't find what you need, or for questions
     requiring evidence scattered across many memories. Supports multiple
@@ -861,26 +862,47 @@ See https://github.com/buildingjoshbetter/TrueMemory for documentation.
 
 
 def main():
-    """Run the MCP server, or --setup / --help / --version."""
-    import sys
-    # Handle informational flags first — these must return immediately, before
-    # mcp.run() blocks on stdin or _preload_models() starts background threads.
-    if "--help" in sys.argv or "-h" in sys.argv:
-        print(_HELP_TEXT)
-        return
-    if "--version" in sys.argv or "-V" in sys.argv:
-        print(f"truememory-mcp {__version__}")
-        return
-    if "--setup" in sys.argv:
-        _setup_claude()
-        return
+    """Run the MCP server, or --setup / --help / --version.
 
-    # Kick off model preloading before entering the event loop.
-    # Models load in background threads (~2.5s) while the MCP handshake
-    # completes (~1-3s), so by the time the first search arrives,
-    # models are already warm.
+    Returns a Unix-style exit code: 0 on success, 2 on unknown flags.
+    """
+    import sys
+    argv = sys.argv[1:]
+
+    # Informational flags — these must return immediately, before mcp.run()
+    # blocks on stdin or _preload_models() starts background threads.
+    if "--help" in argv or "-h" in argv:
+        print(_HELP_TEXT)
+        return 0
+    if "--version" in argv or "-V" in argv:
+        print(f"truememory-mcp {__version__}")
+        return 0
+    if "--setup" in argv:
+        # Unknown args alongside --setup are a user typo; surface it.
+        extras = [a for a in argv if a != "--setup"]
+        if extras:
+            print(f"truememory-mcp: unexpected argument(s) after --setup: {' '.join(extras)}", file=sys.stderr)
+            print(_HELP_TEXT, file=sys.stderr)
+            return 2
+        _setup_claude()
+        return 0
+
+    # Any flag we didn't recognize: exit 2 with usage rather than silently
+    # entering mcp.run() and blocking on stdin. This is the #1 fresh-install
+    # footgun — `truememory-mcp --halp` would hang forever.
+    unknown = [a for a in argv if a.startswith("-")]
+    if unknown:
+        print(f"truememory-mcp: unknown argument(s): {' '.join(unknown)}", file=sys.stderr)
+        print(_HELP_TEXT, file=sys.stderr)
+        return 2
+
+    # No flags → this is the Claude-Code-invoked MCP server path. Kick off
+    # model preloading before entering the event loop. Models load in
+    # background threads (~2.5s) while the MCP handshake completes (~1-3s),
+    # so by the time the first search arrives, models are already warm.
     _preload_models()
     mcp.run(transport="stdio")
+    return 0
 
 
 if __name__ == "__main__":

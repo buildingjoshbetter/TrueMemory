@@ -16,7 +16,6 @@ import json
 import tempfile
 from pathlib import Path
 
-from truememory.ingest.dedup import DedupAction
 from truememory.ingest.encoding_gate import EncodingGate
 from truememory.ingest.pipeline import IngestionPipeline, IngestionResult
 from truememory.ingest.transcript import parse_transcript, format_for_extraction
@@ -196,10 +195,10 @@ def test_e2e_dedup_prevents_double_storage():
     pipeline.llm_config = None
 
     result1 = pipeline.ingest_transcript(str(FIXTURE_PATH), session_id="first")
-    count_after_first = len(memory.stored)
+    _count_after_first = len(memory.stored)
 
     result2 = pipeline.ingest_transcript(str(FIXTURE_PATH), session_id="second")
-    count_after_second = len(memory.stored)
+    _count_after_second = len(memory.stored)
 
     # Second run should store significantly fewer (ideally zero new) facts
     assert result2.facts_stored <= result1.facts_stored, \

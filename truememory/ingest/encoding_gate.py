@@ -62,18 +62,18 @@ log = logging.getLogger(__name__)
 _HAS_TRUEMEMORY_SALIENCE = False
 _HAS_TRUEMEMORY_PREDICTIVE = False
 try:
-    from truememory.salience import compute_message_salience as _nm_salience
+    from truememory.salience import compute_message_salience as _tm_salience
     _HAS_TRUEMEMORY_SALIENCE = True
 except ImportError:
-    _nm_salience = None
+    _tm_salience = None
 
 try:
-    from truememory.predictive import compute_surprise_score as _nm_surprise
-    from truememory.predictive import extract_facts as _nm_extract_facts
+    from truememory.predictive import compute_surprise_score as _tm_surprise
+    from truememory.predictive import extract_facts as _tm_extract_facts
     _HAS_TRUEMEMORY_PREDICTIVE = True
 except ImportError:
-    _nm_surprise = None
-    _nm_extract_facts = None
+    _tm_surprise = None
+    _tm_extract_facts = None
 
 # Log fallback mode loudly at import time so users know when they're
 # running degraded — previously this was silent and users couldn't tell
@@ -190,9 +190,9 @@ class EncodingGate:
 
         # Add this fact's fingerprint to the batch cache so subsequent
         # facts in the same transcript can detect duplicates/contradictions
-        if _HAS_TRUEMEMORY_PREDICTIVE and _nm_extract_facts is not None:
+        if _HAS_TRUEMEMORY_PREDICTIVE and _tm_extract_facts is not None:
             try:
-                self._batch_facts.update(_nm_extract_facts(fact))
+                self._batch_facts.update(_tm_extract_facts(fact))
             except Exception:
                 pass
 
@@ -270,9 +270,9 @@ class EncodingGate:
         # We pass modality="chat" because ingestion captures conversational
         # facts; truememory's salience weights other modalities (email, ocr,
         # calendar, etc.) differently. This preserves that signal.
-        if _HAS_TRUEMEMORY_SALIENCE and _nm_salience is not None:
+        if _HAS_TRUEMEMORY_SALIENCE and _tm_salience is not None:
             try:
-                base = float(_nm_salience(fact, "chat"))
+                base = float(_tm_salience(fact, "chat"))
             except Exception as e:
                 log.debug("truememory salience failed, using fallback: %s", e)
                 base = self._fallback_salience(fact)
@@ -328,11 +328,11 @@ class EncodingGate:
             return 0.0
 
         # Use truememory's surprise score if available
-        if _HAS_TRUEMEMORY_PREDICTIVE and _nm_surprise is not None:
+        if _HAS_TRUEMEMORY_PREDICTIVE and _tm_surprise is not None:
             try:
                 # Seed with the batch cache of already-processed facts so that
                 # within-batch repetition gets penalized
-                surprise = float(_nm_surprise(fact, self._batch_facts))
+                surprise = float(_tm_surprise(fact, self._batch_facts))
                 # Surprise score is 0-1; treat it as prediction error
                 # but weight by novelty to prevent totally new topics from
                 # dominating (we already captured that in the novelty signal)

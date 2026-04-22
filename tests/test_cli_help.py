@@ -80,3 +80,56 @@ def test_help_via_console_script_does_not_hang():
     )
     assert result.returncode == 0
     assert "Usage:" in result.stdout
+
+
+# --- Regression lock: unknown flags must exit non-zero, not hang ---
+
+
+def test_unknown_flag_exits_nonzero_not_hang():
+    """Any flag we don't recognize must error out, not fall through to
+    mcp.run(transport='stdio') and block on stdin.
+
+    This is the same class of bug as the --help hang PR #3 fixed; the
+    original fix only handled four specific flags, so an unknown flag
+    like `--halp` (user typo) regressed into the original hang.
+    The 10s timeout will fire if this test ever catches a hang.
+    """
+    result = _run_cli(["--halp"], timeout=10)
+    # Must exit non-zero (spec: exit 2 for unknown flags, Unix convention)
+    assert result.returncode != 0, (
+        f"unknown flag did not error; stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
+    # Stderr should mention the unknown flag or point to --help
+    assert (
+        "unknown" in result.stderr.lower()
+        or "usage" in result.stderr.lower()
+        or "--help" in result.stderr
+    ), f"stderr lacked usage hint: {result.stderr!r}"
+
+
+# --- truememory-ingest --version parity with truememory-mcp ---
+
+
+def test_ingest_version_flag_exits_cleanly():
+    """`truememory-ingest --version` must exit 0 with the version string,
+    matching `truememory-mcp --version` behavior. Before this patch the
+    ingest CLI returned 'error: unrecognized arguments: --version' (exit 2),
+    which was inconsistent with the MCP CLI.
+    """
+    bin_path = shutil.which("truememory-ingest")
+    if not bin_path:
+        pytest.skip("truememory-ingest console script not installed")
+    result = subprocess.run(
+        [bin_path, "--version"],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, (
+        f"non-zero exit: {result.returncode}; stderr: {result.stderr}"
+    )
+    assert __version__ in result.stdout, (
+        f"stdout lacks version {__version__}: {result.stdout!r}"
+    )
+    assert "truememory-ingest" in result.stdout, (
+        f"stdout lacks binary name: {result.stdout!r}"
+    )

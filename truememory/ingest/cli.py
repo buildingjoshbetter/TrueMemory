@@ -20,9 +20,15 @@ from truememory.ingest.models import LLMConfig, hydrate_config
 
 
 def main():
+    from truememory import __version__ as _tm_version
     parser = argparse.ArgumentParser(
         description="TrueMemory Ingestion — biomimetic memory encoding",
         prog="truememory-ingest",
+    )
+    parser.add_argument(
+        "-V", "--version",
+        action="version",
+        version=f"truememory-ingest {_tm_version}",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -261,13 +267,11 @@ def _preflight_writable_target(target: str | None, *, kind: str) -> bool:
     return True
 
 
-_SAURON_BANNER = """
+_SETUP_BANNER = """
 \033[1;33m╔══════════════════════════════════════════════════════════════╗
 ║                                                              ║
 ║              ◉  T R U E M E M O R Y                          ║
 ║              Persistent Memory for AI Agents                 ║
-║                                                              ║
-║              A Sauron Company                                ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝\033[0m
 """
@@ -295,7 +299,7 @@ def _save_truememory_config(config: dict) -> None:
 
 def _run_setup(args):
     """Interactive first-time setup wizard for TrueMemory."""
-    print(_SAURON_BANNER)
+    print(_SETUP_BANNER)
     print("Welcome to TrueMemory setup! Let's get you configured.\n")
 
     config = _load_truememory_config()
@@ -417,11 +421,14 @@ def _run_setup(args):
             if use_existing != "n":
                 api_key = existing_key
             else:
-                api_key = input(f"  {prompt_text}: ").strip()
+                # getpass: don't echo the key to the terminal or shell history.
+                from getpass import getpass as _getpass
+                api_key = _getpass(f"  {prompt_text}: ").strip()
         elif existing_key:
             api_key = existing_key
         elif not args.non_interactive:
-            api_key = input(f"  {prompt_text}: ").strip()
+            from getpass import getpass as _getpass
+            api_key = _getpass(f"  {prompt_text}: ").strip()
 
     # ── Save config ───────────────────────────────────────────────────
     config["tier"] = tier
@@ -457,7 +464,7 @@ def _run_setup(args):
     print()
     print("  Run \033[1mtruememory-ingest status\033[0m to verify everything.")
     print()
-    print("  \033[2mThanks for using TrueMemory, a Sauron company.\033[0m")
+    print("  \033[2mThanks for using TrueMemory.\033[0m")
     print()
 
 

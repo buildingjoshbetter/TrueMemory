@@ -22,8 +22,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import os
-import runpy
 import shlex
 import subprocess
 import sys
@@ -314,7 +312,6 @@ def test_compact_snapshot_inlines_session_id_and_timestamp(tmp_path, monkeypatch
             pass
 
     # Intercept the Memory import used inside save_snapshot
-    import truememory.ingest.hooks.compact as compact_mod
 
     class FakeTrueMemory:
         Memory = FakeMemory

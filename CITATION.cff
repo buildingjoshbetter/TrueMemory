@@ -3,7 +3,6 @@ message: "If you use TrueMemory, please cite it as below."
 title: "TrueMemory"
 authors:
   - name: "@Building_Josh"
-    affiliation: "Sauron"
 version: "0.4.0"
 date-released: "2026-04-21"
 url: "https://github.com/buildingjoshbetter/TrueMemory"

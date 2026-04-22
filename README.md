@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/charts/hero-banner.png?v=2" alt="TrueMemory" />
+  <img src="https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/assets/charts/hero-banner.png?v=2" alt="TrueMemory" />
 </p>
 
 <p align="center">
@@ -30,13 +30,13 @@
 Tested on [LoCoMo](https://github.com/snap-research/locomo), the standard benchmark for conversational memory. 1,540 questions across 10 conversations. All 8 systems share the same answer model, judge, scoring, top-k, and byte-identical answer prompt — only retrieval differs.
 
 <p align="center">
-  <img src="assets/charts/leaderboard-bar.png?v=2" alt="LoCoMo 8-System Comparison" />
+  <img src="https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/assets/charts/leaderboard-bar.png?v=2" alt="LoCoMo 8-System Comparison" />
 </p>
 
 TrueMemory achieves **state-of-the-art accuracy for fully-local memory systems** at zero ongoing infrastructure cost. Edge and Base run entirely offline with no API keys. Pro adds one small LLM call per query for HyDE query expansion.
 
 <p align="center">
-  <img src="assets/charts/accuracy-vs-cost.png?v=2" alt="Accuracy vs Infrastructure Cost" />
+  <img src="https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/assets/charts/accuracy-vs-cost.png?v=2" alt="Accuracy vs Infrastructure Cost" />
 </p>
 
 All scores use the same evaluation pipeline: GPT-4.1-mini answer generation, GPT-4o-mini judge (3x majority vote), temperature=0. Zero errors across 12,320 total answers. Scores use a lenient semantic-match judge; rankings are valid across all systems but absolute values are higher than published LoCoMo baselines using strict exact-match. [Full methodology](benchmarks/locomo/BENCHMARK_RESULTS.md) and reproduction scripts in [`benchmarks/`](benchmarks/locomo/).
@@ -52,7 +52,7 @@ All scores use the same evaluation pipeline: GPT-4.1-mini answer generation, GPT
 - **Within 2.7pp of EverMemOS**, the only higher-scoring system — and EverMemOS uses pre-computed retrieval rather than live search at query time.
 
 <p align="center">
-  <img src="assets/charts/category-radar.png?v=2" alt="Category Breakdown" />
+  <img src="https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/assets/charts/category-radar.png?v=2" alt="Category Breakdown" />
 </p>
 
 TrueMemory Pro nearly matches EverMemOS across all 4 question categories. Mem0 collapses on multi-hop reasoning (37.7% vs 90.7%).
@@ -226,7 +226,6 @@ Every benchmark script is self-contained and runs on [Modal](https://modal.com).
 @software{truememory2026,
   title = {TrueMemory: State-of-the-Art Local-First Agent Memory},
   author = {@Building\_Josh},
-  organization = {Sauron},
   year = {2026},
   url = {https://github.com/buildingjoshbetter/TrueMemory},
   version = {0.4.0}
