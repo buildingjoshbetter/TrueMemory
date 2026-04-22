@@ -253,12 +253,23 @@ def _get_llm_fn():
 _SEARCH_INTERNAL_LIMIT = 100   # Benchmark sweet spot
 _DEEP_INTERNAL_LIMIT = 500     # Beyond benchmark — maximum recall
 
-# Tiered rerankers: fast for standard search, heavy for deep search.
-# Default is the paper §2.0 Edge reranker (ms-marco-MiniLM-L-6-v2, 22M params,
-# CPU-friendly). Bench scripts for Base/Pro explicitly override to
-# gte-reranker-modernbert-base via get_reranker(model_name=...).
-_SEARCH_RERANKER = "cross-encoder/ms-marco-MiniLM-L-6-v2"    # 22M, CPU-friendly
+# Tiered rerankers: standard search resolves per-tier via _current_reranker()
+# so Base / Pro get gte-reranker-modernbert-base (paper §2.0). The deep
+# reranker is tier-independent by design — it's a "maximum recall" escape
+# hatch used by truememory_search_deep regardless of tier.
 _DEEP_RERANKER = "BAAI/bge-reranker-v2-m3"                   # 568M, ~0.77s/query
+
+
+def _current_reranker() -> str:
+    """Resolve the reranker HF model ID for the currently-configured tier.
+
+    Thin wrapper around truememory.reranker.get_current_reranker_name().
+    Reads the tier from persistent config (seeded lazily from env /
+    ~/.truememory/config.json, updated explicitly via set_active_tier()
+    when truememory_configure runs).
+    """
+    from truememory.reranker import get_current_reranker_name
+    return get_current_reranker_name()
 
 
 def _set_reranker(model_name: str):
@@ -344,7 +355,7 @@ def truememory_search(
         user_id: Filter results to this user (optional).
         limit: Maximum number of results to return.
     """
-    _set_reranker(_SEARCH_RERANKER)
+    _set_reranker(_current_reranker())
     llm_fn = _get_llm_fn()
     uid = user_id or None
     queries = [q.strip() for q in query.split("|") if q.strip()]
@@ -537,6 +548,14 @@ def truememory_configure(
     from truememory.vector_search import set_embedding_model
     set_embedding_model(tier)
 
+    # Tell the reranker module about the new tier so get_reranker(model_name=None)
+    # calls (from direct Python-API users via rerank_with_modality_fusion etc.)
+    # resolve to the tier-correct model. Then pre-load that reranker so the
+    # first post-configure search doesn't pay a cold-start.
+    from truememory.reranker import set_active_tier as _set_active_tier
+    _set_active_tier(tier)
+    _set_reranker(_current_reranker())
+
     # If tier actually changed, re-embed any existing memories
     rebuilt = False
     if old_tier != tier:
@@ -675,7 +694,7 @@ def _preload_models():
         """
         try:
             from truememory.reranker import get_reranker
-            get_reranker(model_name=_SEARCH_RERANKER)
+            get_reranker(model_name=_current_reranker())
         except Exception:
             pass  # Graceful degradation — reranker loads lazily on first search
 
