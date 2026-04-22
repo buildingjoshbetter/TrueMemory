@@ -139,6 +139,16 @@ CREATE TABLE IF NOT EXISTS entity_relationships (
     dunbar_layer TEXT DEFAULT '',
     last_interaction TEXT DEFAULT ''
 );
+
+-- Embedder identity / schema version (Hunter F02: prevents silent quality
+-- collapse when a tier switch produces matching dims but different vector
+-- spaces — e.g. Model2Vec 256d → Qwen3 256d). Writers: build_vectors,
+-- build_separation_vectors. Readers: init_vec_table, engine.open().
+CREATE TABLE IF NOT EXISTS metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT
+);
 """
 
 
