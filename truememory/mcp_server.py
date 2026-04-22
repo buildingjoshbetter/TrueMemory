@@ -387,6 +387,54 @@ def _set_reranker(model_name: str):
         _record_reranker_error(f"{type(e).__name__}: {e}")
 
 
+# ---------------------------------------------------------------------------
+# Health payload (Hunter F07) — surfaces per-subsystem degradation so MCP
+# clients can diagnose "search quality is bad" without digging through logs.
+# Reads state written by F05 (_llm_last_error), F06 (_reranker_last_error),
+# and F08 (engine._vectors_load_error). Pure read — no mutation.
+# ---------------------------------------------------------------------------
+
+
+def _build_health_payload() -> dict:
+    """Return the `stats['health']` dict exposed by `truememory_stats`.
+
+    Each subsystem reports `{status, last_error, ...}`. ``status`` is one of
+    ``"ok"`` or ``"degraded"`` — the latter means a writer (F05 / F06 / F08)
+    stored a non-None error during the current process lifetime.
+    """
+    # Reranker — written by F06's _set_reranker.
+    with _reranker_error_lock:
+        reranker_err = _reranker_last_error
+
+    # HyDE LLM — written by F05's _build_llm_fn.
+    with _llm_error_lock:
+        llm_errors = dict(_llm_last_error) if _llm_last_error else None
+    active_provider = _current_llm_provider_name
+
+    # sqlite-vec — written by F08 in engine.open().
+    try:
+        from truememory.engine import get_vectors_load_error
+        vectors_err = get_vectors_load_error()
+    except ImportError:
+        vectors_err = None
+
+    return {
+        "reranker": {
+            "status": "ok" if reranker_err is None else "degraded",
+            "last_error": reranker_err,
+        },
+        "hyde_llm": {
+            "status": "ok" if not llm_errors else "degraded",
+            "active_provider": active_provider,
+            "last_error_by_provider": llm_errors,
+        },
+        "vectors": {
+            "status": "ok" if vectors_err is None else "degraded",
+            "last_error": vectors_err,
+        },
+    }
+
+
 def _parallel_search(queries, user_id, internal_limit, llm_fn, output_limit):
     """Run multiple agentic searches in parallel, merge and deduplicate."""
     db_path = _get_memory()._engine.db_path
@@ -550,6 +598,7 @@ def truememory_stats() -> str:
     stats["version"] = __version__
     stats["tier"] = config.get("tier", "edge")
     stats["tier_configured"] = "tier" in config
+    stats["health"] = _build_health_payload()
 
     if not stats["tier_configured"]:
         stats["setup_required"] = True

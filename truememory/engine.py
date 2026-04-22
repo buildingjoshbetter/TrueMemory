@@ -59,6 +59,23 @@ try:
 except (ImportError, ModuleNotFoundError):
     pass
 
+
+# Hunter F08: module-level tracker for sqlite-vec load failures. On platforms
+# without a sqlite-vec wheel (Linux ARM musl, some BSDs, some sandboxed
+# runtimes) the extension load fails and search silently falls back to
+# FTS5-only. truememory_stats.health (F07) surfaces this via
+# get_vectors_load_error() so users can see the degradation.
+_vectors_load_error: str | None = None
+
+
+def get_vectors_load_error() -> str | None:
+    """Return the last sqlite-vec load failure message, or None if healthy.
+
+    Consumed by ``truememory_stats.health`` to surface the degraded-search
+    state. Module-level because ``sqlite_vec.load`` state is process-wide.
+    """
+    return _vectors_load_error
+
 _HAS_HYBRID = False
 try:
     from truememory.hybrid import search_hybrid
@@ -590,14 +607,26 @@ class TrueMemoryEngine:
             ).fetchall()
         }
 
-        # Load sqlite-vec extension if available
+        # Load sqlite-vec extension if available.
+        # Hunter F08: upgrade DEBUG → WARNING and track failure in a
+        # module-level state so ``truememory_stats.health`` can report
+        # "search is FTS-only because sqlite-vec failed to load".
+        global _vectors_load_error
         if _HAS_VECTOR:
             try:
                 import sqlite_vec
                 self.conn.enable_load_extension(True)
                 sqlite_vec.load(self.conn)
-            except Exception:
-                logger.debug("Failed to load sqlite-vec extension in open()", exc_info=True)
+                _vectors_load_error = None
+            except Exception as e:
+                _vectors_load_error = f"{type(e).__name__}: {e}"
+                logger.warning(
+                    "sqlite-vec unavailable (%s); falling back to FTS-only "
+                    "search for this process. See "
+                    "https://github.com/buildingjoshbetter/TrueMemory for "
+                    "platform notes.",
+                    _vectors_load_error,
+                )
 
         # Check for vector tables — rebuild if missing.
         # Hunter F32: if metadata names a different embedder, refuse silent
