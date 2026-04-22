@@ -93,8 +93,18 @@ def _resolve_tier_from_env_and_config() -> str:
             tier = (data.get("tier") or "").strip().lower()
             if tier in ("edge", "base", "pro"):
                 return tier
-    except Exception:
-        pass
+    except (json.JSONDecodeError, OSError) as e:
+        # Hunter F04 duplicate: previously a bare `except Exception: pass`
+        # that hid corrupt config.json exactly like mcp_server._load_config
+        # did. Log a warning so the user knows the fallback fired — the MCP
+        # server's _load_config (called earlier in the startup sequence)
+        # handles the corrupt-file rename.
+        import sys as _sys
+        print(
+            f"truememory: could not read tier from config.json ({type(e).__name__}: "
+            f"{e}); falling back to Edge. Run `truememory-mcp --setup` to fix.",
+            file=_sys.stderr,
+        )
     return "edge"
 
 

@@ -22,8 +22,11 @@ Configuration via environment variables:
 from __future__ import annotations
 
 import json
+import logging
 import os
+import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -40,6 +43,8 @@ from mcp.server.fastmcp import FastMCP
 from truememory import __version__
 from truememory.client import Memory
 
+log = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Config management
 # ---------------------------------------------------------------------------
@@ -49,13 +54,43 @@ _CONFIG_PATH = _TRUEMEMORY_DIR / "config.json"
 
 
 def _load_config() -> dict:
-    """Load persistent config from ~/.truememory/config.json."""
-    if _CONFIG_PATH.exists():
+    """Load persistent config from ~/.truememory/config.json.
+
+    On JSON corruption, rename the file to ``config.json.corrupt.<unix-ts>``
+    so the user can recover any API keys that were in it. On OSError, warn
+    to stderr. Returns ``{}`` in both failure modes so callers never see a
+    half-loaded config.
+    """
+    if not _CONFIG_PATH.exists():
+        return {}
+    try:
+        return json.loads(_CONFIG_PATH.read_text())
+    except json.JSONDecodeError as e:
+        # .with_suffix would replace ".json"; we want to APPEND to preserve
+        # the origin filename in the backup so users can find it easily.
+        backup = _CONFIG_PATH.parent / f"{_CONFIG_PATH.name}.corrupt.{int(time.time())}"
         try:
-            return json.loads(_CONFIG_PATH.read_text())
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
+            _CONFIG_PATH.rename(backup)
+            print(
+                f"truememory: config.json is corrupt (JSON parse error at "
+                f"line {e.lineno} col {e.colno}). Saved corrupt file to "
+                f"{backup} — your API keys may be recoverable from there. "
+                f"Run `truememory-mcp --setup` to recreate the config.",
+                file=sys.stderr,
+            )
+        except OSError:
+            print(
+                "truememory: config.json is corrupt and could not be "
+                "backed up. Run `truememory-mcp --setup` to recreate.",
+                file=sys.stderr,
+            )
+        return {}
+    except OSError as e:
+        print(
+            f"truememory: could not read config.json: {e}",
+            file=sys.stderr,
+        )
+        return {}
 
 
 def _save_config(config: dict) -> None:
@@ -139,91 +174,132 @@ def _get_memory() -> Memory:
 # LLM backend for agentic search (HyDE, query refinement, reranking)
 # ---------------------------------------------------------------------------
 
+# Hunter F05: per-provider last-error state so truememory_stats.health can
+# surface "Pro tier silently degraded to Base" instead of hiding the failure.
+# Mutation happens from _build_llm_fn (MCP thread) and truememory_configure
+# (MCP thread); readers are truememory_stats (MCP thread). A module-level
+# lock keeps the dict consistent when F22 lands.
+_llm_last_error: dict[str, str] = {}
+_llm_error_lock = threading.Lock()
+_current_llm_provider_name: str | None = None
+
+
+def _record_llm_error(provider: str, err: Exception) -> None:
+    with _llm_error_lock:
+        _llm_last_error[provider] = f"{type(err).__name__}: {err}"
+    log.warning("HyDE LLM init failed (%s): %s: %s",
+                provider, type(err).__name__, err)
+
+
+def _clear_llm_error(provider: str) -> None:
+    with _llm_error_lock:
+        _llm_last_error.pop(provider, None)
+
+
+def _clear_all_llm_errors() -> None:
+    with _llm_error_lock:
+        _llm_last_error.clear()
+
+
+def _build_anthropic_llm(api_key: str):
+    import anthropic
+    client = anthropic.Anthropic(api_key=api_key, timeout=30.0)
+
+    def _anthropic_llm(prompt: str) -> str:
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            temperature=0.3,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text
+
+    return _anthropic_llm
+
+
+def _build_openrouter_llm(api_key: str):
+    import httpx
+
+    def _openrouter_llm(prompt: str) -> str:
+        resp = httpx.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "anthropic/claude-haiku-4.5",
+                "max_tokens": 500,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+
+    return _openrouter_llm
+
+
+def _build_openai_llm(api_key: str):
+    import httpx
+
+    def _openai_llm(prompt: str) -> str:
+        resp = httpx.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-4o-mini",
+                "max_tokens": 500,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+
+    return _openai_llm
+
+
+# Provider table — builders are looked up dynamically via module-level name
+# so tests can monkeypatch ``_build_anthropic_llm`` etc. without having to
+# reimport the module or mutate a frozen tuple of captured references.
+_LLM_PROVIDERS = (
+    ("anthropic", "ANTHROPIC_API_KEY", "anthropic_api_key", "_build_anthropic_llm"),
+    ("openrouter", "OPENROUTER_API_KEY", "openrouter_api_key", "_build_openrouter_llm"),
+    ("openai", "OPENAI_API_KEY", "openai_api_key", "_build_openai_llm"),
+)
+
+
 def _build_llm_fn():
     """Build an llm_fn from available API keys.
 
     Resolution order for each provider:
-      1. Environment variable (ANTHROPIC_API_KEY / OPENROUTER_API_KEY)
+      1. Environment variable (ANTHROPIC_API_KEY / OPENROUTER_API_KEY / OPENAI_API_KEY)
       2. Persistent config (~/.truememory/config.json, written by ``truememory-ingest setup``)
 
-    Provider priority: Anthropic direct → OpenRouter.
+    Provider priority: Anthropic direct → OpenRouter → OpenAI. On init
+    failure the error is logged at WARNING and stored in
+    ``_llm_last_error[provider]`` so ``truememory_stats.health`` (F07) can
+    surface the degradation instead of silently returning None.
     """
+    global _current_llm_provider_name
     config = _load_config()
-
-    # Try Anthropic
-    api_key = os.environ.get("ANTHROPIC_API_KEY") or config.get("anthropic_api_key")
-    if api_key:
+    for provider, env_var, config_key, builder_name in _LLM_PROVIDERS:
+        api_key = os.environ.get(env_var) or config.get(config_key)
+        if not api_key:
+            continue
+        builder = globals()[builder_name]
         try:
-            import anthropic
-            client = anthropic.Anthropic(api_key=api_key, timeout=30.0)
-
-            def _anthropic_llm(prompt: str) -> str:
-                resp = client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=300,
-                    temperature=0.3,
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                return resp.content[0].text
-
-            return _anthropic_llm
-        except Exception:
-            pass
-
-    # Try OpenRouter (OpenAI-compatible API)
-    api_key = os.environ.get("OPENROUTER_API_KEY") or config.get("openrouter_api_key")
-    if api_key:
-        try:
-            import httpx
-
-            def _openrouter_llm(prompt: str) -> str:
-                resp = httpx.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": "anthropic/claude-haiku-4.5",
-                        "max_tokens": 500,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
-                    timeout=30,
-                )
-                resp.raise_for_status()
-                return resp.json()["choices"][0]["message"]["content"]
-
-            return _openrouter_llm
-        except Exception:
-            pass
-
-    # Try OpenAI
-    api_key = os.environ.get("OPENAI_API_KEY") or config.get("openai_api_key")
-    if api_key:
-        try:
-            import httpx
-
-            def _openai_llm(prompt: str) -> str:
-                resp = httpx.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": "gpt-4o-mini",
-                        "max_tokens": 500,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
-                    timeout=30,
-                )
-                resp.raise_for_status()
-                return resp.json()["choices"][0]["message"]["content"]
-
-            return _openai_llm
-        except Exception:
-            pass
-
+            fn = builder(api_key)
+            _clear_llm_error(provider)
+            _current_llm_provider_name = provider
+            return fn
+        except Exception as e:
+            _record_llm_error(provider, e)
+    _current_llm_provider_name = None
     return None
 
 
@@ -272,13 +348,51 @@ def _current_reranker() -> str:
     return get_current_reranker_name()
 
 
+# Hunter F06: reranker init error state. ``_set_reranker`` is called on
+# every truememory_search — the throttle flag prevents repeated log spam
+# when the error is unchanged across calls, but the stored error string
+# is always current so truememory_stats.health (F07) reports live state.
+_reranker_last_error: str | None = None
+_reranker_last_logged: str | None = None
+_reranker_error_lock = threading.Lock()
+
+
+def _record_reranker_error(msg: str) -> None:
+    """Store ``msg`` and log once per distinct error value."""
+    global _reranker_last_error, _reranker_last_logged
+    with _reranker_error_lock:
+        _reranker_last_error = msg
+        should_log = (_reranker_last_logged != msg)
+        if should_log:
+            _reranker_last_logged = msg
+    if should_log:
+        log.warning("Reranker init failed: %s", msg)
+
+
+def _clear_reranker_error() -> None:
+    global _reranker_last_error, _reranker_last_logged
+    with _reranker_error_lock:
+        _reranker_last_error = None
+        _reranker_last_logged = None
+
+
 def _set_reranker(model_name: str):
-    """Set the active reranker model (lazy-loads on first use)."""
+    """Set the active reranker model (lazy-loads on first use).
+
+    On failure: store the error in ``_reranker_last_error`` so F07's health
+    payload can surface the degradation; log at WARNING once per distinct
+    error to avoid spamming logs on every search call.
+    """
     try:
         from truememory.reranker import get_reranker
         get_reranker(model_name=model_name)
-    except Exception:
-        pass  # Reranker unavailable — search degrades gracefully
+        _clear_reranker_error()
+    except ImportError as e:
+        _record_reranker_error(
+            f"ImportError: {e} — install truememory[gpu] for reranker support"
+        )
+    except Exception as e:
+        _record_reranker_error(f"{type(e).__name__}: {e}")
 
 
 def _parallel_search(queries, user_id, internal_limit, llm_fn, output_limit):
@@ -540,6 +654,8 @@ def truememory_configure(
         global _cached_llm_fn, _cached_llm_fn_built
         _cached_llm_fn = None
         _cached_llm_fn_built = False
+        # Clear stored LLM errors for the provider we just re-keyed
+        _clear_llm_error(api_provider)
 
     # Apply model change — temporarily allow downloads for tier switch
     # (the new model may not be cached yet)
@@ -557,8 +673,15 @@ def truememory_configure(
     _set_active_tier(tier)
     _set_reranker(_current_reranker())
 
-    # If tier actually changed, re-embed any existing memories
+    # If tier actually changed, re-embed any existing memories.
+    # Hunter F03: (1) rebuild BOTH vec_messages and vec_messages_sep (the
+    # old code only rebuilt the completion table, leaving the separation
+    # table silently empty); (2) surface exceptions as rebuild_error in
+    # the response payload instead of swallowing into bare pass; (3) null
+    # _memory in `finally` so the next call always gets a fresh instance
+    # with the new model — even on failure.
     rebuilt = False
+    rebuild_error: str | None = None
     if old_tier != tier:
         try:
             m = _get_memory()
@@ -570,13 +693,20 @@ def truememory_configure(
                 conn.execute("DROP TABLE IF EXISTS vec_messages")
                 conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
                 conn.commit()
-                from truememory.vector_search import init_vec_table, build_vectors
+                from truememory.vector_search import (
+                    build_separation_vectors,
+                    build_vectors,
+                    init_vec_table,
+                )
                 init_vec_table(conn)
                 build_vectors(conn)
+                build_separation_vectors(conn)
                 rebuilt = True
-        except Exception:
-            pass
-        _memory = None  # Force re-init with new model on next call
+        except Exception as e:
+            rebuild_error = f"{type(e).__name__}: {e}"
+            log.exception("truememory_configure re-embed failed")
+        finally:
+            _memory = None  # Always force re-init, even on failure
 
     # Restore offline mode now that the new model is downloaded/loaded
     os.environ["HF_HUB_OFFLINE"] = "1"
@@ -592,6 +722,13 @@ def truememory_configure(
     }
     if rebuilt:
         result["note"] = "Existing memories have been re-embedded with the new model."
+    if rebuild_error is not None:
+        result["rebuild_error"] = rebuild_error
+        result["warning"] = (
+            "Tier switch succeeded but memory re-embedding failed. Re-run "
+            "truememory_configure() to retry, or delete ~/.truememory/memories.db "
+            "to start fresh."
+        )
     if api_key:
         result["api_key_saved"] = f"{api_provider} key stored"
 
