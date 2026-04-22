@@ -226,6 +226,7 @@ Every benchmark script is self-contained and runs on [Modal](https://modal.com).
 @software{truememory2026,
   title = {TrueMemory: State-of-the-Art Local-First Agent Memory},
   author = {@Building\_Josh},
+  organization = {Sauron},
   year = {2026},
   url = {https://github.com/buildingjoshbetter/TrueMemory},
   version = {0.4.0}

@@ -10,7 +10,7 @@ readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 authors = [
-    { name = "@Building_Josh", email = "buildingjoshbetter@gmail.com" },
+    { name = "@Building_Josh" },
 ]
 keywords = ["memory", "ai", "agents", "llm", "rag", "sqlite", "locomo", "mcp", "embeddings"]
 classifiers = [

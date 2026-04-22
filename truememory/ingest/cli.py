@@ -267,11 +267,13 @@ def _preflight_writable_target(target: str | None, *, kind: str) -> bool:
     return True
 
 
-_SETUP_BANNER = """
+_SAURON_BANNER = """
 \033[1;33m╔══════════════════════════════════════════════════════════════╗
 ║                                                              ║
 ║              ◉  T R U E M E M O R Y                          ║
 ║              Persistent Memory for AI Agents                 ║
+║                                                              ║
+║              A Sauron Company                                ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝\033[0m
 """
@@ -299,7 +301,7 @@ def _save_truememory_config(config: dict) -> None:
 
 def _run_setup(args):
     """Interactive first-time setup wizard for TrueMemory."""
-    print(_SETUP_BANNER)
+    print(_SAURON_BANNER)
     print("Welcome to TrueMemory setup! Let's get you configured.\n")
 
     config = _load_truememory_config()
@@ -464,7 +466,7 @@ def _run_setup(args):
     print()
     print("  Run \033[1mtruememory-ingest status\033[0m to verify everything.")
     print()
-    print("  \033[2mThanks for using TrueMemory.\033[0m")
+    print("  \033[2mThanks for using TrueMemory, a Sauron company.\033[0m")
     print()
 
 
