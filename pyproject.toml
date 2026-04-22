@@ -40,10 +40,10 @@ dependencies = [
 
 [project.optional-dependencies]
 # "gpu" and "reranker" name the same stack — one alias to keep them in sync.
-reranker = ["sentence-transformers>=3.0.0,<4.0", "torch>=2.0.0,<3.0"]
+reranker = ["sentence-transformers>=3.0.0,<6.0", "torch>=2.0.0,<3.0"]
 gpu = ["truememory[reranker]"]
 agentic = ["anthropic>=0.80.0,<1.0"]
-dev = ["pytest>=7.0,<9.0", "ruff>=0.4,<1.0", "build>=1.2,<2.0", "twine>=5.0,<7.0"]
+dev = ["pytest>=7.0,<10.0", "ruff>=0.4,<1.0", "build>=1.2,<2.0", "twine>=5.0,<7.0"]
 all = ["truememory[gpu,reranker,agentic]"]
 
 [project.scripts]
