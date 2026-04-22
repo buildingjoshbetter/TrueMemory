@@ -6,10 +6,11 @@ Reranks retrieval results using a cross-encoder model that jointly encodes
 (query, document) pairs for more accurate relevance scoring than embedding-
 based similarity alone.
 
-Uses ``cross-encoder/ms-marco-MiniLM-L-6-v2`` by default (paper §2.0 Edge
-reranker, 22M params, CPU-friendly).  Base/Pro bench scripts override to
-``Alibaba-NLP/gte-reranker-modernbert-base`` (149M, GPU recommended).
-Can optionally use GPU if available.
+The reranker model is resolved per tier via ``get_reranker_name_for_tier``:
+Edge → ``cross-encoder/ms-marco-MiniLM-L-6-v2`` (22M, CPU-friendly, paper
+§2.0 Edge reranker), Base / Pro → ``Alibaba-NLP/gte-reranker-modernbert-base``
+(149M, GPU recommended). Callers with explicit needs can override by passing
+``model_name=...`` to ``get_reranker``. Can optionally use GPU if available.
 
 Usage::
 
@@ -39,16 +40,103 @@ _model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 _lock = threading.Lock()
 _inference_lock = threading.Lock()  # Protects concurrent model.predict() calls
 
+# ---------------------------------------------------------------------------
+# Tier-aware reranker resolution (v0.4.0 paper §2.0)
+# ---------------------------------------------------------------------------
+#
+# Edge uses the lightweight MiniLM cross-encoder (22M params, CPU-friendly).
+# Base and Pro use gte-reranker-modernbert-base (149M, GPU recommended) —
+# required to reach the 91.5% / 91.8% LoCoMo targets for those tiers.
+#
+# The active tier is cached in _active_tier. It's seeded lazily on first
+# get_current_reranker_name() call (from TRUEMEMORY_EMBED_MODEL env var or
+# ~/.truememory/config.json), and can be updated at runtime via
+# set_active_tier() — the MCP server calls this on truememory_configure.
+_TIER_RERANKERS = {
+    "edge": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    "base": "Alibaba-NLP/gte-reranker-modernbert-base",
+    "pro": "Alibaba-NLP/gte-reranker-modernbert-base",
+}
+
+_active_tier: str | None = None  # None = not yet resolved; resolved lazily
+
+
+def get_reranker_name_for_tier(tier: str) -> str:
+    """Pure mapping from tier name ("edge" / "base" / "pro") to reranker HF ID.
+
+    Case-insensitive. Unknown or empty tier names fall back to the Edge
+    default (MiniLM). Does not load any model — use ``get_reranker`` for that.
+    """
+    if not tier:
+        return _TIER_RERANKERS["edge"]
+    return _TIER_RERANKERS.get(tier.lower(), _TIER_RERANKERS["edge"])
+
+
+def _resolve_tier_from_env_and_config() -> str:
+    """Read the active tier from TRUEMEMORY_EMBED_MODEL env var, then from
+    ~/.truememory/config.json. Safe on missing / malformed config / any OS
+    error — returns "edge" as the ultimate fallback.
+
+    This is called at most once per process (cached in _active_tier) unless
+    set_active_tier() is called explicitly.
+    """
+    import os
+    env = os.environ.get("TRUEMEMORY_EMBED_MODEL", "").strip().lower()
+    if env in ("edge", "base", "pro"):
+        return env
+    try:
+        from pathlib import Path
+        import json
+        cfg_path = Path.home() / ".truememory" / "config.json"
+        if cfg_path.exists():
+            data = json.loads(cfg_path.read_text())
+            tier = (data.get("tier") or "").strip().lower()
+            if tier in ("edge", "base", "pro"):
+                return tier
+    except Exception:
+        pass
+    return "edge"
+
+
+def set_active_tier(tier: str) -> None:
+    """Update the cached active tier.
+
+    Called by the MCP server's ``truememory_configure`` when the user changes
+    tier at runtime so subsequent ``get_reranker(model_name=None)`` calls
+    resolve to the new tier's reranker. Empty / unknown tier falls back
+    to "edge".
+    """
+    global _active_tier
+    if not tier:
+        _active_tier = "edge"
+        return
+    t = tier.strip().lower()
+    _active_tier = t if t in ("edge", "base", "pro") else "edge"
+
+
+def get_current_reranker_name() -> str:
+    """Return the reranker HF model ID for the currently-active tier.
+
+    Resolves lazily on first call via _resolve_tier_from_env_and_config;
+    subsequent calls use the cached _active_tier until set_active_tier()
+    is called.
+    """
+    global _active_tier
+    if _active_tier is None:
+        _active_tier = _resolve_tier_from_env_and_config()
+    return get_reranker_name_for_tier(_active_tier)
+
 
 def get_reranker(model_name: str | None = None, device: str | None = None):
     """
     Lazy-load the cross-encoder reranker (singleton).
 
     Args:
-        model_name: HuggingFace model ID.  Defaults to
-                    ``cross-encoder/ms-marco-MiniLM-L-6-v2`` (paper §2.0 Edge
-                    reranker).  Pass ``Alibaba-NLP/gte-reranker-modernbert-base``
-                    for the paper Base/Pro reranker.
+        model_name: HuggingFace model ID.  If None (the default), resolves via
+                    ``get_current_reranker_name()`` to the tier-correct model
+                    (Edge → MiniLM, Base/Pro → gte-reranker-modernbert-base).
+                    Pass an explicit name for overrides (bench scripts, custom
+                    rerankers).
         device:     Device string (``"cpu"``, ``"cuda:0"``, etc.).
                     If None, auto-detects.
 
@@ -57,7 +145,7 @@ def get_reranker(model_name: str | None = None, device: str | None = None):
     """
     global _model, _model_name
 
-    name = model_name or _model_name
+    name = model_name or get_current_reranker_name()
     if _model is not None and name == _model_name:
         return _model  # Fast path, no lock needed
     with _lock:
