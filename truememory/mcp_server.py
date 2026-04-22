@@ -896,7 +896,15 @@ def main():
         print(_HELP_TEXT, file=sys.stderr)
         return 2
 
-    # No flags → this is the Claude-Code-invoked MCP server path. Kick off
+    # Any remaining positional args at this point are a user typo — e.g.,
+    # `truememory-mcp help` (no dashes, not caught by the unknown-flag check
+    # above). Reject rather than fall through to mcp.run() and hang on stdin.
+    if argv:
+        print(f"truememory-mcp: unexpected argument(s): {' '.join(argv)}", file=sys.stderr)
+        print(_HELP_TEXT, file=sys.stderr)
+        return 2
+
+    # No args → this is the Claude-Code-invoked MCP server path. Kick off
     # model preloading before entering the event loop. Models load in
     # background threads (~2.5s) while the MCP handshake completes (~1-3s),
     # so by the time the first search arrives, models are already warm.

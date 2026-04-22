@@ -133,3 +133,31 @@ def test_ingest_version_flag_exits_cleanly():
     assert "truememory-ingest" in result.stdout, (
         f"stdout lacks binary name: {result.stdout!r}"
     )
+
+
+# --- Regression lock: positional args must also exit non-zero, not hang ---
+
+
+def test_positional_arg_exits_nonzero_not_hang():
+    """`truememory-mcp help` (positional arg, no dashes) must NOT fall through
+    to mcp.run(transport='stdio') and hang on stdin.
+
+    The round-1 CLI patch only rejected flag-shaped unknowns (startswith('-')),
+    leaving positional typos like `help`, `setup`, `halp` to reach the
+    mcp.run() fallthrough and block indefinitely. This test locks the
+    round-2 fix: any non-empty argv after known-flag processing must exit 2.
+
+    The 10s timeout will fire if this test ever catches a hang regression.
+    """
+    result = _run_cli(["help"], timeout=10)
+    # Must exit non-zero (spec: exit 2 for unexpected positional args)
+    assert result.returncode != 0, (
+        f"positional arg did not error; stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
+    # Stderr should mention the unexpected arg or point to --help
+    assert (
+        "unexpected" in result.stderr.lower()
+        or "usage" in result.stderr.lower()
+        or "--help" in result.stderr
+    ), f"stderr lacked usage hint: {result.stderr!r}"
