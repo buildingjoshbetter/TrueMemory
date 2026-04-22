@@ -20,7 +20,7 @@ Usage:
 
     modal volume get locomo-results / ./results --force
 """
-# ruff: noqa: E701, E702, E722
+# ruff: noqa: E701, E702
 # This bench script uses a deliberately terse one-line-per-statement style
 # to keep the Modal-shipped source compact. Style rules above are silenced
 # for the file; correctness rules still apply.
@@ -129,7 +129,7 @@ def judge_one(client, q, gold, gen):
                 messages=[{"role":"system","content":JUDGE_SYS},{"role":"user","content":up}]
             ).choices[0].message.content
         try: votes.append(_verdict(_retry(_j)))
-        except: votes.append(False)
+        except Exception: votes.append(False)
     return sum(votes) > len(votes)/2, votes
 
 def score_results(details):
@@ -151,7 +151,7 @@ def score_results(details):
 def _pdt(s):
     for f in ("%I:%M %p on %d %B, %Y", "%I:%M %p on %d %B %Y"):
         try: return datetime.strptime(s.strip(), f)
-        except: pass
+        except Exception: pass
     return None
 
 def _rtime(text, ds):
@@ -237,7 +237,7 @@ def retrieve_truememory_base(conv_data, conv_idx):
     os.unlink(tmp_db)
     for ext in ("-wal","-shm"):
         try: os.unlink(tmp_db + ext)
-        except: pass
+        except Exception: pass
     os.unlink(tmp_json)
     return results
 
@@ -384,7 +384,7 @@ def orchestrate(locomo_data: list, smoke: bool = False):
 
     # Clean up checkpoint
     try: os.remove(ckpt_path); vol.commit()
-    except: pass
+    except Exception: pass
 
     return {"system": system, "j_score": scores["j_score"],
             "total": scores["total_questions"], "correct": scores["total_correct"]}

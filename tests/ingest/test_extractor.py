@@ -6,7 +6,6 @@ from truememory.ingest.extractor import (
     _parse_extraction_response,
     _salvage_partial_json,
     extract_facts_simple,
-    ExtractedFact,
 )
 
 

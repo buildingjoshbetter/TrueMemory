@@ -411,11 +411,15 @@ def retrieve_truememory_base(conv_data, conv_idx):
     import tempfile
     get_reranker(model_name="cross-encoder/ms-marco-MiniLM-L6-v2")
     msgs = parse_conv(conv_data)
-    tmp_db = tempfile.mktemp(suffix=".db", prefix=f"base_{conv_idx}_")
+    _tmp_db_file = tempfile.NamedTemporaryFile(suffix=".db", prefix=f"base_{conv_idx}_", delete=False)
+    tmp_db = _tmp_db_file.name
+    _tmp_db_file.close()
     engine = TrueMemoryEngine(db_path=tmp_db)
     # Ingest
     import json as _json
-    tmp_json = tempfile.mktemp(suffix=".json")
+    _tmp_json_file = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+    tmp_json = _tmp_json_file.name
+    _tmp_json_file.close()
     msg_dicts = [{"content":m["content"],"sender":m["speaker"],"recipient":m["recipient"],
                   "timestamp":m["timestamp"],"category":m["session"],"modality":"conversation"}
                  for m in msgs]
@@ -445,11 +449,15 @@ def retrieve_truememory_pro(conv_data, conv_idx):
     get_reranker(model_name="Alibaba-NLP/gte-reranker-modernbert-base")
     llm_fn = _nm_make_hyde_fn()
     msgs = parse_conv(conv_data)
-    tmp_db = tempfile.mktemp(suffix=".db", prefix=f"pro_{conv_idx}_")
+    _tmp_db_file = tempfile.NamedTemporaryFile(suffix=".db", prefix=f"pro_{conv_idx}_", delete=False)
+    tmp_db = _tmp_db_file.name
+    _tmp_db_file.close()
     engine = TrueMemoryEngine(db_path=tmp_db)
     # Ingest
     import json as _json
-    tmp_json = tempfile.mktemp(suffix=".json")
+    _tmp_json_file = tempfile.NamedTemporaryFile(suffix=".json", delete=False)
+    tmp_json = _tmp_json_file.name
+    _tmp_json_file.close()
     msg_dicts = [{"content":m["content"],"sender":m["speaker"],"recipient":m["recipient"],
                   "timestamp":m["timestamp"],"category":m["session"],"modality":"conversation"}
                  for m in msgs]

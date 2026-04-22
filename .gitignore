@@ -80,3 +80,13 @@ benchmarks/longmemeval/
 
 # Test runner cache
 .pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Internal working directory — audit scaffolding, paper drafts, bench archives.
+# NEVER commit; handled by sdist excludes in pyproject.toml.
+_working/
+
+# Claude Code tool state (scheduled tasks, telemetry, etc.) — never commit.
+.claude/

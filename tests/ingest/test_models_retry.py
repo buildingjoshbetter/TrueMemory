@@ -16,7 +16,6 @@ import urllib.error
 from truememory.ingest.models import (
     LLMConfig,
     LLMError,
-    _MAX_RETRIES,
     _retry_backoff,
     _should_retry,
     _complete_openai_compat,

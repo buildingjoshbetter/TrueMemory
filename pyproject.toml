@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.18,<2.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -16,36 +16,35 @@ keywords = ["memory", "ai", "agents", "llm", "rag", "sqlite", "locomo", "mcp", "
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
 ]
 
 dependencies = [
     "model2vec>=0.6.0,<1.0",
     "sqlite-vec>=0.1.0,<1.0",
-    "numpy>=1.24.0",
+    "numpy>=1.24.0,<3.0",
     # mcp[cli] and httpx are required by truememory.mcp_server, which is the
     # primary entry point of this package (`truememory-mcp`). Previously these
     # lived in the `[mcp]` optional extra, which caused `pip install truememory
     # && truememory-mcp --setup` to crash with ModuleNotFoundError on first run.
-    # Moved to core in 0.3.0. The [mcp] extra below is kept as a no-op alias
-    # for backwards compatibility.
-    "mcp[cli]>=1.0.0",
-    "httpx>=0.27.0",
+    # Moved to core in 0.3.0.
+    "mcp[cli]>=1.0.0,<2.0",
+    "httpx>=0.27.0,<1.0",
 ]
 
 [project.optional-dependencies]
-gpu = ["sentence-transformers>=3.0.0", "torch>=2.0.0"]
-reranker = ["sentence-transformers>=3.0.0", "torch>=2.0.0"]
-agentic = ["anthropic>=0.80.0"]
-mcp = ["mcp[cli]>=1.0.0", "httpx>=0.27.0"]
-dev = ["pytest>=7.0", "ruff>=0.4"]
-all = ["truememory[gpu,reranker,agentic,mcp]"]
+# "gpu" and "reranker" name the same stack — one alias to keep them in sync.
+reranker = ["sentence-transformers>=3.0.0,<4.0", "torch>=2.0.0,<3.0"]
+gpu = ["truememory[reranker]"]
+agentic = ["anthropic>=0.80.0,<1.0"]
+dev = ["pytest>=7.0,<9.0", "ruff>=0.4,<1.0", "build>=1.2,<2.0", "twine>=5.0,<7.0"]
+all = ["truememory[gpu,reranker,agentic]"]
 
 [project.scripts]
 truememory-mcp = "truememory.mcp_server:main"
@@ -54,6 +53,7 @@ truememory-ingest = "truememory.ingest.cli:main"
 [project.urls]
 Homepage = "https://github.com/buildingjoshbetter/TrueMemory"
 Repository = "https://github.com/buildingjoshbetter/TrueMemory"
+Documentation = "https://github.com/buildingjoshbetter/TrueMemory#readme"
 Issues = "https://github.com/buildingjoshbetter/TrueMemory/issues"
 Changelog = "https://github.com/buildingjoshbetter/TrueMemory/blob/main/CHANGELOG.md"
 
@@ -75,3 +75,27 @@ packages = ["truememory"]
 
 # CLAUDE_TEMPLATE.md lives inside the package at truememory/ingest/CLAUDE_TEMPLATE.md
 # so it's auto-included in the wheel — no force-include needed.
+
+[tool.hatch.build.targets.sdist]
+# Explicit exclude list so the sdist stays tight (~400KB compressed instead of 36MB).
+# Without these, hatchling ships every untracked non-gitignored file including
+# _working/ (149MB of paper drafts, audit logs, bench archives).
+exclude = [
+    "/_working",
+    "/.claude",
+    "/dist",
+    "/build",
+    "/.venv",
+    "/.venv*",
+    "/.pytest_cache",
+    "/.ruff_cache",
+    "/.github",
+    "/install.sh",
+    "/assets/charts/*.html",
+    "/assets/charts/*.png",
+    "/benchmarks/locomo/data/locomo10.json",
+    "/benchmarks/locomo/results",
+    "*.pyc",
+    "__pycache__",
+    ".DS_Store",
+]

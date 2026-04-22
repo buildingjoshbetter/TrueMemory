@@ -40,14 +40,12 @@ import stat
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from truememory.ingest.extractor import (
-    ExtractedFact,
     _chunk_transcript,
     extract_facts,
 )

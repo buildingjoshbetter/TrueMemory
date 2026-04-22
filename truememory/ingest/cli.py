@@ -20,9 +20,15 @@ from truememory.ingest.models import LLMConfig, hydrate_config
 
 
 def main():
+    from truememory import __version__ as _tm_version
     parser = argparse.ArgumentParser(
         description="TrueMemory Ingestion — biomimetic memory encoding",
         prog="truememory-ingest",
+    )
+    parser.add_argument(
+        "-V", "--version",
+        action="version",
+        version=f"truememory-ingest {_tm_version}",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -417,11 +423,14 @@ def _run_setup(args):
             if use_existing != "n":
                 api_key = existing_key
             else:
-                api_key = input(f"  {prompt_text}: ").strip()
+                # getpass: don't echo the key to the terminal or shell history.
+                from getpass import getpass as _getpass
+                api_key = _getpass(f"  {prompt_text}: ").strip()
         elif existing_key:
             api_key = existing_key
         elif not args.non_interactive:
-            api_key = input(f"  {prompt_text}: ").strip()
+            from getpass import getpass as _getpass
+            api_key = _getpass(f"  {prompt_text}: ").strip()
 
     # ── Save config ───────────────────────────────────────────────────
     config["tier"] = tier
