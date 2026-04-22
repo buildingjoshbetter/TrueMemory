@@ -292,11 +292,26 @@ def _load_truememory_config() -> dict:
 
 
 def _save_truememory_config(config: dict) -> None:
-    """Save config to ~/.truememory/config.json."""
+    """Save config to ~/.truememory/config.json.
+
+    Hunter F28: chmod calls below are silent no-ops on Windows. When an
+    API key is being persisted on Windows we warn to stderr so the user
+    knows the plaintext file is readable by other local users and can
+    route keys through env vars instead on shared machines.
+    """
     _TRUEMEMORY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     _TRUEMEMORY_CONFIG_PATH.parent.chmod(0o700)
     _TRUEMEMORY_CONFIG_PATH.write_text(json.dumps(config, indent=2))
     _TRUEMEMORY_CONFIG_PATH.chmod(0o600)
+    if sys.platform == "win32" and any(k.endswith("_api_key") for k in config):
+        print(
+            "truememory: warning — on Windows, ~/.truememory/config.json "
+            "permissions are inherited from the parent directory and may be "
+            "readable by other local users. If this is a shared machine, set "
+            "the API key via the ANTHROPIC_API_KEY / OPENROUTER_API_KEY / "
+            "OPENAI_API_KEY environment variable instead.",
+            file=sys.stderr,
+        )
 
 
 def _run_setup(args):

@@ -86,11 +86,27 @@ def _load_config() -> dict:
 
 
 def _save_config(config: dict) -> None:
-    """Save config to ~/.truememory/config.json."""
+    """Save config to ~/.truememory/config.json.
+
+    Hunter F28: the POSIX `chmod` calls below are silent no-ops on Windows;
+    the config file (which stores API keys in plaintext) inherits the
+    parent-directory ACL — typically readable by all local users. When
+    storing a key on Windows we warn to stderr and suggest the env-var
+    route, which is the actually-private channel.
+    """
     _TRUEMEMORY_DIR.mkdir(parents=True, exist_ok=True)
     _TRUEMEMORY_DIR.chmod(0o700)
     _CONFIG_PATH.write_text(json.dumps(config, indent=2))
     _CONFIG_PATH.chmod(0o600)
+    if sys.platform == "win32" and any(k.endswith("_api_key") for k in config):
+        print(
+            "truememory: warning — on Windows, ~/.truememory/config.json "
+            "permissions are inherited from the parent directory and may be "
+            "readable by other local users. If this is a shared machine, set "
+            "the API key via the ANTHROPIC_API_KEY / OPENROUTER_API_KEY / "
+            "OPENAI_API_KEY environment variable instead.",
+            file=sys.stderr,
+        )
 
 
 # Apply saved tier on startup (before any model loading)
@@ -892,6 +908,31 @@ def _preload_models():
 # Auto-setup for Claude Code and Claude Desktop
 # ---------------------------------------------------------------------------
 
+def _claude_desktop_config_path() -> Path:
+    """Return the per-platform Claude Desktop config file location.
+
+    Hunter F29: previously hardcoded to macOS. Claude Desktop stores this
+    file in a platform-specific app-data location:
+      - macOS:   ``~/Library/Application Support/Claude/claude_desktop_config.json``
+      - Windows: ``%APPDATA%/Claude/claude_desktop_config.json`` (fallback
+                 ``~/AppData/Roaming/Claude/...`` when APPDATA is unset)
+      - Linux:   ``~/.config/Claude/claude_desktop_config.json``
+
+    The caller still gates on ``desktop_config_path.parent.exists()`` — if
+    Claude Desktop isn't installed on this platform, ``_setup_claude`` will
+    correctly report "not detected" instead of creating the directory.
+    """
+    if sys.platform == "darwin":
+        return (Path.home() / "Library" / "Application Support"
+                / "Claude" / "claude_desktop_config.json")
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        return base / "Claude" / "claude_desktop_config.json"
+    # Linux / BSD / other POSIX
+    return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
+
+
 def _setup_claude():
     """Auto-configure TrueMemory as an MCP server in Claude Code and/or Claude Desktop.
 
@@ -990,7 +1031,11 @@ def _setup_claude():
             print(f"  Claude Code: failed — {result.stderr.strip()}")
 
     # --- Claude Desktop ---
-    desktop_config_path = Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    # Hunter F29: pre-PR49, this path was hardcoded to the macOS
+    # `~/Library/Application Support/Claude/...` location, so Linux and
+    # Windows users silently got "Claude Desktop not detected" even with
+    # Desktop installed. Resolve per-platform instead.
+    desktop_config_path = _claude_desktop_config_path()
     if desktop_config_path.parent.exists():
         try:
             if desktop_config_path.exists():
