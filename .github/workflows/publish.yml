@@ -32,4 +32,4 @@ jobs:
         # Pinned to v1.12.4 SHA — pypa/gh-action-pypi-publish publishes to PyPI,
         # so supply-chain hardening matters here more than anywhere else.
         # Update by: refreshing the SHA from https://github.com/pypa/gh-action-pypi-publish/releases
-        uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1.12.4
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
