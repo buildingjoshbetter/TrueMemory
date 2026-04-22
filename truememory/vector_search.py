@@ -26,7 +26,10 @@ Dependencies:
 
 from __future__ import annotations
 
+import datetime
+import logging
 import os
+import re
 import struct
 import sqlite3
 import threading
@@ -36,6 +39,19 @@ import numpy as np
 
 if TYPE_CHECKING:
     pass
+
+logger = logging.getLogger(__name__)
+
+
+class TrueMemoryMigrationError(Exception):
+    """Raised when the stored DB was built with a different embedder than the
+    currently-configured tier.
+
+    Upgrading between tiers that use different embedding dimensions (e.g.
+    v0.3.0 Pro @ 1024d → v0.4.0 Pro @ 256d) or different embedders at the
+    same dimension (e.g. Model2Vec 256d → Qwen3 256d) requires re-embedding
+    the stored messages. See the CHANGELOG for migration steps.
+    """
 
 # ---------------------------------------------------------------------------
 # Singleton model loader
@@ -141,6 +157,141 @@ def get_model():
 # Serialization helpers
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Embedder-identity metadata (Hunter F01 / F02 / F32)
+# ---------------------------------------------------------------------------
+
+
+def _ensure_metadata_table(conn: sqlite3.Connection) -> None:
+    """Idempotently create the key/value metadata table.
+
+    storage._SCHEMA_SQL also declares this table, but engine.open() connects
+    to existing v0.3.0 DBs without running that script, so a runtime-safe
+    CREATE IF NOT EXISTS is needed before any metadata read/write.
+    """
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS metadata ("
+        "key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT"
+        ")"
+    )
+
+
+def _write_embedder_metadata(conn: sqlite3.Connection) -> None:
+    """Record `(embed_model, embed_dim)` so later opens can detect drift."""
+    _ensure_metadata_table(conn)
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    conn.execute(
+        "INSERT OR REPLACE INTO metadata(key, value, updated_at) VALUES (?, ?, ?)",
+        ("embed_model", EMBEDDING_MODEL, now),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO metadata(key, value, updated_at) VALUES (?, ?, ?)",
+        ("embed_dim", str(_embedding_dim), now),
+    )
+    conn.commit()
+
+
+def _read_embedder_metadata(
+    conn: sqlite3.Connection,
+) -> tuple[str | None, int | None]:
+    """Return `(stored_model, stored_dim)` or `(None, None)` if not recorded."""
+    _ensure_metadata_table(conn)
+    rows = conn.execute(
+        "SELECT key, value FROM metadata WHERE key IN ('embed_model', 'embed_dim')"
+    ).fetchall()
+    stored = {r[0]: r[1] for r in rows}
+    model = stored.get("embed_model")
+    dim_str = stored.get("embed_dim")
+    try:
+        dim = int(dim_str) if dim_str else None
+    except ValueError:
+        dim = None
+    return model, dim
+
+
+def _detect_existing_vec_dim(conn: sqlite3.Connection) -> int | None:
+    """Parse the dimension declared in an existing `vec_messages` schema."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name='vec_messages'"
+    ).fetchone()
+    if not row or not row[0]:
+        return None
+    match = re.search(r"float\[(\d+)\]", row[0])
+    return int(match.group(1)) if match else None
+
+
+def _migration_hint() -> str:
+    return (
+        "Re-embed via `truememory_configure(tier=...)` (re-encodes existing "
+        "memories with the new model) or delete the DB (e.g. "
+        "`~/.truememory/memories.db`) to start fresh."
+    )
+
+
+def _check_embedder_compatibility(conn: sqlite3.Connection) -> None:
+    """Guard against silent dim- or model-mismatch when a vec table exists.
+
+    Called from :func:`init_vec_table`. Skips when `vec_messages` is absent
+    so that explicit re-embed flows (truememory_configure dropping + rebuilding)
+    aren't blocked by stale metadata from the previous embedder.
+    """
+    existing_dim = _detect_existing_vec_dim(conn)
+    if existing_dim is None:
+        return  # fresh DB or dropped-for-re-embed — nothing to protect
+
+    stored_model, _stored_dim = _read_embedder_metadata(conn)
+    current_dim = _embedding_dim
+
+    if existing_dim != current_dim:
+        stored_hint = (
+            f" (stored embed_model={stored_model!r})"
+            if stored_model
+            else " (no metadata — likely a legacy v0.3.0 DB)"
+        )
+        raise TrueMemoryMigrationError(
+            f"Database has a {existing_dim}d vec_messages table but the "
+            f"current embedder produces {current_dim}d vectors{stored_hint}. "
+            f"This commonly happens when upgrading between tiers with "
+            f"different embedding dimensions (e.g. v0.3.0 Pro @ 1024d → "
+            f"v0.4.0 Pro @ 256d). " + _migration_hint()
+        )
+
+    if stored_model is not None and stored_model != EMBEDDING_MODEL:
+        raise TrueMemoryMigrationError(
+            f"Database was built with embed_model={stored_model!r}; current "
+            f"is {EMBEDDING_MODEL!r}. Matching dims ({current_dim}d) would "
+            f"otherwise mask a silent vector-space mismatch. " + _migration_hint()
+        )
+
+    if stored_model is None:
+        logger.warning(
+            "vec_messages exists without embedder metadata (legacy v0.3.0-style "
+            "DB). Current embedder=%r at %dd. If you have switched embedding "
+            "models since ingestion, re-embed via truememory_configure() — "
+            "otherwise new vectors will carry the %r marker going forward.",
+            EMBEDDING_MODEL, current_dim, EMBEDDING_MODEL,
+        )
+
+
+def _check_rebuild_allowed(conn: sqlite3.Connection) -> None:
+    """Refuse a silent auto-rebuild if metadata names a different embedder.
+
+    Called from :func:`TrueMemoryEngine.open` when `vec_messages` is missing
+    and `rebuild_vectors=True`. The intent of that path is bootstrap — but if
+    the DB has metadata, an implicit rebuild with the current (possibly
+    different) model would silently re-encode against a different vector
+    space. Force the user to route through `truememory_configure`.
+    """
+    stored_model, _ = _read_embedder_metadata(conn)
+    if stored_model is not None and stored_model != EMBEDDING_MODEL:
+        raise TrueMemoryMigrationError(
+            f"Refusing silent auto-rebuild: DB metadata says "
+            f"embed_model={stored_model!r} but current is {EMBEDDING_MODEL!r}. "
+            f"Call truememory_configure() to re-embed explicitly, or delete "
+            f"the DB to start fresh."
+        )
+
+
 def serialize_f32(vector) -> bytes:
     """
     Serialize a float vector to raw little-endian bytes for sqlite-vec.
@@ -180,6 +331,10 @@ def init_vec_table(conn: sqlite3.Connection) -> None:
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
+
+    _ensure_metadata_table(conn)
+    _check_embedder_compatibility(conn)
+
     dim = _embedding_dim
     # Completion embeddings (semantic similarity)
     conn.execute(
@@ -257,6 +412,7 @@ def build_vectors(
         total += len(batch)
 
     conn.commit()
+    _write_embedder_metadata(conn)
     return total
 
 
@@ -411,6 +567,7 @@ def build_separation_vectors(
         total += len(batch)
 
     conn.commit()
+    _write_embedder_metadata(conn)
     return total
 
 

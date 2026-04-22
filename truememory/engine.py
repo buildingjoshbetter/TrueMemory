@@ -24,6 +24,7 @@ Design principles:
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 import sqlite3
@@ -47,7 +48,13 @@ logger = logging.getLogger(__name__)
 
 _HAS_VECTOR = False
 try:
-    from truememory.vector_search import init_vec_table, build_vectors, build_separation_vectors
+    from truememory.vector_search import (
+        init_vec_table,
+        build_vectors,
+        build_separation_vectors,
+        TrueMemoryMigrationError,
+        _check_rebuild_allowed,
+    )
     _HAS_VECTOR = True
 except (ImportError, ModuleNotFoundError):
     pass
@@ -592,21 +599,35 @@ class TrueMemoryEngine:
             except Exception:
                 logger.debug("Failed to load sqlite-vec extension in open()", exc_info=True)
 
-        # Check for vector tables — rebuild if missing
+        # Check for vector tables — rebuild if missing.
+        # Hunter F32: if metadata names a different embedder, refuse silent
+        # rebuild; route the user through truememory_configure() instead.
         self._has_vectors = False
         if _HAS_VECTOR:
             try:
                 self.conn.execute("SELECT COUNT(*) FROM vec_messages").fetchone()
                 self._has_vectors = True
             except Exception:
-                logger.debug("vec_messages table not found, attempting rebuild", exc_info=True)
+                logger.warning(
+                    "vec_messages table missing; attempting rebuild with "
+                    "current model=%s",
+                    os.environ.get("TRUEMEMORY_EMBED_MODEL", "edge"),
+                )
                 if rebuild_vectors:
+                    _check_rebuild_allowed(self.conn)  # raises on model drift
                     try:
                         init_vec_table(self.conn)
                         n = build_vectors(self.conn)
                         self._has_vectors = n > 0
+                        logger.info(
+                            "vec_messages rebuilt with %d vectors (model=%s)",
+                            n,
+                            os.environ.get("TRUEMEMORY_EMBED_MODEL", "edge"),
+                        )
+                    except TrueMemoryMigrationError:
+                        raise
                     except Exception:
-                        logger.debug("Vector table rebuild failed", exc_info=True)
+                        logger.exception("Vector table rebuild failed")
                         self._has_vectors = False
 
         self._has_hybrid = _HAS_HYBRID and self._has_vectors
