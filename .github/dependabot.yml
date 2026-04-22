@@ -1,0 +1,22 @@
+# Hunter F27: weekly dep scan so stale caps (like the sentence-transformers
+# <4.0 that forced 3.4.1 when 5.4.1 was current — F19) surface within a week
+# instead of needing a full audit to catch. Weekly cadence is intentional —
+# daily is noisy for a ~10-dep project.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "ci"

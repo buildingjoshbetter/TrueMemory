@@ -35,3 +35,25 @@ jobs:
         run: pytest tests/ -v
       - name: Lint
         run: ruff check truememory/ tests/
+
+  # Hunter F26: catch packaging regressions (missing py.typed, metadata
+  # errors, broken README rendering, sdist contents) in CI instead of
+  # at release time. Runs once on 3.12 only — duplicating across the
+  # matrix wastes CI minutes without additional signal.
+  build-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
+      - name: Install build tooling
+        run: pip install build twine
+      - name: Build sdist + wheel
+        run: python -m build
+      - name: Verify package metadata
+        run: twine check --strict dist/*
