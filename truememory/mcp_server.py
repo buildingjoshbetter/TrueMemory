@@ -912,6 +912,30 @@ def _setup_claude():
     import subprocess
     import sys
 
+    # Hunter F23: bound every `claude` CLI call. Without a timeout, a stalled
+    # claude binary (auth prompt, blocked network, deadlock) wedges
+    # `truememory-mcp --setup` forever. 30s is generous — claude CLI calls
+    # should complete in well under a second.
+    _CLAUDE_TIMEOUT = 30
+
+    def _run_claude(cmd: list[str]) -> subprocess.CompletedProcess | None:
+        """Run a `claude ...` command with a bounded wait.
+
+        Returns None (and warns to stderr) if the command timed out so the
+        caller can fall through gracefully.
+        """
+        try:
+            return subprocess.run(
+                cmd, capture_output=True, text=True, timeout=_CLAUDE_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            print(
+                f"  Claude Code: `{' '.join(cmd[:4])}...` timed out after "
+                f"{_CLAUDE_TIMEOUT}s. Skip or re-run later.",
+                file=sys.stderr,
+            )
+            return None
+
     python_path = sys.executable
     mcp_args = ["-m", "truememory.mcp_server"]
     configured = []
@@ -927,17 +951,17 @@ def _setup_claude():
     if claude_bin:
         add_cmd = [claude_bin, "mcp", "add", "truememory", "--",
                    python_path, *mcp_args]
-        result = subprocess.run(add_cmd, capture_output=True, text=True)
-        if result.returncode == 0:
+        result = _run_claude(add_cmd)
+        if result is None:
+            pass  # Timeout already warned — fall through to Claude Desktop
+        elif result.returncode == 0:
             configured.append("Claude Code")
         elif "already exists" in (result.stderr or "").lower():
             # Inspect the existing entry. `claude mcp list` output format:
             #   truememory: /path/to/python -m truememory.mcp_server - ✓ Connected
-            list_result = subprocess.run(
-                [claude_bin, "mcp", "list"], capture_output=True, text=True,
-            )
+            list_result = _run_claude([claude_bin, "mcp", "list"])
             existing_cmd = ""
-            if list_result.returncode == 0:
+            if list_result is not None and list_result.returncode == 0:
                 for line in (list_result.stdout or "").splitlines():
                     stripped = line.strip()
                     if stripped.startswith("truememory:") or stripped.startswith("truememory "):
@@ -956,14 +980,11 @@ def _setup_claude():
                 configured.append("Claude Code (existing config preserved)")
             else:
                 # Stale entry — remove and re-add.
-                subprocess.run(
-                    [claude_bin, "mcp", "remove", "truememory"],
-                    capture_output=True, text=True,
-                )
-                retry = subprocess.run(add_cmd, capture_output=True, text=True)
-                if retry.returncode == 0:
+                _run_claude([claude_bin, "mcp", "remove", "truememory"])
+                retry = _run_claude(add_cmd)
+                if retry is not None and retry.returncode == 0:
                     configured.append("Claude Code (stale entry replaced)")
-                else:
+                elif retry is not None:
                     print(f"  Claude Code: update failed — {retry.stderr.strip()}")
         else:
             print(f"  Claude Code: failed — {result.stderr.strip()}")

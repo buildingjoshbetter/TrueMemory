@@ -333,7 +333,25 @@ def _run_setup(args):
                 do_install = input("  Install now? [y/N]: ").strip().lower()
                 if do_install == "y":
                     import subprocess
-                    subprocess.run([sys.executable, "-m", "pip", "install", "truememory[gpu]"])
+                    # Hunter F25: bound pip with a 10-minute timeout —
+                    # long enough for model downloads from slow mirrors,
+                    # short enough that a dead mirror doesn't wedge setup.
+                    try:
+                        subprocess.run(
+                            [sys.executable, "-m", "pip", "install",
+                             "truememory[gpu]"],
+                            timeout=600,
+                        )
+                    except subprocess.TimeoutExpired:
+                        print(
+                            "  \033[33m⚠ pip install timed out after "
+                            "10 minutes. Try `pip install "
+                            "truememory[gpu]` directly, then re-run "
+                            "`truememory-ingest setup`.\033[0m",
+                            file=sys.stderr,
+                        )
+                        print("  Falling back to Edge tier.")
+                        tier = "edge"
                 else:
                     print("  Falling back to Edge tier.")
                     tier = "edge"
