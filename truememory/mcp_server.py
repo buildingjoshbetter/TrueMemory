@@ -317,15 +317,29 @@ def _build_llm_fn():
 
 _cached_llm_fn = None
 _cached_llm_fn_built = False
+# Hunter F22: double-checked locking around first-call construction.
+# Without this, two concurrent first-searches both observe
+# `_cached_llm_fn_built == False`, both call `_build_llm_fn()`, both
+# race to write — benign (no data corruption) but wasteful (duplicate
+# API-key validation + client construction).
+_llm_cache_lock = threading.Lock()
 
 
 def _get_llm_fn():
-    """Build and cache the LLM function. Only rebuilt on first call."""
+    """Build and cache the LLM function. First caller wins the build.
+
+    Fast path bypasses the lock once ``_cached_llm_fn_built`` is True,
+    so steady-state searches don't pay synchronization cost.
+    """
     global _cached_llm_fn, _cached_llm_fn_built
-    if not _cached_llm_fn_built:
+    if _cached_llm_fn_built:
+        return _cached_llm_fn  # fast path, no lock
+    with _llm_cache_lock:
+        if _cached_llm_fn_built:
+            return _cached_llm_fn  # another thread won the race
         _cached_llm_fn = _build_llm_fn()
         _cached_llm_fn_built = True
-    return _cached_llm_fn
+        return _cached_llm_fn
 
 
 # ---------------------------------------------------------------------------
@@ -456,13 +470,14 @@ def _parallel_search(queries, user_id, internal_limit, llm_fn, output_limit):
     db_path = _get_memory()._engine.db_path
 
     def _run_query(q):
-        thread_m = Memory(path=db_path)
-        try:
+        # Hunter F30: context manager ensures the sqlite connection is
+        # closed even if `KeyboardInterrupt` lands between construction
+        # and entry into the old explicit `try:` block. `Memory.__exit__`
+        # already handles close; this form is just interrupt-safe.
+        with Memory(path=db_path) as thread_m:
             return thread_m.search_deep(
                 q, user_id=user_id, limit=internal_limit, llm_fn=llm_fn,
             )
-        finally:
-            thread_m.close()
 
     with ThreadPoolExecutor(max_workers=min(len(queries), 5)) as pool:
         futures = [pool.submit(_run_query, q) for q in queries]
@@ -715,59 +730,68 @@ def truememory_configure(
         _clear_llm_error(api_provider)
 
     # Apply model change — temporarily allow downloads for tier switch
-    # (the new model may not be cached yet)
-    os.environ.pop("HF_HUB_OFFLINE", None)
-    os.environ.pop("TRANSFORMERS_OFFLINE", None)
-    os.environ["TRUEMEMORY_EMBED_MODEL"] = tier
-    from truememory.vector_search import set_embedding_model
-    set_embedding_model(tier)
-
-    # Tell the reranker module about the new tier so get_reranker(model_name=None)
-    # calls (from direct Python-API users via rerank_with_modality_fusion etc.)
-    # resolve to the tier-correct model. Then pre-load that reranker so the
-    # first post-configure search doesn't pay a cold-start.
-    from truememory.reranker import set_active_tier as _set_active_tier
-    _set_active_tier(tier)
-    _set_reranker(_current_reranker())
-
-    # If tier actually changed, re-embed any existing memories.
-    # Hunter F03: (1) rebuild BOTH vec_messages and vec_messages_sep (the
-    # old code only rebuilt the completion table, leaving the separation
-    # table silently empty); (2) surface exceptions as rebuild_error in
-    # the response payload instead of swallowing into bare pass; (3) null
-    # _memory in `finally` so the next call always gets a fresh instance
-    # with the new model — even on failure.
+    # (the new model may not be cached yet).
+    #
+    # Hunter F31: wrap pop + restore in try/finally. Without this, any
+    # exception between the pop (line below) and the restore at the
+    # bottom (e.g. `set_embedding_model` raising on a removed model,
+    # model-download failure, disk-full during re-embed) leaves offline
+    # mode PERMANENTLY disabled for the process, and subsequent
+    # searches silently hit the network on every cache miss.
     rebuilt = False
     rebuild_error: str | None = None
-    if old_tier != tier:
-        try:
-            m = _get_memory()
-            engine = m._engine
-            engine._ensure_connection()
-            conn = engine.conn
-            count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-            if count > 0:
-                conn.execute("DROP TABLE IF EXISTS vec_messages")
-                conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
-                conn.commit()
-                from truememory.vector_search import (
-                    build_separation_vectors,
-                    build_vectors,
-                    init_vec_table,
-                )
-                init_vec_table(conn)
-                build_vectors(conn)
-                build_separation_vectors(conn)
-                rebuilt = True
-        except Exception as e:
-            rebuild_error = f"{type(e).__name__}: {e}"
-            log.exception("truememory_configure re-embed failed")
-        finally:
-            _memory = None  # Always force re-init, even on failure
+    os.environ.pop("HF_HUB_OFFLINE", None)
+    os.environ.pop("TRANSFORMERS_OFFLINE", None)
+    try:
+        os.environ["TRUEMEMORY_EMBED_MODEL"] = tier
+        from truememory.vector_search import set_embedding_model
+        set_embedding_model(tier)
 
-    # Restore offline mode now that the new model is downloaded/loaded
-    os.environ["HF_HUB_OFFLINE"] = "1"
-    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        # Tell the reranker module about the new tier so get_reranker(model_name=None)
+        # calls (from direct Python-API users via rerank_with_modality_fusion etc.)
+        # resolve to the tier-correct model. Then pre-load that reranker so the
+        # first post-configure search doesn't pay a cold-start.
+        from truememory.reranker import set_active_tier as _set_active_tier
+        _set_active_tier(tier)
+        _set_reranker(_current_reranker())
+
+        # If tier actually changed, re-embed any existing memories.
+        # Hunter F03: (1) rebuild BOTH vec_messages and vec_messages_sep (the
+        # old code only rebuilt the completion table, leaving the separation
+        # table silently empty); (2) surface exceptions as rebuild_error in
+        # the response payload instead of swallowing into bare pass; (3) null
+        # _memory in `finally` so the next call always gets a fresh instance
+        # with the new model — even on failure.
+        if old_tier != tier:
+            try:
+                m = _get_memory()
+                engine = m._engine
+                engine._ensure_connection()
+                conn = engine.conn
+                count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+                if count > 0:
+                    conn.execute("DROP TABLE IF EXISTS vec_messages")
+                    conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
+                    conn.commit()
+                    from truememory.vector_search import (
+                        build_separation_vectors,
+                        build_vectors,
+                        init_vec_table,
+                    )
+                    init_vec_table(conn)
+                    build_vectors(conn)
+                    build_separation_vectors(conn)
+                    rebuilt = True
+            except Exception as e:
+                rebuild_error = f"{type(e).__name__}: {e}"
+                log.exception("truememory_configure re-embed failed")
+            finally:
+                _memory = None  # Always force re-init, even on failure
+    finally:
+        # Always restore offline mode, even if set_embedding_model or the
+        # rebuild block raised before we got to their own cleanup.
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
     # Build result with onboarding info
     result = {
