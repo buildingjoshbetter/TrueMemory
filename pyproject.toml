@@ -93,8 +93,11 @@ exclude = [
     "/install.sh",
     "/assets/charts/*.html",
     "/assets/charts/*.png",
-    "/benchmarks/locomo/data/locomo10.json",
-    "/benchmarks/locomo/results",
+    # Hunter F36: exclude all benchmarks from sdist (used to exclude only the
+    # 44MB locomo10.json and results/; the Modal bench scripts still shipped,
+    # amplifying doc-drift findings like F13/F18 to PyPI source-download users).
+    # Users who want to reproduce benchmarks clone the repo.
+    "/benchmarks",
     "*.pyc",
     "__pycache__",
     ".DS_Store",
