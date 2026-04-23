@@ -152,6 +152,14 @@ CREATE TABLE IF NOT EXISTS metadata (
 """
 
 
+# Hunter F35: single source of truth for the sqlite busy_timeout pragma.
+# Pre-fix, create_db used 5000ms and pipeline._set_busy_timeout used
+# 10_000ms — same DB, asymmetric lock-wait behaviour that surfaced as
+# sporadic "database is locked" errors under concurrent ingest + MCP
+# search load. Both paths now import this constant.
+DEFAULT_BUSY_TIMEOUT_MS = 10_000
+
+
 # ---------------------------------------------------------------------------
 # Database creation
 # ---------------------------------------------------------------------------
@@ -173,7 +181,7 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
     """
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
     conn.executescript(_SCHEMA_SQL)
     conn.commit()
     return conn

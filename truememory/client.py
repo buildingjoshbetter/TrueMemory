@@ -60,7 +60,28 @@ class Memory:
 
         Returns:
             Dict with ``id``, ``content``, ``user_id``, ``created_at``.
+            When ``content`` is empty / whitespace-only the memory is
+            NOT stored — a warning is issued and a skip-marker is
+            returned (``id`` is ``None``, ``created_at`` is ``None``).
         """
+        # Hunter F38: skip empty / whitespace-only content. Callers
+        # passing through user-generated text (parsed transcripts,
+        # partial JSON) used to pollute the DB with useless rows that
+        # inflated `stats().message_count`. Warn rather than raise so
+        # batch callers can continue; the skip-marker lets them detect.
+        if not content or not content.strip():
+            import warnings
+            warnings.warn(
+                "Memory.add called with empty or whitespace-only content; "
+                "skipping (no row inserted).",
+                stacklevel=2,
+            )
+            return {
+                "id": None,
+                "content": content,
+                "user_id": user_id or "",
+                "created_at": None,
+            }
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         result = self._engine.add(
             content=content,

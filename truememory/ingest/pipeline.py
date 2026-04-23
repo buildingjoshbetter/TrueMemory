@@ -110,7 +110,7 @@ def _dedup_store_lock():
             pass
 
 
-def _set_busy_timeout(memory, timeout_ms: int = 10_000) -> None:
+def _set_busy_timeout(memory, timeout_ms: int | None = None) -> None:
     """Best-effort: set ``PRAGMA busy_timeout`` on the underlying connection.
 
     Older truememory versions may not expose ``_engine`` / ``conn``.
@@ -119,7 +119,13 @@ def _set_busy_timeout(memory, timeout_ms: int = 10_000) -> None:
     already serializes the critical section, and even without busy_timeout
     sqlite will raise ``OperationalError`` which the caller already catches
     and records in the trace.
+
+    Hunter F35: defaults come from ``storage.DEFAULT_BUSY_TIMEOUT_MS`` so
+    this helper and :func:`truememory.storage.create_db` never drift apart.
     """
+    if timeout_ms is None:
+        from truememory.storage import DEFAULT_BUSY_TIMEOUT_MS
+        timeout_ms = DEFAULT_BUSY_TIMEOUT_MS
     try:
         engine = getattr(memory, "_engine", None)
         if engine is None:
