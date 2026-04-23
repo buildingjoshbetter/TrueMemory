@@ -37,6 +37,17 @@ LOG_DIR = Path(os.environ.get(
     "TRUEMEMORY_LOG_DIR",
     str(Path.home() / ".truememory" / "logs"),
 ))
+# Hunter F33: when Popen fails we queue the ingestion here instead of
+# running inline (which would block Claude Code shutdown).
+BACKLOG_DIR = Path(os.environ.get(
+    "TRUEMEMORY_BACKLOG_DIR",
+    str(Path.home() / ".truememory" / "backlog"),
+))
+# Hunter F21: cap concurrent ingest processes. N parallel Stop hooks
+# (multi-session close, session-restart loop) would otherwise load N
+# embedding models at once — ~600MB RSS each on Pro, easy OOM on laptops.
+# Tunable via env var; POSIX-only via pgrep (on Windows the cap is a no-op).
+SPAWN_CAP = int(os.environ.get("TRUEMEMORY_INGEST_SPAWN_CAP", "2"))
 
 
 def _parse_args() -> argparse.Namespace:
@@ -174,6 +185,60 @@ def _has_enough_messages(transcript_path: str, min_messages: int) -> bool:
     return len(content) > min_messages * 50
 
 
+def _count_active_ingest_processes() -> int:
+    """Return a best-effort count of live ``truememory.ingest.cli`` children.
+
+    Hunter F21: used to bound concurrent hook-spawned ingestions. pgrep
+    is POSIX-only; on Windows this returns 0 (cap disabled) to avoid a
+    platform-dependent hard stop — the typical burst-close scenario is
+    rare on Windows anyway. Any pgrep failure is swallowed (return 0)
+    so the cap never becomes a hard fence that prevents ingestion.
+    """
+    if sys.platform == "win32":
+        return 0
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "truememory.ingest.cli"],
+            capture_output=True, text=True, timeout=1,
+        )
+        return len([ln for ln in (result.stdout or "").splitlines() if ln.strip()])
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return 0
+
+
+def _queue_to_backlog(
+    transcript_path: str,
+    session_id: str,
+    user_id: str,
+    db_path: str,
+    reason: str,
+) -> None:
+    """Drop a queue marker so a later session can re-attempt this ingestion.
+
+    Hunter F33: when Popen fails (disk full for log file, permission error,
+    etc.) we used to fall back to synchronous inline ingestion — which
+    blocked Claude Code's shutdown for 10–60s. Now we write a marker to
+    BACKLOG_DIR and let the next session's startup hook drain it (drain
+    path is a follow-up item).
+    """
+    try:
+        from datetime import datetime, timezone
+        BACKLOG_DIR.mkdir(parents=True, exist_ok=True)
+        marker = BACKLOG_DIR / f"{session_id or 'unknown'}.json"
+        marker.write_text(json.dumps({
+            "transcript_path": transcript_path,
+            "session_id": session_id,
+            "user_id": user_id,
+            "db_path": db_path,
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+            "reason": reason,
+        }))
+    except Exception as e:
+        # Best-effort: if we can't write the backlog marker, the session's
+        # memories are lost — log and move on. Must not raise.
+        log.error("stop hook: failed to queue backlog marker: %s", e)
+
+
 def _run_background_ingestion(
     transcript_path: str,
     session_id: str,
@@ -185,6 +250,12 @@ def _run_background_ingestion(
     Captures stderr/stdout to a log file so silent failures are recoverable.
     Handles Windows (CREATE_NEW_PROCESS_GROUP) and POSIX (start_new_session)
     subprocess detachment.
+
+    Hunter F21: bounds concurrent spawns via ``SPAWN_CAP`` so a burst of
+    Stop hooks doesn't load N embedding models at once.
+    Hunter F33: on Popen failure, queue the ingestion to ``BACKLOG_DIR``
+    for a later session to re-attempt — NEVER fall back to synchronous
+    inline ingestion (that blocks Claude Code's shutdown).
     """
     # Log the effective config for debugging. Operators commonly wire up
     # multiple profiles and need to confirm which user/db the hook actually
@@ -226,6 +297,21 @@ def _run_background_ingestion(
     else:
         detach_kwargs["start_new_session"] = True
 
+    # Hunter F21: refuse to spawn if we're already at the concurrent-ingest
+    # cap. Over-cap events queue to the backlog so the memories aren't lost.
+    active = _count_active_ingest_processes()
+    if active >= SPAWN_CAP:
+        log.warning(
+            "stop hook: at spawn cap (%d active / cap %d); queueing session "
+            "%r to backlog for later",
+            active, SPAWN_CAP, session_id,
+        )
+        _queue_to_backlog(
+            transcript_path, session_id, user_id, db_path,
+            reason=f"spawn_cap_reached:{active}>=SPAWN_CAP={SPAWN_CAP}",
+        )
+        return
+
     log_file = None
     try:
         # Open the log file and hand it to the subprocess. We MUST close our
@@ -242,25 +328,18 @@ def _run_background_ingestion(
             **detach_kwargs,
         )
     except Exception as e:
-        # If background launch fails, try inline (blocking)
-        log.warning("Background launch failed: %s, running inline", e)
-        try:
-            from truememory.ingest import ingest
-            result = ingest(
-                transcript_path=transcript_path,
-                user_id=user_id,
-                db_path=db_path or None,
-                gate_threshold=GATE_THRESHOLD,
-                session_id=session_id,
-            )
-            from truememory.ingest.pipeline import save_trace
-            save_trace(result, trace_path)
-        except Exception as e2:
-            log.error("Inline ingestion also failed: %s", e2)
-            try:
-                log_path.write_text(f"Inline ingestion failed: {e2}\n", encoding="utf-8")
-            except Exception:
-                pass
+        # Hunter F33: NEVER fall back to synchronous inline ingestion —
+        # that blocks Claude Code's shutdown for 10–60s. Queue instead;
+        # a later session's drain path will re-attempt.
+        log.warning(
+            "stop hook: background launch failed (%s); queueing session "
+            "%r to backlog for later",
+            e, session_id,
+        )
+        _queue_to_backlog(
+            transcript_path, session_id, user_id, db_path,
+            reason=f"popen_failed:{type(e).__name__}:{e}",
+        )
     finally:
         # Always close our parent-side handle to prevent FD leaks.
         # The subprocess still has its own dup'd copy of the FD and will
