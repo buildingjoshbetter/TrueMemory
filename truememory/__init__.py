@@ -62,10 +62,59 @@ from truememory.hyde import (
 from truememory.clustering import cluster_messages, search_clustered, get_cluster_info
 from truememory.engine import TrueMemoryEngine
 
+# Hunter F37: `__all__` must enumerate every name __init__.py re-exports.
+# Pre-fix, only 3 of ~79 public names were declared — IDE auto-import,
+# Sphinx autodoc, and `from truememory import *` all saw a misleadingly
+# small public API surface. Entries here are grouped to match the
+# import block above; any new re-export must be added here at the same
+# time (enforced by `tests/test_public_api.py::test_no_public_drift`).
 __all__ = [
+    # Version + core
     "__version__",
     "Memory",
     "TrueMemoryEngine",
+    # Storage
+    "create_db",
+    "load_messages", "load_messages_from_file",
+    "insert_message", "delete_message", "update_message",
+    "get_message", "get_message_count",
+    # FTS
+    "search_fts", "search_fts_by_sender", "search_fts_in_range",
+    # Vector search
+    "init_vec_table", "build_vectors", "search_vector",
+    "build_separation_vectors", "search_vector_separation", "embed_single",
+    # Hybrid / RRF
+    "search_hybrid", "reciprocal_rank_fusion",
+    # Temporal
+    "detect_temporal_intent", "parse_date_reference", "search_temporal",
+    "get_timeline", "detect_episodes", "get_episode_messages",
+    "expand_to_episodes", "detect_landmark_events",
+    # Salience
+    "apply_salience_guard", "compute_message_salience", "detect_entities",
+    # Personality
+    "build_entity_profiles", "extract_preferences", "search_personality",
+    "get_entity_profile", "get_communication_pattern",
+    "resolve_entity", "build_dunbar_hierarchy",
+    # Consolidation
+    "build_entity_timelines", "detect_contradictions", "build_summaries",
+    "search_contradictions", "search_consolidated",
+    "build_entity_summary_sheets", "build_structured_facts",
+    # Predictive
+    "compute_surprise_score", "extract_facts", "build_surprise_index",
+    "get_high_surprise_messages",
+    # Query classifier
+    "classify_query", "get_search_mode", "QUERY_TYPES", "DEFAULT_WEIGHTS",
+    # Reranker
+    "rerank", "rerank_with_fusion", "get_reranker",
+    # HyDE
+    "hyde_search", "hyde_multi_search",
+    "generate_hypothetical_doc", "generate_multi_hypothetical_docs",
+    # Clustering
+    "cluster_messages", "search_clustered", "get_cluster_info",
+    # Submodules (explicit access: `from truememory import vector_search`)
+    "client", "engine", "storage", "vector_search", "fts_search",
+    "hybrid", "temporal", "salience", "personality", "consolidation",
+    "predictive", "query_classifier", "reranker", "hyde", "clustering",
 ]
 
 
