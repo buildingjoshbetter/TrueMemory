@@ -191,12 +191,14 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
 # Message loading
 # ---------------------------------------------------------------------------
 
-def load_messages(conn: sqlite3.Connection, messages: list[dict]) -> int:
+def bulk_replace_messages(conn: sqlite3.Connection, messages: list[dict]) -> int:
     """
-    Bulk-load messages into the database.
+    Replace every row in ``messages`` with the provided list (destructive).
 
-    Clears all existing message data (messages + FTS index) before inserting,
-    so the database reflects exactly the provided list afterwards.
+    **DESTRUCTIVE:** Clears all existing message data (messages + FTS index)
+    before inserting, so the database reflects exactly the provided list
+    afterwards. If you want to append without wiping, use
+    :func:`insert_message` per-row.
 
     Each dict in *messages* should have at minimum a ``content`` key.
     Optional keys: ``sender``, ``recipient``, ``timestamp``, ``category``,
@@ -237,12 +239,35 @@ def load_messages(conn: sqlite3.Connection, messages: list[dict]) -> int:
     return len(messages)
 
 
+def load_messages(conn: sqlite3.Connection, messages: list[dict]) -> int:
+    """Deprecated alias for :func:`bulk_replace_messages`.
+
+    Hunter F34: the original name ``load_messages`` paralleled
+    ``insert_message`` (non-destructive) but actually WIPES the table
+    before inserting. Callers writing ``load_messages(conn, [new_msg])``
+    believing it appended silently destroyed their DB. The destructive
+    semantics now live under ``bulk_replace_messages``; this alias is
+    preserved for one release with a ``DeprecationWarning``.
+    """
+    import warnings
+    warnings.warn(
+        "`load_messages` is a deprecated alias for "
+        "`bulk_replace_messages` (which makes the destructive semantics "
+        "explicit). This alias will be removed in a future release — "
+        "migrate to `bulk_replace_messages` for the same behaviour, or "
+        "use `insert_message` per-row if you actually want to append.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return bulk_replace_messages(conn, messages)
+
+
 def load_messages_from_file(conn: sqlite3.Connection, json_path: str | Path) -> int:
     """
-    Load messages from a JSON file into the database.
+    Load messages from a JSON file into the database (destructive — wipes first).
 
     The file must contain a JSON array of message objects (same format as
-    :func:`load_messages`).
+    :func:`bulk_replace_messages`).
 
     Args:
         conn:      Open database connection.
@@ -255,7 +280,9 @@ def load_messages_from_file(conn: sqlite3.Connection, json_path: str | Path) -> 
     with open(path, "r", encoding="utf-8") as f:
         messages = json.load(f)
 
-    return load_messages(conn, messages)
+    # Use the non-deprecated name internally so we don't emit our own
+    # DeprecationWarning to users who never called `load_messages`.
+    return bulk_replace_messages(conn, messages)
 
 
 # ---------------------------------------------------------------------------
@@ -379,8 +406,8 @@ def insert_message(conn: sqlite3.Connection, msg: dict) -> int:
     """
     Insert a single message without clearing existing data.
 
-    Unlike :func:`load_messages`, this appends to the database — it does NOT
-    wipe existing messages.  The FTS5 INSERT trigger keeps the full-text
+    Unlike :func:`bulk_replace_messages`, this appends to the database —
+    it does NOT wipe existing messages.  The FTS5 INSERT trigger keeps the full-text
     index in sync automatically.
 
     Args:

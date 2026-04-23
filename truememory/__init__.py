@@ -30,7 +30,7 @@ __version__ = "0.4.0"
 
 from truememory.client import Memory
 from truememory.storage import (
-    create_db, load_messages, load_messages_from_file,
+    create_db, bulk_replace_messages, load_messages, load_messages_from_file,
     insert_message, delete_message, update_message,
     get_message, get_message_count,
 )
@@ -75,7 +75,8 @@ __all__ = [
     "TrueMemoryEngine",
     # Storage
     "create_db",
-    "load_messages", "load_messages_from_file",
+    "bulk_replace_messages",  # F34: non-deprecated name for load_messages
+    "load_messages", "load_messages_from_file",  # load_messages: DEPRECATED alias
     "insert_message", "delete_message", "update_message",
     "get_message", "get_message_count",
     # FTS
