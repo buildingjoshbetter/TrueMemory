@@ -1115,6 +1115,12 @@ def main():
 
     # Informational flags — these must return immediately, before mcp.run()
     # blocks on stdin or _preload_models() starts background threads.
+    #
+    # Hunter F40: if both `--help` and `--setup` are passed, `--help` wins
+    # (checked first, below). This is the conventional Unix posture —
+    # docs-emitting flags short-circuit any side-effecting operation — and
+    # is locked in by tests/test_cli_help.py. Flipping the precedence would
+    # be a behaviour change worth a CHANGELOG entry.
     if "--help" in argv or "-h" in argv:
         print(_HELP_TEXT)
         return 0

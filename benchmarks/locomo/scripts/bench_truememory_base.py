@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-LoCoMo Benchmark — TrueMemory Pro Tier (+HyDE, T4 GPU)
-======================================================
-TrueMemory Pro tier using Qwen3-Embedding-0.6B @ 256d Matryoshka embeddings,
-gte-reranker-modernbert-base (149M params) reranker, and HyDE (Hypothetical
-Document Embeddings) via OpenRouter LLM. Paper §2.0 target: 91.8%.
+LoCoMo Benchmark — TrueMemory Base Tier (default, HyDE off)
+===========================================================
+TrueMemory Base tier using Qwen3-Embedding-0.6B @ 256d Matryoshka embeddings
+and gte-reranker-modernbert-base (149M params) reranker. HyDE is OFF — Base
+is the fully-offline default tier, no LLM API calls. Paper §2.0 target: 91.5%.
 Requires a T4 GPU on Modal.
 
 This is a fully self-contained Modal script. No local imports required.
@@ -15,8 +15,8 @@ Eval: openai/gpt-4.1-mini (answers) + openai/gpt-4o-mini (judge) via OpenRouter
 Usage:
     modal secret create openrouter-key OPENROUTER_API_KEY=sk-or-...
 
-    modal run --detach bench_truememory_pro.py          # Full run (10 convs, 1540 Qs)
-    modal run --detach bench_truememory_pro.py --smoke  # Smoke test (1 conv, 5 Qs)
+    modal run --detach bench_truememory_base.py          # Full run (10 convs, 1540 Qs)
+    modal run --detach bench_truememory_base.py --smoke  # Smoke test (1 conv, 5 Qs)
 
     modal volume get locomo-results / ./results --force
 """
@@ -186,7 +186,7 @@ def fmsg(m): return f"[{m['timestamp']}] {m['speaker']} to {m['recipient']}: {m[
 
 # ── TrueMemory Context Formatting ─────────────────────────────────────────
 
-def _nm_format_ctx(results):
+def _tm_format_ctx(results):
     """Format TrueMemory results with metadata — matches v2 scripts exactly."""
     parts = []
     for r in results:
@@ -231,7 +231,7 @@ def retrieve_truememory_base(conv_data, conv_idx):
     for qa in get_qa(conv_data):
         sr = engine.search_agentic(qa["question"], limit=100,
                                    use_hyde=False, use_reranker=True)
-        ctx = _nm_format_ctx(sr)
+        ctx = _tm_format_ctx(sr)
         results.append((qa["question"], qa["category"], qa["answer"], ctx or "No results found."))
     engine.close()
     os.unlink(tmp_db)

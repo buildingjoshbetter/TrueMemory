@@ -29,6 +29,8 @@
 
 Tested on [LoCoMo](https://github.com/snap-research/locomo), the standard benchmark for conversational memory. 1,540 questions across 10 conversations. All 8 systems share the same answer model, judge, scoring, top-k, and byte-identical answer prompt — only retrieval differs.
 
+> **Note on charts:** the hero banner and the three charts below still show the v0.3.0 single-Pro-tier layout (91.5%). Chart regeneration is tracked for a later release; all numerical claims in the README text and tables reflect the v0.4.0 three-tier scores (90.1 / 91.5 / 91.8%).
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/assets/charts/leaderboard-bar.png?v=2" alt="LoCoMo 8-System Comparison" />
 </p>
@@ -39,7 +41,7 @@ TrueMemory achieves **state-of-the-art accuracy for fully-local memory systems**
   <img src="https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/assets/charts/accuracy-vs-cost.png?v=2" alt="Accuracy vs Infrastructure Cost" />
 </p>
 
-All scores use the same evaluation pipeline: GPT-4.1-mini answer generation, GPT-4o-mini judge (3x majority vote), temperature=0. Zero errors across 12,320 total answers. Scores use a lenient semantic-match judge; rankings are valid across all systems but absolute values are higher than published LoCoMo baselines using strict exact-match. [Full methodology](benchmarks/locomo/BENCHMARK_RESULTS.md) and reproduction scripts in [`benchmarks/`](benchmarks/locomo/).
+All scores use the same evaluation pipeline: GPT-4.1-mini answer generation, GPT-4o-mini judge (3x majority vote), temperature=0. Zero errors across 12,320 total answers. Scores use a lenient semantic-match judge; rankings are valid across all systems but absolute values are higher than published LoCoMo baselines using strict exact-match. [Full methodology](https://github.com/buildingjoshbetter/TrueMemory/blob/main/benchmarks/locomo/BENCHMARK_RESULTS.md) and reproduction scripts in [`benchmarks/`](https://github.com/buildingjoshbetter/TrueMemory/blob/main/benchmarks/locomo/).
 
 ---
 
@@ -56,8 +58,6 @@ All scores use the same evaluation pipeline: GPT-4.1-mini answer generation, GPT
 </p>
 
 TrueMemory Pro nearly matches EverMemOS across all 4 question categories. Mem0 collapses on multi-hop reasoning (37.7% vs 90.7%).
-
-> The hero banner and charts in this README still show the v0.3.0 single-Pro-tier layout (91.5%). Chart regeneration is tracked for a later release; all numerical claims in the README text and tables reflect the v0.4.0 three-tier scores above.
 
 ---
 
@@ -101,7 +101,7 @@ curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/
 
 > **What this actually does:** installs [uv](https://docs.astral.sh/uv/) (Astral's Python tool manager) if needed, fetches a managed Python 3.12 into `~/.local/share/uv/`, installs TrueMemory into an isolated tool environment, and auto-configures Claude Code and Claude Desktop. **Your system Python is never touched.** No sudo, no venvs, no pip struggle. Uninstall cleanly with `uv tool uninstall truememory`.
 
-> **Want to audit the script first?** It's ~140 lines of shell, no sudo, stays entirely under `$HOME`. Read the source at [`install.sh`](install.sh), or download and inspect locally: `curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.sh -o install.sh && less install.sh && sh install.sh`.
+> **Want to audit the script first?** It's ~140 lines of shell, no sudo, stays entirely under `$HOME`. Read the source at [`install.sh`](https://github.com/buildingjoshbetter/TrueMemory/blob/main/install.sh), or download and inspect locally: `curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.sh -o install.sh && less install.sh && sh install.sh`.
 
 > **Want Base or Pro (adds Qwen3 embeddings + gte-reranker + sentence-transformers, ~1.5-2.5GB depending on OS)?**
 > ```bash
@@ -149,7 +149,7 @@ After setup, TrueMemory runs automatically. It stores what you tell it and recal
 
 ### Make it automatic (optional)
 
-Copy [`CLAUDE.md.example`](CLAUDE.md.example) to your home directory as `CLAUDE.md`. This tells Claude to store your preferences and recall them without being asked:
+Copy [`CLAUDE.md.example`](https://github.com/buildingjoshbetter/TrueMemory/blob/main/CLAUDE.md.example) to your home directory as `CLAUDE.md`. This tells Claude to store your preferences and recall them without being asked:
 
 ```bash
 cp CLAUDE.md.example ~/CLAUDE.md
@@ -214,9 +214,9 @@ uvx creates a cached environment on first run; subsequent spawns are fast. Good 
 
 Every benchmark script is self-contained and runs on [Modal](https://modal.com).
 
-- **[Leaderboard & Reproduction](benchmarks/locomo/README.md)**: run any system yourself
-- **[Full Technical Report](benchmarks/locomo/BENCHMARK_RESULTS.md)**: per-category breakdowns, latency, cost, hardware
-- **[Evaluation Config](benchmarks/locomo/EVAL_CONFIG.md)**: exact models, prompts, parameters
+- **[Leaderboard & Reproduction](https://github.com/buildingjoshbetter/TrueMemory/blob/main/benchmarks/locomo/README.md)**: run any system yourself
+- **[Full Technical Report](https://github.com/buildingjoshbetter/TrueMemory/blob/main/benchmarks/locomo/BENCHMARK_RESULTS.md)**: per-category breakdowns, latency, cost, hardware
+- **[Evaluation Config](https://github.com/buildingjoshbetter/TrueMemory/blob/main/benchmarks/locomo/EVAL_CONFIG.md)**: exact models, prompts, parameters
 
 ---
 
@@ -237,4 +237,4 @@ Every benchmark script is self-contained and runs on [Modal](https://modal.com).
 
 ## ⚖️ License
 
-Licensed under [Apache 2.0](LICENSE). Free for personal and commercial use.
+Licensed under [Apache 2.0](https://github.com/buildingjoshbetter/TrueMemory/blob/main/LICENSE). Free for personal and commercial use.

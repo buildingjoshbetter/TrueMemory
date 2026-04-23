@@ -1,25 +1,36 @@
 """
 TrueMemory Vector Search
-======================
+========================
 
-Semantic search using Model2Vec (potion-base-8M, 256-dim) embeddings stored
-in a sqlite-vec virtual table.  Provides nearest-neighbor retrieval based on
-cosine distance so that queries like "networking problems" can surface results
-about ECONNREFUSED even when no keywords overlap.
+Tier-aware semantic search backed by a sqlite-vec virtual table. The
+embedding model is resolved from the active tier when :func:`get_model`
+is first called — the module itself imports cleanly with only cheap
+constants computed:
+
+    edge → Model2Vec potion-base-8M @ 256d (CPU, ~30MB)
+    base → Qwen3-Embedding-0.6B @ 256d Matryoshka (GPU recommended, ~1.5GB)
+    pro  → Qwen3-Embedding-0.6B @ 256d Matryoshka (GPU recommended, ~1.5GB)
+
+The active tier comes from the ``TRUEMEMORY_EMBED_MODEL`` env var
+(``edge`` / ``base`` / ``pro``) or ``~/.truememory/config.json``; MCP-server
+callers may also invoke :func:`set_embedding_model` at runtime. Cosine-
+distance nearest-neighbour search surfaces queries like "networking
+problems" against stored "ECONNREFUSED" messages without keyword overlap.
 
 Usage::
 
-    from truememory.storage import create_db, load_messages_from_file
+    from truememory.storage import create_db
     from truememory.vector_search import init_vec_table, build_vectors, search_vector
 
     conn = create_db("truememory.db")
-    load_messages_from_file(conn, "synthetic_v2_messages.json")
+    # ... insert messages ...
     init_vec_table(conn)
     build_vectors(conn)
     results = search_vector(conn, "networking problems", limit=5)
 
 Dependencies:
-    - model2vec (``pip install model2vec``)
+    - model2vec (``pip install model2vec``) — for the edge tier
+    - sentence-transformers (``pip install truememory[gpu]``) — for base / pro
     - sqlite-vec (``pip install sqlite-vec``)
     - numpy
 """

@@ -185,7 +185,7 @@ def fmsg(m): return f"[{m['timestamp']}] {m['speaker']} to {m['recipient']}: {m[
 
 # ── TrueMemory Context Formatting ─────────────────────────────────────────
 
-def _nm_format_ctx(results):
+def _tm_format_ctx(results):
     """Format TrueMemory results with metadata — matches v2 scripts exactly."""
     parts = []
     for r in results:
@@ -229,7 +229,7 @@ def retrieve_truememory_edge(conv_data, conv_idx):
     results = []
     for qa in get_qa(conv_data):
         sr = engine.search_agentic(qa["question"], limit=100, use_hyde=False, use_reranker=True)
-        ctx = _nm_format_ctx(sr)
+        ctx = _tm_format_ctx(sr)
         results.append((qa["question"], qa["category"], qa["answer"], ctx or "No results found."))
     engine.close()
     os.unlink(tmp_db)

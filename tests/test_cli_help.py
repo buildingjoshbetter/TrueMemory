@@ -45,6 +45,23 @@ def test_help_long_flag_exits_cleanly():
     assert "--version" in result.stdout
 
 
+def test_help_beats_setup_when_both_passed():
+    """Hunter F40 regression lock: `truememory-mcp --setup --help` must
+    print help and exit 0 WITHOUT running `_setup_claude`. This is the
+    conventional Unix precedence — docs-emitting flags short-circuit
+    side-effecting operations. Flipping this would be a CHANGELOG-worthy
+    behaviour change."""
+    result = _run_cli(["--setup", "--help"])
+    assert result.returncode == 0
+    assert result.stdout.lstrip().startswith("Usage: truememory-mcp"), (
+        f"expected help banner at start; got:\n{result.stdout}"
+    )
+    # `_setup_claude` prints distinctive markers not present in _HELP_TEXT.
+    assert "Manual setup:" not in result.stdout
+    assert "existing config preserved" not in result.stdout
+    assert "stale entry replaced" not in result.stdout
+
+
 def test_help_short_flag_exits_cleanly():
     """`truememory-mcp -h` must behave identically to --help."""
     result = _run_cli(["-h"])

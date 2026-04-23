@@ -186,7 +186,7 @@ def fmsg(m): return f"[{m['timestamp']}] {m['speaker']} to {m['recipient']}: {m[
 
 # ── TrueMemory Context Formatting ─────────────────────────────────────────
 
-def _nm_format_ctx(results):
+def _tm_format_ctx(results):
     """Format TrueMemory results with metadata — matches v2 scripts exactly."""
     parts = []
     for r in results:
@@ -202,7 +202,7 @@ def _nm_format_ctx(results):
         parts.append(f"{meta} {r['content']}")
     return "\n\n".join(parts)
 
-def _nm_make_hyde_fn():
+def _tm_make_hyde_fn():
     """Create HyDE LLM callable via OpenRouter — matches v2 scripts."""
     client = mkc()
     def _call(prompt):
@@ -221,7 +221,7 @@ def retrieve_truememory_pro(conv_data, conv_idx):
     from truememory.reranker import get_reranker
     import tempfile
     get_reranker(model_name="Alibaba-NLP/gte-reranker-modernbert-base")
-    llm_fn = _nm_make_hyde_fn()
+    llm_fn = _tm_make_hyde_fn()
     msgs = parse_conv(conv_data)
     _tmp_db_file = tempfile.NamedTemporaryFile(suffix=".db", prefix=f"pro_{conv_idx}_", delete=False)
     tmp_db = _tmp_db_file.name
@@ -242,7 +242,7 @@ def retrieve_truememory_pro(conv_data, conv_idx):
     for qa in get_qa(conv_data):
         sr = engine.search_agentic(qa["question"], limit=100, llm_fn=llm_fn,
                                    use_hyde=True, use_reranker=True)
-        ctx = _nm_format_ctx(sr)
+        ctx = _tm_format_ctx(sr)
         results.append((qa["question"], qa["category"], qa["answer"], ctx or "No results found."))
     engine.close()
     os.unlink(tmp_db)

@@ -42,7 +42,7 @@ Question categories: **Cat 1** = single-hop, **Cat 2** = multi-hop, **Cat 3** = 
 | Supermemory | 77.7% (219) | 64.5% (207) | 64.6% (62) | 61.7% (519) | 65.4% |
 | Mem0 | 78.0% (220) | 37.7% (121) | 74.0% (71) | 63.5% (534) | 61.4% |
 
-TrueMemory tier per-category numbers are sourced from the authoritative 56-grid sweep (`_working/benchmarks_56combo/results/` in the repo's working archive, files: `mini_b1_model2vec_miniml6_hyde_off_result.json` for Edge, `pro_qwen3_256d_gte_reranker_hyde_off_result.json` for Base, `qwen3_256d__gte_reranker_result.json` for Pro).
+TrueMemory tier per-category numbers are sourced from the authoritative 56-grid sweep. The raw result JSONs live in a gitignored working archive (not distributed with the package); the aggregate numbers in the table above are the canonical reference, and the Modal bench scripts in `benchmarks/locomo/scripts/` reproduce them end-to-end.
 
 ### Legacy v0.3.0 configurations (deprecated in v0.4.0)
 
