@@ -195,6 +195,12 @@ uvx creates a cached environment on first run; subsequent spawns are fast. Good 
 
 ---
 
+## Configuration
+
+- `TRUEMEMORY_ENTITY_SHEETS=1` — re-enable the legacy L4 entity-profile writer (disabled by default in v0.6.0+). **Set before first `open()`** to preserve existing legacy rows on upgrade. Accepts `1`, `true`, `yes`, `on` (case-insensitive).
+
+---
+
 ## 📖 API
 
 | Method | What it does |
