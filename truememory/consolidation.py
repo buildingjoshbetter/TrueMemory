@@ -1039,7 +1039,31 @@ def build_entity_summary_sheets(conn):
     """
     Build searchable entity profile summaries stored as special records
     in the summaries table with period='entity_profile'.
+
+    .. deprecated:: 0.5.1
+        Disabled by default in ``TrueMemoryEngine.consolidate()`` as of
+        2026-04-24 per the MEMORIST-L4 research finding that the function
+        produces fat profile rows that saturate top-1 retrieval by keyword
+        match and leak superseded facts into contradiction scoring
+        (+5.3 pts composite probe metric when disabled). The function
+        itself is retained for backward-compatible imports and for users
+        who re-enable it via ``TRUEMEMORY_ENTITY_SHEETS=1``.
+
+        See ``CHANGELOG.md`` v0.6.0 or
+        https://github.com/buildingjoshbetter/TrueMemory/issues
+        for rationale.
     """
+    import warnings
+    warnings.warn(
+        "build_entity_summary_sheets is deprecated as of v0.5.1 per "
+        "MEMORIST-L4 research: its output harms contradiction resolution "
+        "and retrieval precision. Disabled by default; set "
+        "TRUEMEMORY_ENTITY_SHEETS=1 to re-enable. See CHANGELOG.md "
+        "v0.6.0 or https://github.com/buildingjoshbetter/TrueMemory/issues "
+        "for rationale.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     from datetime import datetime, timezone
 
     # Get all entities with significant message counts

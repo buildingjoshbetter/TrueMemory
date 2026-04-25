@@ -8,6 +8,29 @@
   ingest. Default α=0.3. Override via `Memory(alpha_surprise=…)` or
   `TRUEMEMORY_ALPHA_SURPRISE` env var. Set to `0` to disable.
 
+### Changed
+- **L4 `build_entity_summary_sheets` disabled by default** per
+  MEMORIST-L4 research (2026-04-23): the function produced monolithic
+  per-entity profile rows that saturated top-1 retrieval and leaked
+  superseded facts into contradiction scoring. Disabling is Pareto-
+  dominant (+5.3 pts composite probe metric, +12.9 pts contradiction
+  accuracy, −15 ms wall-clock, −1 KB/persona storage).
+
+  - **Escape hatch:** set `TRUEMEMORY_ENTITY_SHEETS=1` (also accepts
+    `true`, `yes`, `on`, case-insensitive) **before first engine
+    `open()`** to retain legacy behavior. Setting the var after the
+    initial upgrade-open will not restore already-purged rows — the
+    next `consolidate()` will write them fresh.
+  - **One-time migration on `open()`** purges legacy
+    `period='entity_profile'` summary rows for upgraders. Guarded by a
+    `l4_entity_profile_migration_done` flag in the `metadata` table so
+    subsequent opens skip the scan.
+  - **DeprecationWarning** now emitted when `build_entity_summary_sheets`
+    is called directly (e.g., by a user re-enabling via env var).
+  - **Failure visibility:** the migration's exception path now logs at
+    WARNING (was DEBUG) so silent failures on a destructive operation
+    surface in production logs.
+
 ## [0.5.0] - 2026-04-23
 
 Post-v0.4.0 hardening release. 40 findings closed from a structured audit ("Hunter v1" — see tracker #44), shipped across 11 PRs + 3 direct-to-main commits. v0.4.0 was a code-only tier-realignment release that never reached PyPI; v0.5.0 is the first published release to include it.
