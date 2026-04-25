@@ -1153,6 +1153,12 @@ class TrueMemoryEngine:
             except Exception:
                 logger.debug("Salience guard failed in search()", exc_info=True)
 
+        # ── 7.5 L5 surprise rerank boost (MEMORIST-L5, default-path wiring) ──
+        # `search()` has no cross-encoder, so this is the "after RRF/L3"
+        # insertion point per ISSUES.md Issue #1 Scope. α=0 default makes
+        # this a no-op unless operator explicitly opts in.
+        results = self._apply_surprise_boost(results)
+
         # ── 8. Ensure all results have required fields and trim ───────────
         cleaned: list[dict] = []
         seen_ids: set = set()
@@ -1389,6 +1395,14 @@ class TrueMemoryEngine:
                 key=lambda d: (-d.get("score", d.get("rrf_score", 0)), d.get("id", 0))
             )
 
+        # ── L5 surprise rerank boost (MEMORIST-L5, applied BEFORE cross-encoder) ──
+        # Per ISSUES.md Issue #1 Scope: "join surprise_scores after RRF/L3
+        # and before cross-encoder rerank". Boost mutates score in place;
+        # cross-encoder then folds the boosted RRF into fused_score so the
+        # signal propagates through LLM reranker downstream (rerank_with_llm
+        # would otherwise overwrite a post-rerank boost).
+        primary_results = self._apply_surprise_boost(primary_results)
+
         # ── Cross-encoder reranking (modality-aware) ──────────────────────
         if use_reranker and self._has_reranker and len(primary_results) > 1:
             try:
@@ -1400,8 +1414,6 @@ class TrueMemoryEngine:
                     rerank_weight=0.6,
                     device=reranker_device,
                 )
-                # ── L5 surprise rerank boost (opt-in; default α=0) ──────
-                final_results = self._apply_surprise_boost(final_results)
                 # ── LLM reranking (optional, after cross-encoder) ──────────
                 if use_llm_reranker and llm_fn and len(final_results) > limit:
                     try:
@@ -1456,21 +1468,52 @@ class TrueMemoryEngine:
     # keep a healthy margin for any other bound params in the query.
     _SURPRISE_IN_CHUNK = 500
 
+    def _source_is_blocked(self, source: str | None) -> bool:
+        """True if any '+'-separated segment of `source` is in the
+        blocklist. Handles composed labels like 'personality+refined'
+        produced by the agentic refined-query loop.
+        """
+        if not source:
+            return False
+        return any(
+            seg in self._SURPRISE_BOOST_SOURCE_BLOCKLIST
+            for seg in source.split("+")
+        )
+
     def _get_alpha_surprise(self) -> float:
         """Resolve alpha_surprise per MEMORIST-L5 precedence:
         constructor arg > TRUEMEMORY_ALPHA_SURPRISE env var > 0.0.
+
+        Sanitizes against non-finite values (inf, -inf, nan) and
+        TypeError/ValueError. Negative values are clamped to 0.
         """
+        import math
+        # Constructor override path
         alpha = getattr(self, "_alpha_surprise_override", None)
         if alpha is not None:
-            return float(alpha)
+            try:
+                a = float(alpha)
+            except (TypeError, ValueError):
+                return 0.0
+            if math.isnan(a) or math.isinf(a):
+                return 0.0
+            return max(0.0, a)
+        # Env-var path
         env = os.environ.get("TRUEMEMORY_ALPHA_SURPRISE")
         if env:
             try:
-                return max(0.0, float(env))
+                a = float(env)
             except ValueError:
                 logger.warning(
                     "Invalid TRUEMEMORY_ALPHA_SURPRISE=%r; using 0.0", env,
                 )
+                return 0.0
+            if math.isnan(a) or math.isinf(a):
+                logger.warning(
+                    "Non-finite TRUEMEMORY_ALPHA_SURPRISE=%r; using 0.0", env,
+                )
+                return 0.0
+            return max(0.0, a)
         return 0.0
 
     def _apply_surprise_boost(self, results: list[dict]) -> list[dict]:
@@ -1490,11 +1533,14 @@ class TrueMemoryEngine:
             return results  # exact no-op; identical order preserved
 
         # Collect message-backed row IDs. Non-message rows carry a
-        # `source` that indicates a different origin table.
+        # `source` that indicates a different origin table. Sources can
+        # be composed via "+" (e.g. "personality+refined" from the
+        # round-2 refined-queries loop); check every segment against
+        # the blocklist so composite labels don't escape.
         message_rows = [
             r for r in results
             if r.get("id") is not None
-            and r.get("source") not in self._SURPRISE_BOOST_SOURCE_BLOCKLIST
+            and not self._source_is_blocked(r.get("source"))
         ]
         if not message_rows:
             return results
