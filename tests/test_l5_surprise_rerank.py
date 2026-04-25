@@ -2,8 +2,8 @@
 
 Ensures the surprise rerank boost:
 
-1. Defaults to α=0 (off) — results are byte-identical to pre-wiring.
-2. Respects constructor > env var > 0.0 precedence.
+1. Defaults to α=0.3 — set to 0 for byte-identical pre-wiring behavior.
+2. Respects constructor > env var > 0.3 precedence.
 3. Only boosts message-backed rows (not summaries, profiles, etc.).
 4. Chunks IN-clause queries so >999 candidates don't crash.
 5. Degrades gracefully when surprise_scores table is missing or empty.

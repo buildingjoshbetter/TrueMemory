@@ -1040,7 +1040,7 @@ def build_entity_summary_sheets(conn):
     Build searchable entity profile summaries stored as special records
     in the summaries table with period='entity_profile'.
 
-    .. deprecated:: 0.5.1
+    .. deprecated:: 0.6.0
         Disabled by default in ``TrueMemoryEngine.consolidate()`` as of
         2026-04-24 per the MEMORIST-L4 research finding that the function
         produces fat profile rows that saturate top-1 retrieval by keyword
@@ -1055,7 +1055,7 @@ def build_entity_summary_sheets(conn):
     """
     import warnings
     warnings.warn(
-        "build_entity_summary_sheets is deprecated as of v0.5.1 per "
+        "build_entity_summary_sheets is deprecated as of v0.6.0 per "
         "MEMORIST-L4 research: its output harms contradiction resolution "
         "and retrieval precision. Disabled by default; set "
         "TRUEMEMORY_ENTITY_SHEETS=1 to re-enable. See CHANGELOG.md "
