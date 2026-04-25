@@ -235,16 +235,28 @@ class TrueMemoryEngine:
     # Lifecycle
     # ──────────────────────────────────────────────────────────────────────
 
-    def __init__(self, db_path: str | Path = None):
+    def __init__(self, db_path: str | Path = None,
+                 alpha_surprise: float | None = None):
         """Initialize engine with an optional database path.
 
         If *db_path* is omitted the database defaults to
         ``<project_root>/truememory.db``.
+
+        :param alpha_surprise: Optional override for the MEMORIST-L5
+            surprise rerank boost coefficient. When set, takes priority
+            over ``TRUEMEMORY_ALPHA_SURPRISE`` env var and the default
+            of 0.0 (off). Range [0, ~2.0]; the MEMORIST-L5 session
+            recommended α=0.3 pending Modal validation. See
+            ``_working/memorist/l5_predictive/REPORT.md``.
         """
         self.db_path = Path(db_path) if db_path else Path(__file__).parent.parent / "truememory.db"
         self.conn: sqlite3.Connection | None = None
         self.ready = False
         self.stats: dict = {}
+
+        # L5 surprise rerank boost coefficient. None = resolve from env
+        # var / default at call-time via _get_alpha_surprise().
+        self._alpha_surprise_override = alpha_surprise
 
         # Capability flags (set during ingest)
         self._has_vectors = False
@@ -1012,7 +1024,7 @@ class TrueMemoryEngine:
     # Search — full 6-layer pipeline
     # ──────────────────────────────────────────────────────────────────────
 
-    def search(self, query: str, limit: int = 10) -> list[dict]:
+    def search(self, query: str, limit: int = 10, _skip_surprise_boost: bool = False) -> list[dict]:
         """
         Main search pipeline.
 
@@ -1234,6 +1246,12 @@ class TrueMemoryEngine:
             except Exception:
                 logger.debug("Salience guard failed in search()", exc_info=True)
 
+        # ── 7.5 L5 surprise rerank boost (MEMORIST-L5) ──
+        # Skipped when called from search_agentic() which applies its own
+        # boost after merging all result sources.
+        if not _skip_surprise_boost:
+            results = self._apply_surprise_boost(results)
+
         # ── 8. Ensure all results have required fields and trim ───────────
         cleaned: list[dict] = []
         seen_ids: set = set()
@@ -1341,7 +1359,7 @@ class TrueMemoryEngine:
             candidate_pool = max(limit * 8, 100)  # Large pool for reranking
         else:
             candidate_pool = limit * 3
-        primary_results = self.search(query, limit=candidate_pool)
+        primary_results = self.search(query, limit=candidate_pool, _skip_surprise_boost=True)
 
         # If HyDE available, run a parallel search and fuse with RRF
         if use_hyde and self._has_hyde and self._has_hybrid and llm_fn:
@@ -1448,7 +1466,7 @@ class TrueMemoryEngine:
             existing_ids = {r.get("id") for r in primary_results if r.get("id")}
             for rq in refined_queries:
                 try:
-                    rq_results = self.search(rq, limit=limit)
+                    rq_results = self.search(rq, limit=limit, _skip_surprise_boost=True)
                     for rr in rq_results:
                         rid = rr.get("id")
                         if rid and rid not in existing_ids:
@@ -1469,6 +1487,14 @@ class TrueMemoryEngine:
             primary_results.sort(
                 key=lambda d: (-d.get("score", d.get("rrf_score", 0)), d.get("id", 0))
             )
+
+        # ── L5 surprise rerank boost (MEMORIST-L5, applied BEFORE cross-encoder) ──
+        # Per ISSUES.md Issue #1 Scope: "join surprise_scores after RRF/L3
+        # and before cross-encoder rerank". Boost mutates score in place;
+        # cross-encoder then folds the boosted RRF into fused_score so the
+        # signal propagates through LLM reranker downstream (rerank_with_llm
+        # would otherwise overwrite a post-rerank boost).
+        primary_results = self._apply_surprise_boost(primary_results)
 
         # ── Cross-encoder reranking (modality-aware) ──────────────────────
         if use_reranker and self._has_reranker and len(primary_results) > 1:
@@ -1509,6 +1535,157 @@ class TrueMemoryEngine:
                 logger.debug("LLM reranking (standalone) failed in search_agentic()", exc_info=True)
 
         return self._clean_results(primary_results, limit, max_per_session=max_per_session)
+
+    # ── L5 surprise rerank boost (MEMORIST-L5 wiring, 2026-04-24) ──────
+    # Multiplies the reranked `score` field by (1 + α · surprise) for
+    # message-backed rows, then re-sorts. Source-gated so non-message rows
+    # (summaries, personality profiles, contradictions) are not boosted —
+    # their `id` values do NOT reference `messages.id`, so joining on
+    # `surprise_scores.message_id` would silently mismatch and rewrite
+    # unrelated rows' scores.
+    #
+    # Default α=0 (off) per the MEMORIST-L5 recommendation: the session
+    # measured +2.0 pts P@10 on short-horizon at α=0.3 (McNemar p≈0.0625,
+    # not yet significant). Ship the wiring; flip α via env var or
+    # ``truememory_configure`` only after Modal validation at p<0.05.
+    #
+    # Precedence: constructor arg > env var > 0.0 (off).
+    #
+    # See ``_working/memorist/l5_predictive/REPORT.md`` §1, §10 for
+    # rationale and ``ISSUES.md`` for the follow-up validation plan.
+
+    _SURPRISE_BOOST_SOURCE_BLOCKLIST = frozenset({
+        "personality", "profile", "summary", "contradiction",
+    })
+    # IN-clause parameter chunk size. SQLite default is 999 variables —
+    # keep a healthy margin for any other bound params in the query.
+    _SURPRISE_IN_CHUNK = 500
+
+    def _source_is_blocked(self, source: str | None) -> bool:
+        """True if any '+'-separated segment of `source` is in the
+        blocklist. Handles composed labels like 'personality+refined'
+        produced by the agentic refined-query loop.
+        """
+        if not source:
+            return False
+        return any(
+            seg in self._SURPRISE_BOOST_SOURCE_BLOCKLIST
+            for seg in source.split("+")
+        )
+
+    _DEFAULT_ALPHA_SURPRISE = 0.3
+
+    def _get_alpha_surprise(self) -> float:
+        """Resolve alpha_surprise per MEMORIST-L5 precedence:
+        constructor arg > TRUEMEMORY_ALPHA_SURPRISE env var > 0.3.
+
+        Sanitizes against non-finite values (inf, -inf, nan) and
+        TypeError/ValueError. Negative values are clamped to 0.
+        """
+        import math
+        # Constructor override path
+        alpha = getattr(self, "_alpha_surprise_override", None)
+        if alpha is not None:
+            try:
+                a = float(alpha)
+            except (TypeError, ValueError):
+                return self._DEFAULT_ALPHA_SURPRISE
+            if math.isnan(a) or math.isinf(a):
+                return self._DEFAULT_ALPHA_SURPRISE
+            return max(0.0, a)
+        # Env-var path
+        env = os.environ.get("TRUEMEMORY_ALPHA_SURPRISE")
+        if env:
+            try:
+                a = float(env)
+            except ValueError:
+                logger.warning(
+                    "Invalid TRUEMEMORY_ALPHA_SURPRISE=%r; using default", env,
+                )
+                return self._DEFAULT_ALPHA_SURPRISE
+            if math.isnan(a) or math.isinf(a):
+                logger.warning(
+                    "Non-finite TRUEMEMORY_ALPHA_SURPRISE=%r; using default", env,
+                )
+                return self._DEFAULT_ALPHA_SURPRISE
+            return max(0.0, a)
+        return self._DEFAULT_ALPHA_SURPRISE
+
+    def _apply_surprise_boost(self, results: list[dict]) -> list[dict]:
+        """Apply L5 surprise multiplicative boost to message-backed rows.
+
+        Mutates ``r["score"]`` (the canonical field that
+        ``rerank_with_modality_fusion`` sorts on) so re-sort is coherent.
+        Non-message rows and rows without a surprise score are left
+        untouched. When ``alpha_surprise == 0.0`` this function is a
+        no-op that preserves result order byte-for-byte.
+        """
+        if not results:
+            return results
+        alpha = self._get_alpha_surprise()
+        if alpha <= 0.0:
+            return results  # exact no-op; identical order preserved
+
+        # Collect message-backed row IDs. Non-message rows carry a
+        # `source` that indicates a different origin table. Sources can
+        # be composed via "+" (e.g. "personality+refined" from the
+        # round-2 refined-queries loop); check every segment against
+        # the blocklist so composite labels don't escape.
+        message_rows = [
+            r for r in results
+            if r.get("id") is not None
+            and not self._source_is_blocked(r.get("source"))
+        ]
+        if not message_rows:
+            return results
+
+        ids = [r["id"] for r in message_rows]
+        surprise_map: dict[int, float] = {}
+        try:
+            # Chunk to stay under SQLite's 999-variable IN limit.
+            for i in range(0, len(ids), self._SURPRISE_IN_CHUNK):
+                chunk = ids[i : i + self._SURPRISE_IN_CHUNK]
+                placeholders = ",".join("?" * len(chunk))
+                cur = self.conn.execute(
+                    f"SELECT message_id, surprise FROM surprise_scores "
+                    f"WHERE message_id IN ({placeholders})",
+                    chunk,
+                )
+                surprise_map.update(dict(cur.fetchall()))
+        except sqlite3.OperationalError as exc:
+            # Most likely surprise_scores table doesn't exist yet (cold
+            # DB before first consolidate). Surface at WARNING once per
+            # process so silent no-ops are visible.
+            logger.warning(
+                "L5 surprise boost unavailable: %s (run consolidate first)",
+                exc,
+            )
+            return results
+        except Exception:
+            logger.warning(
+                "L5 surprise boost failed; returning unboosted results",
+                exc_info=True,
+            )
+            return results
+
+        if not surprise_map:
+            return results  # no scored messages; nothing to boost
+
+        # Apply multiplicative boost on the canonical `score` field
+        # that rerank_with_modality_fusion set to the fused_score.
+        for r in message_rows:
+            s = surprise_map.get(r["id"], 0.0)
+            if s > 0.0:
+                base = r.get("score", r.get("rerank_score", r.get("rrf_score", 0.0)))
+                r["score"] = base * (1.0 + alpha * float(s))
+
+        # Re-sort by the same canonical field.
+        results = sorted(
+            results,
+            key=lambda r: r.get("score", 0.0),
+            reverse=True,
+        )
+        return results
 
     def _check_sufficiency(self, top_results: list[dict]) -> bool:
         """

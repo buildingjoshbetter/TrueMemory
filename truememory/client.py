@@ -33,13 +33,26 @@ class Memory:
     Args:
         path: Database file path.  Defaults to ``~/.truememory/memories.db``.
               Use ``":memory:"`` for an in-memory database (testing).
+        alpha_surprise: Optional L5 surprise rerank boost coefficient.
+              Multiplies each message's post-rerank score by
+              ``(1 + alpha_surprise * surprise)``. Default ``None``
+              resolves to the ``TRUEMEMORY_ALPHA_SURPRISE`` env var
+              (or 0.0 / off). Set explicitly (e.g. ``0.3``) to override.
+              See MEMORIST-L5 research for rationale.
     """
 
-    def __init__(self, path: str | Path | None = None):
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        alpha_surprise: float | None = None,
+    ):
         if path is None:
             path = _DEFAULT_DB
         db_path = Path(path) if str(path) != ":memory:" else path
-        self._engine = TrueMemoryEngine(db_path=db_path)
+        self._engine = TrueMemoryEngine(
+            db_path=db_path,
+            alpha_surprise=alpha_surprise,
+        )
 
     # ------------------------------------------------------------------
     # CRUD

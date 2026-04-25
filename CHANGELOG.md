@@ -2,6 +2,12 @@
 
 ## [0.6.0] — 2026-04-XX
 
+### Added
+- **L5 surprise rerank boost** — retrieval now reweights candidates by
+  `(1 + α · surprise)` using the `surprise_scores` table populated at
+  ingest. Default α=0.3. Override via `Memory(alpha_surprise=…)` or
+  `TRUEMEMORY_ALPHA_SURPRISE` env var. Set to `0` to disable.
+
 ### Changed
 - **L4 `build_entity_summary_sheets` disabled by default** per
   MEMORIST-L4 research (2026-04-23): the function produced monolithic
