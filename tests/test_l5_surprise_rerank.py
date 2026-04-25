@@ -17,9 +17,6 @@ after Modal validation at p<0.05. See
 """
 from __future__ import annotations
 
-import os
-import sqlite3
-from unittest.mock import patch
 
 import pytest
 
@@ -285,3 +282,246 @@ def test_alpha_zero_skips_db_query(engine_with_surprise):
         assert [r["id"] for r in boosted] == [1, 2]
     finally:
         eng.conn = real_conn
+
+
+# ── MEMORIST-L5 PR 76 fix-pass regression tests ───────────────────────────
+
+def test_search_default_path_applies_boost(tmp_path, monkeypatch):
+    """Regression: the default Memory.search() path now applies the
+    L5 surprise boost. Previously only search_agentic() was wired."""
+    monkeypatch.setenv("TRUEMEMORY_ALPHA_SURPRISE", "0.3")
+
+    from truememory.engine import TrueMemoryEngine
+    from truememory.storage import create_db
+
+    db_path = tmp_path / "default_path.db"
+    conn = create_db(db_path)
+    for i in range(1, 6):
+        conn.execute(
+            "INSERT INTO messages (content, sender, recipient, timestamp, "
+            "category, modality) VALUES (?, 'alice', 'bob', ?, 'session_1', "
+            "'conversation')",
+            (f"alpha topic {i}", f"2026-0{i}-01T10:00:00Z"),
+        )
+    conn.commit()
+    conn.close()
+
+    eng = TrueMemoryEngine(db_path)
+    eng.open(rebuild_vectors=False)
+
+    calls: list[int] = []
+    real_boost = eng._apply_surprise_boost
+
+    def spy(results):
+        calls.append(len(results))
+        return real_boost(results)
+
+    eng._apply_surprise_boost = spy
+    eng.search("alpha", limit=5)
+
+    assert len(calls) >= 1, (
+        "Memory.search() default path must invoke _apply_surprise_boost "
+        "(was previously bypassed — only search_agentic was wired)."
+    )
+
+
+def test_alpha_zero_byte_identical_through_pipeline(tmp_path, monkeypatch):
+    """At α=0 the boost is a no-op regardless of whether the env var
+    is unset or explicitly '0'. _apply_surprise_boost must produce
+    identical id-order AND identical scores."""
+    from truememory.engine import TrueMemoryEngine
+    from truememory.storage import create_db
+
+    db_path = tmp_path / "azero.db"
+    create_db(db_path).close()
+    eng = TrueMemoryEngine(db_path)
+    eng.open(rebuild_vectors=False)
+
+    sample = _fake_results([(1, 0.9), (2, 0.8), (3, 0.7), (4, 0.6), (5, 0.5)])
+
+    monkeypatch.delenv("TRUEMEMORY_ALPHA_SURPRISE", raising=False)
+    r_unset = eng._apply_surprise_boost([dict(r) for r in sample])
+
+    monkeypatch.setenv("TRUEMEMORY_ALPHA_SURPRISE", "0")
+    r_zero = eng._apply_surprise_boost([dict(r) for r in sample])
+
+    assert [(r["id"], r["score"]) for r in r_unset] == [
+        (r["id"], r["score"]) for r in sample
+    ]
+    assert [(r["id"], r["score"]) for r in r_zero] == [
+        (r["id"], r["score"]) for r in sample
+    ]
+
+
+def test_composite_source_refined_is_excluded(engine_with_surprise):
+    """`personality+refined` (round-2 refined-queries loop) must be
+    filtered out of the boost set; `fts+refined` must NOT be."""
+    eng = engine_with_surprise
+    eng._alpha_surprise_override = 0.5
+
+    rows = [
+        {"id": 5, "content": "x", "score": 1.0, "source": "personality+refined"},
+        {"id": 4, "content": "y", "score": 1.0, "source": "fts+refined"},
+    ]
+    boosted = eng._apply_surprise_boost(rows)
+
+    by_source = {r["source"]: r for r in boosted}
+    assert by_source["personality+refined"]["score"] == 1.0, (
+        "Composite source containing 'personality' must NOT be boosted "
+        "— its id is not a messages.id."
+    )
+    assert by_source["fts+refined"]["score"] > 1.0, (
+        "Composite source 'fts+refined' should still receive the boost."
+    )
+
+
+def test_precedence_chain_in_one_function(monkeypatch, tmp_path):
+    """Verify constructor > env-var > default precedence in one shot."""
+    from truememory.engine import TrueMemoryEngine
+    from truememory.storage import create_db
+
+    # (1) No env, no override -> 0.0
+    monkeypatch.delenv("TRUEMEMORY_ALPHA_SURPRISE", raising=False)
+    create_db(tmp_path / "a.db").close()
+    engine = TrueMemoryEngine(tmp_path / "a.db")
+    engine.open(rebuild_vectors=False)
+    assert engine._get_alpha_surprise() == 0.0
+
+    # (2) Env=0.3, no override -> 0.3
+    monkeypatch.setenv("TRUEMEMORY_ALPHA_SURPRISE", "0.3")
+    create_db(tmp_path / "b.db").close()
+    engine = TrueMemoryEngine(tmp_path / "b.db")
+    engine.open(rebuild_vectors=False)
+    assert engine._get_alpha_surprise() == 0.3
+
+    # (3) Env=0.3, override=0.7 -> 0.7 (override wins)
+    create_db(tmp_path / "c.db").close()
+    engine = TrueMemoryEngine(tmp_path / "c.db", alpha_surprise=0.7)
+    engine.open(rebuild_vectors=False)
+    assert engine._get_alpha_surprise() == 0.7
+
+    # (4) Env=0.3, override=0.0 -> 0.0 (explicit override wins even at 0)
+    create_db(tmp_path / "d.db").close()
+    engine = TrueMemoryEngine(tmp_path / "d.db", alpha_surprise=0.0)
+    engine.open(rebuild_vectors=False)
+    assert engine._get_alpha_surprise() == 0.0
+
+
+@pytest.mark.parametrize("bad_value", ["inf", "-inf", "nan", "1e400"])
+def test_non_finite_alpha_falls_back_to_zero(
+    bad_value, tmp_path, monkeypatch, caplog,
+):
+    """inf, -inf, nan, and overflow-to-inf literals must resolve to 0.0
+    with a logged warning."""
+    import logging
+
+    from truememory.engine import TrueMemoryEngine
+    from truememory.storage import create_db
+
+    monkeypatch.setenv("TRUEMEMORY_ALPHA_SURPRISE", bad_value)
+    create_db(tmp_path / "nf.db").close()
+    engine = TrueMemoryEngine(tmp_path / "nf.db")
+    engine.open(rebuild_vectors=False)
+
+    with caplog.at_level(logging.WARNING, logger="truememory.engine"):
+        assert engine._get_alpha_surprise() == 0.0
+
+    assert any(
+        "TRUEMEMORY_ALPHA_SURPRISE" in rec.message
+        for rec in caplog.records
+        if rec.levelname == "WARNING"
+    ), f"expected WARNING for {bad_value!r}"
+
+
+@pytest.mark.parametrize("neg_value", ["-0.5", "-1"])
+def test_negative_alpha_clamps_to_zero(neg_value, tmp_path, monkeypatch):
+    """Negative α (env or constructor) clamps to 0.0 silently."""
+    from truememory.engine import TrueMemoryEngine
+    from truememory.storage import create_db
+
+    monkeypatch.setenv("TRUEMEMORY_ALPHA_SURPRISE", neg_value)
+    create_db(tmp_path / "neg.db").close()
+    engine = TrueMemoryEngine(tmp_path / "neg.db")
+    engine.open(rebuild_vectors=False)
+    assert engine._get_alpha_surprise() == 0.0
+
+
+def test_boost_applies_without_reranker(tmp_path, monkeypatch):
+    """When the cross-encoder reranker is unavailable, the boost must
+    STILL fire on primary_results in search_agentic — previously the
+    boost was gated on `use_reranker AND _has_reranker`."""
+    monkeypatch.setenv("TRUEMEMORY_ALPHA_SURPRISE", "0.3")
+
+    from truememory.engine import TrueMemoryEngine
+    from truememory.storage import create_db
+
+    db_path = tmp_path / "no_reranker.db"
+    conn = create_db(db_path)
+    for i in range(1, 4):
+        conn.execute(
+            "INSERT INTO messages (content, sender, recipient, timestamp, "
+            "category, modality) VALUES (?, 'alice', 'bob', ?, 'session_1', "
+            "'conversation')",
+            (f"beta topic {i}", f"2026-0{i}-01T10:00:00Z"),
+        )
+    conn.commit()
+    conn.close()
+
+    eng = TrueMemoryEngine(db_path)
+    eng.open(rebuild_vectors=False)
+    eng._has_reranker = False  # simulate reranker unavailable
+
+    calls: list[int] = []
+    real_boost = eng._apply_surprise_boost
+
+    def spy(results):
+        calls.append(len(results))
+        return real_boost(results)
+
+    eng._apply_surprise_boost = spy
+    eng.search_agentic("beta", limit=5)
+
+    assert len(calls) >= 1, (
+        "Boost must fire in search_agentic even when the cross-encoder "
+        "reranker is unavailable (α>0 must be honored regardless)."
+    )
+
+
+def test_sparse_surprise_across_chunk_boundary(engine_with_surprise):
+    """With 1500 results but only 6 surprise rows (3 below the 500-id
+    chunk boundary, 3 well above), the boost should multiplicatively
+    update only those 6 and leave the other 1494 untouched."""
+    eng = engine_with_surprise
+    eng._alpha_surprise_override = 0.5
+
+    # Re-seed surprise_scores so only ids {1,2,3,1450,1451,1452} get a row.
+    eng.conn.execute("DELETE FROM surprise_scores")
+    for mid, s in [
+        (1, 0.9), (2, 0.9), (3, 0.9),
+        (1450, 0.9), (1451, 0.9), (1452, 0.9),
+    ]:
+        eng.conn.execute(
+            "INSERT INTO surprise_scores (message_id, surprise) VALUES (?, ?)",
+            (mid, s),
+        )
+    eng.conn.commit()
+
+    # Construct fake results with all 1500 ids at the same base score.
+    base = 1.0
+    big = _fake_results([(i, base) for i in range(1, 1501)])
+    boosted = eng._apply_surprise_boost(big)
+
+    by_id = {r["id"]: r["score"] for r in boosted}
+    boosted_ids = {1, 2, 3, 1450, 1451, 1452}
+    expected_boost = base * (1 + 0.5 * 0.9)
+
+    for mid in boosted_ids:
+        assert by_id[mid] == pytest.approx(expected_boost), (
+            f"id={mid} should be boosted to {expected_boost}, got {by_id[mid]}"
+        )
+    # Spot-check a handful of unboosted ids on either side of the chunk
+    # boundary to keep this fast.
+    for mid in [4, 100, 499, 500, 501, 1000, 1449, 1453, 1500]:
+        assert by_id[mid] == base, (
+            f"id={mid} has no surprise row and must keep score={base}"
+        )

@@ -210,6 +210,12 @@ uvx creates a cached environment on first run; subsequent spawns are fast. Good 
 
 ---
 
+## ⚙️ Configuration
+
+- `TRUEMEMORY_ALPHA_SURPRISE` (or `Memory(alpha_surprise=0.3)`) — opt-in L5 surprise rerank boost. Default `0.0` (off). See CHANGELOG v0.6.0 for rationale.
+
+---
+
 ## 📊 Full Benchmark Details
 
 Every benchmark script is self-contained and runs on [Modal](https://modal.com).

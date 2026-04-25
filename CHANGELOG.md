@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.6.0] — 2026-04-XX
+
+### Added
+- **L5 predictive-coder retrieval boost** wired through both
+  `Memory.search()` and `Memory.search_deep()`. Multiplicatively
+  reweights candidates by `(1 + α · surprise)` using the
+  already-populated `surprise_scores` table. Opt-in via the
+  `alpha_surprise=` kwarg on `Memory(...)` or the
+  `TRUEMEMORY_ALPHA_SURPRISE` env var. **Default α=0 (off)** pending
+  Modal validation at p<0.05 per MEMORIST-L5 research session
+  (2026-04-23). See `_working/memorist/l5_predictive/REPORT.md` §9.
+
+  Notes:
+  - The env-var name diverges from the research spec's
+    `L5_SURPRISE_ALPHA` to stay consistent with the existing
+    `TRUEMEMORY_*` naming convention.
+  - The boost is applied BEFORE the cross-encoder rerank in
+    `search_agentic()`, so it survives downstream LLM reranking
+    (which otherwise overwrites the `score` field).
+  - Non-finite env values (`inf`, `nan`, `-inf`) resolve to 0.0 with
+    a warning.
+
 ## [0.5.0] - 2026-04-23
 
 Post-v0.4.0 hardening release. 40 findings closed from a structured audit ("Hunter v1" — see tracker #44), shipped across 11 PRs + 3 direct-to-main commits. v0.4.0 was a code-only tier-realignment release that never reached PyPI; v0.5.0 is the first published release to include it.
