@@ -1049,15 +1049,18 @@ def build_entity_summary_sheets(conn):
         itself is retained for backward-compatible imports and for users
         who re-enable it via ``TRUEMEMORY_ENTITY_SHEETS=1``.
 
-        See ``_working/memorist/l4_consolidation/REPORT.md`` §3, §10.7.
+        See ``CHANGELOG.md`` v0.6.0 or
+        https://github.com/buildingjoshbetter/TrueMemory/issues
+        for rationale.
     """
     import warnings
     warnings.warn(
         "build_entity_summary_sheets is deprecated as of v0.5.1 per "
         "MEMORIST-L4 research: its output harms contradiction resolution "
         "and retrieval precision. Disabled by default; set "
-        "TRUEMEMORY_ENTITY_SHEETS=1 to re-enable. See "
-        "_working/memorist/l4_consolidation/REPORT.md.",
+        "TRUEMEMORY_ENTITY_SHEETS=1 to re-enable. See CHANGELOG.md "
+        "v0.6.0 or https://github.com/buildingjoshbetter/TrueMemory/issues "
+        "for rationale.",
         DeprecationWarning,
         stacklevel=2,
     )

@@ -14,7 +14,7 @@ and leak superseded facts into contradiction scoring. Disabling produced
 from __future__ import annotations
 
 import json
-import os
+import logging
 import sqlite3
 import tempfile
 import warnings
@@ -232,3 +232,216 @@ def test_deprecation_warning_on_direct_call():
     msg = str(dep_warnings[0].message)
     assert "MEMORIST-L4" in msg
     assert "TRUEMEMORY_ENTITY_SHEETS" in msg
+
+
+# ── Rustle-the-feathers remediation tests (PR 77 follow-up) ──────────────
+
+def _seed_legacy_db(tmp_path, n_rows: int):
+    """Create a v0.5.0-shape DB with N legacy entity_profile rows."""
+    from truememory.storage import create_db
+
+    db_path = tmp_path / f"legacy_{n_rows}.db"
+    conn = create_db(db_path)
+    for i in range(n_rows):
+        conn.execute(
+            "INSERT INTO summaries (entity, period, start_date, end_date, "
+            "summary, message_ids) VALUES (?, 'entity_profile', "
+            "'2026-01-01', '2026-03-01', ?, '[1,2,3]')",
+            (f"entity_{i}", f"Profile for entity_{i}"),
+        )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_migration_log_fires_on_purge(tmp_path, monkeypatch, caplog):
+    """The INFO log line must include the actual purged count."""
+    from truememory.engine import TrueMemoryEngine
+
+    monkeypatch.delenv("TRUEMEMORY_ENTITY_SHEETS", raising=False)
+    db_path = _seed_legacy_db(tmp_path, n_rows=3)
+
+    with caplog.at_level(logging.INFO):
+        eng = TrueMemoryEngine(db_path).open(rebuild_vectors=False)
+        eng.close()
+
+    text = caplog.text
+    assert "MEMORIST-L4 migration" in text, (
+        f"Expected migration log, got: {text!r}"
+    )
+    assert "purged 3" in text, (
+        f"Expected 'purged 3' in log; got: {text!r}"
+    )
+
+
+def test_migration_idempotent_across_opens(tmp_path, monkeypatch, caplog):
+    """Second open must skip the DELETE and not re-emit the log."""
+    from truememory.engine import TrueMemoryEngine
+
+    monkeypatch.delenv("TRUEMEMORY_ENTITY_SHEETS", raising=False)
+    db_path = _seed_legacy_db(tmp_path, n_rows=4)
+
+    # First open: should purge.
+    with caplog.at_level(logging.INFO):
+        eng1 = TrueMemoryEngine(db_path).open(rebuild_vectors=False)
+        eng1.close()
+    first_text = caplog.text
+    assert "purged 4" in first_text
+
+    # Verify metadata flag set.
+    conn = sqlite3.connect(str(db_path))
+    flag = conn.execute(
+        "SELECT value FROM metadata WHERE key = ?",
+        ("l4_entity_profile_migration_done",),
+    ).fetchone()
+    conn.close()
+    assert flag is not None and flag[0] == "1", (
+        f"Migration flag should be set after first open; got {flag!r}"
+    )
+
+    # Second open: must NOT re-emit the purge log.
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        eng2 = TrueMemoryEngine(db_path).open(rebuild_vectors=False)
+        eng2.close()
+    assert "MEMORIST-L4 migration: purged" not in caplog.text, (
+        f"Idempotent open should skip the migration log; got: {caplog.text!r}"
+    )
+
+    # Final state: no entity_profile rows.
+    conn2 = sqlite3.connect(str(db_path))
+    remaining = conn2.execute(
+        "SELECT COUNT(*) FROM summaries WHERE period='entity_profile'"
+    ).fetchone()[0]
+    conn2.close()
+    assert remaining == 0
+
+
+@pytest.mark.parametrize("value", ["1", "true", "True", "TRUE", "yes", "YES", "on", "On"])
+def test_env_var_accepts_variants(tmp_path, monkeypatch, value):
+    """All accepted variants must enable the writer."""
+    from truememory.engine import TrueMemoryEngine
+
+    monkeypatch.setenv("TRUEMEMORY_ENTITY_SHEETS", value)
+    tmp_json = _seed_messages(tmp_path)
+    db_path = tmp_path / f"variant_{value.strip().lower()}.db"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        eng = TrueMemoryEngine(db_path)
+        stats = eng.ingest(str(tmp_json))
+        eng.close()
+
+    assert "sheets in" in stats["entity_summary_sheets"], (
+        f"Variant {value!r} should enable writer; got: {stats['entity_summary_sheets']!r}"
+    )
+    assert "DISABLED" not in stats["entity_summary_sheets"]
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", "", "random", "  "])
+def test_env_var_rejects_invalid(tmp_path, monkeypatch, value):
+    """Non-truthy / unknown values must leave the writer disabled."""
+    from truememory.engine import TrueMemoryEngine
+
+    if value == "":
+        monkeypatch.delenv("TRUEMEMORY_ENTITY_SHEETS", raising=False)
+    else:
+        monkeypatch.setenv("TRUEMEMORY_ENTITY_SHEETS", value)
+    tmp_json = _seed_messages(tmp_path)
+    db_path = tmp_path / f"reject_{abs(hash(value))}.db"
+
+    eng = TrueMemoryEngine(db_path)
+    stats = eng.ingest(str(tmp_json))
+    eng.close()
+
+    assert "DISABLED" in stats["entity_summary_sheets"], (
+        f"Value {value!r} should leave writer DISABLED; got: {stats['entity_summary_sheets']!r}"
+    )
+
+
+def test_other_consolidation_stages_preserved(tmp_path, monkeypatch):
+    """Sibling consolidation stages must still produce summaries rows
+    after the L4 disable. Specifically: monthly summaries (build_summaries)
+    and structured facts (build_structured_facts) are independent of the
+    entity_profile writer."""
+    from truememory.engine import TrueMemoryEngine
+
+    monkeypatch.delenv("TRUEMEMORY_ENTITY_SHEETS", raising=False)
+
+    # Build a corpus large enough to trigger monthly summarization
+    # (>= 30 messages spanning >= 2 calendar months).
+    messages = []
+    base_senders = ["alice", "bob", "carol"]
+    # Month 1: Jan 2026.
+    for i in range(15):
+        messages.append({
+            "content": f"Jan message {i}: discussing project status with team.",
+            "sender": base_senders[i % 3],
+            "recipient": base_senders[(i + 1) % 3],
+            "timestamp": f"2026-01-{(i % 28) + 1:02d}T10:00:00Z",
+            "category": "work",
+            "modality": "conversation",
+        })
+    # Month 2: Feb 2026.
+    for i in range(15):
+        messages.append({
+            "content": f"Feb message {i}: follow-up notes on the same project.",
+            "sender": base_senders[i % 3],
+            "recipient": base_senders[(i + 1) % 3],
+            "timestamp": f"2026-02-{(i % 28) + 1:02d}T10:00:00Z",
+            "category": "work",
+            "modality": "conversation",
+        })
+    tmp_json = tmp_path / "corpus.json"
+    tmp_json.write_text(json.dumps(messages))
+
+    db_path = tmp_path / "siblings.db"
+    eng = TrueMemoryEngine(db_path)
+    eng.ingest(str(tmp_json))
+    eng.close()
+
+    conn = sqlite3.connect(str(db_path))
+    by_period = dict(conn.execute(
+        "SELECT period, COUNT(*) FROM summaries GROUP BY period"
+    ).fetchall())
+    conn.close()
+
+    # The whole point of the migration: zero entity_profile rows.
+    assert by_period.get("entity_profile", 0) == 0, (
+        f"Expected 0 entity_profile rows; got {by_period.get('entity_profile')}"
+    )
+    # Monthly summaries must still produce something.
+    assert by_period.get("monthly", 0) > 0, (
+        f"build_summaries should produce monthly rows; counts={by_period!r}"
+    )
+    # At least one other sibling stage produced rows (entity_monthly or
+    # structured_fact). Both are corpus-dependent — assert union.
+    sibling_total = (
+        by_period.get("entity_monthly", 0)
+        + by_period.get("structured_fact", 0)
+    )
+    assert sibling_total > 0, (
+        f"At least one of entity_monthly/structured_fact should produce "
+        f"rows on this corpus; counts={by_period!r}"
+    )
+
+
+def test_rowcount_not_minus_one(tmp_path, monkeypatch, caplog):
+    """Regression for the cursor-scope bug: .rowcount must reflect the
+    actual delete count, not -1 from a GC'd cursor."""
+    from truememory.engine import TrueMemoryEngine
+
+    monkeypatch.delenv("TRUEMEMORY_ENTITY_SHEETS", raising=False)
+    db_path = _seed_legacy_db(tmp_path, n_rows=5)
+
+    with caplog.at_level(logging.INFO):
+        eng = TrueMemoryEngine(db_path).open(rebuild_vectors=False)
+        eng.close()
+
+    text = caplog.text
+    assert "purged 5" in text, (
+        f"Expected exact 'purged 5'; cursor-scope bug would show -1 or 0. "
+        f"Got: {text!r}"
+    )
+    assert "purged -1" not in text
+    assert "purged 0" not in text
