@@ -13,8 +13,8 @@
   MEMORIST-L4 research (2026-04-23): the function produced monolithic
   per-entity profile rows that saturated top-1 retrieval and leaked
   superseded facts into contradiction scoring. Disabling is Pareto-
-  dominant (+5.3 pts composite probe metric, +12.9 pts contradiction
-  accuracy, −15 ms wall-clock, −1 KB/persona storage).
+  dominant (+5.3% relative composite probe metric, +3.2 pts contradiction
+  accuracy, −4 KB/persona storage).
 
   - **Escape hatch:** set `TRUEMEMORY_ENTITY_SHEETS=1` (also accepts
     `true`, `yes`, `on`, case-insensitive) **before first engine

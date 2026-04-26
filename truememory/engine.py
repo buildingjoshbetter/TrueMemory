@@ -245,7 +245,7 @@ class TrueMemoryEngine:
         :param alpha_surprise: Optional override for the MEMORIST-L5
             surprise rerank boost coefficient. When set, takes priority
             over ``TRUEMEMORY_ALPHA_SURPRISE`` env var and the default
-            of 0.0 (off). Range [0, ~2.0]; the MEMORIST-L5 session
+            of 0.3. Range [0, ~2.0]; the MEMORIST-L5 session
             recommended α=0.3 pending Modal validation. See
             ``_working/memorist/l5_predictive/REPORT.md``.
         """
@@ -1544,12 +1544,11 @@ class TrueMemoryEngine:
     # `surprise_scores.message_id` would silently mismatch and rewrite
     # unrelated rows' scores.
     #
-    # Default α=0 (off) per the MEMORIST-L5 recommendation: the session
-    # measured +2.0 pts P@10 on short-horizon at α=0.3 (McNemar p≈0.0625,
-    # not yet significant). Ship the wiring; flip α via env var or
-    # ``truememory_configure`` only after Modal validation at p<0.05.
+    # Default α=0.3 per commit 816ec48: the MEMORIST-L5 session measured
+    # +2.0 pts P@10 on short-horizon at α=0.3 (McNemar p≈0.0625, not yet
+    # significant). Modal validation pending — revert to 0 if p≥0.05.
     #
-    # Precedence: constructor arg > env var > 0.0 (off).
+    # Precedence: constructor arg > env var > 0.3.
     #
     # See ``_working/memorist/l5_predictive/REPORT.md`` §1, §10 for
     # rationale and ``ISSUES.md`` for the follow-up validation plan.

@@ -37,7 +37,7 @@ class Memory:
               Multiplies each message's post-rerank score by
               ``(1 + alpha_surprise * surprise)``. Default ``None``
               resolves to the ``TRUEMEMORY_ALPHA_SURPRISE`` env var
-              (or 0.0 / off). Set explicitly (e.g. ``0.3``) to override.
+              (or 0.3). Set explicitly to ``0`` to disable.
               See MEMORIST-L5 research for rationale.
     """
 

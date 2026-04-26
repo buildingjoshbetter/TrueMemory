@@ -74,7 +74,7 @@ def seeded_engine(tmp_path, monkeypatch):
 
 
 def test_disabled_by_default_no_entity_profile_rows(seeded_engine):
-    """Default v0.5.1 behavior: ingest() must NOT write any summaries
+    """Default v0.6.0 behavior: ingest() must NOT write any summaries
     rows with period='entity_profile'."""
     db_path, _stats = seeded_engine
     conn = sqlite3.connect(str(db_path))
