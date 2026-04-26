@@ -1,5 +1,5 @@
 """
-TrueMemory Salience Guard Module (L4)
+TrueMemory Salience Guard Module (L3)
 ====================================
 
 Filters noise and handles entity disambiguation in search results. Solves
@@ -17,14 +17,16 @@ two major problems that plague vector-search-based memory systems:
 
 This module is a **post-processing** step: it takes search results and
 re-ranks them. It does not replace the search layer -- it refines it.
-
-Key entities in the Jordan Chen dataset:
-    jordan, riley, dev, sam, mom, lily, jake, aisha, nina, marcus, rachel,
-    dr. woo
 """
 
+import json
+import logging
 import re
 import sqlite3
+from math import exp, log
+from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -49,11 +51,9 @@ _NOISE_EXACT = frozenset({
     "gn", "goodnight", "good night",
     "gm", "good morning",
     "brb", "ttyl",
-    "?", "??", "???",
-    "!", "!!", "!!!",
 })
 
-# Regex for messages that are predominantly emoji
+# Regex for messages that are predominantly emoji (legacy scorer)
 _EMOJI_PATTERN = re.compile(
     r"^[\U0001F600-\U0001F64F"
     r"\U0001F300-\U0001F5FF"
@@ -65,6 +65,20 @@ _EMOJI_PATTERN = re.compile(
     r"\U0001fa00-\U0001fa6f"
     r"\U0001fa70-\U0001faff"
     r"\s]+$",
+    re.UNICODE,
+)
+
+# Per-character emoji regex for learned scorer feature extraction
+_EMOJI_RE = re.compile(
+    r"[\U0001F600-\U0001F64F"
+    r"\U0001F300-\U0001F5FF"
+    r"\U0001F680-\U0001F6FF"
+    r"\U0001F1E0-\U0001F1FF"
+    r"\U00002702-\U000027B0"
+    r"\U000024C2-\U0001F251"
+    r"\U0001f900-\U0001f9FF"
+    r"\U0001fa00-\U0001fa6f"
+    r"\U0001fa70-\U0001faff]",
     re.UNICODE,
 )
 
@@ -85,6 +99,93 @@ _DATE_PATTERN = re.compile(
     r"\s+\d{1,2}",
     re.IGNORECASE,
 )
+_CAPS_WORDS_RE = re.compile(r"\b[A-Z]{3,}\b")
+_BULLET_RE = re.compile(r"^[-*•]\s", re.MULTILINE)
+
+_HIGH_AROUSAL: frozenset[str] = frozenset({
+    "amazing", "incredible", "devastating", "heartbreaking",
+    "thrilled", "furious", "terrified", "ecstatic", "crushed",
+    "panic", "emergency", "urgent", "critical", "breakthrough",
+    "milestone", "promoted", "fired", "pregnant", "engaged",
+    "diagnosed", "accident", "passed away", "died",
+})
+
+_LIFE_EVENTS: frozenset[str] = frozenset({
+    "got married", "got engaged", "having a baby", "got promoted",
+    "got fired", "broke up", "moved to", "graduated", "launched",
+    "raised funding", "demo day", "ipo", "acquisition",
+})
+
+
+# ---------------------------------------------------------------------------
+# L3 learned weights (loaded once at import time)
+# ---------------------------------------------------------------------------
+
+_L3_WEIGHTS_PATH = Path(__file__).parent / "data" / "l3_weights.json"
+_L3_WEIGHTS: tuple[float, ...] | None = None
+_L3_BIAS: float | None = None
+
+try:
+    with open(_L3_WEIGHTS_PATH) as _f:
+        _L3_DATA = json.load(_f)
+        _L3_WEIGHTS = tuple(_L3_DATA["weights"])
+        _L3_BIAS = float(_L3_DATA["bias"])
+        assert len(_L3_WEIGHTS) == 13, f"Expected 13 weights, got {len(_L3_WEIGHTS)}"
+        del _L3_DATA
+    _log.debug("L3 learned weights loaded from %s", _L3_WEIGHTS_PATH)
+except FileNotFoundError:
+    _log.warning(
+        "L3 weight file not found at %s — falling back to legacy hand-tuned scorer.",
+        _L3_WEIGHTS_PATH,
+    )
+except Exception as _exc:
+    _log.warning(
+        "Failed to load L3 weights from %s: %s — falling back to legacy scorer.",
+        _L3_WEIGHTS_PATH,
+        _exc,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Feature extraction for the learned scorer
+# ---------------------------------------------------------------------------
+
+def _extract_features(content: str, modality: str = "") -> tuple[float, ...]:
+    """Extract the 13 continuous features for the L3 salience model.
+
+    Feature order matches l3_weights.json and _features.py FEATURE_NAMES:
+        f_noise, f_emoji, f_length, f_num, f_money, f_date,
+        f_mod, f_nl, f_bul, f_excl, f_caps, f_arou, f_life
+    """
+    text_stripped = content.strip()
+    text_lower = text_stripped.lower().strip("!?.… ")
+
+    f_noise = 1.0 if text_lower in _NOISE_EXACT else 0.0
+
+    if text_stripped:
+        emoji_chars = sum(1 for _ in _EMOJI_RE.finditer(text_stripped))
+        f_emoji = min(1.0, emoji_chars / max(1, len(text_stripped)))
+    else:
+        f_emoji = 0.0
+
+    f_length = log(1 + len(text_stripped)) / 7.0
+    f_num = log(1 + len(_NUMBER_PATTERN.findall(text_stripped))) / 3.0
+    f_money = min(1.0, len(_MONEY_PATTERN.findall(text_stripped)) / 2.0)
+    f_date = min(1.0, len(_DATE_PATTERN.findall(text_stripped)) / 2.0)
+    f_mod = 1.0 if modality.lower() in _HIGH_SIGNAL_MODALITIES else 0.0
+    f_nl = 1.0 if ("\n" in text_stripped and len(text_stripped) > 50) else 0.0
+    f_bul = 1.0 if _BULLET_RE.search(text_stripped) else 0.0
+    f_excl = min(1.0, text_stripped.count("!") / 3.0)
+    f_caps = min(1.0, len(_CAPS_WORDS_RE.findall(text_stripped)) / 5.0)
+    arou_hits = sum(1 for w in _HIGH_AROUSAL if w in text_lower)
+    f_arou = min(1.0, arou_hits / 3.0)
+    life_hits = sum(1 for e in _LIFE_EVENTS if e in text_lower)
+    f_life = min(1.0, life_hits / 2.0)
+
+    return (
+        f_noise, f_emoji, f_length, f_num, f_money, f_date,
+        f_mod, f_nl, f_bul, f_excl, f_caps, f_arou, f_life,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -92,35 +193,25 @@ _DATE_PATTERN = re.compile(
 # ---------------------------------------------------------------------------
 
 def compute_message_salience(content: str, modality: str = "") -> float:
+    """Score a message's salience (importance) on a 0-1 scale.
+
+    Uses a learned logistic regression model if weights are available,
+    otherwise falls back to the legacy hand-tuned additive scorer.
     """
-    Score how substantive a message is on a 0.0 -- 1.0 scale.
+    if not content or not content.strip():
+        return 0.0
 
-    Low salience (noise):
-        - Very short messages (``"ok"``, ``"lol"``, ``"thanks"``)
-        - Pure emoji messages
-        - Simple acknowledgments
+    if _L3_WEIGHTS is not None and _L3_BIAS is not None:
+        features = _extract_features(content, modality)
+        logit = sum(w * f for w, f in zip(_L3_WEIGHTS, features)) + _L3_BIAS
+        return 1.0 / (1.0 + exp(-logit))
 
-    High salience (signal):
-        - Contains numbers, dates, dollar amounts, proper nouns
-        - Longer messages with substance
-        - Structured data from OCR, notes, calendar entries
-        - Contains specific details (addresses, percentages, names)
+    return _score_legacy(content, modality)
 
-    Heuristic breakdown:
-        - **Base**: 0.3
-        - **Length bonus**: up to +0.25 (longer = more informative)
-        - **Number bonus**: +0.1 if contains numbers/dates/money
-        - **Modality bonus**: +0.15 for high-signal modalities
-        - **Noise penalty**: -0.3 for known noise phrases
-        - **Emoji penalty**: -0.2 for pure emoji content
 
-    Args:
-        content:  Message text content.
-        modality: Message modality (e.g. ``"imessage"``, ``"ocr"``, ``"note"``).
-
-    Returns:
-        Float between 0.0 and 1.0.
-    """
+def _score_legacy(content: str, modality: str = "") -> float:
+    """Legacy hand-tuned additive scorer. Used as fallback when learned
+    weights are not available."""
     if not content:
         return 0.0
 
@@ -184,22 +275,10 @@ def compute_message_salience(content: str, modality: str = "") -> float:
         score += min(0.1, len(caps_words) * 0.05)
 
     # High-arousal vocabulary
-    _HIGH_AROUSAL = {
-        "amazing", "incredible", "devastating", "heartbreaking",
-        "thrilled", "furious", "terrified", "ecstatic", "crushed",
-        "panic", "emergency", "urgent", "critical", "breakthrough",
-        "milestone", "promoted", "fired", "pregnant", "engaged",
-        "diagnosed", "accident", "passed away", "died",
-    }
     arousal_hits = sum(1 for w in _HIGH_AROUSAL if w in text_lower)
     score += min(0.2, arousal_hits * 0.1)
 
     # Life event markers
-    _LIFE_EVENTS = {
-        "got married", "got engaged", "having a baby", "got promoted",
-        "got fired", "broke up", "moved to", "graduated", "launched",
-        "raised funding", "demo day", "ipo", "acquisition",
-    }
     event_hits = sum(1 for e in _LIFE_EVENTS if e in text_lower)
     score += min(0.3, event_hits * 0.15)
 
