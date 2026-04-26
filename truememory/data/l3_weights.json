@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "features": [
+    "f_noise",
+    "f_emoji",
+    "f_length",
+    "f_num",
+    "f_money",
+    "f_date",
+    "f_mod",
+    "f_nl",
+    "f_bul",
+    "f_excl",
+    "f_caps",
+    "f_arou",
+    "f_life"
+  ],
+  "weights": [
+    -0.052939640809508304,
+    0.0010151622450581994,
+    8.54183154970494,
+    2.71629524430362,
+    1.1070298074856058,
+    -0.07922780676745152,
+    0.0,
+    -0.3470936566180834,
+    0.0,
+    0.005413270434786019,
+    3.1549869797370067,
+    -0.20083200008887786,
+    2.1164913740853084
+  ],
+  "bias": -6.028736117425409,
+  "training_auc": 0.719,
+  "training_dataset": "locomo_short_horizon_200",
+  "note": "Coefficients: mean across 10-fold LOCO-CV (from C4_coefficients_short.json). Bias: intercept from full-data LogisticRegression fit (same hyperparams). See _working/memorist/l3_salience/REPORT.md."
+}

@@ -9,6 +9,12 @@
   `TRUEMEMORY_ALPHA_SURPRISE` env var. Set to `0` to disable.
 
 ### Changed
+- **L3 salience reweighter: learned weights replace hand-tuned deltas.**
+  The 13-factor message salience scorer now uses logistic regression weights
+  trained on LoCoMo retrieval-utility labels (+0.045 AUC, p=0.012 vs hand-tuned
+  baseline). Key corrections: message length upweighted ~30×, arousal/date/newline
+  sign flips fixed. Falls back to the legacy additive scorer if weight file is
+  missing. See `_working/memorist/l3_salience/REPORT.md`.
 - **L4 `build_entity_summary_sheets` disabled by default** per
   MEMORIST-L4 research (2026-04-23): the function produced monolithic
   per-entity profile rows that saturated top-1 retrieval and leaked
