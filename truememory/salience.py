@@ -368,7 +368,7 @@ def detect_entities(query: str, conn: sqlite3.Connection | None = None) -> list[
 
 def filter_by_salience(
     results: list[dict],
-    min_salience: float = 0.3,
+    min_salience: float = 0.10,
 ) -> list[dict]:
     """
     Remove low-salience noise from search results.
@@ -484,7 +484,7 @@ def apply_salience_guard(
     results: list[dict],
     query: str,
     conn: sqlite3.Connection | None = None,
-    min_salience: float = 0.25,
+    min_salience: float = 0.10,
 ) -> list[dict]:
     """
     Main entry point for the L4 Salience Guard.
