@@ -2,8 +2,8 @@
 
 Ensures the surprise rerank boost:
 
-1. Defaults to α=0.3 — set to 0 for byte-identical pre-wiring behavior.
-2. Respects constructor > env var > 0.3 precedence.
+1. Defaults to α=0.2 — set to 0 for byte-identical pre-wiring behavior.
+2. Respects constructor > env var > 0.2 precedence.
 3. Only boosts message-backed rows (not summaries, profiles, etc.).
 4. Chunks IN-clause queries so >999 candidates don't crash.
 5. Degrades gracefully when surprise_scores table is missing or empty.
@@ -108,7 +108,7 @@ def test_env_var_sets_alpha(engine_with_surprise, monkeypatch):
     assert eng._get_alpha_surprise() == 1.5
 
     monkeypatch.setenv("TRUEMEMORY_ALPHA_SURPRISE", "not a number")
-    assert eng._get_alpha_surprise() == 0.3  # falls back to default
+    assert eng._get_alpha_surprise() == 0.2  # falls back to default
 
 
 def test_constructor_override_beats_env_var(tmp_path, monkeypatch):
@@ -368,12 +368,12 @@ def test_precedence_chain_in_one_function(monkeypatch, tmp_path):
     from truememory.engine import TrueMemoryEngine
     from truememory.storage import create_db
 
-    # (1) No env, no override -> 0.3 (default)
+    # (1) No env, no override -> 0.2 (default)
     monkeypatch.delenv("TRUEMEMORY_ALPHA_SURPRISE", raising=False)
     create_db(tmp_path / "a.db").close()
     engine = TrueMemoryEngine(tmp_path / "a.db")
     engine.open(rebuild_vectors=False)
-    assert engine._get_alpha_surprise() == 0.3
+    assert engine._get_alpha_surprise() == 0.2
 
     # (2) Env=0.3, no override -> 0.3
     monkeypatch.setenv("TRUEMEMORY_ALPHA_SURPRISE", "0.3")
@@ -412,7 +412,7 @@ def test_non_finite_alpha_falls_back_to_zero(
     engine.open(rebuild_vectors=False)
 
     with caplog.at_level(logging.WARNING, logger="truememory.engine"):
-        assert engine._get_alpha_surprise() == 0.3  # falls back to default
+        assert engine._get_alpha_surprise() == 0.2  # falls back to default
 
     assert any(
         "TRUEMEMORY_ALPHA_SURPRISE" in rec.message
