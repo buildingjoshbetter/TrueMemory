@@ -5,8 +5,9 @@
 ### Added
 - **L5 surprise rerank boost** — retrieval now reweights candidates by
   `(1 + α · surprise)` using the `surprise_scores` table populated at
-  ingest. Default α=0.3. Override via `Memory(alpha_surprise=…)` or
-  `TRUEMEMORY_ALPHA_SURPRISE` env var. Set to `0` to disable.
+  ingest. Default α=0.2 (tuned via Modal alpha sweep, 2026-04-26).
+  Override via `Memory(alpha_surprise=…)` or `TRUEMEMORY_ALPHA_SURPRISE`
+  env var. Set to `0` to disable.
 
 ### Changed
 - **L3 salience reweighter: learned weights replace hand-tuned deltas.**

@@ -245,8 +245,8 @@ class TrueMemoryEngine:
         :param alpha_surprise: Optional override for the MEMORIST-L5
             surprise rerank boost coefficient. When set, takes priority
             over ``TRUEMEMORY_ALPHA_SURPRISE`` env var and the default
-            of 0.3. Range [0, ~2.0]; the MEMORIST-L5 session
-            recommended α=0.3 pending Modal validation. See
+            of 0.2. Range [0, ~2.0]; Modal alpha sweep (2026-04-26)
+            found α=0.2 is the empirical peak. See
             ``_working/memorist/l5_predictive/REPORT.md``.
         """
         self.db_path = Path(db_path) if db_path else Path(__file__).parent.parent / "truememory.db"
@@ -1551,11 +1551,12 @@ class TrueMemoryEngine:
     # `surprise_scores.message_id` would silently mismatch and rewrite
     # unrelated rows' scores.
     #
-    # Default α=0.3 per commit 816ec48: the MEMORIST-L5 session measured
-    # +2.0 pts P@10 on short-horizon at α=0.3 (McNemar p≈0.0625, not yet
-    # significant). Modal validation pending — revert to 0 if p≥0.05.
+    # Default α=0.2 per Modal alpha sweep (2026-04-26): 5-point sweep
+    # (0, 0.1, 0.15, 0.2, 0.3) × 3 seeds each found α=0.2 is the
+    # empirical peak at 93.20% mean LoCoMo (vs 93.00% at α=0, 93.07%
+    # at α=0.3). Cross-validated on GPUBox (RTX 5090).
     #
-    # Precedence: constructor arg > env var > 0.3.
+    # Precedence: constructor arg > env var > 0.2.
     #
     # See ``_working/memorist/l5_predictive/REPORT.md`` §1, §10 for
     # rationale and ``ISSUES.md`` for the follow-up validation plan.
@@ -1579,11 +1580,11 @@ class TrueMemoryEngine:
             for seg in source.split("+")
         )
 
-    _DEFAULT_ALPHA_SURPRISE = 0.3
+    _DEFAULT_ALPHA_SURPRISE = 0.2
 
     def _get_alpha_surprise(self) -> float:
         """Resolve alpha_surprise per MEMORIST-L5 precedence:
-        constructor arg > TRUEMEMORY_ALPHA_SURPRISE env var > 0.3.
+        constructor arg > TRUEMEMORY_ALPHA_SURPRISE env var > 0.2.
 
         Sanitizes against non-finite values (inf, -inf, nan) and
         TypeError/ValueError. Negative values are clamped to 0.
