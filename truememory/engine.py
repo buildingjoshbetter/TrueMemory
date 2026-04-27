@@ -1244,13 +1244,12 @@ class TrueMemoryEngine:
                         _l0_scale = float(_l0_scale_raw) if _l0_scale_raw is not None else 0.9
                     except (ValueError, TypeError):
                         _l0_scale = 0.9
+                    _l0_scale = max(0.0, min(_l0_scale, 1.0))
                     for pr in personality_results:
                         if "source" not in pr:
                             pr["source"] = "personality"
-                        if pr.get("source") == "profile":
-                            pr["score"] = max_existing * 0.8
-                        elif pr.get("source") == "style_vec":
-                            pr["score"] = max_existing * _l0_scale
+                        if pr.get("source") in ("profile", "style_vec", "fts"):
+                            pr["score"] = max_existing * (0.8 if pr["source"] == "profile" else _l0_scale)
                         pr_id = pr.get("id")
                         if pr_id and pr_id in existing_ids:
                             continue
