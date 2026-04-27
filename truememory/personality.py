@@ -57,7 +57,6 @@ _ACTIVITY_KEYWORDS = {
     "game", "gaming", "play", "played", "golf", "tennis", "soccer",
     "basketball", "football", "baseball", "marathon", "race", "trail",
     "climb", "climbing", "surf", "surfing", "ski", "skiing",
-    "f1", "formula 1", "acl",
 }
 
 _FEAR_KEYWORDS = {
@@ -299,6 +298,13 @@ def _extract_topics(messages: list[dict]) -> list[str]:
 
     Returns the top topics sorted by frequency.
     """
+    import warnings
+    warnings.warn(
+        "_extract_topics is deprecated as of v0.6.0 per MEMORIST-L0 research. "
+        "Keyword-based scoring replaced by char-n-gram style vectors in v0.6.0.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     topic_counts: dict[str, int] = defaultdict(int)
 
     # Domain-specific topic clusters
@@ -309,7 +315,7 @@ def _extract_topics(messages: list[dict]) -> list[str]:
         "technology": {"code", "deploy", "database", "api", "backend",
                        "frontend", "server", "aws", "cloud", "repo",
                        "kubernetes", "docker", "github", "python", "go",
-                       "rewrite", "migrate", "clickhouse", "postgres"},
+                       "rewrite", "migrate", "typescript", "javascript"},
         "health/fitness": {"gym", "run", "running", "workout", "health",
                            "marathon", "sleep", "meditation", "therapy",
                            "doctor", "weight", "resting heart rate"},
@@ -324,14 +330,13 @@ def _extract_topics(messages: list[dict]) -> list[str]:
         "career": {"job", "quit", "hired", "hiring", "employee",
                    "cofounder", "cto", "ceo", "role", "interview",
                    "offer", "equity", "promotion"},
-        "pets": {"dog", "puppy", "vet", "biscuit", "corgi", "walk",
+        "pets": {"dog", "puppy", "vet", "walk",
                  "shelter", "pet"},
         "entertainment": {"show", "movie", "netflix", "hulu", "watch",
-                          "concert", "festival", "acl", "f1", "book",
+                          "concert", "festival", "book",
                           "game"},
         "family": {"mom", "dad", "sister", "brother", "parents",
-                   "family", "thanksgiving", "christmas", "birthday",
-                   "lily"},
+                   "family", "thanksgiving", "christmas", "birthday"},
     }
 
     for msg in messages:
@@ -355,6 +360,13 @@ def _extract_traits(messages: list[dict]) -> list[str]:
     Uses a trait-indicator mapping: if enough messages match the indicators,
     the trait is assigned.
     """
+    import warnings
+    warnings.warn(
+        "_extract_traits is deprecated as of v0.6.0 per MEMORIST-L0 research. "
+        "Keyword-based scoring replaced by char-n-gram style vectors in v0.6.0.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     trait_indicators = {
         "ambitious": {"goal", "growth", "scale", "expand", "raise",
                       "million", "revenue", "build", "launch", "grind"},
@@ -684,12 +696,15 @@ def search_personality(conn: sqlite3.Connection, query: str,
     character), it performs targeted retrieval that generic keyword or vector
     search would miss.
 
-    Strategy:
+    Strategy (post-MEMORIST-L0):
 
     1. Detect which personality aspect the query asks about.
-    2. Pull relevant messages via FTS5 using aspect-specific search terms.
-    3. Enrich results with pre-computed entity profile data.
-    4. Return results ranked by relevance to the personality question.
+    2. Extract the target entity from the query.
+    3. Pull candidate messages via FTS5 using aspect-specific search terms.
+    4. Score candidates using char-n-gram style vector similarity with
+       persona scoping bias (5.0 for same-entity messages).
+    5. Enrich results with pre-computed entity profile data.
+    6. Return results ranked by score.
 
     Args:
         conn:  Open database connection.
@@ -698,8 +713,9 @@ def search_personality(conn: sqlite3.Connection, query: str,
 
     Returns:
         List of result dicts.  Each dict has ``content``, ``sender``,
-        ``timestamp``, ``source`` (``"fts"`` or ``"profile"``), and
-        ``aspect`` (the detected personality dimension).
+        ``timestamp``, ``source`` (``"fts"``, ``"profile"``, or
+        ``"style_vec"``), and ``aspect`` (the detected personality
+        dimension).
     """
     lower_query = query.lower()
     results: list[dict] = []
@@ -715,7 +731,6 @@ def search_personality(conn: sqlite3.Connection, query: str,
             detected_aspect = aspect
 
     # ---- Step 2: extract entity name from query ----
-    # Look for entity names that exist in the database
     all_senders = conn.execute(
         "SELECT DISTINCT sender FROM messages WHERE sender != ''"
     ).fetchall()
@@ -727,37 +742,103 @@ def search_personality(conn: sqlite3.Connection, query: str,
             target_entity = name
             break
 
-    # ---- Step 3: FTS search with aspect-specific terms ----
+    # ---- Step 3: gather candidate messages via FTS ----
     aspect_config = PERSONALITY_ASPECTS.get(detected_aspect, {})
     fts_terms = aspect_config.get("fts_terms", [])
+    candidate_msgs: list[dict] = []
 
     if fts_terms:
         fts_query = _build_safe_fts_query(fts_terms)
-        fts_results = _fts_search(conn, fts_query, limit=limit * 3)
+        candidate_msgs = _fts_search(conn, fts_query, limit=limit * 3)
 
-        # Filter to target entity if identified
+    # Fallback: direct query word search
+    if not candidate_msgs:
+        query_words = [w for w in lower_query.split()
+                       if len(w) > 3 and w not in {"what", "does", "like",
+                                                    "kind", "person", "with",
+                                                    "how", "about", "their",
+                                                    "they", "have", "been"}]
+        if query_words:
+            fts_query = _build_safe_fts_query(query_words)
+            candidate_msgs = _fts_search(conn, fts_query, limit=limit * 3)
+
+    # If we have a target entity and no FTS results, get their messages directly
+    if not candidate_msgs and target_entity:
+        candidate_msgs = _get_messages_by_sender(conn, target_entity)[:limit * 3]
+
+    # ---- Step 4: score candidates using style vectors ----
+    _use_style_vec = False
+    try:
+        from truememory.personality_style_vec import (
+            compute_style_vector,
+            cosine_similarity,
+            get_entity_style_vector,
+        )
+        _use_style_vec = True
+    except ImportError:
+        pass
+
+    if _use_style_vec and candidate_msgs:
+        profile_vec = None
         if target_entity:
-            fts_results = [
-                r for r in fts_results
+            profile_vec = get_entity_style_vector(conn, target_entity)
+            if profile_vec is None:
+                for r in all_senders:
+                    if r[0].lower() == target_entity:
+                        profile_vec = get_entity_style_vector(conn, r[0])
+                        if profile_vec:
+                            break
+
+        q_vec = compute_style_vector(query)
+
+        scored: list[dict] = []
+        for msg in candidate_msgs:
+            sender = msg.get("sender", "")
+            same_entity = (sender.lower() == target_entity) if target_entity else False
+            base = 5.0 if same_entity else 0.0
+
+            cv = compute_style_vector(msg.get("content", ""))
+            sim_query = cosine_similarity(q_vec, cv)
+            sim_profile = cosine_similarity(profile_vec, cv) if profile_vec else 0.0
+
+            vec_score = base + 0.5 * sim_query + 0.5 * sim_profile
+
+            scored.append({
+                "id": msg.get("id"),
+                "content": msg["content"],
+                "sender": sender,
+                "recipient": msg.get("recipient", ""),
+                "timestamp": msg.get("timestamp", ""),
+                "source": "style_vec",
+                "aspect": detected_aspect,
+                "score": vec_score,
+            })
+
+        scored.sort(key=lambda r: r["score"], reverse=True)
+        results = scored[:limit]
+
+    else:
+        # Fallback: use FTS results directly (legacy behavior)
+        if target_entity:
+            candidate_msgs = [
+                r for r in candidate_msgs
                 if r["sender"].lower() == target_entity
             ]
-
-        for r in fts_results[:limit]:
+        for r in candidate_msgs[:limit]:
             results.append({
                 "content": r["content"],
                 "sender": r["sender"],
                 "recipient": r.get("recipient", ""),
-                "timestamp": r["timestamp"],
+                "timestamp": r.get("timestamp", ""),
                 "source": "fts",
                 "aspect": detected_aspect,
                 "score": r.get("score", 0.0),
             })
 
-    # ---- Step 4: add profile data ----
+    # ---- Step 5: add profile data ----
     if target_entity:
         profile = get_entity_profile(conn, target_entity)
         if profile:
-            # Build a summary from the profile
             summary_parts = []
 
             if detected_aspect in ("personality", "communication"):
@@ -813,34 +894,7 @@ def search_personality(conn: sqlite3.Connection, query: str,
                     "timestamp": "",
                     "source": "profile",
                     "aspect": detected_aspect,
-                    "score": 1.0,  # profile data is highly relevant
-                })
-
-    # ---- Step 5: if no FTS terms, fall back to direct query search ----
-    if not fts_terms or not results:
-        # Try a direct FTS search with the query words
-        query_words = [w for w in lower_query.split()
-                       if len(w) > 3 and w not in {"what", "does", "like",
-                                                    "kind", "person", "with",
-                                                    "how", "about", "their",
-                                                    "they", "have", "been"}]
-        if query_words:
-            fts_query = _build_safe_fts_query(query_words)
-            fts_results = _fts_search(conn, fts_query, limit=limit)
-            if target_entity:
-                fts_results = [
-                    r for r in fts_results
-                    if r["sender"].lower() == target_entity
-                ]
-            for r in fts_results[:limit]:
-                results.append({
-                    "content": r["content"],
-                    "sender": r["sender"],
-                    "recipient": r.get("recipient", ""),
-                    "timestamp": r["timestamp"],
-                    "source": "fts",
-                    "aspect": detected_aspect,
-                    "score": r.get("score", 0.0),
+                    "score": 1.0,
                 })
 
     return results[:limit]
@@ -927,7 +981,7 @@ def update_entity_profile_incremental(
                     "house", "rent", "401k", "investment", "budget"},
         "career": {"job", "quit", "hired", "hiring", "employee",
                    "cofounder", "cto", "ceo", "role", "interview"},
-        "pets": {"dog", "puppy", "vet", "corgi", "pet", "shelter"},
+        "pets": {"dog", "puppy", "vet", "pet", "shelter"},
         "entertainment": {"show", "movie", "netflix", "watch", "concert",
                           "festival", "book", "game"},
         "family": {"mom", "dad", "sister", "brother", "parents", "family",

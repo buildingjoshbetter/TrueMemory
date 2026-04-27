@@ -159,6 +159,16 @@ try:
 except (ImportError, ModuleNotFoundError):
     pass
 
+_HAS_STYLE_VEC = False
+try:
+    from truememory.personality_style_vec import (
+        build_entity_style_vectors,
+        update_entity_style_vector_incremental as _update_style_vec,
+    )
+    _HAS_STYLE_VEC = True
+except (ImportError, ModuleNotFoundError):
+    pass
+
 
 # ───────────────────────────────────────────────────────────────────────────
 # Helper
@@ -269,6 +279,7 @@ class TrueMemoryEngine:
         self._has_reranker = _HAS_RERANKER
         self._has_hyde = _HAS_HYDE
         self._has_clustering = _HAS_CLUSTERING
+        self._has_style_vec = _HAS_STYLE_VEC
 
     # ──────────────────────────────────────────────────────────────────────
     # Auto-connect (production API)
@@ -364,6 +375,13 @@ class TrueMemoryEngine:
             except Exception:
                 logger.debug("Failed to update entity profile for %s during add()", sender, exc_info=True)
 
+        # Incrementally update style vector (L0 char-n-gram)
+        if self._has_style_vec and sender:
+            try:
+                _update_style_vec(self.conn, sender, content)
+            except Exception:
+                logger.debug("Failed to update style vector for %s during add()", sender, exc_info=True)
+
         # Persist vector embedding and any profile updates
         self.conn.commit()
 
@@ -446,6 +464,14 @@ class TrueMemoryEngine:
             except Exception:
                 logger.debug("Failed to clean entity_profiles for user %s", user_id, exc_info=True)
 
+            # Clean entity style vectors for this user
+            try:
+                self.conn.execute(
+                    "DELETE FROM entity_style_vectors WHERE entity = ?", (user_id,)
+                )
+            except Exception:
+                logger.debug("Failed to clean entity_style_vectors for user %s", user_id, exc_info=True)
+
             # Clean entity relationships involving this user
             try:
                 self.conn.execute(
@@ -492,6 +518,7 @@ class TrueMemoryEngine:
 
             for table in (
                 "entity_profiles",
+                "entity_style_vectors",
                 "fact_timeline",
                 "summaries",
                 "episodes",
@@ -861,6 +888,20 @@ class TrueMemoryEngine:
         else:
             stats["build_profiles"] = "SKIPPED (personality module not available)"
 
+        # ── 4.5. Build entity style vectors (L0 char-n-gram) ─────────────
+        if _HAS_STYLE_VEC:
+            try:
+                t0 = time.time()
+                style_vecs = build_entity_style_vectors(self.conn)
+                stats["build_style_vectors"] = f"{len(style_vecs)} vectors in {time.time() - t0:.3f}s"
+                self._has_style_vec = True
+            except Exception as exc:
+                stats["build_style_vectors"] = f"ERROR: {exc}"
+                logger.debug("build_style_vectors failed", exc_info=True)
+                self._has_style_vec = False
+        else:
+            stats["build_style_vectors"] = "SKIPPED (personality_style_vec module not available)"
+
         # ── 5. Extract preferences (L0) ───────────────────────────────────
         if _HAS_PERSONALITY:
             try:
@@ -1010,6 +1051,7 @@ class TrueMemoryEngine:
             "temporal": self._has_temporal,
             "salience": self._has_salience,
             "personality": self._has_personality,
+            "style_vec": self._has_style_vec,
             "consolidation": self._has_consolidation,
             "predictive": self._has_predictive,
             "reranker": self._has_reranker,

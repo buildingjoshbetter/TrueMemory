@@ -44,6 +44,10 @@ from truememory.personality import (
     get_entity_profile, get_communication_pattern,
     resolve_entity, build_dunbar_hierarchy,
 )
+from truememory.personality_style_vec import (
+    compute_style_vector,
+    build_entity_style_vectors,
+)
 from truememory.consolidation import (
     build_entity_timelines, detect_contradictions, build_summaries,
     search_contradictions, search_consolidated,
@@ -96,6 +100,8 @@ __all__ = [
     "build_entity_profiles", "extract_preferences", "search_personality",
     "get_entity_profile", "get_communication_pattern",
     "resolve_entity", "build_dunbar_hierarchy",
+    # Style vectors (L0 char-n-gram)
+    "compute_style_vector", "build_entity_style_vectors",
     # Consolidation
     "build_entity_timelines", "detect_contradictions", "build_summaries",
     "search_contradictions", "search_consolidated",
@@ -114,7 +120,8 @@ __all__ = [
     "cluster_messages", "search_clustered", "get_cluster_info",
     # Submodules (explicit access: `from truememory import vector_search`)
     "client", "engine", "storage", "vector_search", "fts_search",
-    "hybrid", "temporal", "salience", "personality", "consolidation",
+    "hybrid", "temporal", "salience", "personality", "personality_style_vec",
+    "consolidation",
     "predictive", "query_classifier", "reranker", "hyde", "clustering",
 ]
 

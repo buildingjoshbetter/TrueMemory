@@ -37,6 +37,13 @@
   - **Failure visibility:** the migration's exception path now logs at
     WARNING (was DEBUG) so silent failures on a destructive operation
     surface in production logs.
+- **L0 personality: char-n-gram style vectors replace keyword extraction.**
+  Per-entity style profiles now use 256-d hashed char-n-gram vectors
+  (MEMORIST-L0 C3c winner, 0.686 accuracy vs 0.271 for hand-tuned keywords).
+  Retrieval scoring uses cosine similarity for persona-scoped reranking.
+  Josh-specific keyword tokens removed. Legacy `_extract_topics` and
+  `_extract_traits` deprecated with one-release sunset.
+  See `_working/memorist/l0_personality/REPORT.md`.
 
 ## [0.5.0] - 2026-04-23
 

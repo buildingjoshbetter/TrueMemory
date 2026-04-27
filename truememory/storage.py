@@ -71,6 +71,14 @@ CREATE TABLE IF NOT EXISTS entity_profiles (
     updated_at TEXT
 );
 
+-- Entity style vectors (L0 char-n-gram profiles, MEMORIST-L0)
+CREATE TABLE IF NOT EXISTS entity_style_vectors (
+    entity TEXT PRIMARY KEY,
+    vector TEXT,
+    message_count INTEGER DEFAULT 0,
+    updated_at TEXT
+);
+
 -- Fact timeline (L5 contradiction tracking)
 CREATE TABLE IF NOT EXISTS fact_timeline (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
