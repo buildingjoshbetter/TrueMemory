@@ -1238,7 +1238,7 @@ class TrueMemoryEngine:
                     existing_ids = {r.get("id") for r in results if r.get("id")}
                     max_existing = max(
                         (r.get("score", 0) for r in results), default=0.05
-                    ) if results else 0.05
+                    )
                     _l0_scale_raw = os.environ.get("TRUEMEMORY_L0_SCORE_SCALE")
                     try:
                         _l0_scale = float(_l0_scale_raw) if _l0_scale_raw is not None else 0.9
