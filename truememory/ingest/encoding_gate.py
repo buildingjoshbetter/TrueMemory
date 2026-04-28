@@ -37,7 +37,7 @@ or partial install) a warning is logged at import time and the gate
 falls back to internal heuristics.
 
 **What a skeptical reader should know**: the final encoding decision is
-`0.40 * novelty + 0.35 * salience + 0.25 * prediction_error > 0.30`.
+`0.40 * novelty + 0.35 * salience + 0.25 * prediction_error >= 0.30`.
 The neuroscience names describe what each term is *inspired by*, not a
 claim that this is how the brain works.
 
@@ -178,7 +178,7 @@ class EncodingGate:
         )
         score = max(0.0, min(1.0, raw / self._norm))
 
-        should_encode = score > self.threshold
+        should_encode = score >= self.threshold
         reason = self._explain(novelty, salience, pred_error, score, should_encode)
 
         # Get the most similar existing memory for context (only if moderately similar)
