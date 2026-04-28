@@ -336,7 +336,7 @@ class EncodingGate:
                 # Surprise score is 0-1; treat it as prediction error
                 # but weight by novelty to prevent totally new topics from
                 # dominating (we already captured that in the novelty signal)
-                return max(0.0, min(1.0, surprise * 0.8 + 0.1))
+                return max(0.0, min(1.0, surprise * 0.9))
             except Exception as e:
                 log.debug("truememory surprise failed, using fallback: %s", e)
 
