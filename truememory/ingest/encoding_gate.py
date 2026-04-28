@@ -159,6 +159,10 @@ class EncodingGate:
         # batch — used so that prediction error can detect contradictions
         # within the batch, not just against stored memories
         self._batch_facts: set[str] = set()
+        self._batch_scores: list[float] = []
+        self._batch_novelties: list[float] = []
+        self._batch_saliences: list[float] = []
+        self._batch_pes: list[float] = []
 
     def evaluate(self, fact: str, category: str = "") -> EncodingDecision:
         """
@@ -180,6 +184,18 @@ class EncodingGate:
 
         should_encode = score > self.threshold
         reason = self._explain(novelty, salience, pred_error, score, should_encode)
+
+        verdict = "ENCODE" if should_encode else "SKIP"
+        log.debug(
+            "gate: fact=%r n=%.2f s=%.2f p=%.2f score=%.3f thr=%.2f -> %s",
+            fact[:60], novelty, salience, pred_error, score,
+            self.threshold, verdict,
+        )
+
+        self._batch_scores.append(score)
+        self._batch_novelties.append(novelty)
+        self._batch_saliences.append(salience)
+        self._batch_pes.append(pred_error)
 
         # Get the most similar existing memory for context (only if moderately similar)
         similar = ""
@@ -439,6 +455,46 @@ class EncodingGate:
             f"threshold={self.threshold:.2f} — {', '.join(parts)}"
         )
 
+    def log_batch_summary(self) -> dict:
+        """Log summary statistics for the current batch and return them."""
+        n = len(self._batch_scores)
+        if n == 0:
+            return {"evaluated": 0}
+
+        passed = sum(1 for s in self._batch_scores if s > self.threshold)
+        blocked = n - passed
+
+        def _stats(vals: list[float]) -> str:
+            mn = min(vals)
+            mx = max(vals)
+            avg = sum(vals) / len(vals)
+            return f"[{mn:.2f}, {mx:.2f}, mean={avg:.2f}]"
+
+        log.info(
+            "gate summary: %d evaluated, %d passed (%d%%), %d blocked. "
+            "score_range=%s threshold=%.2f",
+            n, passed, round(passed / n * 100) if n else 0, blocked,
+            _stats(self._batch_scores), self.threshold,
+        )
+        log.debug(
+            "gate signals: novelty=%s salience=%s pe=%s",
+            _stats(self._batch_novelties),
+            _stats(self._batch_saliences),
+            _stats(self._batch_pes),
+        )
+
+        return {
+            "evaluated": n,
+            "passed": passed,
+            "blocked": blocked,
+            "score_min": min(self._batch_scores),
+            "score_max": max(self._batch_scores),
+        }
+
     def reset_batch(self):
         """Clear the batch-level fact cache (call between transcripts)."""
         self._batch_facts.clear()
+        self._batch_scores.clear()
+        self._batch_novelties.clear()
+        self._batch_saliences.clear()
+        self._batch_pes.clear()
