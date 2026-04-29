@@ -159,6 +159,7 @@ class EncodingGate:
         # batch — used so that prediction error can detect contradictions
         # within the batch, not just against stored memories
         self._batch_facts: set[str] = set()
+        self._last_search_results: list[dict] = []
 
     def evaluate(self, fact: str, category: str = "") -> EncodingDecision:
         """
@@ -184,9 +185,12 @@ class EncodingGate:
         # Get the most similar existing memory for context (only if moderately similar)
         similar = ""
         if 0.1 < novelty < 0.7:
-            results = self._search(fact, limit=1)
-            if results:
-                similar = results[0].get("content", "")
+            if self._last_search_results:
+                similar = self._last_search_results[0].get("content", "")
+            else:
+                results = self._search(fact, limit=1)
+                if results:
+                    similar = results[0].get("content", "")
 
         # Add this fact's fingerprint to the batch cache so subsequent
         # facts in the same transcript can detect duplicates/contradictions
@@ -222,6 +226,7 @@ class EncodingGate:
         implementation is a pragmatic proxy.
         """
         results = self._search(fact, limit=5)
+        self._last_search_results = results
 
         if not results:
             return 1.0  # Empty memory = maximum novelty
@@ -345,7 +350,7 @@ class EncodingGate:
 
     def _fallback_prediction_error(self, fact: str, novelty: float) -> float:
         """Fallback prediction error when truememory.predictive isn't available."""
-        results = self._search(fact, limit=3)
+        results = self._last_search_results[:3] if self._last_search_results else self._search(fact, limit=3)
         if not results:
             return 0.3
 
@@ -442,3 +447,4 @@ class EncodingGate:
     def reset_batch(self):
         """Clear the batch-level fact cache (call between transcripts)."""
         self._batch_facts.clear()
+        self._last_search_results = []
