@@ -1,7 +1,5 @@
 """Test that the PE signal can reach zero for pure noise (no +0.1 floor)."""
 
-import pytest
-
 
 class MockMemoryWithScore:
     """Returns results with a specific score."""
