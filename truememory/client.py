@@ -138,18 +138,22 @@ class Memory:
     ) -> list[dict]:
         """Search by pure vector cosine similarity (no FTS, no RRF fusion).
 
-        Returns results with ``score`` in [0, 1] based on cosine distance:
-        ``score = 1 / (1 + distance)``. Used by the encoding gate for
-        novelty detection where raw cosine similarity is needed instead
-        of the hybrid RRF score.
+        Returns results with ``score`` as cosine similarity in [0, 1]
+        (1.0 = identical, 0.0 = orthogonal). Used by the encoding gate
+        for novelty detection where the paper equation (1) specifies
+        n_t = 1 - max cos(v_t, v_{e'}).
+
+        sqlite-vec returns cosine distance d. We convert to similarity:
+        cos_sim = max(0, 1 - d). This gives the gate a score that can
+        be directly subtracted from 1.0 to get novelty.
 
         Falls back to regular search() if vector search is unavailable.
         """
         if self._engine.conn is None or not self._engine._has_vectors:
             return self.search(query, limit=limit)
         try:
-            from truememory.vector_search import search_vector
-            return search_vector(self._engine.conn, query, limit=limit)
+            from truememory.vector_search import search_vector_raw
+            return search_vector_raw(self._engine.conn, query, limit=limit)
         except Exception:
             return self.search(query, limit=limit)
 
