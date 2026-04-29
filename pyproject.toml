@@ -7,7 +7,7 @@ name = "truememory"
 version = "0.5.0"
 description = "SOTA-level agent memory at zero infrastructure cost."
 readme = "README.md"
-license = "Apache-2.0"
+license = "AGPL-3.0-only"
 requires-python = ">=3.10"
 authors = [
     { name = "@Building_Josh" },

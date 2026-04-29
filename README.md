@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://pypi.org/project/truememory/"><img src="https://img.shields.io/pypi/v/truememory?color=blue&label=PyPI" alt="PyPI"></a>
   <a href="https://pypi.org/project/truememory/"><img src="https://img.shields.io/pypi/pyversions/truememory?color=blue" alt="Python"></a>
-  <a href="https://github.com/buildingjoshbetter/TrueMemory/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache_2.0-blue" alt="License"></a>
+  <a href="https://github.com/buildingjoshbetter/TrueMemory/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License"></a>
   <img src="https://img.shields.io/badge/Edge-90.1%25_LoCoMo-brightgreen" alt="Edge Score">
   <img src="https://img.shields.io/badge/Base-91.5%25_LoCoMo-blue" alt="Base Score">
   <img src="https://img.shields.io/badge/Pro-91.8%25_LoCoMo-blueviolet" alt="Pro Score">
@@ -243,4 +243,4 @@ Every benchmark script is self-contained and runs on [Modal](https://modal.com).
 
 ## ⚖️ License
 
-Licensed under [Apache 2.0](https://github.com/buildingjoshbetter/TrueMemory/blob/main/LICENSE). Free for personal and commercial use.
+Licensed under [AGPL-3.0](https://github.com/buildingjoshbetter/TrueMemory/blob/main/LICENSE). Free for personal and research use. Commercial use requires a separate license — contact buildingjoshbetter@gmail.com.
