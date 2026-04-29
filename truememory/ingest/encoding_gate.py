@@ -51,6 +51,7 @@ References (for inspiration, not literal modeling):
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
@@ -141,13 +142,19 @@ class EncodingGate:
         self,
         memory,
         threshold: float = 0.30,
-        w_novelty: float = 0.40,
-        w_salience: float = 0.35,
-        w_prediction_error: float = 0.25,
+        w_novelty: float | None = None,
+        w_salience: float | None = None,
+        w_prediction_error: float | None = None,
         user_id: str = "",
     ):
         self.memory = memory
         self.threshold = threshold
+        if w_novelty is None:
+            w_novelty = float(os.environ.get("TRUEMEMORY_GATE_W_NOVELTY", "0.40"))
+        if w_salience is None:
+            w_salience = float(os.environ.get("TRUEMEMORY_GATE_W_SALIENCE", "0.35"))
+        if w_prediction_error is None:
+            w_prediction_error = float(os.environ.get("TRUEMEMORY_GATE_W_PE", "0.25"))
         self.w_novelty = w_novelty
         self.w_salience = w_salience
         self.w_prediction_error = w_prediction_error
