@@ -1,7 +1,5 @@
 """Test that the encoding gate threshold uses >= (paper equation 4)."""
 
-import pytest
-
 
 class MockMemoryFixedScore:
     """Returns results with a controlled score to produce a known gate score."""
@@ -22,33 +20,13 @@ def test_threshold_boundary_gte():
 
     threshold = 0.50
     gate = EncodingGate(
-        memory=MockMemoryFixedScore(score=0.0),
-        threshold=threshold,
-        w_novelty=1.0,
-        w_salience=0.0,
-        w_prediction_error=0.0,
-    )
-    # With empty results (score=0), novelty=1.0.
-    # Final score = 1.0 * 1.0 / 1.0 = 1.0 — well above threshold.
-    # Now set weights so score lands exactly at threshold.
-    # We need score = threshold exactly.
-    # With w_novelty=1, w_salience=0, w_pe=0: score = novelty.
-    # We need novelty = 0.50 exactly.
-    # From the piecewise: novelty = 0.30 + 0.40*(1-(x-0.4)/0.2)
-    #   0.50 = 0.30 + 0.40*(1-(x-0.4)/0.2)
-    #   0.20 = 0.40*(1-(x-0.4)/0.2)
-    #   0.50 = 1-(x-0.4)/0.2
-    #   (x-0.4)/0.2 = 0.50
-    #   x = 0.50
-    # So search score = 0.50 gives novelty = 0.50.
-    gate2 = EncodingGate(
         memory=MockMemoryFixedScore(score=0.50),
         threshold=0.50,
         w_novelty=1.0,
         w_salience=0.0,
         w_prediction_error=0.0,
     )
-    decision = gate2.evaluate("test fact", "")
+    decision = gate.evaluate("test fact", "")
     # novelty at search_score=0.50: 0.30 + 0.40*(1-(0.50-0.4)/0.2) = 0.30+0.40*0.5 = 0.50
     assert abs(decision.novelty - 0.50) < 0.01, f"Expected novelty ~0.50, got {decision.novelty}"
     assert abs(decision.encoding_score - 0.50) < 0.01, f"Expected score ~0.50, got {decision.encoding_score}"
