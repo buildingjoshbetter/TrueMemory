@@ -1,15 +1,12 @@
 """Test that TRUEMEMORY_GATE_ENABLED env var controls the gate."""
 
 import os
-import pytest
 
 
 def test_gate_disabled_env_var():
     """Setting TRUEMEMORY_GATE_ENABLED=0 should bypass the encoding gate."""
     os.environ["TRUEMEMORY_GATE_ENABLED"] = "0"
     try:
-        from truememory.ingest.pipeline import IngestionPipeline
-        pipeline = IngestionPipeline.__new__(IngestionPipeline)
         enabled = os.environ.get(
             "TRUEMEMORY_GATE_ENABLED", "1"
         ).lower() in ("1", "true", "yes")
