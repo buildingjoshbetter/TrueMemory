@@ -27,7 +27,7 @@ def test_fallback_pe_reuses_novelty_search():
     gate = EncodingGate(memory=memory)
     gate.evaluate("Some fact about Portland", "")
 
-    # With score=0.5, novelty maps to ~0.33 (smooth function), which is in the mid-range
+    # With score=0.5, novelty maps to ~0.50 (linear: 1.0 - 0.50), which is in the mid-range
     # (not > 0.9 and not < 0.05), so PE will use the truememory path
     # or fallback. The similar_memory lookup also fires (0.1 < 0.5 < 0.7).
     #

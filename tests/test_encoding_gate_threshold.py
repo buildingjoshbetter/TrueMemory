@@ -4,7 +4,11 @@ import pytest
 
 
 class MockMemoryFixedScore:
-    """Returns results with a controlled score to produce a known gate score."""
+    """Returns results with a controlled score to produce a known gate score.
+
+    Provides both search() (hybrid fallback) and search_vectors() (cosine
+    path) so the gate tests exercise the preferred cosine code path.
+    """
 
     def __init__(self, score: float, content: str = "existing"):
         self._score = score
@@ -14,6 +18,10 @@ class MockMemoryFixedScore:
         if self._score > 0:
             return [{"content": self._content, "score": self._score}]
         return []
+
+    def search_vectors(self, query, limit=5):
+        """Return same results as search — gate prefers this method."""
+        return self.search(query)
 
 
 def test_threshold_boundary_gte():
@@ -49,15 +57,16 @@ def test_docstring_mentions_gte():
 
 
 @pytest.mark.parametrize("search_score,expected_novelty", [
-    (0.0, 1.0),
-    (0.05, 0.788),
-    (0.10, 0.700),
-    (0.25, 0.525),
-    (0.50, 0.328),
-    (1.0, 0.05),
+    (0.0, 1.0),     # no match → fully novel
+    (0.05, 0.95),   # 1.0 - 0.05
+    (0.10, 0.90),   # 1.0 - 0.10
+    (0.25, 0.75),   # 1.0 - 0.25
+    (0.50, 0.50),   # 1.0 - 0.50
+    (0.95, 0.05),   # 1.0 - 0.95 = 0.05 (floor)
+    (1.0, 0.05),    # floor at 0.05
 ])
-def test_smooth_novelty_mapping(search_score, expected_novelty):
-    """Verify the smooth novelty inversion at multiple points."""
+def test_linear_novelty_mapping(search_score, expected_novelty):
+    """Verify the novelty = 1 - similarity inversion (paper eq 1)."""
     from truememory.ingest.encoding_gate import EncodingGate
 
     gate = EncodingGate(

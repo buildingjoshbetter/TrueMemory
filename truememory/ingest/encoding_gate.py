@@ -241,22 +241,32 @@ class EncodingGate:
         """
         Proxy for hippocampal novelty detection.
 
-        Uses truememory's hybrid search to find the most similar existing
-        memory. High similarity → low novelty. Low similarity → high novelty.
+        Uses cosine similarity against existing memories to determine how
+        novel this fact is. High similarity → low novelty. Low similarity
+        → high novelty.
 
-        This is NOT a CA1 comparator in any neuroscientific sense — it's
-        vector-similarity inversion. The name is aspirational; the
-        implementation is a pragmatic proxy.
+        Prefers pure vector search (cosine distance) when available via
+        memory.search_vectors(). Falls back to hybrid search (RRF scores)
+        if vector search is unavailable. Paper equation (1) specifies
+        cosine similarity inversion: n_t = 1 - max cos(v_t, v_{e'}).
         """
-        results = self._search(fact, limit=5)
+        # Prefer cosine-based vector search (matches paper equation 1)
+        results = None
+        if hasattr(self.memory, "search_vectors"):
+            try:
+                results = self.memory.search_vectors(fact, limit=5)
+            except Exception:
+                pass
+
+        # Fall back to hybrid search if vector search unavailable
+        if results is None:
+            results = self._search(fact, limit=5)
+
         self._last_search_results = results
 
         if not results:
             return 1.0  # Empty memory = maximum novelty
 
-        # truememory search returns results with a `score` field (engine.py:726)
-        # Scores from hybrid search are RRF-fused, so they're bounded roughly
-        # in [0, 1] but can be low even for decent matches
         top_score = results[0].get("score", 0.0)
         try:
             top_score = float(top_score)
@@ -265,10 +275,11 @@ class EncodingGate:
 
         top_score = max(0.0, min(1.0, top_score))
 
-        # Continuous inversion: high similarity → low novelty, low → high.
-        # Single smooth function replaces the piecewise with discontinuity at 0.8.
-        # Maps [0, 1] → [1.0, 0.05] with steeper falloff at high similarity.
-        return max(0.05, 1.0 - top_score ** 0.5 * 0.95)
+        # Simple inversion: novelty = 1 - similarity.
+        # With cosine-based scores from search_vectors(), this directly
+        # implements the paper's n_t = 1 - max cos(v_t, v_{e'}).
+        # Floor at 0.05 so near-duplicates still get a tiny novelty signal.
+        return max(0.05, 1.0 - top_score)
 
     # ------------------------------------------------------------------
     # Signal 2: Salience — delegates to truememory.salience when available
