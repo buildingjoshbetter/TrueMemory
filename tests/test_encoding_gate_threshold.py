@@ -1,5 +1,7 @@
 """Test that the encoding gate threshold uses >= (paper equation 4)."""
 
+import pytest
+
 
 class MockMemoryFixedScore:
     """Returns results with a controlled score to produce a known gate score."""
@@ -45,8 +47,6 @@ def test_docstring_mentions_gte():
         "Module docstring should use >= (matching paper equation 4), not >"
     )
 
-
-import pytest
 
 @pytest.mark.parametrize("search_score,expected_novelty", [
     (0.0, 1.0),
