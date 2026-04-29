@@ -37,7 +37,7 @@ or partial install) a warning is logged at import time and the gate
 falls back to internal heuristics.
 
 **What a skeptical reader should know**: the final encoding decision is
-`0.40 * novelty + 0.35 * salience + 0.25 * prediction_error > 0.30`.
+`0.40 * novelty + 0.35 * salience + 0.25 * prediction_error >= 0.30`.
 The neuroscience names describe what each term is *inspired by*, not a
 claim that this is how the brain works.
 
@@ -51,6 +51,7 @@ References (for inspiration, not literal modeling):
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
@@ -141,13 +142,19 @@ class EncodingGate:
         self,
         memory,
         threshold: float = 0.30,
-        w_novelty: float = 0.40,
-        w_salience: float = 0.35,
-        w_prediction_error: float = 0.25,
+        w_novelty: float | None = None,
+        w_salience: float | None = None,
+        w_prediction_error: float | None = None,
         user_id: str = "",
     ):
         self.memory = memory
         self.threshold = threshold
+        if w_novelty is None:
+            w_novelty = float(os.environ.get("TRUEMEMORY_GATE_W_NOVELTY", "0.40"))
+        if w_salience is None:
+            w_salience = float(os.environ.get("TRUEMEMORY_GATE_W_SALIENCE", "0.35"))
+        if w_prediction_error is None:
+            w_prediction_error = float(os.environ.get("TRUEMEMORY_GATE_W_PE", "0.25"))
         self.w_novelty = w_novelty
         self.w_salience = w_salience
         self.w_prediction_error = w_prediction_error
@@ -159,6 +166,7 @@ class EncodingGate:
         # batch — used so that prediction error can detect contradictions
         # within the batch, not just against stored memories
         self._batch_facts: set[str] = set()
+        self._last_search_results: list[dict] = []
         self._batch_scores: list[float] = []
         self._batch_novelties: list[float] = []
         self._batch_saliences: list[float] = []
@@ -182,7 +190,7 @@ class EncodingGate:
         )
         score = max(0.0, min(1.0, raw / self._norm))
 
-        should_encode = score > self.threshold
+        should_encode = score >= self.threshold
         reason = self._explain(novelty, salience, pred_error, score, should_encode)
 
         verdict = "ENCODE" if should_encode else "SKIP"
@@ -200,9 +208,12 @@ class EncodingGate:
         # Get the most similar existing memory for context (only if moderately similar)
         similar = ""
         if 0.1 < novelty < 0.7:
-            results = self._search(fact, limit=1)
-            if results:
-                similar = results[0].get("content", "")
+            if self._last_search_results:
+                similar = self._last_search_results[0].get("content", "")
+            else:
+                results = self._search(fact, limit=1)
+                if results:
+                    similar = results[0].get("content", "")
 
         # Add this fact's fingerprint to the batch cache so subsequent
         # facts in the same transcript can detect duplicates/contradictions
@@ -238,6 +249,7 @@ class EncodingGate:
         implementation is a pragmatic proxy.
         """
         results = self._search(fact, limit=5)
+        self._last_search_results = results
 
         if not results:
             return 1.0  # Empty memory = maximum novelty
@@ -352,7 +364,7 @@ class EncodingGate:
                 # Surprise score is 0-1; treat it as prediction error
                 # but weight by novelty to prevent totally new topics from
                 # dominating (we already captured that in the novelty signal)
-                return max(0.0, min(1.0, surprise * 0.8 + 0.1))
+                return max(0.0, min(1.0, surprise * 0.9))
             except Exception as e:
                 log.debug("truememory surprise failed, using fallback: %s", e)
 
@@ -361,7 +373,7 @@ class EncodingGate:
 
     def _fallback_prediction_error(self, fact: str, novelty: float) -> float:
         """Fallback prediction error when truememory.predictive isn't available."""
-        results = self._search(fact, limit=3)
+        results = self._last_search_results[:3] if self._last_search_results else self._search(fact, limit=3)
         if not results:
             return 0.3
 
@@ -494,6 +506,7 @@ class EncodingGate:
     def reset_batch(self):
         """Clear the batch-level fact cache (call between transcripts)."""
         self._batch_facts.clear()
+        self._last_search_results = []
         self._batch_scores.clear()
         self._batch_novelties.clear()
         self._batch_saliences.clear()
