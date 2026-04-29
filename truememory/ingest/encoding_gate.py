@@ -349,16 +349,12 @@ class EncodingGate:
 
         Real predictive coding is Bayesian error propagation up a
         hierarchical generative model. This is not that.
+
+        NOTE: Previously this function gated on the novelty score
+        (returning fixed values for novelty > 0.9 or < 0.05). That
+        coupling was removed (issue #110) so PE can be evaluated
+        independently. The linear combination handles signal interaction.
         """
-        if novelty > 0.9:
-            # Completely novel topic — can't really have a prediction error
-            # because there's nothing to predict against
-            return 0.3
-
-        if novelty < 0.05:
-            # Near-duplicate — zero prediction error
-            return 0.0
-
         # Use truememory's surprise score if available
         if _HAS_TRUEMEMORY_PREDICTIVE and _tm_surprise is not None:
             try:
@@ -373,9 +369,9 @@ class EncodingGate:
                 log.debug("truememory surprise failed, using fallback: %s", e)
 
         # Fallback: use the moderate-similarity heuristic
-        return self._fallback_prediction_error(fact, novelty)
+        return self._fallback_prediction_error(fact)
 
-    def _fallback_prediction_error(self, fact: str, novelty: float) -> float:
+    def _fallback_prediction_error(self, fact: str) -> float:
         """Fallback prediction error when truememory.predictive isn't available."""
         results = self._last_search_results[:3] if self._last_search_results else self._search(fact, limit=3)
         if not results:
