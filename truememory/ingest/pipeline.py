@@ -214,6 +214,11 @@ class IngestionPipeline:
             self.llm_config = llm_config
 
         # Initialize encoding gate
+        self.gate_enabled = os.environ.get(
+            "TRUEMEMORY_GATE_ENABLED", "1"
+        ).lower() in ("1", "true", "yes")
+        if not self.gate_enabled:
+            log.info("Encoding gate disabled via TRUEMEMORY_GATE_ENABLED=0")
         self.gate = EncodingGate(
             memory=memory,
             threshold=gate_threshold,
@@ -281,7 +286,15 @@ class IngestionPipeline:
             }
 
             # 3. Encoding gate
-            decision = self.gate.evaluate(fact.content, fact.category)
+            if self.gate_enabled:
+                decision = self.gate.evaluate(fact.content, fact.category)
+            else:
+                from truememory.ingest.encoding_gate import EncodingDecision
+                decision = EncodingDecision(
+                    should_encode=True, encoding_score=1.0,
+                    novelty=1.0, salience=1.0, prediction_error=1.0,
+                    reason="gate disabled",
+                )
             trace_entry["gate"] = {
                 "passed": decision.should_encode,
                 "score": decision.encoding_score,
@@ -415,7 +428,15 @@ class IngestionPipeline:
             return result
 
         for fact in facts:
-            decision = self.gate.evaluate(fact.content, fact.category)
+            if self.gate_enabled:
+                decision = self.gate.evaluate(fact.content, fact.category)
+            else:
+                from truememory.ingest.encoding_gate import EncodingDecision
+                decision = EncodingDecision(
+                    should_encode=True, encoding_score=1.0,
+                    novelty=1.0, salience=1.0, prediction_error=1.0,
+                    reason="gate disabled",
+                )
             if not decision.should_encode:
                 result.facts_skipped_gate += 1
                 continue
