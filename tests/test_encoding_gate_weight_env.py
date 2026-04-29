@@ -1,7 +1,6 @@
 """Test that signal weights can be configured via env vars."""
 
 import os
-import pytest
 
 
 class MockMemoryEmpty:
