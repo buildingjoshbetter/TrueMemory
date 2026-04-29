@@ -507,6 +507,59 @@ def search_vector(
     return results
 
 
+def search_vector_raw(
+    conn: sqlite3.Connection,
+    query: str,
+    limit: int = 5,
+) -> list[dict]:
+    """Search by vector similarity, returning cosine similarity scores.
+
+    Unlike :func:`search_vector` which returns ``1/(1+distance)``, this
+    function converts sqlite-vec's cosine distance to cosine similarity:
+    ``cos_sim = max(0, 1 - distance)``. This is used by the encoding
+    gate where the paper equation (1) requires ``n_t = 1 - cos_sim``.
+    """
+    model = get_model()
+    query_embedding = model.encode([query])[0]
+    query_blob = serialize_f32(query_embedding)
+
+    rows = conn.execute(
+        """
+        SELECT v.rowid, v.distance,
+               m.content, m.sender, m.recipient,
+               m.timestamp, m.category, m.modality
+        FROM (
+            SELECT rowid, distance
+            FROM vec_messages
+            WHERE embedding MATCH ? AND k = ?
+        ) v
+        JOIN messages m ON m.id = v.rowid
+        ORDER BY v.distance
+        """,
+        (query_blob, limit),
+    ).fetchall()
+
+    results: list[dict] = []
+    for row in rows:
+        distance = row[1]
+        cos_sim = max(0.0, min(1.0, 1.0 - distance))
+
+        results.append(
+            {
+                "id": row[0],
+                "content": row[2],
+                "sender": row[3],
+                "recipient": row[4],
+                "timestamp": row[5],
+                "category": row[6],
+                "modality": row[7],
+                "score": round(cos_sim, 6),
+            }
+        )
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Separation embeddings (B2: dual embedding support)
 # ---------------------------------------------------------------------------

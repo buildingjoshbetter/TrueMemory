@@ -4,7 +4,11 @@ import pytest
 
 
 class MockMemoryFixedScore:
-    """Returns results with a controlled score to produce a known gate score."""
+    """Returns results with a controlled score to produce a known gate score.
+
+    Provides both search() (hybrid fallback) and search_vectors() (cosine
+    path) so the gate tests exercise the preferred cosine code path.
+    """
 
     def __init__(self, score: float, content: str = "existing"):
         self._score = score
@@ -14,6 +18,10 @@ class MockMemoryFixedScore:
         if self._score > 0:
             return [{"content": self._content, "score": self._score}]
         return []
+
+    def search_vectors(self, query, limit=5):
+        """Return same results as search — gate prefers this method."""
+        return self.search(query)
 
 
 def test_threshold_boundary_gte():
