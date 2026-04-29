@@ -287,35 +287,29 @@ class EncodingGate:
 
     def _compute_salience(self, fact: str, category: str = "") -> float:
         """
-        Salience score combining truememory's built-in salience with a
-        category-based boost from the LLM extractor.
+        Encoding-specific salience: "is this worth remembering?"
 
-        If `truememory.salience.compute_message_salience` is available,
-        we use it as the base signal — this ensures the encoding gate
-        agrees with truememory's own salience layer used during retrieval.
-        Otherwise we fall back to a minimal heuristic.
+        Uses a hybrid scorer (encoding_salience_d) that applies a
+        rule-based, length-independent scorer for short messages
+        (<=50 chars) and L3's retrieval scorer for longer text.
+        Falls back to L3 + category boost if the encoding salience
+        module is unavailable.
         """
-        # Base salience from truememory (handles length, numbers, dates,
-        # emotional markers, life events, ALL-CAPS, etc.) — see
-        # truememory/salience.py compute_message_salience
-        # We pass modality="chat" because ingestion captures conversational
-        # facts; truememory's salience weights other modalities (email, ocr,
-        # calendar, etc.) differently. This preserves that signal.
-        if _HAS_TRUEMEMORY_SALIENCE and _tm_salience is not None:
-            try:
-                base = float(_tm_salience(fact, "chat"))
-            except Exception as e:
-                log.debug("truememory salience failed, using fallback: %s", e)
+        try:
+            from truememory.ingest.encoding_salience import encoding_salience_d
+            return encoding_salience_d(fact, category)
+        except ImportError:
+            if _HAS_TRUEMEMORY_SALIENCE and _tm_salience is not None:
+                try:
+                    base = float(_tm_salience(fact, "chat"))
+                except Exception as e:
+                    log.debug("truememory salience failed, using fallback: %s", e)
+                    base = self._fallback_salience(fact)
+            else:
                 base = self._fallback_salience(fact)
-        else:
-            base = self._fallback_salience(fact)
-
-        # Category boost from the LLM extractor — corrections and decisions
-        # are worth more than generic technical details
-        cat = (category or "").strip().lower()
-        boost = _CATEGORY_SALIENCE_BOOST.get(cat, 0.05)
-
-        return max(0.0, min(1.0, base + boost))
+            cat = (category or "").strip().lower()
+            boost = _CATEGORY_SALIENCE_BOOST.get(cat, 0.05)
+            return max(0.0, min(1.0, base + boost))
 
     @staticmethod
     def _fallback_salience(fact: str) -> float:

@@ -1,0 +1,335 @@
+{
+  "baseline": "L3 compute_message_salience on GateLoCoMo",
+  "auc_s_vs_n": 0.8601,
+  "signal_stats": {
+    "mean": 0.3558,
+    "median": 0.3325,
+    "min": 0.0385,
+    "max": 0.9249,
+    "count": 655
+  },
+  "noise_stats": {
+    "mean": 0.1529,
+    "median": 0.1326,
+    "min": 0.0056,
+    "max": 0.8271,
+    "count": 958
+  },
+  "per_category_means": {
+    "B1": 0.2643,
+    "B2": 0.2972,
+    "B3": 0.2821,
+    "N1": 0.1419,
+    "N2": 0.1647,
+    "N3": 0.1337,
+    "N4": 0.2132,
+    "N5": 0.1618,
+    "S1": 0.4139,
+    "S2": 0.2993,
+    "S3": 0.2679,
+    "S4": 0.2677,
+    "S5": 0.2688
+  },
+  "per_category_recall_at_030": {
+    "S1": 0.7029,
+    "S2": 0.5325,
+    "S3": 0.3966,
+    "S4": 0.5,
+    "S5": 0.3866,
+    "N_false_pass_rate": 0.0846
+  },
+  "lowest_20_signal": [
+    {
+      "id": "conv1_s08_006",
+      "content": "I'm there",
+      "category": "S3",
+      "l3_score": 0.038457692203426624,
+      "length": 9
+    },
+    {
+      "id": "conv2_s02_039",
+      "content": "\ud83e\udd7a thx mom",
+      "category": "S5",
+      "l3_score": 0.03846186346259994,
+      "length": 9
+    },
+    {
+      "id": "conv2_s09_035",
+      "content": "omg mom \ud83d\ude2d",
+      "category": "S5",
+      "l3_score": 0.03846186346259994,
+      "length": 9
+    },
+    {
+      "id": "conv3_s11_002",
+      "content": "it's booked.",
+      "category": "S4",
+      "l3_score": 0.05221158989185741,
+      "length": 12
+    },
+    {
+      "id": "conv1_s08_032",
+      "content": "I'll bring it",
+      "category": "S3",
+      "l3_score": 0.056872172485206894,
+      "length": 13
+    },
+    {
+      "id": "conv3_s07_012",
+      "content": "ok I'm into it",
+      "category": "S2",
+      "l3_score": 0.06156001746666137,
+      "length": 14
+    },
+    {
+      "id": "conv1_s06_002",
+      "content": "I GOT IT",
+      "category": "S4",
+      "l3_score": 0.062003822735999824,
+      "length": 8
+    },
+    {
+      "id": "conv2_s06_002",
+      "content": "I DID IT",
+      "category": "S4",
+      "l3_score": 0.062003822735999824,
+      "length": 8
+    },
+    {
+      "id": "conv3_s13_007",
+      "content": "I'm shaking lol",
+      "category": "S5",
+      "l3_score": 0.06626985041172188,
+      "length": 15
+    },
+    {
+      "id": "conv5_s01_028",
+      "content": "I'm in Portland",
+      "category": "S1",
+      "l3_score": 0.06626985041172188,
+      "length": 15
+    },
+    {
+      "id": "conv3_s07_020",
+      "content": "hire someone lol",
+      "category": "S3",
+      "l3_score": 0.07099698799165466,
+      "length": 16
+    },
+    {
+      "id": "conv5_s01_014",
+      "content": "I live in Berlin",
+      "category": "S1",
+      "l3_score": 0.07099698799165466,
+      "length": 16
+    },
+    {
+      "id": "conv5_s06_039",
+      "content": "I full on sobbed",
+      "category": "S5",
+      "l3_score": 0.07099698799165466,
+      "length": 16
+    },
+    {
+      "id": "conv3_s02_003",
+      "content": "honestly terrible",
+      "category": "S5",
+      "l3_score": 0.0757372480508951,
+      "length": 17
+    },
+    {
+      "id": "conv1_s08_023",
+      "content": "can I bring Priya?",
+      "category": "S3",
+      "l3_score": 0.08048687794878218,
+      "length": 18
+    },
+    {
+      "id": "conv1_s04_028",
+      "content": "I think I found one",
+      "category": "S4",
+      "l3_score": 0.0852424966163669,
+      "length": 19
+    },
+    {
+      "id": "conv1_s12_011",
+      "content": "plus I have Priya \ud83e\udd7a",
+      "category": "S5",
+      "l3_score": 0.085246662945948,
+      "length": 19
+    },
+    {
+      "id": "conv1_s04_025",
+      "content": "I'm excited honestly",
+      "category": "S5",
+      "l3_score": 0.09000104709250846,
+      "length": 20
+    },
+    {
+      "id": "conv2_s05_001",
+      "content": "mom I'm freaking out",
+      "category": "S5",
+      "l3_score": 0.09000104709250846,
+      "length": 20
+    },
+    {
+      "id": "conv3_s04_001",
+      "content": "I am going to scream",
+      "category": "S5",
+      "l3_score": 0.09000104709250846,
+      "length": 20
+    }
+  ],
+  "highest_20_noise": [
+    {
+      "id": "conv5_s04_005",
+      "content": "SHE IS THE CUTEST BABY I'VE EVER SEEN",
+      "category": "N3",
+      "l3_score": 0.8270779098736396,
+      "length": 37
+    },
+    {
+      "id": "conv2_s10_040",
+      "content": "OK OK I'll be tasteful about it. LOVE YOU SO MUCH. \u2764\ufe0f\ud83c\udf89",
+      "category": "N2",
+      "l3_score": 0.6801165506569707,
+      "length": 54
+    },
+    {
+      "id": "conv5_s02_039",
+      "content": "YES please I live vicariously through people who leave the house after 8pm now",
+      "category": "N3",
+      "l3_score": 0.6368523614650964,
+      "length": 78
+    },
+    {
+      "id": "conv3_s09_026",
+      "content": "you're 28 with a law degree and the courage to chase something that makes you happy. that's not starting over. that's leveling up",
+      "category": "N1",
+      "l3_score": 0.6314696859311103,
+      "length": 129
+    },
+    {
+      "id": "conv5_s01_012",
+      "content": "ok SO. catch me up. what are you doing where are you TELL ME EVERYTHING",
+      "category": "N4",
+      "l3_score": 0.6110933357120036,
+      "length": 71
+    },
+    {
+      "id": "conv3_s03_013",
+      "content": "hmmm that's a lot but also like... when else are we gonna find $890 flights",
+      "category": "N1",
+      "l3_score": 0.6075449273899552,
+      "length": 75
+    },
+    {
+      "id": "conv3_s09_024",
+      "content": "100%. you're miserable at the firm. you light up when you talk about design. the math works out. what's the downside?",
+      "category": "N1",
+      "l3_score": 0.6035657634421076,
+      "length": 117
+    },
+    {
+      "id": "conv2_s09_045",
+      "content": "love u too mom \u2764\ufe0f I'll let u know the SECOND I hear from UCLA",
+      "category": "N2",
+      "l3_score": 0.5669642034211039,
+      "length": 61
+    },
+    {
+      "id": "conv2_s08_002",
+      "content": "YESSS!! Berkeley, UCLA, and UCSF?",
+      "category": "N3",
+      "l3_score": 0.5426330855977332,
+      "length": 33
+    },
+    {
+      "id": "conv1_s10_027",
+      "content": "ok enough about my existential crisis lol. what about you. where do you see yourself in 5 years",
+      "category": "N4",
+      "l3_score": 0.5420406070936064,
+      "length": 95
+    },
+    {
+      "id": "conv3_s13_025",
+      "content": "Cas this is going to be so good. 2026 is YOUR year",
+      "category": "N1",
+      "l3_score": 0.5069282504954679,
+      "length": 50
+    },
+    {
+      "id": "conv4_s07_042",
+      "content": "Deal. Alright, I should finish up some stuff before EOD. Happy Thanksgiving, Riley.",
+      "category": "N2",
+      "l3_score": 0.5022542587607821,
+      "length": 83
+    },
+    {
+      "id": "conv5_s02_038",
+      "content": "speaking of which do you want to hear about Berlin nightlife because it is UNHINGED",
+      "category": "N4",
+      "l3_score": 0.5022542587607821,
+      "length": 83
+    },
+    {
+      "id": "conv2_s10_024",
+      "content": "Well you already have UCLA! With funding! Whatever else happens is just a bonus.",
+      "category": "N1",
+      "l3_score": 0.492062642260069,
+      "length": 80
+    },
+    {
+      "id": "conv3_s12_021",
+      "content": "that's what I was thinking. come home to a brand new kitchen AND jet lag lol",
+      "category": "N1",
+      "l3_score": 0.47572920240235866,
+      "length": 76
+    },
+    {
+      "id": "conv4_s08_020",
+      "content": "ok STOP being wise. it's my turn. what about you? what do you actually want?",
+      "category": "N4",
+      "l3_score": 0.47572920240235866,
+      "length": 76
+    },
+    {
+      "id": "conv2_s10_019",
+      "content": "And they're PAYING you to do it. Your father is going to lose his mind.",
+      "category": "N1",
+      "l3_score": 0.4553475114421244,
+      "length": 71
+    },
+    {
+      "id": "conv2_s09_032",
+      "content": "Oh Sam she would LOVE that. She talks about your pottery all the time.",
+      "category": "N3",
+      "l3_score": 0.4511181472300614,
+      "length": 70
+    },
+    {
+      "id": "conv2_s08_006",
+      "content": "When do you hear back from UCLA and UCSF?",
+      "category": "N1",
+      "l3_score": 0.44872923477926036,
+      "length": 41
+    },
+    {
+      "id": "conv5_s02_024",
+      "content": "even though the slides were POSTED ONLINE",
+      "category": "N5",
+      "l3_score": 0.44872923477926036,
+      "length": 41
+    }
+  ],
+  "s4_recall_at_005": 1.0,
+  "specific_scores": {
+    "we're pregnant": 0.0578,
+    "dad passed away": 0.0622,
+    "I GOT IT": 0.062,
+    "I said yes": 0.043,
+    "ok": 0.0087,
+    "lol": 0.0122,
+    "haha": 0.016
+  }
+}
