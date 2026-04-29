@@ -265,18 +265,10 @@ class EncodingGate:
 
         top_score = max(0.0, min(1.0, top_score))
 
-        # Non-linear inversion so that:
-        # - very high similarity (>0.8) maps to near-zero novelty
-        # - moderate similarity (0.4-0.8) maps to partial novelty (0.2-0.6)
-        # - low similarity (<0.4) maps to high novelty (>0.7)
-        if top_score > 0.8:
-            return 0.05
-        elif top_score > 0.6:
-            return 0.30 * (1.0 - (top_score - 0.6) / 0.2)
-        elif top_score > 0.4:
-            return 0.30 + 0.40 * (1.0 - (top_score - 0.4) / 0.2)
-        else:
-            return 0.70 + 0.30 * (1.0 - top_score / 0.4)
+        # Continuous inversion: high similarity → low novelty, low → high.
+        # Single smooth function replaces the piecewise with discontinuity at 0.8.
+        # Maps [0, 1] → [1.0, 0.05] with steeper falloff at high similarity.
+        return max(0.05, 1.0 - top_score ** 0.5 * 0.95)
 
     # ------------------------------------------------------------------
     # Signal 2: Salience — delegates to truememory.salience when available
@@ -309,7 +301,8 @@ class EncodingGate:
 
         # Category boost from the LLM extractor — corrections and decisions
         # are worth more than generic technical details
-        boost = _CATEGORY_SALIENCE_BOOST.get(category.lower(), 0.05) if category else 0.05
+        cat = (category or "").strip().lower()
+        boost = _CATEGORY_SALIENCE_BOOST.get(cat, 0.05)
 
         return max(0.0, min(1.0, base + boost))
 

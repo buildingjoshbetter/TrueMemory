@@ -22,7 +22,7 @@ def test_pe_no_floor_for_noise():
     from truememory.ingest.encoding_gate import EncodingGate
 
     # Use a moderate novelty (0.1 < novelty < 0.9) to avoid the early returns.
-    # Search score 0.50 -> novelty ~0.50 (in the mid-range).
+    # Search score 0.50 -> novelty ~0.33 (smooth function mid-range).
     gate = EncodingGate(
         memory=MockMemoryWithScore(score=0.50, content="existing fact"),
         threshold=0.30,
