@@ -78,6 +78,14 @@ benchmarks/convomem/
 benchmarks/latency/
 benchmarks/longmemeval/
 
+# Salience sweep research artifacts (validated the v23 decision; not production)
+benchmarks/gate_eval/salience_sweep.py
+benchmarks/gate_eval/run_salience_sweep.py
+benchmarks/gate_eval/run_combination_sweep.py
+benchmarks/gate_eval/results/salience_50_sweep.json
+benchmarks/gate_eval/results/salience_50_raw_scores.json
+benchmarks/gate_eval/results/salience_combination_sweep.json
+
 # Test runner cache
 .pytest_cache/
 .ruff_cache/

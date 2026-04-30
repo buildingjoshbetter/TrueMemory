@@ -1,0 +1,132 @@
+{
+  "B1": {
+    "count": 152,
+    "mean_length": 55.9,
+    "frac_numbers": 0.072,
+    "frac_proper_nouns": 0.553,
+    "frac_caps_words": 0.079,
+    "frac_life_events": 0.007,
+    "frac_arousal_words": 0.026,
+    "frac_update_verbs": 0.013
+  },
+  "B2": {
+    "count": 154,
+    "mean_length": 62.6,
+    "frac_numbers": 0.156,
+    "frac_proper_nouns": 0.597,
+    "frac_caps_words": 0.084,
+    "frac_life_events": 0.0,
+    "frac_arousal_words": 0.019,
+    "frac_update_verbs": 0.013
+  },
+  "B3": {
+    "count": 81,
+    "mean_length": 54.0,
+    "frac_numbers": 0.284,
+    "frac_proper_nouns": 0.593,
+    "frac_caps_words": 0.062,
+    "frac_life_events": 0.0,
+    "frac_arousal_words": 0.0,
+    "frac_update_verbs": 0.049
+  },
+  "N1": {
+    "count": 500,
+    "mean_length": 29.9,
+    "frac_numbers": 0.026,
+    "frac_proper_nouns": 0.298,
+    "frac_caps_words": 0.084,
+    "frac_life_events": 0.0,
+    "frac_arousal_words": 0.012,
+    "frac_update_verbs": 0.0
+  },
+  "N2": {
+    "count": 115,
+    "mean_length": 33.9,
+    "frac_numbers": 0.026,
+    "frac_proper_nouns": 0.383,
+    "frac_caps_words": 0.148,
+    "frac_life_events": 0.0,
+    "frac_arousal_words": 0.009,
+    "frac_update_verbs": 0.0
+  },
+  "N3": {
+    "count": 169,
+    "mean_length": 22.5,
+    "frac_numbers": 0.047,
+    "frac_proper_nouns": 0.45,
+    "frac_caps_words": 0.337,
+    "frac_life_events": 0.0,
+    "frac_arousal_words": 0.053,
+    "frac_update_verbs": 0.006
+  },
+  "N4": {
+    "count": 114,
+    "mean_length": 44.8,
+    "frac_numbers": 0.009,
+    "frac_proper_nouns": 0.386,
+    "frac_caps_words": 0.132,
+    "frac_life_events": 0.0,
+    "frac_arousal_words": 0.026,
+    "frac_update_verbs": 0.0
+  },
+  "N5": {
+    "count": 60,
+    "mean_length": 31.4,
+    "frac_numbers": 0.05,
+    "frac_proper_nouns": 0.267,
+    "frac_caps_words": 0.15,
+    "frac_life_events": 0.0,
+    "frac_arousal_words": 0.017,
+    "frac_update_verbs": 0.017
+  },
+  "S1": {
+    "count": 377,
+    "mean_length": 74.8,
+    "frac_numbers": 0.387,
+    "frac_proper_nouns": 0.663,
+    "frac_caps_words": 0.146,
+    "frac_life_events": 0.003,
+    "frac_arousal_words": 0.027,
+    "frac_update_verbs": 0.024
+  },
+  "S2": {
+    "count": 77,
+    "mean_length": 66.8,
+    "frac_numbers": 0.065,
+    "frac_proper_nouns": 0.623,
+    "frac_caps_words": 0.117,
+    "frac_life_events": 0.0,
+    "frac_arousal_words": 0.026,
+    "frac_update_verbs": 0.013
+  },
+  "S3": {
+    "count": 58,
+    "mean_length": 56.6,
+    "frac_numbers": 0.052,
+    "frac_proper_nouns": 0.69,
+    "frac_caps_words": 0.155,
+    "frac_life_events": 0.0,
+    "frac_arousal_words": 0.017,
+    "frac_update_verbs": 0.034
+  },
+  "S4": {
+    "count": 24,
+    "mean_length": 54.0,
+    "frac_numbers": 0.125,
+    "frac_proper_nouns": 0.667,
+    "frac_caps_words": 0.333,
+    "frac_life_events": 0.0,
+    "frac_arousal_words": 0.042,
+    "frac_update_verbs": 0.083
+  },
+  "S5": {
+    "count": 119,
+    "mean_length": 61.6,
+    "frac_numbers": 0.042,
+    "frac_proper_nouns": 0.529,
+    "frac_caps_words": 0.084,
+    "frac_life_events": 0.0,
+    "frac_arousal_words": 0.017,
+    "frac_update_verbs": 0.008
+  }
+}
