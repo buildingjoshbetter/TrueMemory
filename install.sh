@@ -135,18 +135,29 @@ main() {
 
   # ---------- done ----------
   printf '\n'
-  ok "truememory installed."
+  printf '%b' "$GREEN"
+  cat << 'BANNER'
+████████╗██████╗ ██╗   ██╗███████╗    ███╗   ███╗███████╗███╗   ███╗ ██████╗ ██████╗ ██╗   ██╗
+╚══██╔══╝██╔══██╗██║   ██║██╔════╝    ████╗ ████║██╔════╝████╗ ████║██╔═══██╗██╔══██╗╚██╗ ██╔╝
+   ██║   ██████╔╝██║   ██║█████╗      ██╔████╔██║█████╗  ██╔████╔██║██║   ██║██████╔╝ ╚████╔╝
+   ██║   ██╔══██╗██║   ██║██╔══╝      ██║╚██╔╝██║██╔══╝  ██║╚██╔╝██║██║   ██║██╔══██╗  ╚██╔╝
+   ██║   ██║  ██║╚██████╔╝███████╗    ██║ ╚═╝ ██║███████╗██║ ╚═╝ ██║╚██████╔╝██║  ██║   ██║
+   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚══════╝    ╚═╝     ╚═╝╚══════╝╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝
+BANNER
+  printf '%b' "$RESET"
+  printf '\n'
+  ok "TrueMemory installed successfully."
+  printf '\n'
+  printf '  %bFirst time?%b Start a new Claude session — TrueMemory will\n' "$GREEN" "$RESET"
+  printf '  walk you through tier selection automatically.\n'
   printf '\n'
   printf '  %b%bIMPORTANT — if Claude Desktop was already open:%b\n' "$YELLOW" "$BOLD" "$RESET"
   printf '    Quit it completely with %bCmd+Q%b and reopen it.\n' "$BOLD" "$RESET"
   printf '    A new chat window is NOT enough — the config only loads at launch.\n'
   printf '\n'
-  printf '  %bNext:%b start a new Claude session and try:\n' "$GREEN" "$RESET"
-  printf '    %b"remember that I prefer dark mode"%b\n' "$DIM" "$RESET"
-  printf '    %b"what do you remember about me?"%b\n' "$DIM" "$RESET"
-  printf '\n'
   printf '  %bCommands:%b\n' "$GREEN" "$RESET"
   printf '    truememory-mcp --setup              %b# re-run Claude auto-config%b\n' "$DIM" "$RESET"
+  printf '    truememory-ingest install            %b# re-install hooks%b\n' "$DIM" "$RESET"
   printf '    uv tool upgrade truememory     %b# update to latest%b\n' "$DIM" "$RESET"
   printf '    uv tool uninstall truememory   %b# uninstall%b\n' "$DIM" "$RESET"
   printf '\n'

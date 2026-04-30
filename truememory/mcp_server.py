@@ -828,6 +828,15 @@ def truememory_configure(
     )
     result["hyde_search"] = "enabled" if has_key else "disabled (no API key — search still works, just without query expansion)"
 
+    # Mark onboarding complete so the SessionStart hook stops showing
+    # the setup banner on subsequent sessions.
+    _onboarded = Path.home() / ".truememory" / ".onboarded"
+    try:
+        _onboarded.parent.mkdir(parents=True, exist_ok=True)
+        _onboarded.write_text(f"tier={tier}\n")
+    except OSError:
+        pass
+
     # Onboarding: usage examples and next steps
     result["next_steps"] = (
         "TrueMemory is ready. Here's how it works:\n"
