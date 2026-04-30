@@ -225,6 +225,19 @@ _NOISE_EXACT_V23 = frozenset({
     "damn", "dude", "bro", "ugh", "wow", "yikes", "ooh", "oof",
     "true", "facts", "right", "exactly", "totally", "absolutely",
     "lmao dead", "im dead", "crying", "screaming",
+    # Reactions to someone else's news (N2 noise, issue #118)
+    "that's great", "thats great", "that's awesome", "thats awesome",
+    "that's amazing", "thats amazing", "that's crazy", "thats crazy",
+    "that's insane", "thats insane", "that's wild", "thats wild",
+    "that's so cool", "thats so cool",
+    "congratulations", "congrats", "happy for you", "so happy for you",
+    "proud of you", "so proud of you", "good for you",
+    "no way", "are you serious", "oh my god", "oh my gosh",
+    "i can't believe it", "i cant believe it", "shut up",
+    "that's wonderful", "thats wonderful", "that's fantastic",
+    "love that", "love it", "so cool", "so sick",
+    "good luck", "you got this", "go for it", "let's go", "lets go",
+    "aww", "aw", "yay", "woohoo", "woo",
 })
 
 _COMMITMENT_RE = re.compile(

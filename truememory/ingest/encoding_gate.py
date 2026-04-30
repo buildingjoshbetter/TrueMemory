@@ -157,6 +157,7 @@ class EncodingGate:
         self.w_novelty = w_novelty
         self.w_salience = w_salience
         self.w_prediction_error = w_prediction_error
+        self.salience_floor = float(os.environ.get("TRUEMEMORY_GATE_SALIENCE_FLOOR", "0.10"))
         self.user_id = user_id
         # Normalized weights so the final score lands in [0, 1]
         total = w_novelty + w_salience + w_prediction_error
@@ -186,7 +187,13 @@ class EncodingGate:
         )
         score = max(0.0, min(1.0, raw / self._norm))
 
-        should_encode = score >= self.threshold
+        # Salience floor: reject messages the salience scorer considers
+        # pure noise, regardless of how novel or surprising they are.
+        # Prevents high-novelty off-topic chatter from passing the gate.
+        if salience < self.salience_floor:
+            should_encode = False
+        else:
+            should_encode = score >= self.threshold
         reason = self._explain(novelty, salience, pred_error, score, should_encode)
 
         verdict = "ENCODE" if should_encode else "SKIP"
