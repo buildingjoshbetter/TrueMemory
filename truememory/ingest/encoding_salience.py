@@ -23,12 +23,7 @@ from truememory.salience import (
     _NOISE_EXACT,
     _EMOJI_PATTERN,
     _EMOJI_RE,
-    _NUMBER_PATTERN,
     _MONEY_PATTERN,
-    _DATE_PATTERN,
-    _CAPS_WORDS_RE,
-    _BULLET_RE,
-    _HIGH_SIGNAL_MODALITIES,
     _extract_features,
     compute_message_salience,
 )

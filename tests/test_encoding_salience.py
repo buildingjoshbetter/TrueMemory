@@ -117,13 +117,10 @@ class TestEncodingGateFallback:
 
     def test_fallback_produces_valid_score(self):
         from unittest.mock import patch
-        from truememory.ingest.encoding_gate import EncodingGate
 
         class FakeMemory:
             def search(self, *a, **kw):
                 return []
-
-        gate = EncodingGate(memory=FakeMemory(), threshold=0.30)
 
         with patch.dict("sys.modules", {"truememory.ingest.encoding_salience": None}):
             import importlib
