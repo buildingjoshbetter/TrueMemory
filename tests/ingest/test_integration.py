@@ -169,14 +169,14 @@ def test_e2e_reset_batch_between_runs():
     pipeline.llm_config = None
 
     # Inject stale batch state
-    pipeline.gate._batch_facts.add("stale:fingerprint:from:previous:run")
+    pipeline.gate._batch_scores.append(0.999)
 
     # Ingest the fixture
     pipeline.ingest_transcript(str(FIXTURE_PATH), session_id="test-reset-1")
 
-    # After ingestion, the stale fingerprint should be gone
-    # (batch may contain NEW fingerprints from the actual facts, but not the stale one)
-    assert "stale:fingerprint:from:previous:run" not in pipeline.gate._batch_facts, \
+    # After ingestion, the stale score should be gone
+    # (batch may contain NEW scores from the actual facts, but not the stale one)
+    assert 0.999 not in pipeline.gate._batch_scores, \
         "reset_batch() was not called by ingest_transcript — stale state leaked"
 
 
@@ -277,10 +277,10 @@ def test_encoding_gate_reset_batch_clears_state():
     """reset_batch() should clear internal batch-level state."""
     memory = MockMemory()
     gate = EncodingGate(memory, threshold=0.30)
-    gate._batch_facts.add("test:fingerprint")
-    assert len(gate._batch_facts) == 1
+    gate._batch_scores.append(0.5)
+    assert len(gate._batch_scores) == 1
     gate.reset_batch()
-    assert len(gate._batch_facts) == 0
+    assert len(gate._batch_scores) == 0
 
 
 def test_mock_memory_supports_engine_add_signature():

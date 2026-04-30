@@ -43,7 +43,7 @@ def test_ingest_transcript_calls_reset_batch():
     pipeline.llm_config = None
 
     # Inject stale state
-    pipeline.gate._batch_facts.add("stale:from:previous:run")
+    pipeline.gate._batch_scores.append(0.999)
 
     # Create a minimal transcript
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
@@ -52,7 +52,7 @@ def test_ingest_transcript_calls_reset_batch():
 
     try:
         pipeline.ingest_transcript(path)
-        assert "stale:from:previous:run" not in pipeline.gate._batch_facts, \
+        assert 0.999 not in pipeline.gate._batch_scores, \
             "reset_batch() was not called at the start of ingest_transcript"
     finally:
         Path(path).unlink()
@@ -79,25 +79,22 @@ def test_ingest_transcript_two_consecutive_runs_dont_leak_state():
                 f.write(content)
                 transcripts.append(f.name)
 
-        # First run — produces some batch facts
+        # First run — produces some batch scores
         pipeline.ingest_transcript(transcripts[0], session_id="run-1")
-        _first_batch = set(pipeline.gate._batch_facts)
+        first_count = len(pipeline.gate._batch_scores)
 
         # Second run — should reset and produce a fresh batch
         pipeline.ingest_transcript(transcripts[1], session_id="run-2")
-        second_batch = set(pipeline.gate._batch_facts)
+        second_count = len(pipeline.gate._batch_scores)
 
-        # The two batches should be independent (second doesn't contain everything from first)
-        # At minimum, the old batch should have been cleared before the second run
-        # We can't easily test this without knowing what _tm_extract_facts returns,
-        # but we CAN verify that reset_batch doesn't accumulate stale state across runs
-        # by checking that the method is callable and the state is finite
-        assert isinstance(second_batch, set)
+        # The second batch should NOT accumulate scores from the first run
+        assert second_count <= first_count + 5, \
+            "batch scores appear to accumulate across runs"
 
-        # Add stale fingerprints before the next run, verify they're gone after
-        pipeline.gate._batch_facts.add("stale:between:runs")
+        # Add stale score before the next run, verify it's gone after
+        pipeline.gate._batch_scores.append(0.999)
         pipeline.ingest_transcript(transcripts[0], session_id="run-3")
-        assert "stale:between:runs" not in pipeline.gate._batch_facts
+        assert 0.999 not in pipeline.gate._batch_scores
     finally:
         for p in transcripts:
             Path(p).unlink()
