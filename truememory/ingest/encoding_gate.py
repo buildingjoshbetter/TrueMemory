@@ -38,7 +38,9 @@ falls back to internal heuristics. Prediction error uses an
 embedding-based scorer that is independent of L5's surprise module.
 
 **What a skeptical reader should know**: the final encoding decision is
-`0.40 * novelty + 0.35 * salience + 0.25 * prediction_error >= 0.30`.
+`0.25 * novelty + 0.20 * salience + 0.30 * prediction_error >= 0.26`
+(with a salience floor of 0.10 — messages below the floor are rejected
+regardless of gate score).
 The neuroscience names describe what each term is *inspired by*, not a
 claim that this is how the brain works.
 
@@ -140,7 +142,7 @@ class EncodingGate:
     def __init__(
         self,
         memory,
-        threshold: float = 0.30,
+        threshold: float = 0.26,
         w_novelty: float | None = None,
         w_salience: float | None = None,
         w_prediction_error: float | None = None,
@@ -149,11 +151,11 @@ class EncodingGate:
         self.memory = memory
         self.threshold = threshold
         if w_novelty is None:
-            w_novelty = float(os.environ.get("TRUEMEMORY_GATE_W_NOVELTY", "0.40"))
+            w_novelty = float(os.environ.get("TRUEMEMORY_GATE_W_NOVELTY", "0.25"))
         if w_salience is None:
-            w_salience = float(os.environ.get("TRUEMEMORY_GATE_W_SALIENCE", "0.35"))
+            w_salience = float(os.environ.get("TRUEMEMORY_GATE_W_SALIENCE", "0.20"))
         if w_prediction_error is None:
-            w_prediction_error = float(os.environ.get("TRUEMEMORY_GATE_W_PE", "0.25"))
+            w_prediction_error = float(os.environ.get("TRUEMEMORY_GATE_W_PE", "0.30"))
         self.w_novelty = w_novelty
         self.w_salience = w_salience
         self.w_prediction_error = w_prediction_error
