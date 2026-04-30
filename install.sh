@@ -11,10 +11,13 @@
 #   3. Installs truememory as an isolated uv tool.
 #   4. Runs `truememory-mcp --setup` (code from PyPI) to auto-configure
 #      Claude Code and/or Claude Desktop. Set TRUEMEMORY_SKIP_SETUP=1 to skip.
+#   5. Runs `truememory-ingest install` to wire up lifecycle hooks
+#      (SessionStart, Stop, UserPromptSubmit, PreCompact) and merge
+#      CLAUDE.md instructions so Claude uses TrueMemory proactively.
 #
 # Environment overrides:
 #   TRUEMEMORY_PY=3.12         # pin a specific Python (default: 3.12)
-#   TRUEMEMORY_EXTRAS=mcp      # pip extras (default: mcp; use "gpu,mcp" for Pro)
+#   TRUEMEMORY_EXTRAS=          # pip extras (default: none; use "gpu" for Pro/GPU support)
 #   TRUEMEMORY_SOURCE=...      # install from a local path or git URL instead of PyPI
 #                            # (useful for testing: TRUEMEMORY_SOURCE=/path/to/truememory)
 #   TRUEMEMORY_SKIP_SETUP=1    # skip the Claude auto-config step
@@ -44,7 +47,7 @@ main() {
   set -eu
 
   TRUEMEMORY_PY="${TRUEMEMORY_PY:-3.12}"
-  TRUEMEMORY_EXTRAS="${TRUEMEMORY_EXTRAS:-mcp}"
+  TRUEMEMORY_EXTRAS="${TRUEMEMORY_EXTRAS:-}"
   TRUEMEMORY_SOURCE="${TRUEMEMORY_SOURCE:-}"
 
   # Defend against hostile env vars (e.g. a malicious "paste this" blog post).
@@ -58,10 +61,18 @@ main() {
   esac
 
   if [ -n "$TRUEMEMORY_SOURCE" ]; then
-    PKG_SPEC="${TRUEMEMORY_SOURCE}[${TRUEMEMORY_EXTRAS}]"
+    if [ -n "$TRUEMEMORY_EXTRAS" ]; then
+      PKG_SPEC="${TRUEMEMORY_SOURCE}[${TRUEMEMORY_EXTRAS}]"
+    else
+      PKG_SPEC="$TRUEMEMORY_SOURCE"
+    fi
     say "using custom source: $TRUEMEMORY_SOURCE"
   else
-    PKG_SPEC="truememory[${TRUEMEMORY_EXTRAS}]"
+    if [ -n "$TRUEMEMORY_EXTRAS" ]; then
+      PKG_SPEC="truememory[${TRUEMEMORY_EXTRAS}]"
+    else
+      PKG_SPEC="truememory"
+    fi
   fi
 
   # ---------- preflight ----------
@@ -116,6 +127,10 @@ main() {
     # resolves to the isolated tool venv, so Claude gets a stable absolute path.
     truememory-mcp --setup || \
       warn "auto-setup returned non-zero (you can re-run it with: truememory-mcp --setup)"
+
+    say "installing hooks and CLAUDE.md instructions..."
+    truememory-ingest install || \
+      warn "hook install returned non-zero (you can re-run it with: truememory-ingest install)"
   fi
 
   # ---------- done ----------
