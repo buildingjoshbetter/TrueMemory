@@ -120,6 +120,16 @@ _CATEGORY_SALIENCE_BOOST = {
     "general": 0.05,
 }
 
+# Per-category threshold overrides. High-value categories (corrections,
+# decisions, relationships) get a lower bar to pass the gate because
+# they're worth storing even when their scores are borderline.
+# Uses the same category string from the LLM extractor.
+_CATEGORY_THRESHOLD_OVERRIDE = {
+    "correction": -0.06,
+    "decision": -0.04,
+    "relationship": -0.04,
+}
+
 
 class EncodingGate:
     """
@@ -200,7 +210,10 @@ class EncodingGate:
         if floored:
             should_encode = False
         else:
-            should_encode = score >= self.threshold
+            cat = (category or "").strip().lower()
+            effective_threshold = self.threshold + _CATEGORY_THRESHOLD_OVERRIDE.get(cat, 0.0)
+            effective_threshold = max(0.10, effective_threshold)
+            should_encode = score >= effective_threshold
         reason = self._explain(novelty, salience, pred_error, score, should_encode, floored)
 
         verdict = "ENCODE" if should_encode else "SKIP"
