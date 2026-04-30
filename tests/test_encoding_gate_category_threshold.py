@@ -33,7 +33,7 @@ def test_correction_gets_lower_threshold():
 
 def test_general_category_no_override():
     """General category should use the default threshold unchanged."""
-    from truememory.ingest.encoding_gate import EncodingGate, _CATEGORY_THRESHOLD_OVERRIDE
+    from truememory.ingest.encoding_gate import _CATEGORY_THRESHOLD_OVERRIDE
 
     assert "general" not in _CATEGORY_THRESHOLD_OVERRIDE
 
