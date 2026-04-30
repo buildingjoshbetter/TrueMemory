@@ -55,6 +55,8 @@ import logging
 import os
 from dataclasses import dataclass
 
+import numpy as np
+
 log = logging.getLogger(__name__)
 
 
@@ -382,9 +384,6 @@ class EncodingGate:
             emb_fact = embeddings[0]
             emb_mem = embeddings[1]
 
-            # Check similarity — if message is about a completely different
-            # topic, there's nothing to contradict (that's novelty, not PE)
-            import numpy as np
             norm_f = float(np.linalg.norm(emb_fact))
             norm_m = float(np.linalg.norm(emb_mem))
             if norm_f < 1e-10 or norm_m < 1e-10:

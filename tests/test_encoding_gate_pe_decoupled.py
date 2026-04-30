@@ -43,23 +43,20 @@ def test_pe_not_clamped_at_high_novelty():
 def test_pe_not_forced_zero_at_low_novelty():
     """PE should NOT be forced to 0.0 when novelty is very low.
 
-    Before this fix, lines 358-360 forced PE to 0.0 whenever
-    novelty < 0.05. A near-duplicate that CONTRADICTS existing
-    memory should still get high PE.
+    A near-duplicate that discusses the same topic should still get
+    nonzero PE from the embedding pair-difference scorer when the
+    content diverges from the stored memory.
     """
     from truememory.ingest.encoding_gate import EncodingGate
 
     # High similarity = low novelty (~0.05)
     gate = EncodingGate(memory=MockMemoryWithScore(score=0.95, content="I work at Stripe"))
 
-    # This message contradicts existing memory — should have nonzero PE
-    # even though novelty is very low (near-duplicate text similarity)
+    # This message discusses the same topic (Stripe) but adds new info.
+    # The embedding pair-difference scorer should produce nonzero PE
+    # because (message, memory) pair diverges from (memory, memory) self-pair.
     decision = gate.evaluate("I switched from Stripe to Anthropic", "personal")
 
-    # The _looks_like_update heuristic should catch "switched from...to"
-    # and return high PE. Before the fix, PE was forced to 0.0 for
-    # low-novelty messages, so this contradiction would be invisible.
-    # We just check PE is not forced to exactly 0.0
     assert decision.prediction_error > 0.0, (
         f"PE should not be forced to 0.0 for near-duplicates that contain updates. "
         f"Got PE={decision.prediction_error}"
