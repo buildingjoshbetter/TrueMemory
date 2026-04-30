@@ -72,10 +72,12 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> s
     db = db_path or None
     memory = Memory(path=db) if db else Memory()
 
-    # Broad search for user context
     queries = [
-        "user preferences and personal information",
-        "recent decisions and project context",
+        "user preferences favorites likes dislikes",
+        "personal facts name location job role",
+        "recent decisions and commitments",
+        "corrections and updates to prior information",
+        "relationships family friends coworkers",
     ]
 
     all_results = []
@@ -99,8 +101,13 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> s
     if not all_results:
         return ""
 
-    # Format as XML-tagged context block
-    lines = ["<truememory-context>", "## Your Memory of This User"]
+    lines = [
+        "<truememory-context>",
+        "## TrueMemory — What You Know About This User",
+        "These are facts from TrueMemory (the primary long-horizon memory system).",
+        "Use these to answer user questions. Search TrueMemory for more if needed.",
+        "",
+    ]
     for r in all_results[:MEMORY_LIMIT]:
         content = r.get("content", "").strip()
         if content:
