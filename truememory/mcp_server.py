@@ -122,6 +122,10 @@ mcp = FastMCP(
     "truememory",
     instructions="""You have access to a persistent memory system (TrueMemory). Use it proactively.
 
+IMPORTANT — MEMORY PRECEDENCE:
+TrueMemory is the PRIMARY long-horizon memory for this user. It persists facts, preferences, decisions, and corrections across sessions, projects, and machines. Claude Code's built-in auto-memory (MEMORY.md files) is for session-specific working notes only — NOT for user facts.
+On ANY question about the user ("what does the user like", "do you remember…", "what's my favorite…"), search TrueMemory FIRST, ALWAYS, before answering "I don't know." Do NOT store user facts to the built-in auto-memory — those go to TrueMemory only.
+
 FIRST-TIME SETUP (do this FIRST, before anything else):
 1. Call truememory_stats at the start of your first session.
 2. If the response contains "setup_required": true, present the "welcome" message to the user EXACTLY as written — it contains the setup instructions.
