@@ -1014,8 +1014,14 @@ def _setup_claude():
     # --- Claude Code CLI ---
     claude_bin = shutil.which("claude")
     if claude_bin:
-        add_cmd = [claude_bin, "mcp", "add", "truememory", "--",
-                   python_path, *mcp_args]
+        # Migration: remove any project-scoped entry from older installs
+        # that registered without --scope user. The project-scoped entry
+        # only works from the cwd where install ran — useless for a memory
+        # tool that should work everywhere.
+        _run_claude([claude_bin, "mcp", "remove", "--scope", "local", "truememory"])
+
+        add_cmd = [claude_bin, "mcp", "add", "--scope", "user",
+                   "truememory", "--", python_path, *mcp_args]
         result = _run_claude(add_cmd)
         if result is None:
             pass  # Timeout already warned — fall through to Claude Desktop
@@ -1045,7 +1051,7 @@ def _setup_claude():
                 configured.append("Claude Code (existing config preserved)")
             else:
                 # Stale entry — remove and re-add.
-                _run_claude([claude_bin, "mcp", "remove", "truememory"])
+                _run_claude([claude_bin, "mcp", "remove", "--scope", "user", "truememory"])
                 retry = _run_claude(add_cmd)
                 if retry is not None and retry.returncode == 0:
                     configured.append("Claude Code (stale entry replaced)")
@@ -1103,7 +1109,7 @@ def _setup_claude():
             print("  Claude Desktop not detected.")
         print()
         print("  Manual setup:")
-        print(f"    claude mcp add truememory -- {python_path} -m truememory.mcp_server")
+        print(f"    claude mcp add --scope user truememory -- {python_path} -m truememory.mcp_server")
     print()
 
 
