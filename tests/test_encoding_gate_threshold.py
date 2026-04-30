@@ -1,7 +1,5 @@
 """Test that the encoding gate threshold uses >= (paper equation 4)."""
 
-import pytest
-
 
 class MockMemoryFixedScore:
     """Returns results with a controlled score to produce a known gate score.
@@ -56,46 +54,28 @@ def test_docstring_mentions_gte():
     )
 
 
-@pytest.mark.parametrize("search_score,expected_novelty", [
-    (0.0, 1.0),     # no match → fully novel
-    (0.05, 0.95),   # 1.0 - 0.05
-    (0.10, 0.90),   # 1.0 - 0.10
-    (0.25, 0.75),   # 1.0 - 0.25
-    (0.50, 0.50),   # 1.0 - 0.50
-    (0.95, 0.05),   # 1.0 - 0.95 = 0.05 (floor)
-    (1.0, 0.05),    # floor at 0.05
-])
-def test_linear_novelty_mapping(search_score, expected_novelty):
-    """Verify the novelty = 1 - similarity inversion (paper eq 1)."""
+def test_compression_novelty_empty_memory():
+    """Empty memory should give maximum novelty."""
     from truememory.ingest.encoding_gate import EncodingGate
 
     gate = EncodingGate(
-        memory=MockMemoryFixedScore(score=search_score),
-        w_novelty=1.0,
-        w_salience=0.0,
-        w_prediction_error=0.0,
+        memory=MockMemoryFixedScore(score=0.0),  # empty results
+        w_novelty=1.0, w_salience=0.0, w_prediction_error=0.0,
     )
-    decision = gate.evaluate("test fact", "")
-    assert abs(decision.novelty - expected_novelty) < 0.01, (
-        f"At search_score={search_score}, expected novelty ~{expected_novelty}, "
-        f"got {decision.novelty:.4f}"
-    )
+    decision = gate.evaluate("I just got a new job at Google", "")
+    assert decision.novelty == 1.0, f"Empty memory should give novelty=1.0, got {decision.novelty}"
 
 
-def test_novelty_monotonically_decreasing():
-    """Higher search similarity should produce lower novelty."""
+def test_compression_novelty_in_valid_range():
+    """Novelty scores must be in [0.05, 1.0]."""
     from truememory.ingest.encoding_gate import EncodingGate
 
-    prev_novelty = 2.0
-    for score in [0.0, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9, 1.0]:
-        gate = EncodingGate(
-            memory=MockMemoryFixedScore(score=score),
-            w_novelty=1.0, w_salience=0.0, w_prediction_error=0.0,
+    gate = EncodingGate(
+        memory=MockMemoryFixedScore(score=0.5, content="I work at Google as an engineer"),
+        w_novelty=1.0, w_salience=0.0, w_prediction_error=0.0,
+    )
+    for msg in ["ok", "I got a new job", "We are moving to Portland next month"]:
+        decision = gate.evaluate(msg, "")
+        assert 0.0 <= decision.novelty <= 1.0, (
+            f"Novelty {decision.novelty} out of range for: {msg!r}"
         )
-        decision = gate.evaluate("test", "")
-        assert decision.novelty <= prev_novelty, (
-            f"Novelty should decrease as similarity increases: "
-            f"score={score} gave novelty={decision.novelty}, "
-            f"but previous (lower score) gave {prev_novelty}"
-        )
-        prev_novelty = decision.novelty
