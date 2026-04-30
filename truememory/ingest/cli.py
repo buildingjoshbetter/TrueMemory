@@ -555,8 +555,11 @@ def _run_install(args):
     settings = {
         "hooks": {
             event: [{
-                "type": "command",
-                "command": _build_command(path),
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": _build_command(path),
+                }],
             }]
             for event, path in hook_files.items()
         }
@@ -614,6 +617,32 @@ def _run_install(args):
                 "(earlier versions registered the wrong event name)."
             )
 
+    # Migration: earlier versions wrote hooks in the flat format
+    # {type, command} instead of the required {matcher, hooks: [{type, command}]}.
+    # Claude Code rejects the entire settings.json when any hook uses the
+    # old format. Upgrade in-place before merging new entries.
+    for event in list(existing["hooks"].keys()):
+        entries = existing["hooks"][event]
+        if not isinstance(entries, list):
+            continue
+        migrated = []
+        did_migrate = False
+        for h in entries:
+            if not isinstance(h, dict):
+                migrated.append(h)
+                continue
+            if "type" in h and "command" in h and "hooks" not in h:
+                migrated.append({
+                    "matcher": "",
+                    "hooks": [h],
+                })
+                did_migrate = True
+            else:
+                migrated.append(h)
+        if did_migrate:
+            existing["hooks"][event] = migrated
+            print(f"Migrated '{event}' hook entries from old format to new {{matcher, hooks}} schema.")
+
     for event, hooks in settings["hooks"].items():
         existing["hooks"].setdefault(event, [])
         if not isinstance(existing["hooks"][event], list):
@@ -621,11 +650,22 @@ def _run_install(args):
         # Don't add duplicates (match on stop.py / session_start.py etc.)
         for hook in hooks:
             hook_file = str(hook_files[event])
-            already_present = any(
-                hook_file in h.get("command", "")
-                for h in existing["hooks"][event]
-                if isinstance(h, dict)
-            )
+            already_present = False
+            for h in existing["hooks"][event]:
+                if not isinstance(h, dict):
+                    continue
+                # Check new schema: {matcher, hooks: [{type, command}]}
+                inner_hooks = h.get("hooks", [])
+                if isinstance(inner_hooks, list):
+                    for ih in inner_hooks:
+                        if isinstance(ih, dict) and hook_file in ih.get("command", ""):
+                            already_present = True
+                            break
+                # Check old schema: {type, command} (for migration)
+                if hook_file in h.get("command", ""):
+                    already_present = True
+                if already_present:
+                    break
             if not already_present:
                 existing["hooks"][event].append(hook)
 
