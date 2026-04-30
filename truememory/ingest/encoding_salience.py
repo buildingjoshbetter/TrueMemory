@@ -71,6 +71,7 @@ _COMMITMENT_PATTERNS = frozenset({
     "got the job", "got the offer", "got accepted", "got rejected",
     "got promoted", "got fired", "got hired", "got laid off",
     "gave my notice", "two weeks notice", "gave notice",
+    "passed away", "passed on",
 })
 
 # Category salience boost (same mapping as encoding_gate.py)
@@ -263,6 +264,14 @@ def _speech_act_score(content: str) -> float:
         return 0.2
     if _COMMITMENT_RE.search(lower):
         return 0.8
+    if any(p in lower for p in _COMMITMENT_PATTERNS):
+        return 0.7
+    if (
+        re.search(r"\b(?:no longer|not anymore|instead|correction)\b", lower)
+        or any(v in lower for v in _UPDATE_VERBS)
+        or ("actually" in lower and re.search(r"\bnot\b", lower))
+    ):
+        return 0.6
     if re.match(r"^(?:hey|hi|hello|yo|sup|what's up|howdy)", lower):
         return 0.05
     if re.match(r"^(?:haha|lol|lmao|omg|wow|damn|ugh|yikes)", lower):
