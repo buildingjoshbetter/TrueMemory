@@ -175,13 +175,13 @@ except (ImportError, ModuleNotFoundError):
 # Helper
 # ───────────────────────────────────────────────────────────────────────────
 
-def _timed(label: str, fn, *args, **kwargs):
-    """Run *fn* and return ``(result, timing_str)``."""
-    t0 = time.time()
-    result = fn(*args, **kwargs)
-    elapsed = time.time() - t0
-    return result, f"{elapsed:.3f}s"
-
+_QUERY_STOP_WORDS = frozenset({
+    "what", "did", "does", "do", "how", "where", "when", "who",
+    "which", "why", "is", "are", "was", "were", "has", "have",
+    "had", "would", "could", "should", "will", "can", "the",
+    "a", "an", "in", "on", "at", "to", "for", "of", "with",
+    "about", "their", "they", "them", "his", "her", "its",
+})
 
 def _has_personality_intent(query: str) -> bool:
     """
@@ -1898,13 +1898,7 @@ Return ONLY the queries, one per line, no numbering or explanation:"""
         # ── 2. Search within matched senders ──────────────────────────────
         if matched_senders:
             # Build a focused query by removing the sender name and stop words
-            stop_words = {
-                "what", "did", "does", "do", "how", "where", "when", "who",
-                "which", "why", "is", "are", "was", "were", "has", "have",
-                "had", "would", "could", "should", "will", "can", "the",
-                "a", "an", "in", "on", "at", "to", "for", "of", "with",
-                "about", "their", "they", "them", "his", "her", "its",
-            }
+            stop_words = _QUERY_STOP_WORDS
 
             content_words = []
             for word in query_words:
@@ -1943,13 +1937,7 @@ Return ONLY the queries, one per line, no numbering or explanation:"""
         # ── 3. Focused content-only search ────────────────────────────────
         # Search with just the key content terms, dropping question structure
         if not matched_senders:
-            stop_words = {
-                "what", "did", "does", "do", "how", "where", "when", "who",
-                "which", "why", "is", "are", "was", "were", "has", "have",
-                "had", "would", "could", "should", "will", "can", "the",
-                "a", "an", "in", "on", "at", "to", "for", "of", "with",
-                "about", "their", "they", "them", "his", "her", "its",
-            }
+            stop_words = _QUERY_STOP_WORDS
             content_words = [
                 w.strip("'\"?.,!") for w in query_words
                 if w.strip("'\"?.,!").lower() not in stop_words
@@ -1970,32 +1958,6 @@ Return ONLY the queries, one per line, no numbering or explanation:"""
     # ──────────────────────────────────────────────────────────────────────
     # Query paraphrasing helper
     # ──────────────────────────────────────────────────────────────────────
-
-    def _generate_query_paraphrases(
-        self, query: str, llm_fn, max_paraphrases: int = 2,
-    ) -> list[str]:
-        """
-        Generate semantic paraphrases of a query to catch vocabulary
-        variations. Unlike HyDE (hypothetical answers), this generates
-        alternative question phrasings with different vocabulary.
-        """
-        prompt = f"""Given this question: "{query}"
-
-Generate {max_paraphrases} alternative phrasings that ask the SAME question but use DIFFERENT vocabulary.
-Each paraphrase should be short and search-friendly (not a hypothetical answer).
-
-Return ONLY the paraphrases, one per line, no numbering:"""
-
-        try:
-            response = llm_fn(prompt)
-            lines = [
-                line.strip().strip('"').strip("'").strip("-").strip()
-                for line in response.strip().split("\n")
-                if line.strip() and len(line.strip()) > 5
-            ]
-            return lines[:max_paraphrases]
-        except Exception:
-            return []
 
     # ──────────────────────────────────────────────────────────────────────
     # Result cleaning helper

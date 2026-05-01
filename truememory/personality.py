@@ -207,22 +207,24 @@ def _extract_proper_nouns(content: str) -> list[str]:
     return [w for w in words if w not in common]
 
 
+_EMOJI_RE = re.compile(
+    "[\U0001f600-\U0001f64f"  # emoticons
+    "\U0001f300-\U0001f5ff"   # symbols & pictographs
+    "\U0001f680-\U0001f6ff"   # transport & map
+    "\U0001f1e0-\U0001f1ff"   # flags
+    "\U00002702-\U000027b0"
+    "\U000024c2-\U0001f251"
+    "\U0001f900-\U0001f9ff"   # supplemental symbols
+    "\U0001fa00-\U0001fa6f"   # chess symbols
+    "\U0001fa70-\U0001faff"   # extended-A
+    "]+",
+    flags=re.UNICODE,
+)
+
+
 def _detect_emoji(content: str) -> bool:
     """Return True if content contains emoji characters."""
-    emoji_pattern = re.compile(
-        "[\U0001f600-\U0001f64f"  # emoticons
-        "\U0001f300-\U0001f5ff"   # symbols & pictographs
-        "\U0001f680-\U0001f6ff"   # transport & map
-        "\U0001f1e0-\U0001f1ff"   # flags
-        "\U00002702-\U000027b0"
-        "\U000024c2-\U0001f251"
-        "\U0001f900-\U0001f9ff"   # supplemental symbols
-        "\U0001fa00-\U0001fa6f"   # chess symbols
-        "\U0001fa70-\U0001faff"   # extended-A
-        "]+",
-        flags=re.UNICODE,
-    )
-    return bool(emoji_pattern.search(content))
+    return bool(_EMOJI_RE.search(content))
 
 
 def _assess_formality(messages: list[dict]) -> str:
