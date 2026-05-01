@@ -11,12 +11,12 @@
   <a href="https://pypi.org/project/truememory/"><img src="https://img.shields.io/pypi/pyversions/truememory?color=blue" alt="Python"></a>
   <a href="https://github.com/buildingjoshbetter/TrueMemory/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License"></a>
   <img src="https://img.shields.io/badge/Edge-90.1%25_LoCoMo-brightgreen" alt="Edge Score">
-  <img src="https://img.shields.io/badge/Base-91.5%25_LoCoMo-blue" alt="Base Score">
-  <img src="https://img.shields.io/badge/Pro-91.8%25_LoCoMo-blueviolet" alt="Pro Score">
+  <img src="https://img.shields.io/badge/Base-91.7%25_LoCoMo-blue" alt="Base Score">
+  <img src="https://img.shields.io/badge/Pro-92.9%25_LoCoMo-blueviolet" alt="Pro Score">
 </p>
 
 <p align="center">
-  <strong>🏆 91.8% on LoCoMo (Pro) · 📦 One SQLite File · ☁️ Zero Cloud · 💰 Zero Infrastructure Cost</strong>
+  <strong>🏆 92.9% on LoCoMo (Pro) · 📦 One SQLite File · ☁️ Zero Cloud · 💰 Zero Infrastructure Cost</strong>
 </p>
 
 <p align="center">
@@ -29,7 +29,7 @@
 
 Tested on [LoCoMo](https://github.com/snap-research/locomo), the standard benchmark for conversational memory. 1,540 questions across 10 conversations. All 8 systems share the same answer model, judge, scoring, top-k, and byte-identical answer prompt — only retrieval differs.
 
-> **Note on charts:** the hero banner and the three charts below still show the v0.3.0 single-Pro-tier layout (91.5%). Chart regeneration is tracked for a later release; all numerical claims in the README text and tables reflect the v0.4.0 three-tier scores (90.1 / 91.5 / 91.8%).
+> **Note on charts:** the hero banner and the three charts below still show the v0.3.0 single-Pro-tier layout. Chart regeneration is tracked for a later release; all numerical claims in the README text and tables reflect the current validated scores (90.1 / 91.7 / 92.9%).
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/assets/charts/leaderboard-bar.png?v=2" alt="LoCoMo 8-System Comparison" />
@@ -47,7 +47,7 @@ All scores use the same evaluation pipeline: GPT-4.1-mini answer generation, GPT
 
 ## ⚡ Research Highlights
 
-- **30+ percentage points more accurate than Mem0** on LoCoMo (91.8% Pro vs 61.4%)
+- **30+ percentage points more accurate than Mem0** on LoCoMo (92.9% Pro vs 61.4%)
 - **2x more cost-efficient** per correct answer than Mem0
 - **Runs offline** on any device with Python 3.10+ and 512MB RAM (Edge tier)
 - **One SQLite file, zero API keys** for Edge and Base tiers. The entire 6-layer system runs offline.
@@ -67,7 +67,7 @@ Same features, same 6-layer pipeline. Three tiers trade off install size, hardwa
 
 | | Edge | Base | Pro |
 |---|------|------|-----|
-| **LoCoMo** | 90.1% | 91.5% | 91.8% |
+| **LoCoMo** | 90.1% | 91.7% | 92.9% |
 | **Embedder** | Model2Vec potion-base-8M (8M params, 256d) | Qwen3-Embedding-0.6B @ 256d Matryoshka (600M params) | Qwen3-Embedding-0.6B @ 256d Matryoshka (600M params) |
 | **Reranker** | ms-marco-MiniLM-L-6-v2 (22M) | gte-reranker-modernbert-base (149M) | gte-reranker-modernbert-base (149M) |
 | **HyDE** | off | off | on (requires an LLM API key) |

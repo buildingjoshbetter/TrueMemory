@@ -7,7 +7,8 @@
   Compression novelty (AUC 0.788), speech-act salience (AUC 0.733), and embedding
   pair-diff prediction error (AUC 0.730) are combined into a weighted score
   (default: `0.25·novelty + 0.20·salience + 0.30·PE`, threshold 0.30). Gate AUC
-  0.810. Weights tuned via 18,480-config sweep. Configurable via `TRUEMEMORY_GATE_*`
+  0.810. Weights tuned via multi-hundred-config sweep across weights, thresholds,
+  and salience floors. Configurable via `TRUEMEMORY_GATE_*`
   env vars. Disable entirely with `TRUEMEMORY_GATE_ENABLED=0`. (#103–#123)
   - **Compression novelty** replaces cosine similarity inversion (#107, #116).
     Cosine distance is anti-correlated with novelty in conversational data;
