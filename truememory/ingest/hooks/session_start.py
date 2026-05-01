@@ -128,21 +128,45 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> s
         "relationships family friends coworkers",
     ]
 
+    per_query_limit = max(1, MEMORY_LIMIT // len(queries))
+
     all_results = []
     seen_ids = set()
+    seen_content = set()
 
     for query in queries:
+        added_this_query = 0
         try:
             if user_id:
-                results = memory.search(query, user_id=user_id, limit=MEMORY_LIMIT)
+                results = memory.search(query, user_id=user_id, limit=per_query_limit * 3)
             else:
-                results = memory.search(query, limit=MEMORY_LIMIT)
+                results = memory.search(query, limit=per_query_limit * 3)
 
             for r in results:
+                if added_this_query >= per_query_limit:
+                    break
                 rid = r.get("id")
-                if rid not in seen_ids:
-                    seen_ids.add(rid)
-                    all_results.append(r)
+                if rid in seen_ids:
+                    continue
+                content = r.get("content", "").strip()
+                if not content:
+                    continue
+                # Content-based dedup: normalize and check for near-duplicates
+                normalized = content.lower().strip().rstrip(".")
+                if normalized in seen_content:
+                    continue
+                # Check for substring containment (catches rephrased duplicates)
+                is_dup = False
+                for existing in seen_content:
+                    if normalized in existing or existing in normalized:
+                        is_dup = True
+                        break
+                if is_dup:
+                    continue
+                seen_ids.add(rid)
+                seen_content.add(normalized)
+                all_results.append(r)
+                added_this_query += 1
         except Exception:
             continue
 
