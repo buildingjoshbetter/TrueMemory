@@ -3,6 +3,10 @@
 </p>
 
 <p align="center">
+  <em>a <strong>sauron company</strong></em>
+</p>
+
+<p align="center">
   One SQLite file. Zero cloud. One command to set up.
 </p>
 
@@ -13,10 +17,11 @@
   <img src="https://img.shields.io/badge/Edge-89.6%25_LoCoMo-brightgreen" alt="Edge Score">
   <img src="https://img.shields.io/badge/Base-92.0%25_LoCoMo-blue" alt="Base Score">
   <img src="https://img.shields.io/badge/Pro-93.0%25_LoCoMo-blueviolet" alt="Pro Score">
+  <img src="https://img.shields.io/badge/Pro-75.0%25_BEAM--1M_(SOTA)-orange" alt="BEAM Score">
 </p>
 
 <p align="center">
-  <strong>🏆 93.0% on LoCoMo (Pro) · 📦 One SQLite File · ☁️ Zero Cloud · 💰 Zero Infrastructure Cost</strong>
+  <strong>🏆 93.0% on LoCoMo (Pro) · 🥇 SOTA on BEAM-1M (75.0%) · 📦 One SQLite File · ☁️ Zero Cloud · 💰 Zero Infrastructure Cost</strong>
 </p>
 
 <p align="center">
@@ -29,7 +34,7 @@
 
 Tested on [LoCoMo](https://github.com/snap-research/locomo), the standard benchmark for conversational memory. 1,540 questions across 10 conversations. All 8 systems share the same answer model, judge, scoring, top-k, and byte-identical answer prompt — only retrieval differs.
 
-> **Note on charts:** the hero banner and the three charts below still show the v0.3.0 single-Pro-tier layout. Chart regeneration is tracked for a later release; all numerical claims in the README text and tables reflect the current 3-run mean scores (89.6 / 92.0 / 93.0%).
+> All charts reflect the current 3-run mean scores (89.6 / 92.0 / 93.0%). Source HTML files in [`assets/charts/`](assets/charts/).
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/assets/charts/leaderboard-bar.png?v=2" alt="LoCoMo 8-System Comparison" />
@@ -68,6 +73,7 @@ Same features, same 6-layer pipeline. Three tiers trade off install size, hardwa
 | | Edge | Base | Pro |
 |---|------|------|-----|
 | **LoCoMo** (3-run mean ± std) | 89.6% ±0.19 | 92.0% ±0.22 | 93.0% ±0.14 |
+| **BEAM 1M** | — | — | 75.0% |
 | **Embedder** | Model2Vec potion-base-8M (8M params, 256d) | Qwen3-Embedding-0.6B @ 256d Matryoshka (600M params) | Qwen3-Embedding-0.6B @ 256d Matryoshka (600M params) |
 | **Reranker** | ms-marco-MiniLM-L-6-v2 (22M) | gte-reranker-modernbert-base (149M) | gte-reranker-modernbert-base (149M) |
 | **HyDE** | off | off | on (requires an LLM API key) |
@@ -260,4 +266,10 @@ Every benchmark script is self-contained and runs on [Modal](https://modal.com).
 
 ## ⚖️ License
 
-Licensed under [AGPL-3.0](https://github.com/buildingjoshbetter/TrueMemory/blob/main/LICENSE). Free for personal and research use. Commercial use requires a separate license — contact buildingjoshbetter@gmail.com.
+Licensed under [AGPL-3.0](https://github.com/buildingjoshbetter/TrueMemory/blob/main/LICENSE). Free for personal and research use. Commercial use requires a separate license — contact josh@sauronlabs.ai.
+
+---
+
+<p align="center">
+  <em>TrueMemory, a <strong>sauron company</strong> · <a href="https://sauronlabs.ai">sauronlabs.ai</a></em>
+</p>
