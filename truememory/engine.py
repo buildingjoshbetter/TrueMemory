@@ -637,6 +637,8 @@ class TrueMemoryEngine:
 
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = None  # Use default tuple rows
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=5000")
 
         # Detect available tables
         tables = {
@@ -1034,7 +1036,17 @@ class TrueMemoryEngine:
         if _HAS_PERSONALITY:
             try:
                 t0 = time.time()
-                dunbar_result = build_dunbar_hierarchy(self.conn)
+                primary = None
+                try:
+                    row = self.conn.execute(
+                        "SELECT sender, COUNT(*) as cnt FROM messages "
+                        "GROUP BY sender ORDER BY cnt DESC LIMIT 1"
+                    ).fetchone()
+                    if row:
+                        primary = row[0]
+                except Exception:
+                    pass
+                dunbar_result = build_dunbar_hierarchy(self.conn, primary_entity=primary)
                 dunbar_count = len(dunbar_result) if isinstance(dunbar_result, dict) else dunbar_result
                 stats["dunbar_hierarchy"] = f"{dunbar_count} relationships in {time.time() - t0:.3f}s"
             except Exception as exc:

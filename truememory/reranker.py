@@ -25,8 +25,11 @@ Dependencies:
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import TYPE_CHECKING
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -448,6 +451,6 @@ def rerank_with_llm(
         scored.sort(key=lambda r: (-r["llm_rerank_score"], -r.get("rrf_score", 0)))
         return scored[:top_k]
 
-    except Exception:
-        # Fallback: return original order
+    except Exception as e:
+        log.warning("LLM reranking failed: %s — returning original order", e)
         return results[:top_k]

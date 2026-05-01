@@ -522,9 +522,11 @@ def build_entity_profiles(conn: sqlite3.Connection) -> dict:
                 "primary_topic": top_topic,
             }
 
-        # Topics and traits
-        topics = _extract_topics(messages)
-        traits = _extract_traits(messages)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            topics = _extract_topics(messages)
+            traits = _extract_traits(messages)
 
         profile = {
             "message_count": len(messages),

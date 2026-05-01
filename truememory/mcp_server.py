@@ -14,7 +14,8 @@ Usage::
     truememory-mcp
 
 Configuration via environment variables:
-    TRUEMEMORY_DB    Path to .db file (default: ~/.truememory/memories.db)
+    TRUEMEMORY_DB_PATH  Path to .db file (default: ~/.truememory/memories.db)
+                        (also accepts legacy TRUEMEMORY_DB)
     ANTHROPIC_API_KEY   For agentic search via Anthropic (optional)
     OPENROUTER_API_KEY  For agentic search via OpenRouter (optional, fallback)
 """
@@ -165,7 +166,9 @@ You should store and recall memories as naturally as a good assistant who rememb
 )
 
 _DB_PATH = os.path.expanduser(
-    os.environ.get("TRUEMEMORY_DB", str(Path.home() / ".truememory" / "memories.db"))
+    os.environ.get("TRUEMEMORY_DB_PATH",
+                   os.environ.get("TRUEMEMORY_DB",
+                                  str(Path.home() / ".truememory" / "memories.db")))
 )
 _memory: Memory | None = None
 _memory_lock = threading.Lock()
@@ -798,12 +801,15 @@ def truememory_configure(
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
     # Build result with onboarding info
+    _tier_descriptions = {
+        "edge": "Edge: Model2Vec embeddings (8M params), MiniLM reranker (~30MB)",
+        "base": "Base: Qwen3 embeddings (256d), gte-reranker-modernbert (~1.5GB)",
+        "pro": "Pro: Qwen3 + HyDE query expansion (~1.5GB + API key)",
+    }
     result = {
         "status": "configured",
         "tier": tier,
-        "description": "Base: lightweight, works everywhere (~30MB)"
-        if tier == "base"
-        else "Pro: higher accuracy embeddings (~1.5GB)",
+        "description": _tier_descriptions.get(tier, f"Tier: {tier}"),
     }
     if rebuilt:
         result["note"] = "Existing memories have been re-embedded with the new model."
