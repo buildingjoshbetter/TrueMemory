@@ -11,10 +11,12 @@ faithful computational model of it. The three-signal gating architecture
 mirrors the *function* of hippocampal / amygdala / prefrontal circuits,
 not their *mechanism*. What you see in this code is a pragmatic proxy:
 
-- **Novelty** is vector-similarity inversion via truememory's hybrid
-  search. A novel fact is one whose content is dissimilar to existing
-  memories. Real CA1 novelty detection involves CA3→CA1 pattern
-  completion, oscillatory dynamics, and sparse coding we don't model.
+- **Novelty** uses gzip compression cost against stored memories.
+  Novel information compresses poorly against a memory-trained model;
+  redundant information compresses cheaply. Validated in 120-variant
+  sweep: AUC 0.788 vs 0.484 for cosine baseline. Real CA1 novelty
+  detection involves CA3→CA1 pattern completion, oscillatory dynamics,
+  and sparse coding we don't model.
 
 - **Salience** delegates to truememory's existing
   `salience.compute_message_salience` (which scores length, numbers,
@@ -153,7 +155,7 @@ class EncodingGate:
     def __init__(
         self,
         memory,
-        threshold: float = 0.26,
+        threshold: float = 0.30,
         w_novelty: float | None = None,
         w_salience: float | None = None,
         w_prediction_error: float | None = None,
