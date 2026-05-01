@@ -83,7 +83,10 @@ if not _HAS_TRUEMEMORY_SALIENCE:
 # copies of the same word list. Falls back to a minimal set if the
 # salience module isn't available.
 try:
-    from truememory.ingest.encoding_salience import _NOISE_EXACT_V23 as _PE_NOISE
+    from truememory.ingest.encoding_salience import (
+        _NOISE_EXACT_V23 as _PE_NOISE,
+        _CATEGORY_SALIENCE_BOOST,
+    )
 except ImportError:
     _PE_NOISE = frozenset({
         "ok", "okay", "k", "kk", "yes", "yeah", "yep", "yup",
@@ -92,6 +95,11 @@ except ImportError:
         "sounds good", "sure", "bet", "word", "same", "mood", "idk",
         "gn", "gm", "brb", "ttyl", "damn", "dude", "bro", "ugh", "wow",
     })
+    _CATEGORY_SALIENCE_BOOST = {
+        "correction": 0.40, "decision": 0.30, "personal": 0.25,
+        "preference": 0.25, "relationship": 0.20, "temporal": 0.15,
+        "technical": 0.10, "general": 0.05,
+    }
 
 
 @dataclass
@@ -105,20 +113,6 @@ class EncodingDecision:
     reason: str = ""         # Human-readable explanation
     similar_memory: str = "" # Most similar existing memory (if any)
 
-
-# Category-level weights derived from the LLM extractor's classification.
-# These are not "the amygdala" — they are a pragmatic boost for fact types
-# that matter more for future retrieval (corrections > decisions > technical).
-_CATEGORY_SALIENCE_BOOST = {
-    "correction": 0.40,
-    "decision": 0.30,
-    "personal": 0.25,
-    "preference": 0.25,
-    "relationship": 0.20,
-    "temporal": 0.15,
-    "technical": 0.10,
-    "general": 0.05,
-}
 
 # Per-category threshold overrides. High-value categories (corrections,
 # decisions, relationships) get a lower bar to pass the gate because

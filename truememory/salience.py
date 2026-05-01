@@ -378,7 +378,7 @@ def filter_by_salience(
 
     Args:
         results:      List of message dicts from search.
-        min_salience: Minimum salience score to keep (default 0.3).
+        min_salience: Minimum salience score to keep (default 0.10).
 
     Returns:
         Filtered list with ``salience`` scores attached.
@@ -503,7 +503,7 @@ def apply_salience_guard(
         query:        The original natural language query.
         conn:         Optional database connection for dynamic entity lookup.
                       If not provided, uses hardcoded entity list.
-        min_salience: Minimum salience threshold for filtering (default 0.25).
+        min_salience: Minimum salience threshold for filtering (default 0.10).
                       Lower values (e.g. 0.15) allow more results through for
                       broad/diffuse queries.
 

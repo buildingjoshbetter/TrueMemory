@@ -183,6 +183,34 @@ def get_reranker(model_name: str | None = None, device: str | None = None):
 # Reranking
 # ---------------------------------------------------------------------------
 
+
+def _normalize_and_fuse(
+    reranked: list[dict],
+    rerank_weight: float,
+    rrf_weight: float,
+    top_k: int,
+) -> list[dict]:
+    """Normalize rerank + original scores to [0,1] and fuse."""
+    if not reranked:
+        return []
+    rerank_scores = [r["rerank_score"] for r in reranked]
+    rr_min, rr_max = min(rerank_scores), max(rerank_scores)
+    rr_range = rr_max - rr_min if rr_max > rr_min else 1.0
+
+    orig_scores = [r.get("score", r.get("rrf_score", 0)) for r in reranked]
+    orig_min, orig_max = min(orig_scores), max(orig_scores)
+    orig_range = orig_max - orig_min if orig_max > orig_min else 1.0
+
+    for r in reranked:
+        norm_rerank = (r["rerank_score"] - rr_min) / rr_range
+        norm_orig = (r.get("score", r.get("rrf_score", 0)) - orig_min) / orig_range
+        r["fused_score"] = rerank_weight * norm_rerank + rrf_weight * norm_orig
+        r["score"] = r["fused_score"]
+
+    reranked.sort(key=lambda r: r["fused_score"], reverse=True)
+    return reranked[:top_k]
+
+
 def rerank(
     query: str,
     results: list[dict],
@@ -264,24 +292,7 @@ def rerank_with_fusion(
         return []
 
     reranked = rerank(query, results, top_k=len(results), **kwargs)
-
-    # Normalize scores to [0, 1] for fair fusion
-    rerank_scores = [r["rerank_score"] for r in reranked]
-    rr_min, rr_max = min(rerank_scores), max(rerank_scores)
-    rr_range = rr_max - rr_min if rr_max > rr_min else 1.0
-
-    orig_scores = [r.get("score", r.get("rrf_score", 0)) for r in reranked]
-    orig_min, orig_max = min(orig_scores), max(orig_scores)
-    orig_range = orig_max - orig_min if orig_max > orig_min else 1.0
-
-    for r in reranked:
-        norm_rerank = (r["rerank_score"] - rr_min) / rr_range
-        norm_orig = (r.get("score", r.get("rrf_score", 0)) - orig_min) / orig_range
-        r["fused_score"] = rerank_weight * norm_rerank + rrf_weight * norm_orig
-        r["score"] = r["fused_score"]
-
-    reranked.sort(key=lambda r: r["fused_score"], reverse=True)
-    return reranked[:top_k]
+    return _normalize_and_fuse(reranked, rerank_weight, rrf_weight, top_k)
 
 
 # ---------------------------------------------------------------------------
@@ -321,23 +332,7 @@ def rerank_with_modality_fusion(
             if modality in ("episode", "fact"):
                 r["rerank_score"] = r["rerank_score"] * 1.2
 
-    # Normalize and fuse
-    rerank_scores = [r["rerank_score"] for r in reranked]
-    rr_min, rr_max = min(rerank_scores), max(rerank_scores)
-    rr_range = rr_max - rr_min if rr_max > rr_min else 1.0
-
-    orig_scores = [r.get("score", r.get("rrf_score", 0)) for r in reranked]
-    orig_min, orig_max = min(orig_scores), max(orig_scores)
-    orig_range = orig_max - orig_min if orig_max > orig_min else 1.0
-
-    for r in reranked:
-        norm_rerank = (r["rerank_score"] - rr_min) / rr_range
-        norm_orig = (r.get("score", r.get("rrf_score", 0)) - orig_min) / orig_range
-        r["fused_score"] = rerank_weight * norm_rerank + rrf_weight * norm_orig
-        r["score"] = r["fused_score"]
-
-    reranked.sort(key=lambda r: r["fused_score"], reverse=True)
-    return reranked[:top_k]
+    return _normalize_and_fuse(reranked, rerank_weight, rrf_weight, top_k)
 
 
 def _classify_question_type(query: str) -> str:
