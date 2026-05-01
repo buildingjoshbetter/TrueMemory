@@ -34,6 +34,7 @@ from pathlib import Path
 # Core modules (always available)
 # ───────────────────────────────────────────────────────────────────────────
 from truememory.storage import (
+    DEFAULT_BUSY_TIMEOUT_MS,
     create_db, load_messages_from_file, get_message_count,
     insert_message, delete_message, update_message, get_message,
 )
@@ -637,6 +638,8 @@ class TrueMemoryEngine:
 
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = None  # Use default tuple rows
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
 
         # Detect available tables
         tables = {
@@ -1034,7 +1037,18 @@ class TrueMemoryEngine:
         if _HAS_PERSONALITY:
             try:
                 t0 = time.time()
-                dunbar_result = build_dunbar_hierarchy(self.conn)
+                primary = None
+                try:
+                    row = self.conn.execute(
+                        "SELECT sender, COUNT(*) as cnt FROM messages "
+                        "WHERE sender != '' AND sender IS NOT NULL "
+                        "GROUP BY sender ORDER BY cnt DESC LIMIT 1"
+                    ).fetchone()
+                    if row and row[0] and row[0].strip():
+                        primary = row[0]
+                except Exception as exc:
+                    logger.debug("Failed to detect primary entity for Dunbar: %s", exc)
+                dunbar_result = build_dunbar_hierarchy(self.conn, primary_entity=primary)
                 dunbar_count = len(dunbar_result) if isinstance(dunbar_result, dict) else dunbar_result
                 stats["dunbar_hierarchy"] = f"{dunbar_count} relationships in {time.time() - t0:.3f}s"
             except Exception as exc:

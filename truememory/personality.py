@@ -23,9 +23,11 @@ All functions operate on a ``sqlite3.Connection`` produced by
 Python standard library.
 """
 
+import contextlib
 import json
 import re
 import sqlite3
+import warnings
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -439,6 +441,13 @@ def _fts_search(conn: sqlite3.Connection, fts_query: str,
 # Public API
 # ---------------------------------------------------------------------------
 
+@contextlib.contextmanager
+def _warnings_ctx():
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        yield
+
+
 def build_entity_profiles(conn: sqlite3.Connection) -> dict:
     """
     Analyze all messages and build personality profiles for key entities.
@@ -522,9 +531,9 @@ def build_entity_profiles(conn: sqlite3.Connection) -> dict:
                 "primary_topic": top_topic,
             }
 
-        # Topics and traits
-        topics = _extract_topics(messages)
-        traits = _extract_traits(messages)
+        with _warnings_ctx():
+            topics = _extract_topics(messages)
+            traits = _extract_traits(messages)
 
         profile = {
             "message_count": len(messages),
