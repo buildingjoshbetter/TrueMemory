@@ -314,19 +314,11 @@ def get_known_entities(conn: sqlite3.Connection) -> list[str]:
     return [r[0] for r in rows if r[0] and r[0] != "self"]
 
 
-_FALLBACK_ENTITIES = []
-
-
 def detect_entities(query: str, conn: sqlite3.Connection | None = None) -> list[str]:
     """
     Extract entity references (person names) from a query.
 
     Matches against known entities from the database for accurate detection.
-    The database entity list is augmented with a hardcoded fallback list
-    to catch entities that appear in message content but are never direct
-    senders/recipients (e.g. "marcus" is discussed but never sends messages).
-
-    If no database connection is provided, uses only the fallback list.
 
     Args:
         query: Natural language query string.
@@ -338,16 +330,9 @@ def detect_entities(query: str, conn: sqlite3.Connection | None = None) -> list[
         returns ``["jordan", "dev", "sam"]``.
     """
     if conn is not None:
-        db_entities = get_known_entities(conn)
-        # Merge DB entities with fallback list (dedup, preserve order)
-        seen = set(db_entities)
-        known = list(db_entities)
-        for e in _FALLBACK_ENTITIES:
-            if e not in seen:
-                known.append(e)
-                seen.add(e)
+        known = get_known_entities(conn)
     else:
-        known = list(_FALLBACK_ENTITIES)
+        known = []
 
     query_lower = query.lower()
     found = []

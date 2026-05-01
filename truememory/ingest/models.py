@@ -311,22 +311,40 @@ def _complete_anthropic(config: LLMConfig, prompt: str, system: str) -> str:
     }
 
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as e:
-        detail = ""
+
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_RETRIES + 1):
         try:
-            detail = e.read().decode("utf-8", errors="replace")[:500]
-        except Exception:
-            pass
-        raise LLMError(f"Anthropic HTTP {e.code}: {detail or e.reason}") from e
-    except urllib.error.URLError as e:
-        raise LLMError(f"Anthropic network error: {e.reason}") from e
-    except (socket.timeout, TimeoutError) as e:
-        raise LLMError("Anthropic request timed out") from e
-    except OSError as e:
-        raise LLMError(f"Anthropic connection error: {e}") from e
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                raw = resp.read()
+            break
+        except urllib.error.HTTPError as e:
+            last_exc = e
+            if attempt < _MAX_RETRIES and _should_retry(e):
+                wait = _retry_backoff(attempt)
+                log.info("Anthropic HTTP %d (attempt %d/%d), retrying in %.1fs",
+                         e.code, attempt + 1, _MAX_RETRIES, wait)
+                time.sleep(wait)
+                continue
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", errors="replace")[:500]
+            except Exception:
+                pass
+            raise LLMError(f"Anthropic HTTP {e.code}: {detail or e.reason}") from e
+        except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as e:
+            last_exc = e
+            if attempt < _MAX_RETRIES:
+                wait = _retry_backoff(attempt)
+                log.info("Anthropic %s (attempt %d/%d), retrying in %.1fs",
+                         type(e).__name__, attempt + 1, _MAX_RETRIES, wait)
+                time.sleep(wait)
+                continue
+            if isinstance(e, urllib.error.URLError):
+                raise LLMError(f"Anthropic network error: {e.reason}") from e
+            raise LLMError(f"Anthropic connection error: {e}") from e
+    else:
+        raise LLMError("Anthropic: max retries exceeded") from last_exc
 
     try:
         data = json.loads(raw)
