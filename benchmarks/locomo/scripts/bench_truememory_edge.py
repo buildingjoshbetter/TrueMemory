@@ -41,6 +41,7 @@ VM = "/results"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 img = (modal.Image.debian_slim(python_version="3.11")
+    .apt_install("git")
     .pip_install("openai>=1.0", "truememory[gpu] @ git+https://github.com/buildingjoshbetter/TrueMemory.git@main", "sentence-transformers"))
 
 # ── Eval Config (IDENTICAL across all systems) ──────────────────────────
