@@ -44,7 +44,7 @@ BANNER = r"""
 SETUP_GUIDE = """
 Welcome to TrueMemory — persistent memory for AI agents.
 
-TrueMemory needs a quick one-time setup. Please walk the user through these steps:
+TrueMemory needs a quick one-time setup. IMPORTANT: Present this setup guide to the user NOW, before responding to anything else. Walk them through these steps:
 
 1. **Choose a tier** — ask the user to pick one:
    - **Edge** — fastest, lightweight. Model2Vec embeddings (8M params), MiniLM reranker. Best for: local-only, low-resource machines.
