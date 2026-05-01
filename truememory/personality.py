@@ -208,15 +208,19 @@ def _extract_proper_nouns(content: str) -> list[str]:
 
 
 _EMOJI_RE = re.compile(
-    "[\U0001f600-\U0001f64f"  # emoticons
+    "["
+    "\U0001f600-\U0001f64f"   # emoticons
     "\U0001f300-\U0001f5ff"   # symbols & pictographs
     "\U0001f680-\U0001f6ff"   # transport & map
-    "\U0001f1e0-\U0001f1ff"   # flags
-    "\U00002702-\U000027b0"
-    "\U000024c2-\U0001f251"
-    "\U0001f900-\U0001f9ff"   # supplemental symbols
+    "\U0001f1e0-\U0001f1ff"   # flags (regional indicators)
+    "\U0001f900-\U0001f9ff"   # supplemental symbols & pictographs
     "\U0001fa00-\U0001fa6f"   # chess symbols
-    "\U0001fa70-\U0001faff"   # extended-A
+    "\U0001fa70-\U0001faff"   # symbols & pictographs extended-A
+    "\U00002702-\U000027b0"   # dingbats subset
+    "\U0000fe00-\U0000fe0f"   # variation selectors
+    "\U0000200d"              # zero-width joiner
+    "\U00002640\U00002642"    # gender symbols
+    "\U000023cf\U000023e9-\U000023f3\U000023f8-\U000023fa"  # misc symbols
     "]+",
     flags=re.UNICODE,
 )
