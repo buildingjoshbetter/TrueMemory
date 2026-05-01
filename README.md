@@ -29,7 +29,7 @@
 
 Tested on [LoCoMo](https://github.com/snap-research/locomo), the standard benchmark for conversational memory. 1,540 questions across 10 conversations. All 8 systems share the same answer model, judge, scoring, top-k, and byte-identical answer prompt — only retrieval differs.
 
-> **Note on charts:** the hero banner and the three charts below still show the v0.3.0 single-Pro-tier layout. Chart regeneration is tracked for a later release; all numerical claims in the README text and tables reflect the current 3-run mean scores (89.6 / 92.0 / 93.0%).
+> All charts reflect the current 3-run mean scores (89.6 / 92.0 / 93.0%). Source HTML files in [`assets/charts/`](assets/charts/).
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/assets/charts/leaderboard-bar.png?v=2" alt="LoCoMo 8-System Comparison" />
@@ -260,4 +260,4 @@ Every benchmark script is self-contained and runs on [Modal](https://modal.com).
 
 ## ⚖️ License
 
-Licensed under [AGPL-3.0](https://github.com/buildingjoshbetter/TrueMemory/blob/main/LICENSE). Free for personal and research use. Commercial use requires a separate license — contact buildingjoshbetter@gmail.com.
+Licensed under [AGPL-3.0](https://github.com/buildingjoshbetter/TrueMemory/blob/main/LICENSE). Free for personal and research use. Commercial use requires a separate license — contact josh@sauronlabs.ai.
