@@ -166,22 +166,6 @@ def _end_of_month(year: int, month: int) -> str:
     return f"{year:04d}-{month:02d}-{last_day:02d}"
 
 
-def _add_months(iso_date: str, months: int) -> str:
-    """Add (or subtract) months from an ISO date string."""
-    dt = datetime.fromisoformat(iso_date)
-    new_month = dt.month + months
-    new_year = dt.year + (new_month - 1) // 12
-    new_month = ((new_month - 1) % 12) + 1
-    # Clamp day to valid range for the target month
-    max_day = (
-        datetime(new_year + (1 if new_month == 12 else 0),
-                 (new_month % 12) + 1 if new_month < 12 else 1, 1)
-        - timedelta(days=1)
-    ).day
-    new_day = min(dt.day, max_day)
-    return f"{new_year:04d}-{new_month:02d}-{new_day:02d}"
-
-
 # ---------------------------------------------------------------------------
 # Temporal intent detection
 # ---------------------------------------------------------------------------
