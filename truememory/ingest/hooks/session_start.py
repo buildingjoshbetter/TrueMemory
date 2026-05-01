@@ -29,7 +29,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-MEMORY_LIMIT = int(os.environ.get("TRUEMEMORY_RECALL_LIMIT", "15"))
+MEMORY_LIMIT = int(os.environ.get("TRUEMEMORY_RECALL_LIMIT", "25"))
 ONBOARDED_MARKER = Path.home() / ".truememory" / ".onboarded"
 
 BANNER = r"""
