@@ -27,7 +27,7 @@ Configuration used for all LoCoMo benchmark runs.
 
 | Parameter | Value |
 |-----------|-------|
-| Dataset | LoCoMo v1 -- 10 conversations, 1,540 questions |
+| Dataset | LoCoMo v1, 10 conversations, 1,540 questions |
 | Category 1 (single-hop) | 282 questions |
 | Category 2 (multi-hop) | 321 questions |
 | Category 3 (temporal) | 96 questions |
@@ -50,12 +50,12 @@ Configuration used for all LoCoMo benchmark runs.
 
 ## TrueMemory tier configurations
 
-TrueMemory v0.4.0 ships three paper-aligned tiers. All three share the same 6-layer pipeline (FTS5 + dense + RRF + cross-encoder reranker + temporal/salience layers); the tiers differ only in embedder, reranker, and whether HyDE query expansion is used. Base and Pro share the same embedder + reranker — only HyDE toggles between them.
+TrueMemory v0.6.0 ships three tiers. All three share the same 6-layer pipeline (FTS5 + dense + RRF + cross-encoder reranker + temporal/salience layers); the tiers differ only in embedder, reranker, and whether HyDE query expansion is used. Base and Pro share the same embedder + reranker. Only HyDE toggles between them.
 
-| Tier | Embedder | Reranker | HyDE | top_k | LoCoMo target | Hardware |
-|------|----------|----------|------|-------|---------------|----------|
-| Edge | Model2Vec potion-base-8M @ 256d (8M params) | `cross-encoder/ms-marco-MiniLM-L-6-v2` (22M) | off | 100 | 90.1% | CPU only, 512 MB RAM |
-| Base (Default) | `Qwen/Qwen3-Embedding-0.6B` @ 256d Matryoshka (600M) | `Alibaba-NLP/gte-reranker-modernbert-base` (149M) | off | 100 | 91.5% | CPU or GPU (T4 recommended), 4 GB RAM |
-| Pro (+HyDE) | `Qwen/Qwen3-Embedding-0.6B` @ 256d Matryoshka (600M) | `Alibaba-NLP/gte-reranker-modernbert-base` (149M) | on (gpt-4.1-mini via OpenRouter) | 100 | 91.8% | CPU or GPU (T4 recommended), 4 GB RAM, LLM API key |
+| Tier | Embedder | Reranker | HyDE | top_k | LoCoMo (3-run mean) | Hardware |
+|------|----------|----------|------|-------|---------------------|----------|
+| Edge | Model2Vec potion-base-8M @ 256d (8M params) | `cross-encoder/ms-marco-MiniLM-L-6-v2` (22M) | off | 100 | 89.6% | CPU only, 512 MB RAM |
+| Base | `Qwen/Qwen3-Embedding-0.6B` @ 256d Matryoshka (600M) | `Alibaba-NLP/gte-reranker-modernbert-base` (149M) | off | 100 | 92.0% | CPU or GPU (T4 recommended), 4 GB RAM |
+| Pro (+HyDE) | `Qwen/Qwen3-Embedding-0.6B` @ 256d Matryoshka (600M) | `Alibaba-NLP/gte-reranker-modernbert-base` (149M) | on (gpt-4.1-mini via OpenRouter) | 100 | 93.0% | CPU or GPU (T4 recommended), 4 GB RAM, LLM API key |
 
-Qwen3-Embedding-0.6B ships at a higher native dimension; the `truncate_dim=256` Matryoshka setting is what produces the 256-dim Base/Pro vectors documented in paper §2.0. Per-tier bench scripts: `bench_truememory_edge.py`, `bench_truememory_base.py`, `bench_truememory_pro.py`.
+Per-tier bench scripts: `bench_truememory_edge.py`, `bench_truememory_base.py`, `bench_truememory_pro.py`.

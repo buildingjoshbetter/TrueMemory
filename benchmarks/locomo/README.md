@@ -16,9 +16,9 @@ Evaluation of 8 memory systems on the [LoCoMo](https://arxiv.org/abs/2312.17487)
 
 Every system was evaluated with the same pipeline to ensure fair comparison:
 
-1. **Retrieval** -- Each system ingests the conversation and retrieves context for each question using its own retrieval method.
-2. **Answer generation** -- `openai/gpt-4.1-mini` via OpenRouter generates an answer from the retrieved context. `temperature=0`, `max_tokens=200`.
-3. **LLM judging** -- `openai/gpt-4o-mini` via OpenRouter judges whether the generated answer matches the gold answer. `temperature=0`, `max_tokens=10`. Run 3 times per question; majority vote decides correctness.
+1. **Retrieval**: each system ingests the conversation and retrieves context for each question using its own retrieval method.
+2. **Answer generation**: `openai/gpt-4.1-mini` via OpenRouter generates an answer from the retrieved context. `temperature=0`, `max_tokens=200`.
+3. **LLM judging**: `openai/gpt-4o-mini` via OpenRouter judges whether the generated answer matches the gold answer. `temperature=0`, `max_tokens=10`. Run 3 times per question; majority vote decides correctness.
 
 The answer model, judge model, prompts, temperature, and voting scheme are identical across all 8 systems. Only the retrieval layer differs.
 
@@ -73,34 +73,39 @@ Recomputes accuracy from the raw JSON result files with zero dependencies beyond
 
 ```
 benchmarks/locomo/
-  README.md                  # This file
-  BENCHMARK_RESULTS.md       # Full technical report (latency, cost, architecture)
-  requirements.txt           # Python dependencies grouped by system
+  README.md                              # This file
+  BENCHMARK_RESULTS.md                   # Full technical report (latency, cost, architecture)
+  EVAL_CONFIG.md                         # Evaluation configuration
+  requirements.txt                       # Python dependencies grouped by system
   data/
-    locomo10.json            # LoCoMo dataset (10 conversations, 1540 questions)
+    locomo10.json                        # LoCoMo dataset (10 conversations, 1540 questions)
   results/
-    bm25_v2_run1.json        # BM25 results
-    engram_v2_run1.json      # Engram results
-    evermemos_v2_run1.json   # EverMemOS results
-    mem0_v2_run1.json        # Mem0 results
-    truememory_edge_v0.4.0.json    # TrueMemory Edge results (90.1% target — Phase 6)
-    truememory_base_v0.4.0.json    # TrueMemory Base results (91.5% target — Phase 6)
-    truememory_pro_v0.4.0.json     # TrueMemory Pro results (91.8% target — Phase 6)
-    rag_v2_run1.json         # RAG (ChromaDB) results
-    supermemory_v2_run1.json # Supermemory results
+    bm25_v2_run1.json                    # BM25 (80.5%)
+    engram_v2_run1.json                  # Engram (84.5%)
+    evermemos_v2_run1.json               # EverMemOS (94.5%)
+    mem0_v2_run1.json                    # Mem0 (61.4%)
+    rag_v2_run1.json                     # RAG / ChromaDB (86.2%)
+    supermemory_v2_run1.json             # Supermemory (65.4%)
+    truememory_edge_v060_run1.json       # TrueMemory Edge run 1 (89.9%)
+    truememory_edge_v060_run2.json       # TrueMemory Edge run 2 (89.5%)
+    truememory_edge_v060_run3.json       # TrueMemory Edge run 3 (89.5%)
+    truememory_base_v060_run2.json       # TrueMemory Base run 2 (92.1%)
+    truememory_base_v060_run3.json       # TrueMemory Base run 3 (92.2%)
+    truememory_pro_v060_run1.json        # TrueMemory Pro run 1 (92.8%)
+    truememory_pro_v060_run2.json        # TrueMemory Pro run 2 (93.1%)
+    truememory_pro_v060_run3.json        # TrueMemory Pro run 3 (93.1%)
   scripts/
-    README.md                # Script documentation
-    bench_bm25.py            # BM25 keyword baseline
-    bench_engram.py          # Engram memory system
-    bench_evermemos.py       # EverMemOS (pre-built retrieval)
-    bench_mem0.py            # Mem0 LLM-extracted memory
-    bench_truememory_edge.py   # TrueMemory Edge tier (90.1%, CPU)
-    bench_truememory_base.py   # TrueMemory Base tier (91.5%, T4 GPU recommended, HyDE off)
-    bench_truememory_pro.py    # TrueMemory Pro tier (91.8%, T4 GPU, +HyDE)
-    bench_rag.py             # ChromaDB RAG baseline
-    bench_supermemory.py     # Supermemory cloud API
-    modal_benchmark.py       # Development runner (see individual scripts instead)
-    verify_scores.py         # Score verification tool
+    README.md                            # Script documentation
+    bench_bm25.py                        # BM25 keyword baseline
+    bench_engram.py                      # Engram memory system
+    bench_evermemos.py                   # EverMemOS (pre-built retrieval)
+    bench_mem0.py                        # Mem0 LLM-extracted memory
+    bench_truememory_edge.py             # TrueMemory Edge (89.6% 3-run mean, CPU)
+    bench_truememory_base.py             # TrueMemory Base (92.0% 3-run mean, T4 GPU)
+    bench_truememory_pro.py              # TrueMemory Pro (93.0% 3-run mean, T4 GPU, +HyDE)
+    bench_rag.py                         # ChromaDB RAG baseline
+    bench_supermemory.py                 # Supermemory cloud API
+    verify_scores.py                     # Score verification tool
 ```
 
 ## Full Details

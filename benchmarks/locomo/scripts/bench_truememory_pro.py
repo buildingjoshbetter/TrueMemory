@@ -4,7 +4,7 @@ LoCoMo Benchmark — TrueMemory Pro Tier (+HyDE, T4 GPU)
 ======================================================
 TrueMemory Pro tier using Qwen3-Embedding-0.6B @ 256d Matryoshka embeddings,
 gte-reranker-modernbert-base (149M params) reranker, and HyDE (Hypothetical
-Document Embeddings) via OpenRouter LLM. Paper §2.0 target: 91.8%.
+Document Embeddings) via OpenRouter LLM. 3-run mean: 93.0%.
 Requires a T4 GPU on Modal.
 
 This is a fully self-contained Modal script. No local imports required.

@@ -4,7 +4,7 @@ LoCoMo Benchmark — TrueMemory Edge Tier
 ======================================
 TrueMemory Edge tier using Model2Vec (potion-base-8M, 256-dim) embeddings
 and cross-encoder reranker (ms-marco-MiniLM-L-6-v2, 22M params).
-No HyDE, no GPU required. CPU-only, ~30M total params. Paper §2.0 target: 90.1%.
+No HyDE, no GPU required. CPU-only, ~30M total params. 3-run mean: 89.6%.
 
 This is a fully self-contained Modal script. No local imports required.
 

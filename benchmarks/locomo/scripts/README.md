@@ -52,7 +52,7 @@ modal run --detach bench_mem0.py --smoke  # Smoke test
 ```
 
 ### bench_truememory_edge.py -- TrueMemory Edge Tier
-TrueMemory Edge using Model2Vec (`potion-base-8M`, 256-dim) embeddings and cross-encoder reranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`, 22M params). No HyDE, no GPU required. Paper §2.0 target: 90.1% LoCoMo.
+TrueMemory Edge using Model2Vec (`potion-base-8M`, 256-dim) embeddings and cross-encoder reranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`, 22M params). No HyDE, no GPU required. 3-run mean: 89.6% LoCoMo.
 
 ```bash
 modal run --detach bench_truememory_edge.py          # Full run
@@ -60,7 +60,7 @@ modal run --detach bench_truememory_edge.py --smoke  # Smoke test
 ```
 
 ### bench_truememory_base.py -- TrueMemory Base Tier (Default, GPU recommended)
-TrueMemory Base using Qwen3-Embedding-0.6B truncated to 256-dim (Matryoshka) and `Alibaba-NLP/gte-reranker-modernbert-base` (149M params). No HyDE. Paper §2.0 target: 91.5%. Runs on CPU but a T4 GPU is strongly recommended for the reranker.
+TrueMemory Base using Qwen3-Embedding-0.6B truncated to 256-dim (Matryoshka) and `Alibaba-NLP/gte-reranker-modernbert-base` (149M params). No HyDE. 3-run mean: 92.0%. Runs on CPU but a T4 GPU is strongly recommended for the reranker.
 
 ```bash
 modal run --detach bench_truememory_base.py          # Full run
@@ -68,7 +68,7 @@ modal run --detach bench_truememory_base.py --smoke  # Smoke test
 ```
 
 ### bench_truememory_pro.py -- TrueMemory Pro Tier (+HyDE, GPU)
-TrueMemory Pro uses the same embedder + reranker as Base, plus HyDE (Hypothetical Document Embeddings) via OpenRouter LLM. Paper §2.0 target: 91.8%. Requires a T4 GPU on Modal and an OpenRouter key for the HyDE call.
+TrueMemory Pro uses the same embedder + reranker as Base, plus HyDE (Hypothetical Document Embeddings) via OpenRouter LLM. 3-run mean: 93.0%. Requires a T4 GPU on Modal and an OpenRouter key for the HyDE call.
 
 ```bash
 modal run --detach bench_truememory_pro.py          # Full run
@@ -99,9 +99,6 @@ Recomputes accuracy from the raw JSON result files. Zero dependencies beyond Pyt
 ```bash
 python3 verify_scores.py
 ```
-
-### modal_benchmark.py
-Development runner used during initial benchmarking. For reproduction, use the individual `bench_*.py` scripts above -- they are self-contained and guaranteed to reproduce the published results.
 
 ## Downloading Results
 

@@ -20,10 +20,16 @@ EXPECTED_SCORES = {
     "engram_v2_run1.json": 84.5,
     "evermemos_v2_run1.json": 94.5,
     "mem0_v2_run1.json": 61.4,
-    "truememory_base_v2_run1.json": 88.2,
-    "truememory_pro_v3_modal.json": 91.5,
     "rag_v2_run1.json": 86.2,
     "supermemory_v2_run1.json": 65.4,
+    "truememory_edge_v060_run1.json": 89.9,
+    "truememory_edge_v060_run2.json": 89.5,
+    "truememory_edge_v060_run3.json": 89.5,
+    "truememory_base_v060_run2.json": 92.1,
+    "truememory_base_v060_run3.json": 92.2,
+    "truememory_pro_v060_run1.json": 92.8,
+    "truememory_pro_v060_run2.json": 93.1,
+    "truememory_pro_v060_run3.json": 93.1,
 }
 
 

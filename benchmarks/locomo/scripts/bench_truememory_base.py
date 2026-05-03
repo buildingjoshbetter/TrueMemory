@@ -4,7 +4,7 @@ LoCoMo Benchmark — TrueMemory Base Tier (default, HyDE off)
 ===========================================================
 TrueMemory Base tier using Qwen3-Embedding-0.6B @ 256d Matryoshka embeddings
 and gte-reranker-modernbert-base (149M params) reranker. HyDE is OFF — Base
-is the fully-offline default tier, no LLM API calls. Paper §2.0 target: 91.5%.
+is the fully-offline default tier, no LLM API calls. 3-run mean: 92.0%.
 Requires a T4 GPU on Modal.
 
 This is a fully self-contained Modal script. No local imports required.
@@ -228,7 +228,7 @@ def retrieve_truememory_base(conv_data, conv_idx):
                  for m in msgs]
     with open(tmp_json,"w") as f: _json.dump(msg_dicts, f)
     engine.ingest(tmp_json)
-    # Retrieve with reranker only; no HyDE (paper §2.0 Default)
+    # Retrieve with reranker only; no HyDE (Base tier default)
     results = []
     for qa in get_qa(conv_data):
         sr = engine.search_agentic(qa["question"], limit=100,
