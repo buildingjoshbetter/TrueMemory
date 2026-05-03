@@ -99,3 +99,19 @@ _working/
 # Claude Code tool state (scheduled tasks, telemetry, etc.) — never commit.
 .claude/
 README_Sunday 3rd May 2026 at 5:48 AM.md
+README_v2.md
+README_v3.md
+
+# Unreferenced chart PNGs (kept locally, not in repo)
+assets/charts/cost-per-answer.png
+assets/charts/hardware-matrix.png
+assets/charts/latency-comparison.png
+assets/charts/architecture.png
+assets/charts/hero-banner-white.png
+assets/charts/category-radar.png
+
+# Gate eval research artifacts (kept locally)
+benchmarks/gate_eval/results/category_feature_analysis.json
+benchmarks/gate_eval/results/encoding_salience_variants.json
+benchmarks/gate_eval/results/l3_baseline_on_gatelocomo.json
+benchmarks/gate_eval/run_weight_threshold_sweep.py
