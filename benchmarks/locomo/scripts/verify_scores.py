@@ -25,6 +25,7 @@ EXPECTED_SCORES = {
     "truememory_edge_v060_run1.json": 89.9,
     "truememory_edge_v060_run2.json": 89.5,
     "truememory_edge_v060_run3.json": 89.5,
+    "truememory_base_v060_run1.json": 91.8,
     "truememory_base_v060_run2.json": 92.1,
     "truememory_base_v060_run3.json": 92.2,
     "truememory_pro_v060_run1.json": 92.8,

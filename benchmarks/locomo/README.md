@@ -89,6 +89,7 @@ benchmarks/locomo/
     truememory_edge_v060_run1.json       # TrueMemory Edge run 1 (89.9%)
     truememory_edge_v060_run2.json       # TrueMemory Edge run 2 (89.5%)
     truememory_edge_v060_run3.json       # TrueMemory Edge run 3 (89.5%)
+    truememory_base_v060_run1.json       # TrueMemory Base run 1 (91.8%)
     truememory_base_v060_run2.json       # TrueMemory Base run 2 (92.1%)
     truememory_base_v060_run3.json       # TrueMemory Base run 3 (92.2%)
     truememory_pro_v060_run1.json        # TrueMemory Pro run 1 (92.8%)

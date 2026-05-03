@@ -20,6 +20,7 @@ Raw result JSON files from all 8 systems evaluated on the LoCoMo benchmark. Each
 | `truememory_edge_v060_run1.json` | Edge | 89.9% |
 | `truememory_edge_v060_run2.json` | Edge | 89.5% |
 | `truememory_edge_v060_run3.json` | Edge | 89.5% |
+| `truememory_base_v060_run1.json` | Base | 91.8% |
 | `truememory_base_v060_run2.json` | Base | 92.1% |
 | `truememory_base_v060_run3.json` | Base | 92.2% |
 | `truememory_pro_v060_run1.json` | Pro | 92.8% |
@@ -31,7 +32,7 @@ Raw result JSON files from all 8 systems evaluated on the LoCoMo benchmark. Each
 | Tier | Mean | ±std |
 |------|------|------|
 | Edge | 89.6% | ±0.19 |
-| Base | 92.2% | ±0.07 (2 runs; run 1 pending) |
+| Base | 92.0% | ±0.23 |
 | Pro | 93.0% | ±0.14 |
 
 ## Verification

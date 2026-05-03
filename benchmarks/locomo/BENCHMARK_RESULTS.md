@@ -210,13 +210,14 @@ All result files are in `results/` and contain the full per-question detail arra
 | `truememory_edge_v060_run1.json` | TrueMemory Edge | 89.9% | v0.6.0, Modal CPU |
 | `truememory_edge_v060_run2.json` | TrueMemory Edge | 89.5% | v0.6.0, Modal CPU |
 | `truememory_edge_v060_run3.json` | TrueMemory Edge | 89.5% | v0.6.0, Modal CPU |
+| `truememory_base_v060_run1.json` | TrueMemory Base | 91.8% | v0.6.0, Modal T4 |
 | `truememory_base_v060_run2.json` | TrueMemory Base | 92.1% | v0.6.0, Modal T4 |
 | `truememory_base_v060_run3.json` | TrueMemory Base | 92.2% | v0.6.0, Modal T4 |
 | `truememory_pro_v060_run1.json` | TrueMemory Pro | 92.8% | v0.6.0, Modal T4, +HyDE |
 | `truememory_pro_v060_run2.json` | TrueMemory Pro | 93.1% | v0.6.0, Modal T4, +HyDE |
 | `truememory_pro_v060_run3.json` | TrueMemory Pro | 93.1% | v0.6.0, Modal T4, +HyDE |
 
-**Note:** Base run 1 is pending. Once available, it will complete the 3-run validated set for Base.
+All TrueMemory tiers have complete 3-run validated sets.
 
 ---
 
