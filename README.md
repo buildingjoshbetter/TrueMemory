@@ -11,7 +11,7 @@
   <a href="https://pypi.org/project/truememory/"><img src="https://img.shields.io/pypi/pyversions/truememory?color=blue" alt="Python"></a>
   <a href="https://github.com/buildingjoshbetter/TrueMemory/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License"></a>
   <img src="https://img.shields.io/badge/LoCoMo-93.0%25_(Pro)-blueviolet" alt="LoCoMo Score">
-  <img src="https://img.shields.io/badge/BEAM--1M-75.0%25_(SOTA)-orange" alt="BEAM Score">
+  <img src="https://img.shields.io/badge/BEAM--1M-76.6%25_(SOTA)-orange" alt="BEAM Score">
 </p>
 
 <p align="center">
@@ -95,7 +95,7 @@ Same architecture, three tiers. Trade off install size and hardware for accuracy
 | | Edge | Base | Pro |
 |---|------|------|-----|
 | **LoCoMo** (3-run mean) | 89.6% | 92.0% | 93.0% |
-| **BEAM-1M** | | | 75.0% (SOTA) |
+| **BEAM-1M** (3-run mean) | | | 76.6% (SOTA) |
 | **Embedder** | Model2Vec potion-base-8M (8M params, 256d) | Qwen3-Embedding-0.6B (600M params, 256d) | Qwen3-Embedding-0.6B (600M params, 256d) |
 | **Reranker** | MiniLM-L-6-v2 (22M) | gte-reranker-modernbert (149M) | gte-reranker-modernbert (149M) |
 | **HyDE** | off | off | on (requires LLM API key) |
@@ -169,21 +169,21 @@ Tested on [LoCoMo](https://github.com/snap-research/locomo) (1,540 questions, 10
 | Base | 92.0% | 91.5% | 91.3% | 82.3% | 93.9% |
 | Pro  | 93.0% | 92.6% | 90.0% | 86.5% | 95.4% |
 
-### BEAM-1M (Pro tier)
+### BEAM-1M (Pro tier, 3-run mean)
 
 | Category | Score |
 |----------|-------|
-| Preference following | 95.7% |
-| Contradiction resolution | 90.0% |
-| Information extraction | 90.0% |
-| Summarization | 90.0% |
-| Instruction following | 81.4% |
-| Knowledge update | 78.6% |
-| Abstention | 75.7% |
-| Multi-session reasoning | 68.6% |
-| Temporal reasoning | 62.9% |
-| Event ordering | 17.1% |
-| **Overall** | **75.0%** |
+| Preference following | 97.1% |
+| Contradiction resolution | 91.4% |
+| Information extraction | 91.4% |
+| Summarization | 89.5% |
+| Instruction following | 84.8% |
+| Abstention | 82.4% |
+| Knowledge update | 77.6% |
+| Multi-session reasoning | 67.1% |
+| Temporal reasoning | 64.8% |
+| Event ordering | 19.5% |
+| **Overall** | **76.6%** |
 
 <p align="center">
   <img src="assets/charts/accuracy-vs-cost.png" alt="Accuracy vs Infrastructure Cost" />
