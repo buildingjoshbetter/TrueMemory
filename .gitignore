@@ -115,3 +115,4 @@ benchmarks/gate_eval/results/category_feature_analysis.json
 benchmarks/gate_eval/results/encoding_salience_variants.json
 benchmarks/gate_eval/results/l3_baseline_on_gatelocomo.json
 benchmarks/gate_eval/run_weight_threshold_sweep.py
+benchmarks/locomo/results/truememory_pro_v3_modal.json
