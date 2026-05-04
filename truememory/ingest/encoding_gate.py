@@ -29,7 +29,7 @@ not their *mechanism*. What you see in this code is a pragmatic proxy:
   self-pair. When the pair embedding diverges from the self-pair
   embedding, the message says something different about the same topic.
   Validated in 200-variant sweep (v1+v2): AUC 0.730 standalone, gate
-  AUC 0.810. Real predictive coding is Bayesian error propagation up a
+  AUC 0.816. Real predictive coding is Bayesian error propagation up a
   hierarchical generative model.
 
 The delegation to `truememory.salience` for salience scoring is
@@ -382,7 +382,7 @@ class EncodingGate:
         embedding diverges from the self-pair — that divergence is PE.
 
         Validated in 200-variant sweep across 10 paradigms: AUC 0.730
-        standalone, gate AUC 0.796 in three-signal combination. Runs in
+        standalone, gate AUC 0.816 in three-signal combination. Runs in
         0.3ms/msg using the existing embedding model (no extra download).
 
         Independent of novelty (r=0.30) and salience (r=0.23).
