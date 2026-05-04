@@ -76,7 +76,7 @@ assets/charts/*.html
 # Untracked benchmark scaffolds (no results yet)
 benchmarks/convomem/
 benchmarks/latency/
-benchmarks/longmemeval/
+# benchmarks/longmemeval/ — now tracked
 
 # Salience sweep research artifacts (validated the v23 decision; not production)
 benchmarks/gate_eval/salience_sweep.py
@@ -117,3 +117,4 @@ benchmarks/gate_eval/results/l3_baseline_on_gatelocomo.json
 benchmarks/gate_eval/run_weight_threshold_sweep.py
 benchmarks/locomo/results/truememory_pro_v3_modal.json
 benchmarks/locomo/scripts/modal_benchmark.py
+benchmarks/longmemeval/data/*.json
