@@ -1,38 +1,35 @@
 #!/usr/bin/env python3
 """
-BEAM 10M Benchmark — TrueMemory Pro
-===================================================================
-BEAM (Beyond a Million Tokens) evaluates 10 memory abilities across
-multi-session conversations at 10M token scale.
+BEAM 10M Benchmark — ChromaDB RAG Baseline
+==========================================
+Dense vector retrieval using ChromaDB with sentence-transformers embeddings.
+Same eval pipeline as TrueMemory BEAM benchmark. No reranker, no HyDE.
 
 10 conversations in the 10M split (Mohammadta/BEAM-10M), 20 questions each = 200 total.
-Smoke test: first 3 conversations = 60 questions.
+Smoke test: first 10 conversations = 200 questions.
 
-Dependencies: truememory[gpu], sentence-transformers, datasets
+Dependencies: chromadb, sentence-transformers, datasets
 Eval: openai/gpt-4.1-mini (answers) + openai/gpt-4o-mini (judge) via OpenRouter
 
 Usage:
     modal secret create openrouter-key OPENROUTER_API_KEY=sk-or-...
 
-    modal run --detach bench_truememory_pro_beam10m.py --smoke   # 3 convs
-    modal run --detach bench_truememory_pro_beam10m.py           # All 10 convs
+    modal run --detach bench_rag_beam10m.py --smoke   # 10 convs
+    modal run --detach bench_rag_beam10m.py           # All 35 convs
 
     modal volume get locomo-results / ./results --force
 """
 
-import ast, json, modal, os, re, sys, time, tempfile
+import ast, json, modal, os, re, sys, time
 from pathlib import Path
 
-app = modal.App("beam-truememory-pro-10m")
+app = modal.App("beam-rag-10m")
 vol = modal.Volume.from_name("locomo-results", create_if_missing=True)
 VM = "/results"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 img = (modal.Image.debian_slim(python_version="3.11")
-    .apt_install("git")
-    .pip_install("openai>=1.0",
-                 "truememory[gpu] @ git+https://github.com/buildingjoshbetter/TrueMemory.git@main",
-                 "sentence-transformers", "datasets"))
+    .pip_install("openai>=1.0", "chromadb", "sentence-transformers", "datasets"))
 
 ANSWER_MODEL = "openai/gpt-4.1-mini"
 ANSWER_MAX_TOKENS = 500
@@ -118,7 +115,6 @@ def judge_one(client, q, ideal, gen):
 
 
 def _extract_questions(probing_questions_str):
-    """Parse probing questions from the dataset. Returns list of (question, ideal_answer, category)."""
     pq = ast.literal_eval(probing_questions_str)
     questions = []
     for category, qs in pq.items():
@@ -133,28 +129,21 @@ def _extract_questions(probing_questions_str):
                 "ideal": ideal,
                 "category": category,
                 "difficulty": q.get("difficulty", ""),
-                "rubric": q.get("rubric", ""),
             })
     return questions
 
 
 @app.function(image=img, secrets=[modal.Secret.from_name("openrouter-key")],
-              timeout=14400, memory=32768, gpu="A100-80GB")
+              timeout=14400, memory=8192)
 def worker(conv_data: dict, conv_idx: int):
-    """Process one BEAM conversation: ingest → retrieve → answer → judge."""
-    from truememory.vector_search import set_embedding_model
-    set_embedding_model("pro")
-    from truememory.engine import TrueMemoryEngine
-    from truememory.reranker import get_reranker, set_active_tier
-    set_active_tier("pro")
-    get_reranker(model_name="Alibaba-NLP/gte-reranker-modernbert-base")
+    """Process one BEAM conversation: ChromaDB ingest → retrieve → answer → judge."""
+    import chromadb
 
     conv_id = conv_data.get("conversation_id", conv_idx)
     chat_sessions = conv_data["chat"]
     questions = _extract_questions(conv_data["probing_questions"])
 
     # Flatten 10M sessions: each session is a dict with plan-N keys
-    # containing batches with turns containing message dicts
     flat_msgs = []
     for session in chat_sessions:
         if isinstance(session, dict):
@@ -174,134 +163,114 @@ def worker(conv_data: dict, conv_idx: int):
                 if isinstance(msg, dict):
                     flat_msgs.append(msg)
 
-    print(f"  [beam-pro] Conv {conv_idx} (id={conv_id}): "
+    print(f"  [rag] Conv {conv_idx} (id={conv_id}): "
           f"{len(chat_sessions)} sessions, {len(flat_msgs)} msgs, "
-          f"{len(questions)} Qs")
+          f"{len(questions)} Qs", flush=True)
 
-    # Step 1: Ingest all messages
+    # Step 1: Ingest into ChromaDB
     t0 = time.time()
-    _tmp = tempfile.NamedTemporaryFile(suffix=".db", prefix=f"beam_{conv_idx}_", delete=False)
-    tmp_db = _tmp.name
-    _tmp.close()
+    client_db = chromadb.Client()
+    col = client_db.create_collection(name=f"beam_{conv_idx}", metadata={"hnsw:space": "cosine"})
 
-    engine = TrueMemoryEngine(tmp_db)
-    engine._ensure_connection()
-
+    docs = []
+    ids = []
     msg_count = 0
-    total_msgs = len(flat_msgs)
     for msg in flat_msgs:
         content = msg.get("content", "")
         role = msg.get("role", "user")
         time_anchor = msg.get("time_anchor", "")
-        sender = "user" if role == "user" else "assistant"
-        ts = time_anchor or f"2024-01-01T00:00:{msg_count:02d}"
-
-        engine.add(content=content, sender=sender,
-                   recipient="assistant" if sender == "user" else "user",
-                   timestamp=ts, category="chat")
+        doc = f"[{role} | {time_anchor}] {content}"
+        docs.append(doc)
+        ids.append(f"m_{msg_count}")
         msg_count += 1
-        if msg_count % 500 == 0:
-            print(f"    Conv {conv_idx}: ingested {msg_count}/{total_msgs} ({msg_count/total_msgs*100:.0f}%)", flush=True)
+        if msg_count % 5000 == 0:
+            print(f"    Conv {conv_idx}: prepared {msg_count}/{len(flat_msgs)} ({msg_count/len(flat_msgs)*100:.0f}%)", flush=True)
+
+    # ChromaDB batch add (max 5000 per batch)
+    for s in range(0, len(docs), 5000):
+        col.add(documents=docs[s:s+5000], ids=ids[s:s+5000])
+        print(f"    Conv {conv_idx}: indexed {min(s+5000, len(docs))}/{len(docs)}", flush=True)
 
     ingest_time = time.time() - t0
-    print(f"    Ingested {msg_count} messages in {ingest_time:.1f}s")
-
-    # Step 1b: Build L5 surprise index
-    t_cons = time.time()
-    try:
-        from truememory.predictive import build_surprise_index
-        surprise_scores = build_surprise_index(engine.conn)
-        print(f"    L5 surprise index built: {len(surprise_scores)} scores in {time.time() - t_cons:.1f}s", flush=True)
-    except Exception as e:
-        print(f"    L5 surprise index failed: {e}", flush=True)
+    print(f"    Ingested {msg_count} messages in {ingest_time:.1f}s", flush=True)
 
     # Step 2: Retrieve + Answer + Judge
-    client = mkc()
+    api_client = mkc()
     details = []
 
     for i, q in enumerate(questions):
         t_ret = time.time()
         try:
-            sr = engine.search_agentic(q["question"], limit=100,
-                                       use_hyde=True, use_reranker=True)
+            results = col.query(query_texts=[q["question"]], n_results=100)
+            retrieved_docs = results["documents"][0] if results["documents"] else []
+            ctx = "\n\n".join(f"[Result {j+1}] {d}" for j, d in enumerate(retrieved_docs))
+            num_retrieved = len(retrieved_docs)
         except Exception as e:
-            sr = []
-            print(f"    Search failed for Q{i}: {e}")
-
-        ctx_parts = []
-        for j, r in enumerate(sr[:50]):
-            content = r.get("content", "")
-            ts = r.get("timestamp", "")
-            sender = r.get("sender", "")
-            ctx_parts.append(f"[Result {j+1}] [{ts}] {sender}: {content}")
-        ctx = "\n\n".join(ctx_parts) if ctx_parts else "No relevant memories found."
+            ctx = "No results found."
+            num_retrieved = 0
+            print(f"    Retrieval error Q{i}: {e}", flush=True)
         retrieval_time = time.time() - t_ret
 
         t_ans = time.time()
-        answer = gen_answer(client, ctx, q["question"])
-        answer_latency = time.time() - t_ans
+        answer = gen_answer(api_client, ctx or "No results found.", q["question"])
+        answer_time = time.time() - t_ans
 
         t_jdg = time.time()
-        correct, votes = judge_one(client, q["question"], q["ideal"], answer)
-        judge_latency = time.time() - t_jdg
+        correct, votes = judge_one(api_client, q["question"], q["ideal"], answer)
+        judge_time = time.time() - t_jdg
 
         details.append({
             "question": q["question"],
             "category": q["category"],
-            "difficulty": q["difficulty"],
-            "ideal_answer": q["ideal"][:500],
+            "difficulty": q.get("difficulty", ""),
+            "ideal_answer": q["ideal"],
             "generated_answer": answer,
             "correct": correct,
             "judge_votes": votes,
-            "num_retrieved": len(sr),
+            "num_retrieved": num_retrieved,
             "conversation_id": conv_id,
             "retrieval_latency_s": round(retrieval_time, 2),
-            "answer_latency_s": round(answer_latency, 2),
-            "judge_latency_s": round(judge_latency, 2),
+            "answer_latency_s": round(answer_time, 2),
+            "judge_latency_s": round(judge_time, 2),
         })
 
         if (i+1) % 5 == 0:
             c = sum(1 for d in details if d["correct"])
-            print(f"    {i+1}/{len(questions)}: {c}/{i+1} ({c/(i+1)*100:.0f}%)")
-
-    # Cleanup
-    try: os.unlink(tmp_db)
-    except: pass
+            print(f"    {i+1}/{len(questions)}: {c}/{i+1} ({c/(i+1)*100:.0f}%)", flush=True)
 
     c = sum(1 for d in details if d["correct"])
     print(f"    Conv {conv_idx} done: {c}/{len(details)} correct "
-          f"({c/len(details)*100:.1f}%), ingest={ingest_time:.1f}s")
+          f"({c/len(details)*100:.1f}%), ingest={ingest_time:.1f}s", flush=True)
     return details
 
 
 @app.function(image=img, secrets=[modal.Secret.from_name("openrouter-key")],
               timeout=43200, memory=4096, volumes={VM: vol})
-def orchestrate(smoke: bool = False, run_id: int = 1):
+def orchestrate(smoke: bool = False):
     """Load BEAM 10M, spawn workers, collect results."""
     import threading
-
     from datasets import load_dataset
     ds = load_dataset("Mohammadta/BEAM-10M", split="10M")
 
-    system = "truememory_pro_beam10m"
-    ckpt_path = f"{VM}/{system}_r{run_id}_checkpoint.json"
-    result_path = f"{VM}/{system}_run{run_id}.json"
+    system = "rag_beam10m"
+    ckpt_path = f"{VM}/{system}_checkpoint.json"
+    result_path = f"{VM}/{system}_run1.json"
     n_convs = 3 if smoke else len(ds)
     mode = "SMOKE TEST (3 convs)" if smoke else f"FULL RUN ({len(ds)} convs)"
 
     run_start = time.time()
-    print(f"\n{'='*60}")
-    print(f"BEAM 10M — TRUEMEMORY PRO — {mode} — Run {run_id}")
-    print(f"{'='*60}")
-    print(f"  Conversations: {n_convs}")
-    print(f"  Questions per conv: 20")
-    print(f"  Total questions: {n_convs * 20}")
-    print(f"  Answer:   {ANSWER_MODEL} via OpenRouter")
-    print(f"  Judge:    {JUDGE_MODEL} via OpenRouter")
-    sys.stdout.flush()
+    print(f"\n{'='*60}", flush=True)
+    print(f"BEAM 10M — RAG (ChromaDB) — {mode}", flush=True)
+    print(f"{'='*60}", flush=True)
+    print(f"  Conversations: {n_convs}", flush=True)
+    print(f"  Questions per conv: 20", flush=True)
+    print(f"  Total questions: {n_convs * 20}", flush=True)
+    print(f"  Answer:   {ANSWER_MODEL} via OpenRouter", flush=True)
+    print(f"  Judge:    {JUDGE_MODEL} via OpenRouter", flush=True)
 
-    # Heartbeat thread — prints every 60s to keep Modal CLI alive
+    # Heartbeat thread
     heartbeat_stop = threading.Event()
+    done_convs = set()
     def heartbeat():
         while not heartbeat_stop.is_set():
             heartbeat_stop.wait(60)
@@ -313,31 +282,29 @@ def orchestrate(smoke: bool = False, run_id: int = 1):
 
     # Resume from checkpoint
     all_details = []
-    done_convs = set()
     try:
         with open(ckpt_path) as f:
             ckpt = json.load(f)
         all_details = ckpt.get("details", [])
-        done_convs = set(ckpt.get("done_convs", []))
+        done_convs.update(ckpt.get("done_convs", []))
         print(f"  Resuming: {len(done_convs)} convs done", flush=True)
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
-    # Spawn all workers
+    # Spawn workers
     pending = {}
     for ci in range(n_convs):
         if ci in done_convs:
             print(f"  Conv {ci}: SKIPPED (checkpoint)", flush=True)
             continue
         conv_data = {
-            "conversation_id": ds[ci]["conversation_id"],
+            "conversation_id": ds[ci].get("conversation_id", ci),
             "chat": ds[ci]["chat"],
             "probing_questions": ds[ci]["probing_questions"],
         }
         pending[ci] = worker.spawn(conv_data, ci)
     print(f"  Spawned {len(pending)} workers", flush=True)
 
-    # Collect results — poll with timeout instead of blocking .get()
     for ci, handle in pending.items():
         try:
             print(f"  Waiting for Conv {ci}...", flush=True)
@@ -353,16 +320,13 @@ def orchestrate(smoke: bool = False, run_id: int = 1):
         except Exception as e:
             print(f"  Conv {ci} FAILED: {e}", flush=True)
 
-    # Stop heartbeat
     heartbeat_stop.set()
 
     if not all_details:
         print(f"  NO RESULTS", flush=True)
         return {"error": "no results"}
 
-    # Final results
     total_time = time.time() - run_start
-
     cats = {}
     for d in all_details:
         cat = d["category"]
@@ -375,8 +339,7 @@ def orchestrate(smoke: bool = False, run_id: int = 1):
     result = {
         "system": system,
         "benchmark": "BEAM-10M",
-        "version": "v0.6.0",
-        "run": run_id,
+        "version": "v1",
         "answer_model": ANSWER_MODEL,
         "judge_model": JUDGE_MODEL,
         "smoke_test": smoke,
@@ -393,18 +356,21 @@ def orchestrate(smoke: bool = False, run_id: int = 1):
         json.dump(result, f, indent=2)
     vol.commit()
 
-    print(f"\n  BEAM 10M — TRUEMEMORY PRO: {result['j_score']}% ({tc}/{len(all_details)})")
+    print(f"\n  BEAM 10M — RAG (ChromaDB): {result['j_score']}% ({tc}/{len(all_details)})", flush=True)
     for cat, v in sorted(cats.items()):
         print(f"    {cat:30s}: {v['correct']}/{v['total']} "
-              f"({v['correct']/v['total']*100:.1f}%)")
-    print(f"\n  Time: {total_time:.0f}s")
-    print(f"  Saved: {result_path}")
+              f"({v['correct']/v['total']*100:.1f}%)", flush=True)
+    print(f"\n  Time: {total_time:.0f}s", flush=True)
+    print(f"  Saved: {result_path}", flush=True)
 
     try: os.remove(ckpt_path); vol.commit()
     except: pass
 
+    return {"system": system, "j_score": result["j_score"],
+            "total": result["total_questions"], "correct": tc}
+
 
 @app.local_entrypoint()
-def main(smoke: bool = False, run_id: int = 1):
-    result = orchestrate.remote(smoke=smoke, run_id=run_id)
+def main(smoke: bool = False):
+    result = orchestrate.remote(smoke=smoke)
     print(f"\n  Final result: {result}")
