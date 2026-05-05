@@ -325,9 +325,9 @@ def _run_setup(args):
     existing_tier = config.get("tier", "")
     print("  \033[1mEmbedding Tier\033[0m")
     print("  ─────────────")
-    print("  [1] Edge — 90.1% LoCoMo, CPU-only, ~30MB install. Works anywhere.")
-    print("  [2] Base — 91.5% LoCoMo, GPU recommended, ~1.5GB install. No API key needed.")
-    print("  [3] Pro  — 91.8% LoCoMo, GPU recommended, ~1.5GB install. Requires LLM API key (HyDE).")
+    print("  [1] Edge — 89.6% LoCoMo, CPU-only, ~30MB install. Works anywhere.")
+    print("  [2] Base — 92.0% LoCoMo, GPU recommended, ~1.5GB install. No API key needed.")
+    print("  [3] Pro  — 93.0% LoCoMo, GPU recommended, ~1.5GB install. Requires LLM API key (HyDE).")
     print()
 
     _TIER_NUM = {"edge": "1", "base": "2", "pro": "3"}
@@ -343,7 +343,9 @@ def _run_setup(args):
             import sentence_transformers  # noqa: F401
             print(f"  \033[32m✓ {tier.capitalize()} dependencies already installed\033[0m")
         except ImportError:
-            print(f"  \033[33m⚠ {tier.capitalize()} tier requires: pip install truememory[gpu]\033[0m")
+            print(f'  \033[33m⚠ {tier.capitalize()} tier requires GPU extras.\033[0m')
+            print('  \033[33m  curl installer: uv tool install "truememory[gpu]"\033[0m')
+            print('  \033[33m  pip:            pip install "truememory[gpu]"\033[0m')
             if not args.non_interactive:
                 do_install = input("  Install now? [y/N]: ").strip().lower()
                 if do_install == "y":
@@ -359,10 +361,11 @@ def _run_setup(args):
                         )
                     except subprocess.TimeoutExpired:
                         print(
-                            "  \033[33m⚠ pip install timed out after "
-                            "10 minutes. Try `pip install "
-                            "truememory[gpu]` directly, then re-run "
-                            "`truememory-ingest setup`.\033[0m",
+                            '  \033[33m⚠ Install timed out after '
+                            '10 minutes. Try running directly:\n'
+                            '    uv tool install "truememory[gpu]"   (curl installer)\n'
+                            '    pip install "truememory[gpu]"       (pip)\n'
+                            '  then re-run `truememory-ingest setup`.\033[0m',
                             file=sys.stderr,
                         )
                         print("  Falling back to Edge tier.")
