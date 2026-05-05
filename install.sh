@@ -178,7 +178,9 @@ CrossEncoder('Alibaba-NLP/gte-reranker-modernbert-base')
 BANNER
   printf '%b' "$RESET"
   printf '\n'
-  ok "TrueMemory installed successfully."
+  # Show installed version
+  INSTALLED_VER=$("$TOOL_PYTHON" -c "from importlib.metadata import version; print(version('truememory'))" 2>/dev/null || echo "unknown")
+  ok "TrueMemory v${INSTALLED_VER} installed successfully."
   printf '\n'
   printf '  %bFirst time?%b Start a new Claude session and type:\n' "$GREEN" "$RESET"
   printf '\n'
