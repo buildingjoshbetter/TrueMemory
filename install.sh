@@ -17,7 +17,7 @@
 #
 # Environment overrides:
 #   TRUEMEMORY_PY=3.12         # pin a specific Python (default: 3.12)
-#   TRUEMEMORY_EXTRAS=          # pip extras (default: none; use "gpu" for Pro/GPU support)
+#   TRUEMEMORY_EXTRAS=          # (deprecated — gpu extras are now installed by default)
 #   TRUEMEMORY_SOURCE=...      # install from a local path or git URL instead of PyPI
 #                            # (useful for testing: TRUEMEMORY_SOURCE=/path/to/truememory)
 #   TRUEMEMORY_SKIP_SETUP=1    # skip the Claude auto-config step
@@ -61,18 +61,10 @@ main() {
   esac
 
   if [ -n "$TRUEMEMORY_SOURCE" ]; then
-    if [ -n "$TRUEMEMORY_EXTRAS" ]; then
-      PKG_SPEC="${TRUEMEMORY_SOURCE}[${TRUEMEMORY_EXTRAS}]"
-    else
-      PKG_SPEC="$TRUEMEMORY_SOURCE"
-    fi
+    PKG_SPEC="${TRUEMEMORY_SOURCE}[gpu]"
     say "using custom source: $TRUEMEMORY_SOURCE"
   else
-    if [ -n "$TRUEMEMORY_EXTRAS" ]; then
-      PKG_SPEC="truememory[${TRUEMEMORY_EXTRAS}]"
-    else
-      PKG_SPEC="truememory"
-    fi
+    PKG_SPEC="truememory[gpu]"
   fi
 
   # ---------- preflight ----------
@@ -108,10 +100,10 @@ main() {
     die "failed to install managed Python $TRUEMEMORY_PY (see error above)"
 
   # ---------- step 3: install truememory as a uv tool ----------
-  say "installing $PKG_SPEC (~1-2 min on first run)..."
+  say "installing $PKG_SPEC (~3-5 min on first run, downloads all tier models)..."
   # --force makes re-runs idempotent. --python pins the interpreter to avoid
   # astral-sh/uv#14110. stderr stays visible so you see real progress and errors.
-  uv tool install --python "$TRUEMEMORY_PY" --force "$PKG_SPEC" >/dev/null || \
+  uv tool install --python "$TRUEMEMORY_PY" --force --refresh "$PKG_SPEC" >/dev/null || \
     die "truememory install failed (see error above)"
 
   # Future shells should see ~/.local/bin. Reversible via 'uv tool update-shell --uninstall'.
@@ -133,6 +125,65 @@ main() {
       warn "hook install returned non-zero (you can re-run it with: truememory-ingest install)"
   fi
 
+  # ---------- step 5: pre-download models for all tiers ----------
+  say "pre-downloading models for all tiers (Edge + Base + Pro)..."
+  say "  this takes 2-5 min but means tier switching just works afterward."
+  # Use the tool's Python to run the download inside the uv venv.
+  # stderr is filtered to show only download progress (lines with %)
+  # while suppressing noisy import warnings from torch/transformers.
+  TOOL_PYTHON="$(uv tool dir)/truememory/bin/python"
+  if [ -x "$TOOL_PYTHON" ]; then
+    # Edge: Model2Vec embedder (usually bundled) + MiniLM reranker
+    say "  [1/3] Edge reranker (MiniLM-L-6-v2, ~22MB)..."
+    "$TOOL_PYTHON" -c "
+from sentence_transformers import CrossEncoder
+CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+print('done')
+" 2>&1 | grep -E '%|done|Downloading' | while IFS= read -r line; do
+      case "$line" in
+        *done*) ;;
+        *) printf '\r  %b%s%b' "$DIM" "$line" "$RESET" ;;
+      esac
+    done
+    printf '\r%80s\r' ""
+    ok "  [1/3] Edge reranker ready"
+
+    # Base/Pro: Qwen3 embedder
+    say "  [2/3] Base/Pro embedder (Qwen3-Embedding-0.6B, ~1.2GB)..."
+    "$TOOL_PYTHON" -c "
+from sentence_transformers import SentenceTransformer
+SentenceTransformer('Qwen/Qwen3-Embedding-0.6B', truncate_dim=256)
+print('done')
+" 2>&1 | grep -E '%|done|Downloading' | while IFS= read -r line; do
+      case "$line" in
+        *done*) ;;
+        *) printf '\r  %b%s%b' "$DIM" "$line" "$RESET" ;;
+      esac
+    done
+    printf '\r%80s\r' ""
+    ok "  [2/3] Base/Pro embedder ready"
+
+    # Base/Pro: gte-reranker
+    say "  [3/3] Base/Pro reranker (gte-modernbert, ~600MB)..."
+    "$TOOL_PYTHON" -c "
+from sentence_transformers import CrossEncoder
+CrossEncoder('Alibaba-NLP/gte-reranker-modernbert-base')
+print('done')
+" 2>&1 | grep -E '%|done|Downloading' | while IFS= read -r line; do
+      case "$line" in
+        *done*) ;;
+        *) printf '\r  %b%s%b' "$DIM" "$line" "$RESET" ;;
+      esac
+    done
+    printf '\r%80s\r' ""
+    ok "  [3/3] Base/Pro reranker ready"
+
+    ok "all models pre-downloaded — tier switching is instant."
+  else
+    warn "could not locate tool Python at $TOOL_PYTHON — skipping model pre-download"
+    warn "models will download on first use instead"
+  fi
+
   # ---------- done ----------
   printf '\n'
   printf '%b' "$GREEN"
@@ -149,8 +200,11 @@ BANNER
   printf '\n'
   ok "TrueMemory installed successfully."
   printf '\n'
-  printf '  %bFirst time?%b Start a new Claude session — TrueMemory will\n' "$GREEN" "$RESET"
-  printf '  walk you through tier selection automatically.\n'
+  printf '  %bFirst time?%b Start a new Claude session and type:\n' "$GREEN" "$RESET"
+  printf '\n'
+  printf '    %b%bSet up TrueMemory%b\n' "$BOLD" "$GREEN" "$RESET"
+  printf '\n'
+  printf '  TrueMemory will walk you through choosing Edge, Base, or Pro.\n'
   printf '\n'
   printf '  %b%bIMPORTANT — if Claude Desktop was already open:%b\n' "$YELLOW" "$BOLD" "$RESET"
   printf '    Quit it completely with %bCmd+Q%b and reopen it.\n' "$BOLD" "$RESET"

@@ -49,7 +49,7 @@ _inference_lock = threading.Lock()  # Protects concurrent model.predict() calls
 #
 # Edge uses the lightweight MiniLM cross-encoder (22M params, CPU-friendly).
 # Base and Pro use gte-reranker-modernbert-base (149M, GPU recommended) —
-# required to reach the 91.5% / 91.8% LoCoMo targets for those tiers.
+# required to reach the 92.0% / 93.0% LoCoMo targets for those tiers.
 #
 # The active tier is cached in _active_tier. It's seeded lazily on first
 # get_current_reranker_name() call (from TRUEMEMORY_EMBED_MODEL env var or

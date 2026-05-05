@@ -648,14 +648,14 @@ def truememory_stats() -> str:
             "\n"
             "Choose your tier:\n"
             "\n"
-            "  Edge — 90.1% accuracy on LoCoMo. CPU-only, works anywhere.\n"
+            "  Edge — 89.6% accuracy on LoCoMo. CPU-only, works anywhere.\n"
             "          Lightweight (~30MB install). No API key needed.\n"
             "\n"
-            "  Base — 91.5% accuracy on LoCoMo. GPU recommended.\n"
+            "  Base — 92.0% accuracy on LoCoMo. GPU recommended.\n"
             "          Paper-aligned Qwen3 @ 256d + gte-reranker (~1.5GB install).\n"
             "          No API key needed — fully offline.\n"
             "\n"
-            "  Pro  — 91.8% accuracy on LoCoMo. GPU recommended.\n"
+            "  Pro  — 93.0% accuracy on LoCoMo. GPU recommended.\n"
             "          Same models as Base plus HyDE query expansion.\n"
             "          Requires an API key (Anthropic / OpenRouter / OpenAI) for the HyDE LLM call.\n"
             "\n"
@@ -713,7 +713,10 @@ def truememory_configure(
             import sentence_transformers  # noqa: F401
         except ImportError:
             return json.dumps({
-                "error": f"{tier.capitalize()} tier requires an extra install. Run: pip install truememory[gpu]",
+                "error": f"{tier.capitalize()} tier requires GPU extras. "
+                         f"If you installed via the curl installer, run:  uv tool install \"truememory[gpu]\"  "
+                         f"If you used pip, run:  pip install \"truememory[gpu]\"  "
+                         f"Then restart Claude and try again.",
                 "current_tier": _load_config().get("tier", "edge"),
             })
 
