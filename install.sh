@@ -149,8 +149,11 @@ BANNER
   printf '\n'
   ok "TrueMemory installed successfully."
   printf '\n'
-  printf '  %bFirst time?%b Start a new Claude session — TrueMemory will\n' "$GREEN" "$RESET"
-  printf '  walk you through tier selection automatically.\n'
+  printf '  %bFirst time?%b Start a new Claude session and type:\n' "$GREEN" "$RESET"
+  printf '\n'
+  printf '    %b%bSet up TrueMemory%b\n' "$BOLD" "$GREEN" "$RESET"
+  printf '\n'
+  printf '  TrueMemory will walk you through choosing Edge, Base, or Pro.\n'
   printf '\n'
   printf '  %b%bIMPORTANT — if Claude Desktop was already open:%b\n' "$YELLOW" "$BOLD" "$RESET"
   printf '    Quit it completely with %bCmd+Q%b and reopen it.\n' "$BOLD" "$RESET"
