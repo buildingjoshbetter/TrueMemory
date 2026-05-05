@@ -33,11 +33,11 @@
 
 ## 🚀 Quick Start
 
-**Step 1.** Open Terminal (Mac: `Cmd + Space`, type `Terminal`. Linux: `Ctrl + Alt + T`).
+${\color{#1a73e8}\textbf{\textsf{Step 1.}}}$ Open Terminal (Mac: `Cmd + Space`, type `Terminal`. Linux: `Ctrl + Alt + T`).
 
 &nbsp;
 
-**Step 2.** Paste this and press Enter:
+${\color{#1a73e8}\textbf{\textsf{Step 2.}}}$ Paste this and press Enter:
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.sh | sh
@@ -45,15 +45,15 @@ curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/
 
 &nbsp;
 
-**Step 3.** Wait 3-5 minutes. You'll see download progress bars.
+${\color{#1a73e8}\textbf{\textsf{Step 3.}}}$ Wait 3-5 minutes. You'll see download progress bars.
 
 &nbsp;
 
-**Step 4.** Quit Claude completely (`Cmd+Q`) and reopen it.
+${\color{#1a73e8}\textbf{\textsf{Step 4.}}}$ Quit Claude completely (`Cmd+Q`) and reopen it.
 
 &nbsp;
 
-**Step 5.** Type **"Set up TrueMemory"** and pick Edge, Base, or Pro.
+${\color{#1a73e8}\textbf{\textsf{Step 5.}}}$ Type **"Set up TrueMemory"** and pick Edge, Base, or Pro.
 
 &nbsp;
 
@@ -62,6 +62,8 @@ That's it. TrueMemory remembers your conversations automatically from here.
 - **Switch tiers:** tell Claude "switch to Pro" or "switch to Base"
 - **Update:** run `uv tool upgrade truememory` in Terminal, then restart Claude
 - **Uninstall:** run `uv tool uninstall truememory`
+
+> **⭐ Tip:** Quit your Claude sessions when you're done prompting. TrueMemory's memory hook runs when the session ends, so it can capture and store the full conversation.
 
 <details>
 <summary><b>Click here for the advanced setup guide ▸</b></summary>
