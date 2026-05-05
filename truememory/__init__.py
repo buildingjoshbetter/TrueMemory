@@ -26,7 +26,8 @@ Core modules:
     clustering     - HDBSCAN scene clustering for episode-scoped retrieval
 """
 
-__version__ = "0.5.0"
+from importlib.metadata import version as _pkg_version
+__version__ = _pkg_version("truememory")
 
 from truememory.client import Memory
 from truememory.storage import (
