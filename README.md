@@ -35,17 +35,27 @@
 
 **Step 1.** Open Terminal (Mac: `Cmd + Space`, type `Terminal`. Linux: `Ctrl + Alt + T`).
 
+&nbsp;
+
 **Step 2.** Paste this and press Enter:
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.sh | sh
 ```
 
+&nbsp;
+
 **Step 3.** Wait 3-5 minutes. You'll see download progress bars.
+
+&nbsp;
 
 **Step 4.** Quit Claude completely (`Cmd+Q`) and reopen it.
 
+&nbsp;
+
 **Step 5.** Type **"Set up TrueMemory"** and pick Edge, Base, or Pro.
+
+&nbsp;
 
 That's it. TrueMemory remembers your conversations automatically from here.
 
@@ -54,7 +64,7 @@ That's it. TrueMemory remembers your conversations automatically from here.
 - **Uninstall:** run `uv tool uninstall truememory`
 
 <details>
-<summary><b>Advanced</b></summary>
+<summary><b>Click here for the advanced setup guide ▸</b></summary>
 
 #### What the installer does
 
