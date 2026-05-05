@@ -128,9 +128,10 @@ main() {
   # ---------- step 5: pre-download models for all tiers ----------
   say "pre-downloading models for all tiers (Edge + Base + Pro)..."
   say "  this takes 2-5 min but means tier switching just works afterward."
+  say "  you'll see download progress bars below."
   # Use the tool's Python to run the download inside the uv venv.
-  # stderr is filtered to show only download progress (lines with %)
-  # while suppressing noisy import warnings from torch/transformers.
+  # stderr is NOT suppressed — HuggingFace's tqdm progress bars show
+  # download percentage, speed, and ETA, which is better UX than silence.
   TOOL_PYTHON="$(uv tool dir)/truememory/bin/python"
   if [ -x "$TOOL_PYTHON" ]; then
     # Edge: Model2Vec embedder (usually bundled) + MiniLM reranker
@@ -138,45 +139,21 @@ main() {
     "$TOOL_PYTHON" -c "
 from sentence_transformers import CrossEncoder
 CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
-print('done')
-" 2>&1 | grep -E '%|done|Downloading' | while IFS= read -r line; do
-      case "$line" in
-        *done*) ;;
-        *) printf '\r  %b%s%b' "$DIM" "$line" "$RESET" ;;
-      esac
-    done
-    printf '\r%80s\r' ""
-    ok "  [1/3] Edge reranker ready"
+" && ok "  [1/3] Edge reranker ready" || warn "  [1/3] Edge reranker download failed (search still works without it)"
 
     # Base/Pro: Qwen3 embedder
     say "  [2/3] Base/Pro embedder (Qwen3-Embedding-0.6B, ~1.2GB)..."
     "$TOOL_PYTHON" -c "
 from sentence_transformers import SentenceTransformer
 SentenceTransformer('Qwen/Qwen3-Embedding-0.6B', truncate_dim=256)
-print('done')
-" 2>&1 | grep -E '%|done|Downloading' | while IFS= read -r line; do
-      case "$line" in
-        *done*) ;;
-        *) printf '\r  %b%s%b' "$DIM" "$line" "$RESET" ;;
-      esac
-    done
-    printf '\r%80s\r' ""
-    ok "  [2/3] Base/Pro embedder ready"
+" && ok "  [2/3] Base/Pro embedder ready" || warn "  [2/3] Base/Pro embedder download failed (you can retry later or use Edge tier)"
 
     # Base/Pro: gte-reranker
     say "  [3/3] Base/Pro reranker (gte-modernbert, ~600MB)..."
     "$TOOL_PYTHON" -c "
 from sentence_transformers import CrossEncoder
 CrossEncoder('Alibaba-NLP/gte-reranker-modernbert-base')
-print('done')
-" 2>&1 | grep -E '%|done|Downloading' | while IFS= read -r line; do
-      case "$line" in
-        *done*) ;;
-        *) printf '\r  %b%s%b' "$DIM" "$line" "$RESET" ;;
-      esac
-    done
-    printf '\r%80s\r' ""
-    ok "  [3/3] Base/Pro reranker ready"
+" && ok "  [3/3] Base/Pro reranker ready" || warn "  [3/3] Base/Pro reranker download failed (you can retry later or use Edge tier)"
 
     ok "all models pre-downloaded — tier switching is instant."
   else
