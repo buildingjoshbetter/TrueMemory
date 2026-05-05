@@ -29,6 +29,8 @@ import logging
 import threading
 from typing import TYPE_CHECKING
 
+from truememory import config
+
 log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -43,10 +45,7 @@ _model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 _lock = threading.Lock()
 _inference_lock = threading.Lock()  # Protects concurrent model.predict() calls
 
-# ---------------------------------------------------------------------------
-# Tier-aware reranker resolution (v0.4.0 paper §2.0)
-# ---------------------------------------------------------------------------
-#
+# v0.4.0 paper §2.0 models:
 # Edge uses the lightweight MiniLM cross-encoder (22M params, CPU-friendly).
 # Base and Pro use gte-reranker-modernbert-base (149M, GPU recommended) —
 # required to reach the 91.5% / 91.8% LoCoMo targets for those tiers.
@@ -55,24 +54,17 @@ _inference_lock = threading.Lock()  # Protects concurrent model.predict() calls
 # get_current_reranker_name() call (from TRUEMEMORY_EMBED_MODEL env var or
 # ~/.truememory/config.json), and can be updated at runtime via
 # set_active_tier() — the MCP server calls this on truememory_configure.
-_TIER_RERANKERS = {
-    "edge": "cross-encoder/ms-marco-MiniLM-L-6-v2",
-    "base": "Alibaba-NLP/gte-reranker-modernbert-base",
-    "pro": "Alibaba-NLP/gte-reranker-modernbert-base",
-}
 
 _active_tier: str | None = None  # None = not yet resolved; resolved lazily
 
 
 def get_reranker_name_for_tier(tier: str) -> str:
-    """Pure mapping from tier name ("edge" / "base" / "pro") to reranker HF ID.
+    """Pure mapping from tier name ("edge" / "base" / "pro" / "custom") to reranker HF ID.
 
     Case-insensitive. Unknown or empty tier names fall back to the Edge
     default (MiniLM). Does not load any model — use ``get_reranker`` for that.
     """
-    if not tier:
-        return _TIER_RERANKERS["edge"]
-    return _TIER_RERANKERS.get(tier.lower(), _TIER_RERANKERS["edge"])
+    return config.get_tier_config(tier)["reranker"]
 
 
 def _resolve_tier_from_env_and_config() -> str:
@@ -85,7 +77,7 @@ def _resolve_tier_from_env_and_config() -> str:
     """
     import os
     env = os.environ.get("TRUEMEMORY_EMBED_MODEL", "").strip().lower()
-    if env in ("edge", "base", "pro"):
+    if env in ("edge", "base", "pro", "custom"):
         return env
     try:
         from pathlib import Path
@@ -94,7 +86,7 @@ def _resolve_tier_from_env_and_config() -> str:
         if cfg_path.exists():
             data = json.loads(cfg_path.read_text())
             tier = (data.get("tier") or "").strip().lower()
-            if tier in ("edge", "base", "pro"):
+            if tier in ("edge", "base", "pro", "custom"):
                 return tier
     except (json.JSONDecodeError, OSError) as e:
         # Hunter F04 duplicate: previously a bare `except Exception: pass`
@@ -124,7 +116,7 @@ def set_active_tier(tier: str) -> None:
         _active_tier = "edge"
         return
     t = tier.strip().lower()
-    _active_tier = t if t in ("edge", "base", "pro") else "edge"
+    _active_tier = t if t in ("edge", "base", "pro", "custom") else "edge"
 
 
 def get_current_reranker_name() -> str:

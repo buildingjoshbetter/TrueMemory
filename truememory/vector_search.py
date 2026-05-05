@@ -48,6 +48,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from truememory import config
+
 if TYPE_CHECKING:
     pass
 
@@ -68,46 +70,38 @@ class TrueMemoryMigrationError(Exception):
 # Singleton model loader
 # ---------------------------------------------------------------------------
 
-# Public tier names → internal model identifiers (v0.4.0 paper-aligned Edge/Base/Pro)
-_TIER_ALIASES = {
-    "edge": "model2vec",
-    "base": "qwen3_256",
-    "pro": "qwen3_256",
-}
-
-_MODEL_DIMS = {
-    "model2vec": 256,
-    "minilm": 384,
-    "bge-small": 384,
-    "qwen3_256": 256,
-}
-
 # v0.4.0 breaking change: the old internal name "qwen3" (1024d native) is gone.
 # Callers must migrate to "pro" (tier alias) or "qwen3_256" (internal name).
 _REMOVED_MODELS = {"qwen3"}
 
 
 def _resolve_model_name(name: str) -> str:
-    """Resolve a public tier name (edge/base/pro) or internal model name.
+    """Resolve a public tier name (edge/base/pro/custom) or internal model name.
 
     Raises:
         ValueError: if *name* refers to a model removed in v0.4.0.
     """
-    lowered = name.lower()
+    lowered = name.lower().strip()
     if lowered in _REMOVED_MODELS:
         raise ValueError(
             f"Embedding model {name!r} was removed in TrueMemory v0.4.0. "
             f"Migrate to 'pro' (tier alias) or 'qwen3_256' (internal name) — "
             f"the paper-aligned Qwen3-Embedding-0.6B @ 256d Matryoshka config."
         )
-    return _TIER_ALIASES.get(lowered, name)
+
+    # Check if it's a known tier (including 'custom')
+    if lowered in config.DEFAULT_TIERS or lowered == "custom":
+        return config.get_tier_config(lowered)["embed_model"]
+
+    # Otherwise assume it's already an internal name or HF ID
+    return name
 
 
 _raw_env = os.environ.get("TRUEMEMORY_EMBED_MODEL", "edge")
 EMBEDDING_MODEL = _resolve_model_name(_raw_env)
 
 _model = None
-_embedding_dim: int = _MODEL_DIMS.get(EMBEDDING_MODEL, 256)
+_embedding_dim: int = config.get_embedding_dim(EMBEDDING_MODEL)
 _lock = threading.Lock()
 
 
@@ -126,7 +120,7 @@ def set_embedding_model(name: str) -> None:
 def get_embedding_dim(name: str | None = None) -> int:
     """Return the embedding dimension for a given model name."""
     name = _resolve_model_name(name) if name else EMBEDDING_MODEL
-    return _MODEL_DIMS.get(name, 256)
+    return config.get_embedding_dim(name)
 
 
 def get_model():
@@ -158,9 +152,15 @@ def get_model():
             )
             _embedding_dim = 256
         else:
-            from model2vec import StaticModel
-            _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
-            _embedding_dim = 256
+            # Assume it's a HuggingFace ID
+            try:
+                from sentence_transformers import SentenceTransformer
+                _model = SentenceTransformer(resolved)
+            except Exception as e:
+                logger.warning("Failed to load model %r as SentenceTransformer: %s. Falling back to Model2Vec.", resolved, e)
+                from model2vec import StaticModel
+                _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
+                _embedding_dim = 256
     return _model
 
 

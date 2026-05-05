@@ -659,7 +659,10 @@ def truememory_stats() -> str:
             "          Same models as Base plus HyDE query expansion.\n"
             "          Requires an API key (Anthropic / OpenRouter / OpenAI) for the HyDE LLM call.\n"
             "\n"
-            "Which would you like: Edge, Base, or Pro?"
+            "  Custom — Inject your own models via environment variables.\n"
+            "          See documentation for TRUEMEMORY_CUSTOM_* vars.\n"
+            "\n"
+            "Which would you like: Edge, Base, Pro, or Custom?"
         )
         stats["has_api_key"] = bool(
             os.environ.get("ANTHROPIC_API_KEY")
@@ -691,8 +694,8 @@ def truememory_configure(
     """
     global _memory
     tier = tier.lower().strip()
-    if tier not in ("edge", "base", "pro"):
-        return json.dumps({"error": "tier must be 'edge', 'base', or 'pro'"})
+    if tier not in ("edge", "base", "pro", "custom"):
+        return json.dumps({"error": "tier must be 'edge', 'base', 'pro', or 'custom'"})
 
     # Validate API key + provider pairing
     if api_key and not api_provider:
@@ -706,9 +709,9 @@ def truememory_configure(
                 "error": "api_provider must be one of: anthropic, openrouter, openai",
             })
 
-    # Check Base / Pro dependencies before committing (both need sentence-transformers
-    # for the Qwen3 embedder + gte-reranker).
-    if tier in ("base", "pro"):
+    # Check Base / Pro / Custom dependencies before committing (these typically need
+    # sentence-transformers for the Qwen3/custom embedder + gte-reranker).
+    if tier in ("base", "pro", "custom"):
         try:
             import sentence_transformers  # noqa: F401
         except ImportError:
