@@ -33,34 +33,42 @@
 
 ## 🚀 Quick Start
 
-### Claude Code / Claude Desktop
+**Step 1.** Open Terminal (Mac: `Cmd + Space`, type `Terminal`. Linux: `Ctrl + Alt + T`).
 
-One command. Works on any Mac or Linux box, even if your system Python is old or missing entirely.
-
-**Step 1.** Open Terminal:
-
-- **Mac:** press `Cmd + Space`, type `Terminal`, press `Enter`
-- **Linux:** press `Ctrl + Alt + T` (or open your distro's terminal app)
-
-**Step 2.** Paste this one line and press `Enter`:
+**Step 2.** Paste this and press Enter:
 
 ```bash
 curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.sh | sh
 ```
 
-**Step 3.** Wait ~3-5 minutes while it downloads and installs (up to 15-30 minutes on slower connections). The installer pre-downloads models for all three tiers (Edge, Base, Pro) so you can switch between them instantly later.
+**Step 3.** Wait 3-5 minutes. You'll see download progress bars.
 
-**Step 4.** If Claude Desktop was already open, **quit it with `Cmd+Q` and reopen it** (a new chat window is not enough; the config is only read at launch). Then start a new Claude session and type **"Set up TrueMemory"**. TrueMemory walks you through choosing **Edge**, **Base**, or **Pro**.
+**Step 4.** Quit Claude completely (`Cmd+Q`) and reopen it.
 
-> **Switching tiers later?** Just tell Claude "switch to Base" or "switch to Pro" in any session. All models are pre-installed, so switching is instant (if you have existing memories, they will be re-embedded with the new model, which may take a moment). Pro requires an LLM API key for HyDE query expansion.
+**Step 5.** Type **"Set up TrueMemory"** and pick Edge, Base, or Pro.
 
-> **Updating to the latest version?** Run `uv tool upgrade truememory` in your terminal. Then restart Claude.
+That's it. TrueMemory remembers your conversations automatically from here.
 
-> **What this actually does:** installs [uv](https://docs.astral.sh/uv/) (Astral's Python tool manager) if needed, fetches a managed Python 3.12 into `~/.local/share/uv/`, installs TrueMemory with all tier models into an isolated tool environment, registers the MCP server, wires up lifecycle hooks, and merges instructions into your `~/.claude/CLAUDE.md`. **Your system Python is never touched.** No sudo, no venvs, no pip struggle. Uninstall cleanly with `uv tool uninstall truememory`.
+- **Switch tiers:** tell Claude "switch to Pro" or "switch to Base"
+- **Update:** run `uv tool upgrade truememory` in Terminal, then restart Claude
+- **Uninstall:** run `uv tool uninstall truememory`
 
-> **Want to audit the script first?** It's ~200 lines of shell, no sudo, stays entirely under `$HOME`. Read the source at [`install.sh`](install.sh), or download and inspect locally: `curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.sh -o install.sh && less install.sh && sh install.sh`.
+<details>
+<summary><b>Advanced</b></summary>
 
-### Python library (for developers)
+#### What the installer does
+
+Installs [uv](https://docs.astral.sh/uv/) (Astral's Python tool manager) if needed, fetches a managed Python 3.12, installs TrueMemory with all tier models into an isolated tool environment, registers the MCP server, wires up lifecycle hooks, and merges instructions into `~/.claude/CLAUDE.md`. Your system Python is never touched. No sudo, no venvs, no pip struggle.
+
+#### Audit the script
+
+It's ~200 lines of shell, no sudo, stays entirely under `$HOME`:
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.sh -o install.sh && less install.sh && sh install.sh
+```
+
+#### Python library (for developers)
 
 If you're embedding TrueMemory in your own Python project (requires Python 3.10+):
 
@@ -68,7 +76,7 @@ If you're embedding TrueMemory in your own Python project (requires Python 3.10+
 pip install truememory
 ```
 
-> **Important:** `pip install` installs the Python library only. It does NOT register the MCP server, install hooks, or configure Claude. For Claude Code / Claude Desktop, always use the `curl | sh` installer above.
+> `pip install` installs the Python library only. It does NOT register the MCP server, install hooks, or configure Claude. For Claude Code / Claude Desktop, always use the `curl | sh` installer above.
 
 ```python
 from truememory import Memory
@@ -83,6 +91,8 @@ print(results[0]["content"])
 ```
 
 The database is created automatically at `~/.truememory/memories.db`.
+
+</details>
 
 ---
 
