@@ -63,7 +63,7 @@ That's it. TrueMemory remembers your conversations automatically from here.
 - **Update:** run `uv tool upgrade truememory` in Terminal, then restart Claude
 - **Uninstall:** run `uv tool uninstall truememory`
 
-> **⭐ Tip:** Quit your Claude sessions when you're done chatting. TrueMemory's memory hook runs when the session ends, so it can capture and store the full conversation.
+> **⭐ Tip:** Quit your Claude sessions when you're done prompting. TrueMemory's memory hook runs when the session ends, so it can capture and store the full conversation.
 
 <details>
 <summary><b>Click here for the advanced setup guide ▸</b></summary>
