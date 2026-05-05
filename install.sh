@@ -101,8 +101,11 @@ main() {
 
   # ---------- step 3: install truememory as a uv tool ----------
   say "installing $PKG_SPEC (~3-5 min on first run, downloads all tier models)..."
+  # Remove any existing install first to guarantee a clean slate.
+  # Without this, uv may serve a cached older version even with --refresh.
+  uv tool uninstall truememory >/dev/null 2>&1 || true
   # --force makes re-runs idempotent. --python pins the interpreter to avoid
-  # astral-sh/uv#14110. stderr stays visible so you see real progress and errors.
+  # astral-sh/uv#14110. --refresh bypasses the resolver cache.
   uv tool install --python "$TRUEMEMORY_PY" --force --refresh "$PKG_SPEC" >/dev/null || \
     die "truememory install failed (see error above)"
 
