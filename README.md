@@ -48,20 +48,15 @@ One command. Works on any Mac or Linux box, even if your system Python is old or
 curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.sh | sh
 ```
 
-**Step 3.** Wait ~1-2 minutes while it downloads and installs. You'll see progress messages scroll by.
+**Step 3.** Wait ~3-5 minutes while it downloads and installs. The installer pre-downloads models for all three tiers (Edge, Base, Pro) so you can switch between them instantly later.
 
-**Step 4.** If Claude Desktop was already open, **quit it with `Cmd+Q` and reopen it** (a new chat window is not enough; the config is only read at launch). Then start a new Claude session and TrueMemory walks you through choosing **Edge**, **Base**, or **Pro** on first run.
+**Step 4.** If Claude Desktop was already open, **quit it with `Cmd+Q` and reopen it** (a new chat window is not enough; the config is only read at launch). Then start a new Claude session and type **"Set up TrueMemory"**. TrueMemory walks you through choosing **Edge**, **Base**, or **Pro**.
 
-> **What this actually does:** installs [uv](https://docs.astral.sh/uv/) (Astral's Python tool manager) if needed, fetches a managed Python 3.12 into `~/.local/share/uv/`, installs TrueMemory into an isolated tool environment, registers the MCP server, wires up lifecycle hooks, and merges instructions into your `~/.claude/CLAUDE.md`. **Your system Python is never touched.** No sudo, no venvs, no pip struggle. Uninstall cleanly with `uv tool uninstall truememory`.
+> **Switching tiers later?** Just tell Claude "switch to Base" or "switch to Pro" in any session. All models are pre-installed, so switching is instant. Pro requires an LLM API key for HyDE query expansion.
 
-> **Want to audit the script first?** It's ~170 lines of shell, no sudo, stays entirely under `$HOME`. Read the source at [`install.sh`](install.sh), or download and inspect locally: `curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.sh -o install.sh && less install.sh && sh install.sh`.
+> **What this actually does:** installs [uv](https://docs.astral.sh/uv/) (Astral's Python tool manager) if needed, fetches a managed Python 3.12 into `~/.local/share/uv/`, installs TrueMemory with all tier models into an isolated tool environment, registers the MCP server, wires up lifecycle hooks, and merges instructions into your `~/.claude/CLAUDE.md`. **Your system Python is never touched.** No sudo, no venvs, no pip struggle. Uninstall cleanly with `uv tool uninstall truememory`.
 
-> **Want Base or Pro** (adds Qwen3 embeddings + gte-reranker + sentence-transformers, ~1.5-2.5GB depending on OS)?
-> ```bash
-> curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.sh | TRUEMEMORY_EXTRAS="gpu" sh
-> ```
-> The default install is **Edge** (~30MB, the CPU-only tier). If you pick Base or Pro during first-run setup, TrueMemory will prompt you to install the extra models. Pro additionally requires an LLM API key at runtime for HyDE.
-> *(Linux CPU-only boxes will pull PyTorch's default CUDA wheel, which is larger, ~2.5GB total. Mac installs are closer to ~1.5GB.)*
+> **Want to audit the script first?** It's ~200 lines of shell, no sudo, stays entirely under `$HOME`. Read the source at [`install.sh`](install.sh), or download and inspect locally: `curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.sh -o install.sh && less install.sh && sh install.sh`.
 
 ### Python library (for developers)
 
