@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/buildingjoshbetter-truememory-badge.png)](https://mseep.ai/app/buildingjoshbetter-truememory)
+
 <p align="center">
   <img src="assets/charts/hero-banner.png" alt="TrueMemory" />
 </p>
