@@ -1133,6 +1133,7 @@ def _setup_claude():
     else:
         if not claude_bin:
             print("  Claude Code CLI not found on PATH.")
+            print("  If you just installed it, try opening a new terminal window.")
         if not desktop_config_path.parent.exists():
             print("  Claude Desktop not detected.")
         print()
@@ -1151,7 +1152,7 @@ TrueMemory MCP server — persistent memory for AI agents.
 
 Options:
   --setup       Auto-configure TrueMemory as an MCP server in Claude Code
-                and/or Claude Desktop. Run this once after `pip install`.
+                and/or Claude Desktop. Run this once after installing.
   --help, -h    Show this help message and exit.
   --version, -V Show version and exit.
 

@@ -132,11 +132,11 @@ def test_pip_install_timeout_handler_prints_stderr_and_falls_back_to_edge():
     )
     # Must warn the user to stderr with an actionable message.
     assert "file=sys.stderr" in text
-    # Must fall back to edge tier on timeout.
+    # Must fall back to edge tier on install failure.
     pip_idx = text.find('"truememory[gpu]"]')
     assert pip_idx != -1
-    post = text[pip_idx : pip_idx + 800]
+    post = text[pip_idx : pip_idx + 1200]
     assert 'tier = "edge"' in post, (
-        "F25 regression: on pip timeout, setup must fall back to Edge tier "
+        "F25 regression: on install failure, setup must fall back to Edge tier "
         "rather than leave the user in an indeterminate state"
     )
