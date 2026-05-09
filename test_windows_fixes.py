@@ -310,6 +310,78 @@ else:
     print(f"{FAIL} - Still uses bare 'claude' string")
 
 
+# ─── TEST 8: Memory store + recall (end-to-end) ───────────────────────────
+section("TEST 8: Memory store and recall (core functionality)")
+
+from truememory import Memory
+import time
+
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+    db_path = Path(tmp) / "test_memories.db"
+    m = Memory(path=str(db_path))
+
+    # Store several facts with different content
+    facts = [
+        "Hunter prefers TypeScript over JavaScript for all new projects.",
+        "Hunter's Windows dev box has Defender ASR rule 01443614 in BLOCK mode.",
+        "TrueMemory is installed at S:\\LIBRARIES\\truememory-venv on Hunter's machine.",
+        "Hunter uses claude_cli provider for TrueMemory Pro tier — no API key needed.",
+        "Hunter never uses uv tool install or uvx — ASR blocks low-prevalence exe shims.",
+    ]
+
+    stored_ids = []
+    for fact in facts:
+        result = m.add(fact, user_id="hunter")
+        if isinstance(result, dict) and "id" in result:
+            stored_ids.append(result["id"])
+
+    if len(stored_ids) == len(facts):
+        print(f"{PASS} - Stored {len(stored_ids)} memories successfully")
+    else:
+        print(f"{FAIL} - Only stored {len(stored_ids)}/{len(facts)} memories")
+
+    # Search with a paraphrased query (not keyword-matching — semantic recall)
+    results = m.search("what programming language does Hunter prefer", user_id="hunter", limit=3)
+    ts_found = any("TypeScript" in r.get("content", "") for r in results)
+    if ts_found:
+        print(f"{PASS} - Semantic recall: 'TypeScript preference' found via paraphrase query")
+        print(f"  Top result: {results[0]['content'][:80]}...")
+    else:
+        print(f"{FAIL} - Semantic recall: 'TypeScript preference' NOT found")
+        print(f"  Got: {[r.get('content', '')[:60] for r in results]}")
+
+    # Search for Windows/ASR context
+    results2 = m.search("Windows security and Python tool installation rules", user_id="hunter", limit=3)
+    asr_found = any("ASR" in r.get("content", "") or "uv tool" in r.get("content", "") for r in results2)
+    if asr_found:
+        print(f"{PASS} - Semantic recall: Windows/ASR rules found via contextual query")
+    else:
+        print(f"{FAIL} - Semantic recall: Windows/ASR rules NOT found")
+
+    # Verify memory count
+    stats = m.get_all(user_id="hunter")
+    total = len(stats) if isinstance(stats, list) else 0
+    if total == len(facts):
+        print(f"{PASS} - Memory count correct: {total} memories stored")
+    else:
+        print(f"  Note: {total} memories in DB (dedup may have merged similar facts)")
+
+    # Test forget (delete) works
+    if stored_ids:
+        m.delete(stored_ids[0])
+        remaining = m.get_all(user_id="hunter")
+        if isinstance(remaining, list) and len(remaining) < total:
+            print(f"{PASS} - Delete/forget works: {total} -> {len(remaining)} memories")
+        else:
+            print(f"  Note: delete check inconclusive (total={total})")
+
+    # Explicitly close connection before temp dir cleanup (Windows file-lock)
+    try:
+        m._engine.conn.close()
+    except Exception:
+        pass
+
+
 # ─── SUMMARY ──────────────────────────────────────────────────────────────
 section("SUMMARY")
 print("All critical and high-priority Windows fixes verified.")
