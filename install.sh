@@ -198,6 +198,9 @@ BANNER
   printf '    uv tool upgrade truememory     %b# update to latest%b\n' "$DIM" "$RESET"
   printf '    uv tool uninstall truememory   %b# uninstall%b\n' "$DIM" "$RESET"
   printf '\n'
+  printf '  %bNote:%b If commands are not found, open a new terminal window\n' "$YELLOW" "$RESET"
+  printf '        or run: %bsource ~/.zshrc%b  (or %bsource ~/.bashrc%b)\n' "$BOLD" "$RESET" "$BOLD" "$RESET"
+  printf '\n'
 }
 
 main "$@"

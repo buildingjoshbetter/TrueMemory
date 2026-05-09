@@ -118,7 +118,8 @@ def _run_ingest(args):
     except ImportError:
         print(
             "ERROR: truememory is not installed.\n"
-            "       Install with: pip install truememory\n"
+            '       Install with: uv tool install truememory  (or: pip install truememory)\n'
+            "       If already installed, ensure ~/.local/bin is on your PATH.\n"
             "       (truememory-ingest depends on truememory>=0.1.3)",
             file=sys.stderr,
         )
@@ -349,16 +350,26 @@ def _run_setup(args):
             if not args.non_interactive:
                 do_install = input("  Install now? [y/N]: ").strip().lower()
                 if do_install == "y":
+                    import shutil
                     import subprocess
-                    # Hunter F25: bound pip with a 10-minute timeout —
+                    # Hunter F25: bound install with a 10-minute timeout —
                     # long enough for model downloads from slow mirrors,
                     # short enough that a dead mirror doesn't wedge setup.
+                    _is_uv = "uv" in sys.executable or (
+                        shutil.which("uv") and ".local/share/uv/tools" in sys.executable
+                    )
                     try:
-                        subprocess.run(
-                            [sys.executable, "-m", "pip", "install",
-                             "truememory[gpu]"],
-                            timeout=600,
-                        )
+                        if _is_uv:
+                            subprocess.run(
+                                ["uv", "tool", "install", "truememory[gpu]"],
+                                timeout=600,
+                            )
+                        else:
+                            subprocess.run(
+                                [sys.executable, "-m", "pip", "install",
+                                 "truememory[gpu]"],
+                                timeout=600,
+                            )
                     except subprocess.TimeoutExpired:
                         print(
                             '  \033[33m⚠ Install timed out after '
@@ -771,7 +782,8 @@ def _run_status(args):
         print(f"  [OK] truememory {version} importable")
     except ImportError as e:
         print(f"  [FAIL] truememory not importable: {e}")
-        print("         Install with: pip install truememory")
+        print('         Install with: uv tool install truememory  (or: pip install truememory)')
+        print("         If already installed, ensure ~/.local/bin is on your PATH.")
         return
 
     # 2. LLM backend
