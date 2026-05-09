@@ -355,8 +355,9 @@ def _run_setup(args):
                     # Hunter F25: bound install with a 10-minute timeout —
                     # long enough for model downloads from slow mirrors,
                     # short enough that a dead mirror doesn't wedge setup.
-                    _is_uv = "uv" in sys.executable or (
-                        shutil.which("uv") and ".local/share/uv/tools" in sys.executable
+                    _is_uv = (
+                        "/uv/tools/" in sys.executable
+                        and shutil.which("uv")
                     )
                     try:
                         if _is_uv:
@@ -370,10 +371,10 @@ def _run_setup(args):
                                  "truememory[gpu]"],
                                 timeout=600,
                             )
-                    except subprocess.TimeoutExpired:
+                    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
                         print(
-                            '  \033[33m⚠ Install timed out after '
-                            '10 minutes. Try running directly:\n'
+                            '  \033[33m⚠ Auto-install failed. '
+                            'Try running directly:\n'
                             '    uv tool install "truememory[gpu]"   (curl installer)\n'
                             '    pip install "truememory[gpu]"       (pip)\n'
                             '  then re-run `truememory-ingest setup`.\033[0m',
