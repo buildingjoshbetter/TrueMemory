@@ -615,6 +615,9 @@ def _run_upgrade_tier(args):
     }
     print()
     print(f"\033[32m✓ Tier upgraded: {_tier_descriptions.get(tier, tier)}\033[0m")
+    print()
+    print("\033[1mIMPORTANT:\033[0m If Claude is currently running, start a new session")
+    print("for the tier change to take effect.")
     if tier == "pro":
         has_key = bool(
             config.get("anthropic_api_key")
@@ -622,8 +625,9 @@ def _run_upgrade_tier(args):
             or config.get("openai_api_key")
         )
         if not has_key:
-            print("\033[33m  Pro tier works without an API key, but HyDE search is disabled.")
-            print("  Run truememory-ingest setup to add one, or set ANTHROPIC_API_KEY.\033[0m")
+            print()
+            print("\033[33mPro tier works without an API key, but HyDE search is disabled.")
+            print("Run truememory-ingest setup to add one, or set ANTHROPIC_API_KEY.\033[0m")
 
 
 def _run_install(args):
