@@ -356,7 +356,7 @@ def _run_setup(args):
                     # long enough for model downloads from slow mirrors,
                     # short enough that a dead mirror doesn't wedge setup.
                     _is_uv = (
-                        "/uv/tools/" in sys.executable
+                        "/uv/tools/" in sys.executable.replace("\\", "/")
                         and shutil.which("uv")
                     )
                     try:
