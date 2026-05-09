@@ -391,7 +391,8 @@ def _complete_claude_cli(config: LLMConfig, prompt: str, system: str) -> str:
     # embed their system prompt in the user message anyway).
     full_prompt = f"{system}\n\n{prompt}" if system else prompt
 
-    cmd = ["claude", "-p", "--output-format", "json"]
+    _claude_exe = shutil.which("claude") or "claude"
+    cmd = [_claude_exe, "-p", "--output-format", "json"]
     if config.model:
         cmd.extend(["--model", config.model])
 
@@ -405,6 +406,8 @@ def _complete_claude_cli(config: LLMConfig, prompt: str, system: str) -> str:
             input=full_prompt,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=120,
             env=env,
             check=False,

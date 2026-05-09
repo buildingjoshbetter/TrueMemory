@@ -126,7 +126,7 @@ _L3_WEIGHTS: tuple[float, ...] | None = None
 _L3_BIAS: float | None = None
 
 try:
-    with open(_L3_WEIGHTS_PATH) as _f:
+    with open(_L3_WEIGHTS_PATH, encoding="utf-8") as _f:
         _L3_DATA = json.load(_f)
         _L3_WEIGHTS = tuple(_L3_DATA["weights"])
         _L3_BIAS = float(_L3_DATA["bias"])

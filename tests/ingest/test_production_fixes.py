@@ -258,25 +258,43 @@ def test_dedup_store_lock_is_reentrant_safe_on_posix():
 # ---------------------------------------------------------------------------
 
 def test_installer_dry_run_shell_quotes_paths(capsys, tmp_path, monkeypatch):
-    """The install command must emit shell-safe quoted paths so directories
-    containing spaces (e.g. ``/Users/Jane Doe/``) don't get word-split
-    when Claude Code executes the hook command."""
+    """On POSIX, install command emits shlex-quoted paths so space-bearing
+    directories don't get word-split when Claude Code executes the hook."""
     from truememory.ingest import cli as ingest_cli
 
-    # Fake a sys.executable with a space in the path
     fake_py = "/Users/Jane Doe/.venv/bin/python"
     monkeypatch.setattr(sys, "executable", fake_py)
+    monkeypatch.setattr(sys, "platform", "linux")  # pin POSIX quoting branch
 
     args = argparse.Namespace(user="alice", db="/tmp/spaces test.db", dry_run=True)
     ingest_cli._run_install(args)
     captured = capsys.readouterr().out
 
-    # The emitted command must use shell-quoting so the space-bearing path
-    # is preserved as a single argument.
     assert shlex.quote(fake_py) in captured, (
-        "sys.executable must be shell-quoted when it contains spaces"
+        "On POSIX, sys.executable must be shlex-quoted when it contains spaces"
     )
     assert shlex.quote("/tmp/spaces test.db") in captured
+
+
+def test_installer_dry_run_uses_list2cmdline_on_windows(capsys, tmp_path, monkeypatch):
+    """On Windows, install command uses subprocess.list2cmdline — no POSIX
+    single-quotes, which cmd.exe treats as literal filename characters."""
+    from truememory.ingest import cli as ingest_cli
+
+    fake_py = r"C:\Users\Jane Doe\.venv\Scripts\python.exe"
+    monkeypatch.setattr(sys, "executable", fake_py)
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    args = argparse.Namespace(user="alice", db=r"C:\spaces path\alice.db", dry_run=True)
+    ingest_cli._run_install(args)
+    captured = capsys.readouterr().out
+
+    assert "'" not in captured, (
+        "On Windows, hook command must not contain POSIX single-quotes "
+        "(cmd.exe treats them as literal filename chars, not delimiters). "
+        "Use subprocess.list2cmdline instead of shlex.quote."
+    )
+    assert fake_py in captured or r"Jane Doe" in captured
 
 
 # ---------------------------------------------------------------------------

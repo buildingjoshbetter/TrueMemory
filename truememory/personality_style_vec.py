@@ -20,11 +20,18 @@ All functions operate on stdlib only (no external dependencies).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
 import sqlite3
+import struct
 from datetime import datetime, timezone
+
+
+def _stable_hash(s: str) -> int:
+    """Stable hash unaffected by PYTHONHASHSEED — safe for cross-process vector compatibility."""
+    return struct.unpack("<I", hashlib.md5(s.encode("utf-8"), usedforsecurity=False).digest()[:4])[0]
 
 DIM = 256
 NGRAM_SIZES = (3, 4, 5)
@@ -53,7 +60,7 @@ def compute_style_vector(text: str) -> list[float]:
     for n in NGRAM_SIZES:
         for i in range(len(normalized) - n + 1):
             ng = normalized[i:i + n]
-            h = hash(ng) % DIM
+            h = _stable_hash(ng) % DIM
             vec[h] += 1.0
     norm = math.sqrt(sum(x * x for x in vec))
     if norm > 0:

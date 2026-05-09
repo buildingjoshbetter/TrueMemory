@@ -57,7 +57,7 @@ def _load_config() -> dict:
     if not _CONFIG_PATH.exists():
         return {}
     try:
-        return json.loads(_CONFIG_PATH.read_text())
+        return json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         # .with_suffix would replace ".json"; we want to APPEND to preserve
         # the origin filename in the backup so users can find it easily.
@@ -97,7 +97,7 @@ def _save_config(config: dict) -> None:
     """
     _TRUEMEMORY_DIR.mkdir(parents=True, exist_ok=True)
     _TRUEMEMORY_DIR.chmod(0o700)
-    _CONFIG_PATH.write_text(json.dumps(config, indent=2))
+    _CONFIG_PATH.write_text(json.dumps(config, indent=2), encoding="utf-8")
     _CONFIG_PATH.chmod(0o600)
     if sys.platform == "win32" and any(k.endswith("_api_key") for k in config):
         print(
@@ -848,7 +848,7 @@ def truememory_configure(
     _onboarded = Path.home() / ".truememory" / ".onboarded"
     try:
         _onboarded.parent.mkdir(parents=True, exist_ok=True)
-        _onboarded.write_text(f"tier={tier}\n")
+        _onboarded.write_text(f"tier={tier}\n", encoding="utf-8")
     except OSError:
         pass
 
@@ -1097,7 +1097,7 @@ def _setup_claude():
     if desktop_config_path.parent.exists():
         try:
             if desktop_config_path.exists():
-                config = json.loads(desktop_config_path.read_text())
+                config = json.loads(desktop_config_path.read_text(encoding="utf-8"))
             else:
                 config = {}
 
@@ -1108,7 +1108,7 @@ def _setup_claude():
             if existing is None:
                 # No entry — create one.
                 servers["truememory"] = {"command": python_path, "args": list(mcp_args)}
-                desktop_config_path.write_text(json.dumps(config, indent=2))
+                desktop_config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
                 configured.append("Claude Desktop")
             elif _path_exists(existing_cmd):
                 # Working entry — preserve it.
@@ -1116,7 +1116,7 @@ def _setup_claude():
             else:
                 # Stale entry — replace it.
                 servers["truememory"] = {"command": python_path, "args": list(mcp_args)}
-                desktop_config_path.write_text(json.dumps(config, indent=2))
+                desktop_config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
                 configured.append("Claude Desktop (stale entry replaced)")
         except Exception as e:
             print(f"  Claude Desktop: failed — {e}")
@@ -1137,7 +1137,7 @@ def _setup_claude():
             print("  Claude Desktop not detected.")
         print()
         print("  Manual setup:")
-        print(f"    claude mcp add --scope user truememory -- {python_path} -m truememory.mcp_server")
+        print(f'    claude mcp add --scope user truememory -- "{python_path}" -m truememory.mcp_server')
     print()
 
 

@@ -92,7 +92,7 @@ def _resolve_tier_from_env_and_config() -> str:
         import json
         cfg_path = Path.home() / ".truememory" / "config.json"
         if cfg_path.exists():
-            data = json.loads(cfg_path.read_text())
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
             tier = (data.get("tier") or "").strip().lower()
             if tier in ("edge", "base", "pro"):
                 return tier
