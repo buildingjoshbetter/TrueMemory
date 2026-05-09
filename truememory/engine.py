@@ -637,7 +637,7 @@ class TrueMemoryEngine:
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found: {self.db_path}")
 
-        self.conn = sqlite3.connect(str(self.db_path))
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.conn.row_factory = None  # Use default tuple rows
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")

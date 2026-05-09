@@ -232,7 +232,7 @@ def _queue_to_backlog(
             "db_path": db_path,
             "queued_at": datetime.now(timezone.utc).isoformat(),
             "reason": reason,
-        }))
+        }), encoding="utf-8")
     except Exception as e:
         # Best-effort: if we can't write the backlog marker, the session's
         # memories are lost — log and move on. Must not raise.
@@ -324,7 +324,7 @@ def _run_background_ingestion(
             stdout=log_file,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            close_fds=True,
+            close_fds=(sys.platform != "win32"),
             **detach_kwargs,
         )
     except Exception as e:

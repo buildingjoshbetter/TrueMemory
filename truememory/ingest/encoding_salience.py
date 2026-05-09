@@ -91,7 +91,7 @@ _ENC_A_WEIGHTS: tuple[float, ...] | None = None
 _ENC_A_BIAS: float | None = None
 
 try:
-    with open(_ENCODING_WEIGHTS_PATH) as _f:
+    with open(_ENCODING_WEIGHTS_PATH, encoding="utf-8") as _f:
         _enc_data = json.load(_f)
         _ENC_A_WEIGHTS = tuple(_enc_data["variant_a"]["weights"])
         _ENC_A_BIAS = float(_enc_data["variant_a"]["bias"])
@@ -308,7 +308,7 @@ _ENC_E_WEIGHTS: tuple[float, ...] | None = None
 _ENC_E_BIAS: float | None = None
 
 try:
-    with open(_ENCODING_WEIGHTS_PATH) as _f:
+    with open(_ENCODING_WEIGHTS_PATH, encoding="utf-8") as _f:
         _enc_data_e = json.load(_f)
         _ENC_E_WEIGHTS = tuple(_enc_data_e["variant_e"]["weights"])
         _ENC_E_BIAS = float(_enc_data_e["variant_e"]["bias"])
