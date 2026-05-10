@@ -754,6 +754,13 @@ def truememory_configure(
         except Exception:
             pass
 
+    # Track tier change for telemetry dashboard
+    try:
+        from truememory import telemetry
+        telemetry.track("tier_change", {"tier": tier, "old_tier": old_tier})
+    except Exception:
+        pass
+
     _save_config(config)
 
     # Invalidate cached LLM function so it picks up the new key
@@ -1247,9 +1254,13 @@ def main():
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
     # Initialize telemetry (fire-and-forget, opt-out via TRUEMEMORY_TELEMETRY=off)
+    # Also checks for version updates — stores result for session_start hook
     try:
         from truememory import telemetry
-        telemetry.init(_load_config())
+        update_info = telemetry.init(_load_config())
+        if update_info and update_info.get("update_available"):
+            _update_check_path = Path.home() / ".truememory" / ".update_available"
+            _update_check_path.write_text(json.dumps(update_info), encoding="utf-8")
     except Exception:
         pass
 
@@ -1268,6 +1279,12 @@ def main():
     except (BrokenPipeError, EOFError, KeyboardInterrupt):
         pass
     finally:
+        # Flush remaining telemetry events before exit
+        try:
+            from truememory.telemetry import _flush_sync
+            _flush_sync()
+        except Exception:
+            pass
         global _memory
         if _memory is not None:
             try:
