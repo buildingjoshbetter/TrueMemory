@@ -77,7 +77,10 @@ def main():
         if should_extract(interval=0):
             from truememory.ingest.hooks.stop import (
                 _has_enough_messages, _run_background_ingestion,
+                TRACE_DIR, LOG_DIR,
             )
+            TRACE_DIR.mkdir(parents=True, exist_ok=True)
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
             if _has_enough_messages(transcript_path, 5):
                 _run_background_ingestion(
                     transcript_path, session_id,
