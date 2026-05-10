@@ -111,9 +111,6 @@ def _check_email_needed() -> str:
         config = json.loads(config_path.read_text(encoding="utf-8"))
         # Only prompt if onboarded but no email
         if config.get("tier") and not config.get("email"):
-            dismissed_path = Path.home() / ".truememory" / ".email_dismissed"
-            if dismissed_path.exists():
-                return ""
             return (
                 "<truememory-email-request>\n"
                 "TrueMemory doesn't have your email yet. Ask the user: "

@@ -78,8 +78,9 @@ You're running the command from a shell that doesn't have the uv tool directory 
 ## Backup and restore
 
 ```bash
-# Backup
+# Backup (database + config with tier and API keys)
 cp ~/.truememory/memories.db ~/backup_memories.db
+cp ~/.truememory/config.json ~/backup_config.json
 
 # Restore
 cp ~/backup_memories.db ~/.truememory/memories.db

@@ -46,6 +46,8 @@ Use when `truememory_search` doesn't find what you need, or for questions requir
 | `user_id` | `str` | `""` | Filter to this user. |
 | `limit` | `int` | `10` | Max results (clamped to 1-200). |
 
+**Query length:** Truncated to 2,000 characters. **Internal candidate pool:** 500 (vs 100 for standard search).
+
 ---
 
 ## truememory_get

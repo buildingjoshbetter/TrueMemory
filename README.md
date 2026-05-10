@@ -287,14 +287,16 @@ results = m.search_deep("What do we know about Alex's career?", user_id="alex")
 
 | Method | Description |
 |--------|-------------|
-| `m.add(content, sender, recipient, timestamp, category)` | Store a memory |
-| `m.search(query, user_id, limit)` | Search memories |
-| `m.search_deep(query, user_id, limit)` | Multi-round agentic search (slower, higher accuracy) |
+| `m.add(content, user_id, metadata)` | Store a memory |
+| `m.search(query, user_id, limit)` | Search memories (6-layer pipeline + reranker) |
+| `m.search_deep(query, user_id, limit, llm_fn)` | Multi-round agentic search (slower, higher accuracy) |
+| `m.search_vectors(query, limit)` | Pure vector cosine similarity search |
 | `m.get(id)` | Get a specific memory by ID |
-| `m.get_all(user_id)` | Get all memories for a user |
+| `m.get_all(user_id, limit, offset)` | Get all memories with pagination |
 | `m.update(id, content)` | Update a memory |
 | `m.delete(id)` | Delete a memory |
-| `m.delete_all(user_id)` | Delete all memories for a user |
+| `m.delete_all(user_id)` | Delete all memories and associated data |
+| `m.stats()` | Memory system statistics |
 
 ---
 

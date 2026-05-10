@@ -12,7 +12,7 @@ Create a Memory instance. The database is created automatically if it doesn't ex
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `path` | `str \| None` | `None` | Path to SQLite database. Defaults to `~/.truememory/memories.db`. |
+| `path` | `str \| Path \| None` | `None` | Path to SQLite database. Defaults to `~/.truememory/memories.db`. Accepts `":memory:"` for testing. |
 | `alpha_surprise` | `float \| None` | `None` | L5 surprise boost coefficient. If None, reads from `TRUEMEMORY_ALPHA_SURPRISE` env var (default 0.2). |
 
 ```python
@@ -33,7 +33,7 @@ with Memory() as m:
 
 ## m.add(content, user_id=None, metadata=None) → dict
 
-Store a memory. Returns a dict with the new memory's `id`, `content`, and `timestamp`.
+Store a memory. Returns a dict with the new memory's `id`, `content`, `user_id`, and `created_at`. Empty or whitespace-only content is silently skipped (returns `{"id": None}`).
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -50,7 +50,7 @@ result = m.add("Prefers TypeScript over JavaScript", user_id="alice")
 
 ## m.search(query, user_id=None, limit=10) → list[dict]
 
-Search memories using the full 6-layer retrieval pipeline with cross-encoder reranking.
+Search memories using the full 6-layer retrieval pipeline: hybrid FTS5+vector search, scent trail, quality self-check, temporal filtering, personality supplementation, salience guard, L5 surprise boost, and cross-encoder reranking.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -143,7 +143,7 @@ m.delete(42)
 
 ## m.delete_all(user_id=None) → bool
 
-Delete all memories. If `user_id` is provided, only deletes that user's memories. Returns `True` if any rows were deleted.
+Delete all memories and associated data (vector embeddings, entity profiles, style vectors, fact timelines, episodes, summaries). If `user_id` is provided, only deletes that user's data. Returns `True` if any rows were deleted.
 
 ```python
 m.delete_all(user_id="alice")   # delete Alice's memories only
