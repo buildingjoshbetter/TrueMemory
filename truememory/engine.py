@@ -55,6 +55,11 @@ _ALLOWED_TABLES = frozenset({
     "messages_fts",
 })
 
+_ALLOWED_COLUMNS = frozenset({
+    "user_id", "sender", "source_message_id", "cause_msg_id",
+    "effect_msg_id", "entity", "rowid",
+})
+
 # ───────────────────────────────────────────────────────────────────────────
 # Optional modules — each import is wrapped so missing deps don't break
 # the engine.  Capability flags track what's available at runtime.
@@ -465,6 +470,8 @@ class TrueMemoryEngine:
                 ]:
                     if table not in _ALLOWED_TABLES:
                         raise ValueError(f"Invalid table name: {table}")
+                    if col not in _ALLOWED_COLUMNS:
+                        raise ValueError(f"Invalid column name: {col}")
                     try:
                         self.conn.execute(
                             f"DELETE FROM {table} WHERE {col} IN ({placeholders})",
@@ -1139,7 +1146,7 @@ class TrueMemoryEngine:
         except Exception:
             return None
 
-    def search(self, query: str, limit: int = 10, _skip_surprise_boost: bool = False) -> list[dict]:
+    def search(self, query: str, limit: int = 10, _skip_surprise_boost: bool = False, _skip_reranker: bool = False) -> list[dict]:
         """
         Main search pipeline.
 
@@ -1153,6 +1160,8 @@ class TrueMemoryEngine:
         6. Check for personality query -- supplement with personality search.
         7. Check for contradiction -- supplement with fact timeline.
         8. Apply salience guard with mode-aware threshold.
+        8.5. L5 surprise rerank boost.
+        8.6. Cross-encoder reranking (skipped when called from search_agentic).
         9. Return top *limit* results.
 
         Each result dict contains: ``id``, ``content``, ``sender``,
@@ -1381,7 +1390,22 @@ class TrueMemoryEngine:
         if not _skip_surprise_boost:
             results = self._apply_surprise_boost(results)
 
-        # ── 8. Ensure all results have required fields and trim ───────────
+        # ── 8.6 Cross-encoder reranking ──────────────────────────────────
+        # Skipped when called from search_agentic() which applies its own
+        # reranking after merging all result sources.
+        if not _skip_reranker and self._has_reranker and len(results) > 1:
+            try:
+                from truememory.reranker import rerank_with_modality_fusion
+                results = rerank_with_modality_fusion(
+                    query, results[:limit * 3],
+                    top_k=limit,
+                    rrf_weight=0.4,
+                    rerank_weight=0.6,
+                )
+            except Exception:
+                logger.debug("Cross-encoder rerank failed in search()", exc_info=True)
+
+        # ── 9. Ensure all results have required fields and trim ───────────
         cleaned: list[dict] = []
         seen_ids: set = set()
         seen_content: set = set()
@@ -1488,7 +1512,7 @@ class TrueMemoryEngine:
             candidate_pool = max(limit * 8, 100)  # Large pool for reranking
         else:
             candidate_pool = limit * 3
-        primary_results = self.search(query, limit=candidate_pool, _skip_surprise_boost=True)
+        primary_results = self.search(query, limit=candidate_pool, _skip_surprise_boost=True, _skip_reranker=True)
 
         # If HyDE available, run a parallel search and fuse with RRF
         if use_hyde and self._has_hyde and self._has_hybrid and llm_fn:
@@ -1595,7 +1619,7 @@ class TrueMemoryEngine:
             existing_ids = {r.get("id") for r in primary_results if r.get("id")}
             for rq in refined_queries:
                 try:
-                    rq_results = self.search(rq, limit=limit, _skip_surprise_boost=True)
+                    rq_results = self.search(rq, limit=limit, _skip_surprise_boost=True, _skip_reranker=True)
                     for rr in rq_results:
                         rid = rr.get("id")
                         if rid and rid not in existing_ids:
