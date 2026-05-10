@@ -56,8 +56,7 @@ _ALLOWED_TABLES = frozenset({
 })
 
 _ALLOWED_COLUMNS = frozenset({
-    "user_id", "sender", "source_message_id", "cause_msg_id",
-    "effect_msg_id", "entity", "rowid",
+    "source_message_id", "cause_msg_id", "effect_msg_id",
 })
 
 # ───────────────────────────────────────────────────────────────────────────
