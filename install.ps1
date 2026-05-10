@@ -65,15 +65,15 @@ if ($uvPath) {
 
 # ---------- step 2: ensure Python is available ----------
 Say "fetching managed Python $TRUEMEMORY_PY (system Python untouched)..."
-& uv python install $TRUEMEMORY_PY 2>$null
+& uv python install $TRUEMEMORY_PY > $null
 if ($LASTEXITCODE -ne 0) {
     Die "failed to install managed Python $TRUEMEMORY_PY"
 }
 
 # ---------- step 3: install truememory as a uv tool ----------
 Say "installing $PKG_SPEC (~3-5 min on first run, downloads all tier models)..."
-& uv tool uninstall truememory 2>$null
-& uv tool install --python $TRUEMEMORY_PY --force --refresh $PKG_SPEC 2>$null
+& uv tool uninstall truememory *> $null
+& uv tool install --python $TRUEMEMORY_PY --force --refresh $PKG_SPEC > $null
 if ($LASTEXITCODE -ne 0) {
     Die "truememory install failed"
 }
@@ -111,17 +111,17 @@ Say "  this takes 2-5 min but means tier switching just works afterward."
 $toolPython = Join-Path (& uv tool dir 2>$null) "truememory\Scripts\python.exe"
 if (Test-Path $toolPython) {
     Say "  [1/3] Edge reranker (MiniLM-L-6-v2, ~22MB)..."
-    & $toolPython -c "from sentence_transformers import CrossEncoder; CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')" 2>$null
+    & $toolPython -c "from sentence_transformers import CrossEncoder; CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
     if ($LASTEXITCODE -eq 0) { Ok "  [1/3] Edge reranker ready" }
     else { Warn "  [1/3] Edge reranker download failed (search still works without it)" }
 
     Say "  [2/3] Base/Pro embedder (Qwen3-Embedding-0.6B, ~1.2GB)..."
-    & $toolPython -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('Qwen/Qwen3-Embedding-0.6B', truncate_dim=256)" 2>$null
+    & $toolPython -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('Qwen/Qwen3-Embedding-0.6B', truncate_dim=256)"
     if ($LASTEXITCODE -eq 0) { Ok "  [2/3] Base/Pro embedder ready" }
     else { Warn "  [2/3] Base/Pro embedder download failed (you can retry later or use Edge tier)" }
 
     Say "  [3/3] Base/Pro reranker (gte-modernbert, ~600MB)..."
-    & $toolPython -c "from sentence_transformers import CrossEncoder; CrossEncoder('Alibaba-NLP/gte-reranker-modernbert-base')" 2>$null
+    & $toolPython -c "from sentence_transformers import CrossEncoder; CrossEncoder('Alibaba-NLP/gte-reranker-modernbert-base')"
     if ($LASTEXITCODE -eq 0) { Ok "  [3/3] Base/Pro reranker ready" }
     else { Warn "  [3/3] Base/Pro reranker download failed (you can retry later or use Edge tier)" }
 
