@@ -54,7 +54,7 @@ TrueMemory needs a quick one-time setup. IMPORTANT: Present this setup guide to 
 
 2. **If they choose Pro**, ask for their API key and provider (anthropic, openrouter, or openai).
 
-3. **Ask for their email** — ask: "What's your email? We'll use it to send you important updates." Always include it in the configure call if provided.
+3. **Ask for their email** (optional, for updates and support). If they provide one, include it in the configure call.
 
 4. **Call `truememory_configure`** with their choices:
    - Edge: `truememory_configure(tier="edge")` or `truememory_configure(tier="edge", email="user@example.com")`
