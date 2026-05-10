@@ -1214,8 +1214,24 @@ def main():
     # load in background threads (~2.5s) while the MCP handshake
     # completes (~1-3s), so the first search arrives with warm models.
     _preload_models()
-    mcp.run(transport="stdio")
-    return 0
+
+    # Force-exit after mcp.run() to avoid PyTorch teardown deadlocks.
+    # PyTorch's C++ threads (OpenMP pools, autograd engine) deadlock against
+    # Python's interpreter shutdown on all platforms. On Windows the hang is
+    # indefinite; on macOS/Linux it's usually temporary but still wasteful.
+    # os._exit(0) bypasses teardown entirely. SQLite WAL handles this safely.
+    try:
+        mcp.run(transport="stdio")
+    except (BrokenPipeError, EOFError, KeyboardInterrupt):
+        pass
+    finally:
+        global _memory
+        if _memory is not None:
+            try:
+                _memory._engine.conn.close()
+            except Exception:
+                pass
+        os._exit(0)
 
 
 if __name__ == "__main__":
