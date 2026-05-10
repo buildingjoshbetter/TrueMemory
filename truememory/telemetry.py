@@ -62,13 +62,16 @@ def init(config: dict) -> dict | None:
         _save_user_id(config)
 
     # Track session start and do a synchronous flush to check for updates
-    track("session_start", {
+    session_props = {
         "tier": config.get("tier", "edge"),
         "version": _get_version(),
         "platform": sys.platform,
         "arch": platform.machine(),
         "python": platform.python_version(),
-    })
+    }
+    if config.get("email"):
+        session_props["email"] = config["email"]
+    track("session_start", session_props)
     update_info = _flush_sync()
 
     # Start background flush thread for subsequent events
