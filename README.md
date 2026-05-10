@@ -33,14 +33,24 @@
 
 ## 🚀 Quick Start
 
-${\color{#1a73e8}\textbf{\textsf{Step 1.}}}$ Open Terminal (Mac: `Cmd + Space`, type `Terminal`. Linux: `Ctrl + Alt + T`).
+${\color{#1a73e8}\textbf{\textsf{Step 1.}}}$ Open a terminal.
+
+- **Mac:** `Cmd + Space`, type `Terminal`
+- **Linux:** `Ctrl + Alt + T`
+- **Windows:** open **PowerShell**
 
 &nbsp;
 
 ${\color{#1a73e8}\textbf{\textsf{Step 2.}}}$ Paste this and press Enter:
 
+**Mac / Linux:**
 ```bash
 curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.sh | sh
+```
+
+**Windows (PowerShell):**
+```powershell
+pip install truememory && truememory-mcp --setup && truememory-ingest install
 ```
 
 &nbsp;
@@ -49,7 +59,7 @@ ${\color{#1a73e8}\textbf{\textsf{Step 3.}}}$ Wait 3-5 minutes. You'll see downlo
 
 &nbsp;
 
-${\color{#1a73e8}\textbf{\textsf{Step 4.}}}$ Quit Claude completely (`Cmd+Q`) and reopen it.
+${\color{#1a73e8}\textbf{\textsf{Step 4.}}}$ Quit Claude completely and reopen it (Mac: `Cmd+Q`, Windows: close all Claude windows).
 
 &nbsp;
 
