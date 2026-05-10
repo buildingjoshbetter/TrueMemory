@@ -48,14 +48,14 @@ ${\color{#1a73e8}\textbf{\textsf{Step 2.}}}$ Paste this and press Enter:
 curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.sh | sh
 ```
 
-**Windows (PowerShell):**
+**Windows (PowerShell)** — requires [Python 3.10+](https://www.python.org/downloads/):
 ```powershell
-pip install truememory && truememory-mcp --setup && truememory-ingest install
+pip install truememory; truememory-mcp --setup; truememory-ingest install
 ```
 
 &nbsp;
 
-${\color{#1a73e8}\textbf{\textsf{Step 3.}}}$ Wait 3-5 minutes. You'll see download progress bars.
+${\color{#1a73e8}\textbf{\textsf{Step 3.}}}$ Wait 3-5 minutes for installation.
 
 &nbsp;
 
