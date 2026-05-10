@@ -53,6 +53,12 @@ def main():
     transcript_path = input_data.get("transcript_path", "")
     session_id = input_data.get("session_id", "unknown")
 
+    # Sanitize session_id to prevent injection (consistent with user_prompt_submit.py)
+    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64]
+    if not safe_id:
+        safe_id = "unknown"
+    session_id = safe_id
+
     if not transcript_path or not Path(transcript_path).exists():
         return
 

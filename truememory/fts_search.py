@@ -7,8 +7,8 @@ normalization. Provides the keyword-search layer of the TrueMemory hybrid
 retrieval pipeline (L3 Semantic layer uses FTS5 + vector + RRF fusion).
 
 Key design decisions:
-    - Graceful query handling: raw FTS5 MATCH first, fall back to OR'd words
-      if the query contains characters that break FTS5 syntax.
+    - Safe query handling: all queries are sanitized (quoted + OR-joined)
+      before use as FTS5 MATCH expressions to prevent syntax injection.
     - Score normalization: BM25 raw scores (negative, more negative = better)
       are flipped and scaled to 0-1 where 1.0 = most relevant result.
     - Time and sender filtering happen in SQL (not post-hoc) where possible,
@@ -29,13 +29,13 @@ def _build_safe_query(query: str) -> str:
     Splits on whitespace, wraps each token in double quotes to neutralize
     special characters, and joins with OR so any matching term counts.
     """
-    tokens = [f'"{w}"' for w in query.split() if w.strip()]
+    tokens = [f'"{w.replace(chr(34), "")}"' for w in query.split() if w.strip()]
     return " OR ".join(tokens) if tokens else '""'
 
 
 def _build_safe_fts_query(terms: list[str]) -> str:
     """Build a safe OR-joined FTS5 query from a list of terms."""
-    quoted = [f'"{t}"' for t in terms if t.strip()]
+    quoted = [f'"{t.replace(chr(34), "")}"' for t in terms if t.strip()]
     return " OR ".join(quoted) if quoted else '""'
 
 
@@ -107,9 +107,8 @@ def search_fts(
     """
     Search messages using FTS5 with BM25 ranking.
 
-    The function tries the raw query as an FTS5 MATCH expression first.
-    If that raises a syntax error (common with natural-language input),
-    it falls back to OR-ing each individual word.
+    The query is always sanitized before use: each word is quoted and
+    joined with OR to prevent FTS5 syntax injection.
 
     Scores are normalized to the 0-1 range where 1.0 = most relevant.
 
@@ -127,17 +126,13 @@ def search_fts(
         return []
 
     sql = f"{_FTS_SELECT} WHERE messages_fts MATCH ? ORDER BY messages_fts.rank LIMIT ?"
-
+    safe = _build_safe_query(query)
+    if not safe:
+        return []
     try:
-        rows = conn.execute(sql, (query, limit)).fetchall()
+        rows = conn.execute(sql, (safe, limit)).fetchall()
     except sqlite3.OperationalError:
-        safe = _build_safe_query(query)
-        if not safe:
-            return []
-        try:
-            rows = conn.execute(sql, (safe, limit)).fetchall()
-        except sqlite3.OperationalError:
-            return []
+        return []
 
     results = _rows_to_results(rows)
     _normalize_scores(results)
@@ -174,16 +169,13 @@ def search_fts_by_sender(
         " ORDER BY messages_fts.rank LIMIT ?"
     )
 
+    safe = _build_safe_query(query)
+    if not safe:
+        return []
     try:
-        rows = conn.execute(sql, (query, sender, limit)).fetchall()
+        rows = conn.execute(sql, (safe, sender, limit)).fetchall()
     except sqlite3.OperationalError:
-        safe = _build_safe_query(query)
-        if not safe:
-            return []
-        try:
-            rows = conn.execute(sql, (safe, sender, limit)).fetchall()
-        except sqlite3.OperationalError:
-            return []
+        return []
 
     results = _rows_to_results(rows)
     _normalize_scores(results)
@@ -221,7 +213,7 @@ def search_fts_in_range(
 
     # Fetch a generous candidate pool so temporal filtering still yields
     # enough results.
-    candidate_limit = max(limit * 10, 100)
+    candidate_limit = min(max(limit * 10, 100), 1000)
 
     sql = (
         f"{_FTS_SELECT}"
@@ -229,16 +221,13 @@ def search_fts_in_range(
         " ORDER BY messages_fts.rank LIMIT ?"
     )
 
+    safe = _build_safe_query(query)
+    if not safe:
+        return []
     try:
-        rows = conn.execute(sql, (query, candidate_limit)).fetchall()
+        rows = conn.execute(sql, (safe, candidate_limit)).fetchall()
     except sqlite3.OperationalError:
-        safe = _build_safe_query(query)
-        if not safe:
-            return []
-        try:
-            rows = conn.execute(sql, (safe, candidate_limit)).fetchall()
-        except sqlite3.OperationalError:
-            return []
+        return []
 
     results = _rows_to_results(rows)
 

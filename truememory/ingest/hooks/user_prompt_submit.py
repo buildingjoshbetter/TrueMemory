@@ -89,6 +89,10 @@ def main():
 def buffer_message(session_id: str, prompt: str):
     """Append a user message to the session buffer file (with file locking)."""
     BUFFER_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        BUFFER_DIR.chmod(0o700)
+    except OSError:
+        pass
 
     # Sanitize session_id to prevent path traversal (e.g., "../../etc/passwd")
     safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64]
