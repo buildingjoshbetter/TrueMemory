@@ -320,6 +320,14 @@ After a tier switch, TrueMemory re-embeds all memories with the new model. If th
 
 No. The recommended install (`curl -LsSf .../install.sh | sh`) uses [uv](https://docs.astral.sh/uv/) to manage a sandboxed Python 3.12. Your system Python is never touched. To uninstall cleanly: `uv tool uninstall truememory`.
 
+**Does TrueMemory collect telemetry?**
+
+TrueMemory collects anonymous usage telemetry to help us understand how the product is used and improve it. We track which tools are called and how often, session counts, and basic platform info (OS, tier, version). We **never** track your memory content, search queries, file paths, or API keys. Telemetry is on by default. To opt out:
+
+```bash
+export TRUEMEMORY_TELEMETRY=off
+```
+
 ---
 
 Find me on X [@Building_Josh](https://x.com/Building_Josh) · Follow us [@Sauron_Labs](https://x.com/Sauron_Labs)

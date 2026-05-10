@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.6.4] — 2026-05-10
+
+### Added
+- **Usage telemetry** (`telemetry.py`) — anonymous, fire-and-forget tracking of
+  tool usage, session lifecycle, and optional email registration. Opt-out via
+  `TRUEMEMORY_TELEMETRY=off`. No memory content, queries, or API keys are ever
+  sent. (#190)
+- **Incremental extraction** during long sessions — UserPromptSubmit hook triggers
+  background ingestion every 4 hours; PreCompact hook triggers before context
+  compression. Shared timestamp marker coordinates both. (#175, #176)
+- **Cross-encoder reranking in `search()`** — `engine.search()` now applies the
+  reranker as step 8.6, matching the documented pipeline architecture. Skipped in
+  `search_agentic()` via `_skip_reranker=True`. (#189)
+- **Column validation** in `delete_all()` — `_ALLOWED_COLUMNS` frozenset. (#201)
+- **Version update notifications** spec filed. (#209)
+
+### Changed
+- `truememory_configure` accepts optional `email` parameter for telemetry
+  registration.
+- Onboarding guide asks for email during first-time setup.
+
 ## [0.6.3] — 2026-05-10
 
 ### Added
