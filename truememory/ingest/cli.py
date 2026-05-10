@@ -333,9 +333,9 @@ def _run_setup(args):
     existing_tier = config.get("tier", "")
     print("  \033[1mEmbedding Tier\033[0m")
     print("  ─────────────")
-    print("  [1] Edge — 89.6% LoCoMo, CPU-only, ~30MB install. Works anywhere.")
-    print("  [2] Base — 92.0% LoCoMo, GPU recommended, ~1.5GB install. No API key needed.")
-    print("  [3] Pro  — 93.0% LoCoMo, GPU recommended, ~1.5GB install. Requires LLM API key (HyDE).")
+    print("  [1] Edge — 89.6% LoCoMo, lightweight. Works anywhere.")
+    print("  [2] Base — 92.0% LoCoMo, higher accuracy. No API key needed.")
+    print("  [3] Pro  — 93.0% LoCoMo, maximum accuracy. Requires LLM API key for HyDE.")
     print()
 
     _TIER_NUM = {"edge": "1", "base": "2", "pro": "3"}

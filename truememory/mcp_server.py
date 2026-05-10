@@ -658,12 +658,12 @@ def truememory_stats() -> str:
             "\n"
             "**Choose your tier:**\n"
             "\n"
-            "- **Edge** — 89.6% accuracy on LoCoMo. CPU-only, works anywhere. "
-            "Lightweight (~30MB). No API key needed.\n"
-            "- **Base** — 92.0% accuracy on LoCoMo. GPU recommended. "
-            "Qwen3 @ 256d + gte-reranker (~1.5GB). No API key needed.\n"
-            "- **Pro** — 93.0% accuracy on LoCoMo. GPU recommended. "
-            "Same as Base plus HyDE query expansion. Requires an API key.\n"
+            "- **Edge** — 89.6% accuracy on LoCoMo. Lightweight, works anywhere. "
+            "No API key needed.\n"
+            "- **Base** — 92.0% accuracy on LoCoMo. Higher accuracy with "
+            "Qwen3 embeddings + gte-reranker. No API key needed.\n"
+            "- **Pro** — 93.0% accuracy on LoCoMo. Maximum accuracy — "
+            "same as Base plus HyDE query expansion. Requires an API key.\n"
             "\n"
             "Which would you like: **Edge**, **Base**, or **Pro**?"
         )
@@ -797,9 +797,9 @@ def truememory_configure(
 
     # Build result with onboarding info
     _tier_descriptions = {
-        "edge": "Edge: Model2Vec embeddings (8M params), MiniLM reranker (~30MB)",
-        "base": "Base: Qwen3 embeddings (256d), gte-reranker-modernbert (~1.5GB)",
-        "pro": "Pro: Qwen3 + HyDE query expansion (~1.5GB + API key)",
+        "edge": "Edge: Model2Vec embeddings (8M params), MiniLM reranker",
+        "base": "Base: Qwen3 embeddings (256d), gte-reranker-modernbert",
+        "pro": "Pro: Qwen3 + HyDE query expansion",
     }
     result = {
         "status": "configured",
