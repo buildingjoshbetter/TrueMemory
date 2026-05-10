@@ -110,7 +110,7 @@ The database is created automatically at `~/.truememory/memories.db`.
 
 ## 🏗️ Edge / Base / Pro
 
-Same architecture, three tiers. Trade off install size and hardware for accuracy.
+Same architecture, three tiers. All included in a single install — switch anytime.
 
 | | Edge | Base | Pro |
 |---|------|------|-----|
@@ -122,7 +122,7 @@ Same architecture, three tiers. Trade off install size and hardware for accuracy
 | **Reranker** | MiniLM-L-6-v2 (22M) | gte-reranker-modernbert (149M) | gte-reranker-modernbert (149M) |
 | **HyDE** | off | off | on (requires LLM API key) |
 | **Runs on** | Any machine, CPU only | 4GB+ RAM, CPU or GPU | 4GB+ RAM + LLM API key |
-| **Install size** | ~30MB | ~1.5GB | ~1.5GB |
+| **Model size** | ~30MB | ~1.5GB | ~1.5GB |
 
 **Edge** works everywhere. **Base** is the strongest fully-offline tier. **Pro** adds HyDE query expansion for the highest scores.
 
