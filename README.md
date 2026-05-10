@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="#-what-is-truememory">What is TrueMemory?</a> · <a href="#-quick-start">Quick Start</a> · <a href="#%EF%B8%8F-edge--base--pro">Edge / Base / Pro</a> · <a href="#-architecture">Architecture</a> · <a href="#-benchmarks">Benchmarks</a> · <a href="#-python-api">API</a> · <a href="#-faq">FAQ</a>
+  <a href="#-what-is-truememory">What is TrueMemory?</a> · <a href="#-quick-start">Quick Start</a> · <a href="#%EF%B8%8F-edge--base--pro">Edge / Base / Pro</a> · <a href="#-architecture">Architecture</a> · <a href="#-benchmarks">Benchmarks</a> · <a href="#-python-api">API</a> · <a href="#-docs">Docs</a> · <a href="#-faq">FAQ</a>
 </p>
 
 ---
@@ -295,6 +295,20 @@ results = m.search_deep("What do we know about Alex's career?", user_id="alex")
 | `m.update(id, content)` | Update a memory |
 | `m.delete(id)` | Delete a memory |
 | `m.delete_all(user_id)` | Delete all memories for a user |
+
+---
+
+## 📖 Docs
+
+| Document | Description |
+|----------|-------------|
+| [Python API Reference](docs/python-api.md) | Full `Memory` class reference with examples |
+| [MCP Tool Reference](docs/mcp-tools.md) | All 8 MCP tools with parameters and usage |
+| [CLI Reference](docs/cli.md) | `truememory-mcp` and `truememory-ingest` commands |
+| [Environment Variables](docs/env-vars.md) | All `TRUEMEMORY_*` configuration options |
+| [Getting Started](docs/guides/getting-started.md) | Install to first memory, step by step |
+| [Tier Selection](docs/guides/tier-selection.md) | Edge vs Base vs Pro comparison |
+| [Debugging](docs/guides/debugging.md) | Logs, traces, common issues, file locations |
 
 ---
 
