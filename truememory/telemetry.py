@@ -30,7 +30,7 @@ import uuid
 from functools import wraps
 from pathlib import Path
 
-_TELEMETRY_ENDPOINT = "https://telemetry.truememory.ai/v1/events"
+_TELEMETRY_ENDPOINT = "https://telemetry-api-production-c2a3.up.railway.app/v1/events"
 _FLUSH_INTERVAL = 60  # seconds
 _HTTP_TIMEOUT = 3  # seconds
 
