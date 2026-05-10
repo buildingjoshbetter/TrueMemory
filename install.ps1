@@ -78,12 +78,17 @@ if ($LASTEXITCODE -ne 0) {
     Die "truememory install failed"
 }
 
-# Ensure uv tool bin dir is on PATH for this session
+# Add uv tool bin dir to PATH for future sessions
+Say "adding uv's tool dir to your PATH (reversible)..."
+& uv tool update-shell *> $null
+
+# Refresh PATH and add tool Scripts dir for this session
+$env:Path = [System.Environment]::GetEnvironmentVariable("Path", "User") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "Machine")
 $uvToolDir = & uv tool dir 2>$null
 if ($uvToolDir) {
-    $binDir = Join-Path $uvToolDir "truememory\Scripts"
-    if ($binDir -and (Test-Path $binDir)) {
-        $env:Path = "$binDir;$env:Path"
+    $scriptsDir = Join-Path $uvToolDir "truememory\Scripts"
+    if ($scriptsDir -and (Test-Path $scriptsDir)) {
+        $env:Path = "$scriptsDir;$env:Path"
     }
 }
 
