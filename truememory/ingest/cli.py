@@ -346,54 +346,7 @@ def _run_setup(args):
         choice = input(f"  Choose tier [1/2/3] (default: {default_num}): ").strip() or default_num
         tier = {"1": "edge", "2": "base", "3": "pro"}.get(choice, "edge")
 
-    if tier in ("base", "pro"):
-        try:
-            import sentence_transformers  # noqa: F401
-            print(f"  \033[32m✓ {tier.capitalize()} dependencies already installed\033[0m")
-        except ImportError:
-            print(f'  \033[33m⚠ {tier.capitalize()} tier requires GPU extras.\033[0m')
-            print('  \033[33m  curl installer: uv tool install "truememory[gpu]"\033[0m')
-            print('  \033[33m  pip:            pip install "truememory[gpu]"\033[0m')
-            if not args.non_interactive:
-                do_install = input("  Install now? [y/N]: ").strip().lower()
-                if do_install == "y":
-                    import shutil
-                    import subprocess
-                    # Hunter F25: bound install with a 10-minute timeout —
-                    # long enough for model downloads from slow mirrors,
-                    # short enough that a dead mirror doesn't wedge setup.
-                    _is_uv = (
-                        "/uv/tools/" in sys.executable.replace("\\", "/")
-                        and shutil.which("uv")
-                    )
-                    try:
-                        if _is_uv:
-                            subprocess.run(
-                                ["uv", "tool", "install", "truememory[gpu]"],
-                                timeout=600,
-                            )
-                        else:
-                            subprocess.run(
-                                [sys.executable, "-m", "pip", "install",
-                                 "truememory[gpu]"],
-                                timeout=600,
-                            )
-                    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                        print(
-                            '  \033[33m⚠ Auto-install failed. '
-                            'Try running directly:\n'
-                            '    uv tool install "truememory[gpu]"   (curl installer)\n'
-                            '    pip install "truememory[gpu]"       (pip)\n'
-                            '  then re-run `truememory-ingest setup`.\033[0m',
-                            file=sys.stderr,
-                        )
-                        print("  Falling back to Edge tier.")
-                        tier = "edge"
-                else:
-                    print("  Falling back to Edge tier.")
-                    tier = "edge"
-
-    # Pre-download the embedding model so first search isn't slow
+    # Pre-load the embedding model so first search isn't slow
     print()
     print("  \033[1mDownloading embedding model...\033[0m")
     try:

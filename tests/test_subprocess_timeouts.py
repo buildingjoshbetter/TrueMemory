@@ -1,12 +1,11 @@
-"""Regression lock for Hunter F23 + F25 — subprocess.run timeouts.
+"""Regression lock for Hunter F23 — subprocess.run timeouts.
 
 F23: the four `claude` CLI calls in `mcp_server._setup_claude` now route
 through a `_run_claude` helper that passes `timeout=30` and reports
 `TimeoutExpired` to stderr instead of hanging forever.
 
-F25: the `pip install truememory[gpu]` call in `ingest/cli.py` now has
-`timeout=600` and a clear stderr message + fallback to Edge tier on
-timeout.
+(F25 tests removed — the truememory[gpu] auto-install subprocess was
+removed when all models became core dependencies.)
 """
 from __future__ import annotations
 
@@ -99,44 +98,3 @@ def test_setup_claude_timeout_on_list_call_is_handled(monkeypatch, capsys):
     assert "timed out" in captured.err.lower()
 
 
-# ---------------------------------------------------------------------------
-# F25 — `pip install truememory[gpu]` bounded by timeout
-# ---------------------------------------------------------------------------
-
-
-def test_pip_install_has_timeout_kwarg(monkeypatch):
-    """Source-level check: the pip install subprocess.run call must include
-    a timeout kwarg. This guards against accidental removal."""
-    import pathlib
-    cli_source = pathlib.Path(__file__).parent.parent / "truememory" / "ingest" / "cli.py"
-    text = cli_source.read_text()
-    # Locate the pip install call and verify timeout is declared nearby.
-    idx = text.find('"truememory[gpu]"]')
-    assert idx != -1, "pip install call for truememory[gpu] not found in cli.py"
-    surrounding = text[idx : idx + 300]
-    assert "timeout=600" in surrounding, (
-        "F25 regression: pip install must declare timeout=600 (10 min) "
-        "so PyPI/mirror stalls don't wedge `truememory-ingest setup`"
-    )
-
-
-def test_pip_install_timeout_handler_prints_stderr_and_falls_back_to_edge():
-    """Simulate the TimeoutExpired path by reading the source and
-    confirming the expected recovery behaviour is wired up."""
-    import pathlib
-    cli_source = pathlib.Path(__file__).parent.parent / "truememory" / "ingest" / "cli.py"
-    text = cli_source.read_text()
-    # Must have a TimeoutExpired handler for the pip call.
-    assert "subprocess.TimeoutExpired" in text, (
-        "F25 regression: TimeoutExpired must be caught, not propagated"
-    )
-    # Must warn the user to stderr with an actionable message.
-    assert "file=sys.stderr" in text
-    # Must fall back to edge tier on install failure.
-    pip_idx = text.find('"truememory[gpu]"]')
-    assert pip_idx != -1
-    post = text[pip_idx : pip_idx + 1200]
-    assert 'tier = "edge"' in post, (
-        "F25 regression: on install failure, setup must fall back to Edge tier "
-        "rather than leave the user in an indeterminate state"
-    )

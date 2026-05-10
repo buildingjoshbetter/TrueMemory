@@ -28,10 +28,10 @@ Usage::
     build_vectors(conn)
     results = search_vector(conn, "networking problems", limit=5)
 
-Dependencies:
-    - model2vec (``pip install model2vec``) — for the edge tier
-    - sentence-transformers (``pip install truememory[gpu]``) — for base / pro
-    - sqlite-vec (``pip install sqlite-vec``)
+Dependencies (all included in ``pip install truememory``):
+    - model2vec — edge tier embeddings
+    - sentence-transformers — base / pro tier embeddings + reranker
+    - sqlite-vec — vector search extension
     - numpy
 """
 

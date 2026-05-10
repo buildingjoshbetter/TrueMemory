@@ -418,7 +418,7 @@ def _set_reranker(model_name: str):
         _clear_reranker_error()
     except ImportError as e:
         _record_reranker_error(
-            f"ImportError: {e} — install truememory[gpu] for reranker support"
+            f"ImportError: {e} — reinstall truememory to restore reranker support"
         )
     except Exception as e:
         _record_reranker_error(f"{type(e).__name__}: {e}")
@@ -710,20 +710,6 @@ def truememory_configure(
         if api_provider not in ("anthropic", "openrouter", "openai"):
             return json.dumps({
                 "error": "api_provider must be one of: anthropic, openrouter, openai",
-            })
-
-    # Check Base / Pro dependencies before committing (both need sentence-transformers
-    # for the Qwen3 embedder + gte-reranker).
-    if tier in ("base", "pro"):
-        try:
-            import sentence_transformers  # noqa: F401
-        except ImportError:
-            return json.dumps({
-                "error": f"{tier.capitalize()} tier requires GPU extras. "
-                         f"If you installed via the curl installer, run:  uv tool install \"truememory[gpu]\"  "
-                         f"If you used pip, run:  pip install \"truememory[gpu]\"  "
-                         f"Then restart Claude and try again.",
-                "current_tier": _load_config().get("tier", "edge"),
             })
 
     # Save to persistent config

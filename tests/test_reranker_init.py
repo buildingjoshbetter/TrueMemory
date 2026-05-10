@@ -1,9 +1,9 @@
 """Regression lock for Hunter F06 — `_set_reranker` must log + store
 errors instead of silently swallowing them.
 
-Prior behavior: `try: ... except Exception: pass`. ImportError on a user
-who installed `truememory` without `[gpu]`, HF hub offline + uncached
-model, CUDA OOM — all swallowed, Base/Pro silently degraded below Edge.
+Prior behavior: `try: ... except Exception: pass`. ImportError from a
+broken install, HF hub offline + uncached model, CUDA OOM — all
+swallowed, Base/Pro silently degraded below Edge.
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def test_import_error_stores_last_error_with_install_hint(server, monkeypatch, c
 
     assert server._reranker_last_error is not None
     assert "ImportError" in server._reranker_last_error
-    assert "truememory[gpu]" in server._reranker_last_error
+    assert "reinstall truememory" in server._reranker_last_error
     assert any("Reranker init failed" in rec.message for rec in caplog.records)
 
 

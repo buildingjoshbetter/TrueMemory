@@ -61,10 +61,10 @@ main() {
   esac
 
   if [ -n "$TRUEMEMORY_SOURCE" ]; then
-    PKG_SPEC="${TRUEMEMORY_SOURCE}[gpu]"
+    PKG_SPEC="${TRUEMEMORY_SOURCE}"
     say "using custom source: $TRUEMEMORY_SOURCE"
   else
-    PKG_SPEC="truememory[gpu]"
+    PKG_SPEC="truememory"
   fi
 
   # ---------- preflight ----------

@@ -300,7 +300,7 @@ Everything lives locally in a single SQLite file at `~/.truememory/memories.db`.
 
 **How do I switch tiers (Edge → Base → Pro)?**
 
-Call `truememory_configure(tier="base")` (or `"pro"`) in any session. TrueMemory will automatically download the new models and re-embed all your existing memories. Base/Pro require `pip install "truememory[gpu]"` for the larger models. Pro also needs an API key for HyDE query expansion.
+Call `truememory_configure(tier="base")` (or `"pro"`) in any session, or run `truememory-ingest upgrade-tier base` from the terminal. All tier models are included in the standard install — switching just re-embeds your existing memories with the new model. Pro also needs an API key for HyDE query expansion.
 
 **I switched tiers and search results seem off. How do I fix it?**
 
