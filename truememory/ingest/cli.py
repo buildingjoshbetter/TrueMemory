@@ -294,7 +294,7 @@ def _load_truememory_config() -> dict:
 def _save_truememory_config(config: dict) -> None:
     """Save config to ~/.truememory/config.json.
 
-    Hunter F28: chmod calls below are silent no-ops on Windows. When an
+    chmod calls below are silent no-ops on Windows. When an
     API key is being persisted on Windows we warn to stderr so the user
     knows the plaintext file is readable by other local users and can
     route keys through env vars instead on shared machines.
@@ -350,7 +350,7 @@ def _run_setup(args):
                 do_install = input("  Install now? [y/N]: ").strip().lower()
                 if do_install == "y":
                     import subprocess
-                    # Hunter F25: bound pip with a 10-minute timeout —
+                    # bound pip with a 10-minute timeout —
                     # long enough for model downloads from slow mirrors,
                     # short enough that a dead mirror doesn't wedge setup.
                     try:

@@ -120,7 +120,7 @@ def _set_busy_timeout(memory, timeout_ms: int | None = None) -> None:
     sqlite will raise ``OperationalError`` which the caller already catches
     and records in the trace.
 
-    Hunter F35: defaults come from ``storage.DEFAULT_BUSY_TIMEOUT_MS`` so
+    defaults come from ``storage.DEFAULT_BUSY_TIMEOUT_MS`` so
     this helper and :func:`truememory.storage.create_db` never drift apart.
     """
     if timeout_ms is None:

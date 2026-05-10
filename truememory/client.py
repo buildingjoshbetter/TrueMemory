@@ -77,7 +77,7 @@ class Memory:
             NOT stored — a warning is issued and a skip-marker is
             returned (``id`` is ``None``, ``created_at`` is ``None``).
         """
-        # Hunter F38: skip empty / whitespace-only content. Callers
+        # skip empty / whitespace-only content. Callers
         # passing through user-generated text (parsed transcripts,
         # partial JSON) used to pollute the DB with useless rows that
         # inflated `stats().message_count`. Warn rather than raise so

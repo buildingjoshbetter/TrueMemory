@@ -61,7 +61,7 @@ except (ImportError, ModuleNotFoundError):
     pass
 
 
-# Hunter F08: module-level tracker for sqlite-vec load failures. On platforms
+# module-level tracker for sqlite-vec load failures. On platforms
 # without a sqlite-vec wheel (Linux ARM musl, some BSDs, some sandboxed
 # runtimes) the extension load fails and search silently falls back to
 # FTS5-only. truememory_stats.health (F07) surfaces this via
@@ -726,7 +726,7 @@ class TrueMemoryEngine:
                 )
 
         # Load sqlite-vec extension if available.
-        # Hunter F08: upgrade DEBUG → WARNING and track failure in a
+        # upgrade DEBUG → WARNING and track failure in a
         # module-level state so ``truememory_stats.health`` can report
         # "search is FTS-only because sqlite-vec failed to load".
         global _vectors_load_error
@@ -747,7 +747,7 @@ class TrueMemoryEngine:
                 )
 
         # Check for vector tables — rebuild if missing.
-        # Hunter F32: if metadata names a different embedder, refuse silent
+        # if metadata names a different embedder, refuse silent
         # rebuild; route the user through truememory_configure() instead.
         self._has_vectors = False
         if _HAS_VECTOR:
