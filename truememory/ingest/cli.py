@@ -526,7 +526,7 @@ def _run_setup(args):
 
 
 def _run_upgrade_tier(args):
-    """Switch embedding tier without re-running the full setup wizard."""
+    """Switch embedding tier and re-embed all memories with the new model."""
     tier = args.tier.lower().strip()
     config = _load_truememory_config()
     old_tier = config.get("tier", "edge")
@@ -535,48 +535,25 @@ def _run_upgrade_tier(args):
         print(f"Already on {tier} tier. Use --force to re-embed anyway.")
         return
 
-    # Check dependencies for base/pro
-    if tier in ("base", "pro"):
-        try:
-            import sentence_transformers  # noqa: F401
-        except ImportError:
-            print(f'\033[33m{tier.capitalize()} tier requires GPU extras.\033[0m')
-            import shutil
-            _is_uv = (
-                "/uv/tools/" in sys.executable.replace("\\", "/")
-                and shutil.which("uv")
-            )
-            if _is_uv:
-                print(f'Run:  uv tool install "truememory[gpu]"')
-            else:
-                print(f'Run:  pip install "truememory[gpu]"')
-            print("Then re-run this command.")
-            sys.exit(1)
-
-    print(f"Switching from {old_tier} → {tier}...")
+    print(f"Switching from {old_tier} to {tier}...")
 
     # Save tier to config
     config["tier"] = tier
     _save_truememory_config(config)
 
-    # Switch embedding model + reranker
+    # Switch active models and re-embed.
+    # All models are pre-downloaded during install — this just switches
+    # which one is active and re-embeds existing memories.
     os.environ.pop("HF_HUB_OFFLINE", None)
     os.environ.pop("TRANSFORMERS_OFFLINE", None)
     try:
         os.environ["TRUEMEMORY_EMBED_MODEL"] = tier
-        from truememory.vector_search import set_embedding_model, get_model
+        from truememory.vector_search import set_embedding_model
         set_embedding_model(tier)
-        print("  Downloading embedding model...")
-        get_model()
-        print("  \033[32m✓ Embedding model ready\033[0m")
 
-        from truememory.reranker import set_active_tier, get_reranker
+        from truememory.reranker import set_active_tier
         set_active_tier(tier)
-        print("  Downloading reranker model...")
-        get_reranker()
-        print("  \033[32m✓ Reranker ready\033[0m")
 
-        # Re-embed existing memories if tier changed (or --force)
         from truememory import Memory
         mem = Memory()
         engine = mem._engine
@@ -609,12 +586,12 @@ def _run_upgrade_tier(args):
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
     _tier_descriptions = {
-        "edge": "Edge — 89.6% LoCoMo, Model2Vec + MiniLM (~30MB)",
-        "base": "Base — 92.0% LoCoMo, Qwen3 + gte-modernbert (~1.5GB)",
-        "pro": "Pro  — 93.0% LoCoMo, Qwen3 + gte-modernbert + HyDE (~1.5GB + API key)",
+        "edge": "Edge — 89.6% LoCoMo, Model2Vec + MiniLM",
+        "base": "Base — 92.0% LoCoMo, Qwen3 + gte-modernbert",
+        "pro": "Pro  — 93.0% LoCoMo, Qwen3 + gte-modernbert + HyDE",
     }
     print()
-    print(f"\033[32m✓ Tier upgraded: {_tier_descriptions.get(tier, tier)}\033[0m")
+    print(f"\033[32m✓ Tier switched: {_tier_descriptions.get(tier, tier)}\033[0m")
     print()
     print("\033[1mIMPORTANT:\033[0m If Claude is currently running, start a new session")
     print("for the tier change to take effect.")
