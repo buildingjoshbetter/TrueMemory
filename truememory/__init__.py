@@ -67,7 +67,7 @@ from truememory.hyde import (
 from truememory.clustering import cluster_messages, search_clustered, get_cluster_info
 from truememory.engine import TrueMemoryEngine
 
-# Hunter F37: `__all__` must enumerate every name __init__.py re-exports.
+# `__all__` must enumerate every name __init__.py re-exports.
 # Pre-fix, only 3 of ~79 public names were declared — IDE auto-import,
 # Sphinx autodoc, and `from truememory import *` all saw a misleadingly
 # small public API surface. Entries here are grouped to match the
@@ -80,7 +80,7 @@ __all__ = [
     "TrueMemoryEngine",
     # Storage
     "create_db",
-    "bulk_replace_messages",  # F34: non-deprecated name for load_messages
+    "bulk_replace_messages",  # non-deprecated name for load_messages
     "load_messages", "load_messages_from_file",  # load_messages: DEPRECATED alias
     "insert_message", "delete_message", "update_message",
     "get_message", "get_message_count",

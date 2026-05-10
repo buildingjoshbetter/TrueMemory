@@ -38,13 +38,13 @@ LOG_DIR = Path(os.environ.get(
     "TRUEMEMORY_LOG_DIR",
     str(Path.home() / ".truememory" / "logs"),
 ))
-# Hunter F33: when Popen fails we queue the ingestion here instead of
+# when Popen fails we queue the ingestion here instead of
 # running inline (which would block Claude Code shutdown).
 BACKLOG_DIR = Path(os.environ.get(
     "TRUEMEMORY_BACKLOG_DIR",
     str(Path.home() / ".truememory" / "backlog"),
 ))
-# Hunter F21: cap concurrent ingest processes. N parallel Stop hooks
+# cap concurrent ingest processes. N parallel Stop hooks
 # (multi-session close, session-restart loop) would otherwise load N
 # embedding models at once — ~600MB RSS each on Pro, easy OOM on laptops.
 # Tunable via env var; POSIX-only via pgrep (on Windows the cap is a no-op).
@@ -214,7 +214,7 @@ def _has_enough_messages(transcript_path: str, min_messages: int) -> bool:
 def _count_active_ingest_processes() -> int:
     """Return a best-effort count of live ``truememory.ingest.cli`` children.
 
-    Hunter F21: used to bound concurrent hook-spawned ingestions. pgrep
+    used to bound concurrent hook-spawned ingestions. pgrep
     is POSIX-only; on Windows this returns 0 (cap disabled) to avoid a
     platform-dependent hard stop — the typical burst-close scenario is
     rare on Windows anyway. Any pgrep failure is swallowed (return 0)
@@ -241,7 +241,7 @@ def _queue_to_backlog(
 ) -> None:
     """Drop a queue marker so a later session can re-attempt this ingestion.
 
-    Hunter F33: when Popen fails (disk full for log file, permission error,
+    when Popen fails (disk full for log file, permission error,
     etc.) we used to fall back to synchronous inline ingestion — which
     blocked Claude Code's shutdown for 10–60s. Now we write a marker to
     BACKLOG_DIR and let the next session's startup hook drain it (drain
@@ -259,7 +259,7 @@ def _queue_to_backlog(
             "db_path": db_path,
             "queued_at": datetime.now(timezone.utc).isoformat(),
             "reason": reason,
-        }))
+        }), encoding="utf-8")
     except Exception as e:
         # Best-effort: if we can't write the backlog marker, the session's
         # memories are lost — log and move on. Must not raise.
@@ -278,9 +278,9 @@ def _run_background_ingestion(
     Handles Windows (CREATE_NEW_PROCESS_GROUP) and POSIX (start_new_session)
     subprocess detachment.
 
-    Hunter F21: bounds concurrent spawns via ``SPAWN_CAP`` so a burst of
+    bounds concurrent spawns via ``SPAWN_CAP`` so a burst of
     Stop hooks doesn't load N embedding models at once.
-    Hunter F33: on Popen failure, queue the ingestion to ``BACKLOG_DIR``
+    on Popen failure, queue the ingestion to ``BACKLOG_DIR``
     for a later session to re-attempt — NEVER fall back to synchronous
     inline ingestion (that blocks Claude Code's shutdown).
     """
@@ -325,7 +325,7 @@ def _run_background_ingestion(
     else:
         detach_kwargs["start_new_session"] = True
 
-    # Hunter F21: refuse to spawn if we're already at the concurrent-ingest
+    # refuse to spawn if we're already at the concurrent-ingest
     # cap. Over-cap events queue to the backlog so the memories aren't lost.
     active = _count_active_ingest_processes()
     if active >= SPAWN_CAP:
@@ -352,11 +352,11 @@ def _run_background_ingestion(
             stdout=log_file,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
-            close_fds=True,
+            close_fds=(sys.platform != "win32"),
             **detach_kwargs,
         )
     except Exception as e:
-        # Hunter F33: NEVER fall back to synchronous inline ingestion —
+        # NEVER fall back to synchronous inline ingestion —
         # that blocks Claude Code's shutdown for 10–60s. Queue instead;
         # a later session's drain path will re-attempt.
         log.warning(

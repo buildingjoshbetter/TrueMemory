@@ -148,7 +148,7 @@ CREATE TABLE IF NOT EXISTS entity_relationships (
     last_interaction TEXT DEFAULT ''
 );
 
--- Embedder identity / schema version (Hunter F02: prevents silent quality
+-- Embedder identity / schema version (prevents silent quality
 -- collapse when a tier switch produces matching dims but different vector
 -- spaces — e.g. Model2Vec 256d → Qwen3 256d). Writers: build_vectors,
 -- build_separation_vectors. Readers: init_vec_table, engine.open().
@@ -160,7 +160,7 @@ CREATE TABLE IF NOT EXISTS metadata (
 """
 
 
-# Hunter F35: single source of truth for the sqlite busy_timeout pragma.
+# single source of truth for the sqlite busy_timeout pragma.
 # Pre-fix, create_db used 5000ms and pipeline._set_busy_timeout used
 # 10_000ms — same DB, asymmetric lock-wait behaviour that surfaced as
 # sporadic "database is locked" errors under concurrent ingest + MCP
@@ -250,7 +250,7 @@ def bulk_replace_messages(conn: sqlite3.Connection, messages: list[dict]) -> int
 def load_messages(conn: sqlite3.Connection, messages: list[dict]) -> int:
     """Deprecated alias for :func:`bulk_replace_messages`.
 
-    Hunter F34: the original name ``load_messages`` paralleled
+    the original name ``load_messages`` paralleled
     ``insert_message`` (non-destructive) but actually WIPES the table
     before inserting. Callers writing ``load_messages(conn, [new_msg])``
     believing it appended silently destroyed their DB. The destructive

@@ -74,7 +74,7 @@ except (ImportError, ModuleNotFoundError):
     pass
 
 
-# Hunter F08: module-level tracker for sqlite-vec load failures. On platforms
+# module-level tracker for sqlite-vec load failures. On platforms
 # without a sqlite-vec wheel (Linux ARM musl, some BSDs, some sandboxed
 # runtimes) the extension load fails and search silently falls back to
 # FTS5-only. truememory_stats.health (F07) surfaces this via
@@ -658,7 +658,7 @@ class TrueMemoryEngine:
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found: {self.db_path}")
 
-        self.conn = sqlite3.connect(str(self.db_path))
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.conn.row_factory = None  # Use default tuple rows
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
@@ -746,8 +746,29 @@ class TrueMemoryEngine:
                     exc_info=True,
                 )
 
+        # Style vector hash migration: Python's hash() was replaced with a
+        # stable hashlib-based hash in v0.6.3. Existing style vectors were
+        # computed with the old non-deterministic hash and must be rebuilt.
+        if "entity_style_vectors" in tables and "metadata" in tables:
+            try:
+                row = self.conn.execute(
+                    "SELECT value FROM metadata WHERE key = 'style_vec_hash_version'"
+                ).fetchone()
+                if row is None or row[0] != "2":
+                    if _HAS_STYLE_VEC:
+                        from truememory.personality_style_vec import build_entity_style_vectors
+                        build_entity_style_vectors(self.conn)
+                        logger.info("Style vectors rebuilt with stable hash (one-time migration)")
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                        ("style_vec_hash_version", "2"),
+                    )
+                    self.conn.commit()
+            except Exception:
+                logger.debug("Style vector migration failed", exc_info=True)
+
         # Load sqlite-vec extension if available.
-        # Hunter F08: upgrade DEBUG → WARNING and track failure in a
+        # upgrade DEBUG → WARNING and track failure in a
         # module-level state so ``truememory_stats.health`` can report
         # "search is FTS-only because sqlite-vec failed to load".
         global _vectors_load_error
@@ -768,7 +789,7 @@ class TrueMemoryEngine:
                 )
 
         # Check for vector tables — rebuild if missing.
-        # Hunter F32: if metadata names a different embedder, refuse silent
+        # if metadata names a different embedder, refuse silent
         # rebuild; route the user through truememory_configure() instead.
         self._has_vectors = False
         if _HAS_VECTOR:

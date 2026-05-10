@@ -293,7 +293,7 @@ def _load_truememory_config() -> dict:
     """Load persistent config from ~/.truememory/config.json."""
     if _TRUEMEMORY_CONFIG_PATH.exists():
         try:
-            return json.loads(_TRUEMEMORY_CONFIG_PATH.read_text())
+            return json.loads(_TRUEMEMORY_CONFIG_PATH.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return {}
     return {}
@@ -302,14 +302,14 @@ def _load_truememory_config() -> dict:
 def _save_truememory_config(config: dict) -> None:
     """Save config to ~/.truememory/config.json.
 
-    Hunter F28: chmod calls below are silent no-ops on Windows. When an
+    chmod calls below are silent no-ops on Windows. When an
     API key is being persisted on Windows we warn to stderr so the user
     knows the plaintext file is readable by other local users and can
     route keys through env vars instead on shared machines.
     """
     _TRUEMEMORY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     _TRUEMEMORY_CONFIG_PATH.parent.chmod(0o700)
-    _TRUEMEMORY_CONFIG_PATH.write_text(json.dumps(config, indent=2))
+    _TRUEMEMORY_CONFIG_PATH.write_text(json.dumps(config, indent=2), encoding="utf-8")
     _TRUEMEMORY_CONFIG_PATH.chmod(0o600)
     if sys.platform == "win32" and any(k.endswith("_api_key") for k in config):
         print(
@@ -610,6 +610,9 @@ def _run_install(args):
             parts.extend(["--user", args.user])
         if args.db:
             parts.extend(["--db", args.db])
+        if sys.platform == "win32":
+            import subprocess as _sp
+            return _sp.list2cmdline(parts)
         return " ".join(shlex.quote(p) for p in parts)
 
     settings = {
@@ -636,7 +639,7 @@ def _run_install(args):
     settings_path = Path.home() / ".claude" / "settings.json"
     if settings_path.exists():
         try:
-            existing = json.loads(settings_path.read_text())
+            existing = json.loads(settings_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as e:
             print(f"ERROR: Existing settings.json is invalid JSON: {e}", file=sys.stderr)
             print(f"Fix or move {settings_path} and retry.", file=sys.stderr)
@@ -729,7 +732,7 @@ def _run_install(args):
             if not already_present:
                 existing["hooks"][event].append(hook)
 
-    settings_path.write_text(json.dumps(existing, indent=2))
+    settings_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
     print(f"Hooks installed in {settings_path}")
     print(f"Events configured: {', '.join(settings['hooks'].keys())}")
 
@@ -845,7 +848,7 @@ def _run_status(args):
     settings_path = Path.home() / ".claude" / "settings.json"
     if settings_path.exists():
         try:
-            settings = json.loads(settings_path.read_text())
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
             hooks = settings.get("hooks", {})
             expected = ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact"]
             installed = []
@@ -854,6 +857,11 @@ def _run_status(args):
                 event_hooks = hooks.get(event, [])
                 has_truememory = any(
                     "truememory" in str(h.get("command", "")).lower()
+                    or any(
+                        "truememory" in str(ih.get("command", "")).lower()
+                        for ih in (h.get("hooks") or [])
+                        if isinstance(ih, dict)
+                    )
                     for h in event_hooks
                     if isinstance(h, dict)
                 )
@@ -921,7 +929,7 @@ def _run_uninstall(args):
         return
 
     try:
-        settings = json.loads(settings_path.read_text())
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         print(f"ERROR: settings.json is invalid JSON: {e}", file=sys.stderr)
         sys.exit(1)
@@ -955,7 +963,7 @@ def _run_uninstall(args):
         return
 
     settings["hooks"] = hooks
-    settings_path.write_text(json.dumps(settings, indent=2))
+    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
     print(f"Removed {len(removed)} truememory hooks from {settings_path}")
     for r in removed:
         print(f"  - {r}")
@@ -976,7 +984,7 @@ def _run_uninstall(args):
 
 
 def _run_stats(args):
-    data = json.loads(Path(args.trace_file).read_text())
+    data = json.loads(Path(args.trace_file).read_text(encoding="utf-8"))
     summary = data.get("summary", {})
     trace = data.get("trace", [])
 

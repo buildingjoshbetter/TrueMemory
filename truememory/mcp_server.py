@@ -57,7 +57,7 @@ def _load_config() -> dict:
     if not _CONFIG_PATH.exists():
         return {}
     try:
-        return json.loads(_CONFIG_PATH.read_text())
+        return json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         # .with_suffix would replace ".json"; we want to APPEND to preserve
         # the origin filename in the backup so users can find it easily.
@@ -89,7 +89,7 @@ def _load_config() -> dict:
 def _save_config(config: dict) -> None:
     """Save config to ~/.truememory/config.json.
 
-    Hunter F28: the POSIX `chmod` calls below are silent no-ops on Windows;
+    the POSIX `chmod` calls below are silent no-ops on Windows;
     the config file (which stores API keys in plaintext) inherits the
     parent-directory ACL — typically readable by all local users. When
     storing a key on Windows we warn to stderr and suggest the env-var
@@ -97,7 +97,7 @@ def _save_config(config: dict) -> None:
     """
     _TRUEMEMORY_DIR.mkdir(parents=True, exist_ok=True)
     _TRUEMEMORY_DIR.chmod(0o700)
-    _CONFIG_PATH.write_text(json.dumps(config, indent=2))
+    _CONFIG_PATH.write_text(json.dumps(config, indent=2), encoding="utf-8")
     _CONFIG_PATH.chmod(0o600)
     if sys.platform == "win32" and any(k.endswith("_api_key") for k in config):
         print(
@@ -189,7 +189,7 @@ def _get_memory() -> Memory:
 # LLM backend for agentic search (HyDE, query refinement, reranking)
 # ---------------------------------------------------------------------------
 
-# Hunter F05: per-provider last-error state so truememory_stats.health can
+# per-provider last-error state so truememory_stats.health can
 # surface "Pro tier silently degraded to Base" instead of hiding the failure.
 # Mutation happens from _build_llm_fn (MCP thread) and truememory_configure
 # (MCP thread); readers are truememory_stats (MCP thread). A module-level
@@ -324,7 +324,7 @@ def _build_llm_fn():
 
 _cached_llm_fn = None
 _cached_llm_fn_built = False
-# Hunter F22: double-checked locking around first-call construction.
+# double-checked locking around first-call construction.
 # Without this, two concurrent first-searches both observe
 # `_cached_llm_fn_built == False`, both call `_build_llm_fn()`, both
 # race to write — benign (no data corruption) but wasteful (duplicate
@@ -377,7 +377,7 @@ def _current_reranker() -> str:
     return get_current_reranker_name()
 
 
-# Hunter F06: reranker init error state. ``_set_reranker`` is called on
+# reranker init error state. ``_set_reranker`` is called on
 # every truememory_search — the throttle flag prevents repeated log spam
 # when the error is unchanged across calls, but the stored error string
 # is always current so truememory_stats.health (F07) reports live state.
@@ -425,7 +425,7 @@ def _set_reranker(model_name: str):
 
 
 # ---------------------------------------------------------------------------
-# Health payload (Hunter F07) — surfaces per-subsystem degradation so MCP
+# Health payload — surfaces per-subsystem degradation so MCP
 # clients can diagnose "search quality is bad" without digging through logs.
 # Reads state written by F05 (_llm_last_error), F06 (_reranker_last_error),
 # and F08 (engine._vectors_load_error). Pure read — no mutation.
@@ -477,7 +477,7 @@ def _parallel_search(queries, user_id, internal_limit, llm_fn, output_limit):
     db_path = _get_memory()._engine.db_path
 
     def _run_query(q):
-        # Hunter F30: context manager ensures the sqlite connection is
+        # context manager ensures the sqlite connection is
         # closed even if `KeyboardInterrupt` lands between construction
         # and entry into the old explicit `try:` block. `Memory.__exit__`
         # already handles close; this form is just interrupt-safe.
@@ -749,7 +749,7 @@ def truememory_configure(
     # Apply model change — temporarily allow downloads for tier switch
     # (the new model may not be cached yet).
     #
-    # Hunter F31: wrap pop + restore in try/finally. Without this, any
+    # wrap pop + restore in try/finally. Without this, any
     # exception between the pop (line below) and the restore at the
     # bottom (e.g. `set_embedding_model` raising on a removed model,
     # model-download failure, disk-full during re-embed) leaves offline
@@ -773,7 +773,7 @@ def truememory_configure(
         _set_reranker(_current_reranker())
 
         # If tier actually changed, re-embed any existing memories.
-        # Hunter F03: (1) rebuild BOTH vec_messages and vec_messages_sep (the
+        # (1) rebuild BOTH vec_messages and vec_messages_sep (the
         # old code only rebuilt the completion table, leaving the separation
         # table silently empty); (2) surface exceptions as rebuild_error in
         # the response payload instead of swallowing into bare pass; (3) null
@@ -850,7 +850,7 @@ def truememory_configure(
     _onboarded = Path.home() / ".truememory" / ".onboarded"
     try:
         _onboarded.parent.mkdir(parents=True, exist_ok=True)
-        _onboarded.write_text(f"tier={tier}\n")
+        _onboarded.write_text(f"tier={tier}\n", encoding="utf-8")
     except OSError:
         pass
 
@@ -965,7 +965,7 @@ def _preload_models():
 def _claude_desktop_config_path() -> Path:
     """Return the per-platform Claude Desktop config file location.
 
-    Hunter F29: previously hardcoded to macOS. Claude Desktop stores this
+    previously hardcoded to macOS. Claude Desktop stores this
     file in a platform-specific app-data location:
       - macOS:   ``~/Library/Application Support/Claude/claude_desktop_config.json``
       - Windows: ``%APPDATA%/Claude/claude_desktop_config.json`` (fallback
@@ -1007,7 +1007,7 @@ def _setup_claude():
     import subprocess
     import sys
 
-    # Hunter F23: bound every `claude` CLI call. Without a timeout, a stalled
+    # bound every `claude` CLI call. Without a timeout, a stalled
     # claude binary (auth prompt, blocked network, deadlock) wedges
     # `truememory-mcp --setup` forever. 30s is generous — claude CLI calls
     # should complete in well under a second.
@@ -1091,7 +1091,7 @@ def _setup_claude():
             print(f"  Claude Code: failed — {result.stderr.strip()}")
 
     # --- Claude Desktop ---
-    # Hunter F29: pre-PR49, this path was hardcoded to the macOS
+    # pre-PR49, this path was hardcoded to the macOS
     # `~/Library/Application Support/Claude/...` location, so Linux and
     # Windows users silently got "Claude Desktop not detected" even with
     # Desktop installed. Resolve per-platform instead.
@@ -1099,7 +1099,7 @@ def _setup_claude():
     if desktop_config_path.parent.exists():
         try:
             if desktop_config_path.exists():
-                config = json.loads(desktop_config_path.read_text())
+                config = json.loads(desktop_config_path.read_text(encoding="utf-8"))
             else:
                 config = {}
 
@@ -1110,7 +1110,7 @@ def _setup_claude():
             if existing is None:
                 # No entry — create one.
                 servers["truememory"] = {"command": python_path, "args": list(mcp_args)}
-                desktop_config_path.write_text(json.dumps(config, indent=2))
+                desktop_config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
                 configured.append("Claude Desktop")
             elif _path_exists(existing_cmd):
                 # Working entry — preserve it.
@@ -1118,7 +1118,7 @@ def _setup_claude():
             else:
                 # Stale entry — replace it.
                 servers["truememory"] = {"command": python_path, "args": list(mcp_args)}
-                desktop_config_path.write_text(json.dumps(config, indent=2))
+                desktop_config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
                 configured.append("Claude Desktop (stale entry replaced)")
         except Exception as e:
             print(f"  Claude Desktop: failed — {e}")
@@ -1140,7 +1140,7 @@ def _setup_claude():
             print("  Claude Desktop not detected.")
         print()
         print("  Manual setup:")
-        print(f"    claude mcp add --scope user truememory -- {python_path} -m truememory.mcp_server")
+        print(f'    claude mcp add --scope user truememory -- "{python_path}" -m truememory.mcp_server')
     print()
 
 
@@ -1177,7 +1177,7 @@ def main():
     # Informational flags — these must return immediately, before mcp.run()
     # blocks on stdin or _preload_models() starts background threads.
     #
-    # Hunter F40: if both `--help` and `--setup` are passed, `--help` wins
+    # if both `--help` and `--setup` are passed, `--help` wins
     # (checked first, below). This is the conventional Unix posture —
     # docs-emitting flags short-circuit any side-effecting operation — and
     # is locked in by tests/test_cli_help.py. Flipping the precedence would
