@@ -523,8 +523,14 @@ def truememory_store(
         user_id: Owner of this memory (e.g. a person's name).
         metadata: Optional JSON string of metadata.
     """
+    MAX_CONTENT_LENGTH = 50_000
+    if len(content) > MAX_CONTENT_LENGTH:
+        return json.dumps({"error": f"Content too large ({len(content)} chars). Maximum is {MAX_CONTENT_LENGTH}."})
     m = _get_memory()
-    meta = json.loads(metadata) if metadata else None
+    try:
+        meta = json.loads(metadata) if metadata else None
+    except (json.JSONDecodeError, ValueError):
+        meta = None
     result = m.add(content=content, user_id=user_id or None, metadata=meta)
     return json.dumps(result, indent=2)
 
@@ -547,6 +553,10 @@ def truememory_search(
         user_id: Filter results to this user (optional).
         limit: Maximum number of results to return.
     """
+    limit = max(1, min(limit, 200))
+    MAX_QUERY_LENGTH = 2000
+    if len(query) > MAX_QUERY_LENGTH:
+        query = query[:MAX_QUERY_LENGTH]
     _set_reranker(_current_reranker())
     llm_fn = _get_llm_fn()
     uid = user_id or None
@@ -582,6 +592,10 @@ def truememory_search_deep(
         user_id: Filter results to this user (optional).
         limit: Maximum number of results to return.
     """
+    limit = max(1, min(limit, 200))
+    MAX_QUERY_LENGTH = 2000
+    if len(query) > MAX_QUERY_LENGTH:
+        query = query[:MAX_QUERY_LENGTH]
     _set_reranker(_DEEP_RERANKER)
     llm_fn = _get_llm_fn()
     uid = user_id or None
@@ -740,8 +754,9 @@ def truememory_configure(
     # Invalidate cached LLM function so it picks up the new key
     if api_key:
         global _cached_llm_fn, _cached_llm_fn_built
-        _cached_llm_fn = None
-        _cached_llm_fn_built = False
+        with _llm_cache_lock:
+            _cached_llm_fn = None
+            _cached_llm_fn_built = False
         # Clear stored LLM errors for the provider we just re-keyed
         _clear_llm_error(api_provider)
 
@@ -802,7 +817,8 @@ def truememory_configure(
                 rebuild_error = f"{type(e).__name__}: {e}"
                 log.exception("truememory_configure re-embed failed")
             finally:
-                _memory = None  # Always force re-init, even on failure
+                with _memory_lock:
+                    _memory = None  # Always force re-init, even on failure
     finally:
         # Always restore offline mode, even if set_embedding_model or the
         # rebuild block raised before we got to their own cleanup.
