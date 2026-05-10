@@ -48,9 +48,9 @@ ${\color{#1a73e8}\textbf{\textsf{Step 2.}}}$ Paste this and press Enter:
 curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.sh | sh
 ```
 
-**Windows (PowerShell)** — requires [Python 3.10+](https://www.python.org/downloads/):
+**Windows (PowerShell):**
 ```powershell
-pip install truememory; truememory-mcp --setup; truememory-ingest install
+irm https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.ps1 | iex
 ```
 
 &nbsp;

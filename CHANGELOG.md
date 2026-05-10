@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.6.3] — 2026-05-10
+
+### Added
+- **Windows one-line installer** (`install.ps1`) — PowerShell equivalent of
+  `install.sh`. Same steps: installs uv, fetches Python 3.12, installs
+  truememory, configures Claude, pre-downloads all tier models.
+  `irm https://...install.ps1 | iex` (#203)
+- **`truememory-ingest upgrade-tier`** CLI command for switching tiers without
+  re-running the full setup wizard. (#170)
+- **Usage telemetry system** spec filed. (#190)
+- **Corpus Sync** spec filed — cloud-backed multi-agent memory with selective
+  sharing. (#199)
+- **Contributor IP assignment clause** in CONTRIBUTING.md. (#198)
+
+### Fixed
+- **Windows compatibility** — 12 `encoding="utf-8"` fixes, `close_fds` platform
+  branch, `shlex.quote` vs `list2cmdline`, `check_same_thread=False`, stable hash
+  for style vectors, Claude CLI path resolution. (#195)
+- **Security hardening** — SQL table name allowlist, FTS5 query sanitization,
+  MCP input validation (50KB content cap, limit clamping, query length cap),
+  session ID path traversal prevention, directory permissions, 30-day trace/log
+  retention. (#181)
+- **PyTorch teardown deadlock** — `os._exit(0)` bypasses interpreter shutdown
+  hang from OpenMP/autograd thread pools. Affects all platforms. (#197)
+- **pip-only install messages** — all error messages now show both uv and pip
+  commands. PATH guidance added. (#168, #171)
+- **HyDE logging** — silent `except: pass` blocks now emit `log.debug`. (#193)
+- **Gate threshold validation** — out-of-range values clamped with warning
+  instead of crashing the pipeline. (#193)
+
+### Changed
+- **All models are now core dependencies.** `sentence-transformers` and `torch`
+  moved from `[gpu]` optional extras into core `dependencies`. `[gpu]`/`[reranker]`
+  kept as empty aliases for backward compatibility. Tier switching just re-embeds
+  locally — no extra packages needed. (#192)
+- **Style vector hash migration** — Python's non-deterministic `hash()` replaced
+  with `hashlib.md5`-based stable hash. One-time rebuild runs on first
+  open after upgrade. (#195, #202)
+- Removed 33 contributor-specific tags from code comments. (#204)
+
 ## [0.6.0] — 2026-05-02
 
 ### Added
