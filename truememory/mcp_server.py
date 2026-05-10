@@ -35,6 +35,7 @@ from mcp.server.fastmcp import FastMCP
 
 from truememory import __version__
 from truememory.client import Memory
+from truememory.telemetry import tracked as _tracked
 
 log = logging.getLogger(__name__)
 
@@ -509,6 +510,7 @@ def _parallel_search(queries, user_id, internal_limit, llm_fn, output_limit):
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
+@_tracked("tool_store")
 def truememory_store(
     content: str,
     user_id: str = "",
@@ -536,6 +538,7 @@ def truememory_store(
 
 
 @mcp.tool()
+@_tracked("tool_search")
 def truememory_search(
     query: str,
     user_id: str = "",
@@ -574,6 +577,7 @@ def truememory_search(
 
 
 @mcp.tool()
+@_tracked("tool_search_deep")
 def truememory_search_deep(
     query: str,
     user_id: str = "",
@@ -613,6 +617,7 @@ def truememory_search_deep(
 
 
 @mcp.tool()
+@_tracked("tool_get")
 def truememory_get(memory_id: int) -> str:
     """Get a specific memory by its ID.
 
@@ -627,6 +632,7 @@ def truememory_get(memory_id: int) -> str:
 
 
 @mcp.tool()
+@_tracked("tool_forget")
 def truememory_forget(memory_id: int) -> str:
     """Delete a memory by its ID.
 
@@ -639,6 +645,7 @@ def truememory_forget(memory_id: int) -> str:
 
 
 @mcp.tool()
+@_tracked("tool_stats")
 def truememory_stats() -> str:
     """Get memory system statistics. On first run, returns a welcome message
     and setup instructions — present these to the user to walk them through
@@ -694,10 +701,12 @@ def truememory_stats() -> str:
 
 
 @mcp.tool()
+@_tracked("tool_configure")
 def truememory_configure(
     tier: str,
     api_key: str = "",
     api_provider: str = "",
+    email: str = "",
 ) -> str:
     """Configure TrueMemory. Call this once during first-time setup,
     or again to change tier or update API keys.
@@ -708,6 +717,7 @@ def truememory_configure(
                  optional for Edge / Base).  Supported providers:
                  anthropic, openrouter, openai.
         api_provider: Required if api_key is provided. One of: "anthropic", "openrouter", "openai".
+        email: User's email for updates and support (optional).
     """
     global _memory
     tier = tier.lower().strip()
@@ -734,6 +744,15 @@ def truememory_configure(
     # Store API key if provided
     if api_key and api_provider:
         config[f"{api_provider}_api_key"] = api_key
+
+    # Store email for telemetry registration
+    if email and email.strip():
+        config["email"] = email.strip()
+        try:
+            from truememory import telemetry
+            telemetry.identify(email.strip(), {"tier": tier})
+        except Exception:
+            pass
 
     _save_config(config)
 
@@ -879,6 +898,7 @@ def truememory_configure(
 
 
 @mcp.tool()
+@_tracked("tool_entity_profile")
 def truememory_entity_profile(entity: str) -> str:
     """Get the personality profile for an entity (person).
 
@@ -1225,6 +1245,13 @@ def main():
     # environment for code that expects online HF access.
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+    # Initialize telemetry (fire-and-forget, opt-out via TRUEMEMORY_TELEMETRY=off)
+    try:
+        from truememory import telemetry
+        telemetry.init(_load_config())
+    except Exception:
+        pass
 
     # Kick off model preloading before entering the event loop. Models
     # load in background threads (~2.5s) while the MCP handshake

@@ -54,16 +54,18 @@ TrueMemory needs a quick one-time setup. IMPORTANT: Present this setup guide to 
 
 2. **If they choose Pro**, ask for their API key and provider (anthropic, openrouter, or openai).
 
-3. **Call `truememory_configure`** with their choices:
-   - Edge: `truememory_configure(tier="edge")`
-   - Base: `truememory_configure(tier="base")`
-   - Pro: `truememory_configure(tier="pro", api_key="...", api_provider="...")`
+3. **Ask for their email** (optional, for updates and support). If they provide one, include it in the configure call.
 
-4. **After configuration**, tell the user to try:
+4. **Call `truememory_configure`** with their choices:
+   - Edge: `truememory_configure(tier="edge")` or `truememory_configure(tier="edge", email="user@example.com")`
+   - Base: `truememory_configure(tier="base")` or with email
+   - Pro: `truememory_configure(tier="pro", api_key="...", api_provider="...", email="...")`
+
+5. **After configuration**, tell the user to try:
    - "Remember that I prefer dark mode"
    - Then in a new session: "What are my preferences?"
 
-5. **Done!** TrueMemory will now automatically remember facts, preferences, and decisions across all sessions.
+6. **Done!** TrueMemory will now automatically remember facts, preferences, and decisions across all sessions.
 """.strip()
 
 
