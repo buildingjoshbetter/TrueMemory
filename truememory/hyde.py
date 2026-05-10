@@ -24,7 +24,10 @@ Dependencies:
 
 from __future__ import annotations
 
+import logging
 import sqlite3
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -79,8 +82,8 @@ def generate_hypothetical_doc(
         result = llm_fn(prompt)
         if result and len(result.strip()) > 10:
             return result.strip()
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("HyDE hypothetical doc generation failed: %s", e)
 
     return None
 
@@ -225,8 +228,8 @@ def hyde_multi_search(
                 fts_weight=fts_weight, vec_weight=vec_weight,
             )
             all_result_lists.append(hyde_results)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("HyDE hybrid search failed for hypothetical doc: %s", e)
 
     if len(all_result_lists) == 1:
         return original_results[:limit]

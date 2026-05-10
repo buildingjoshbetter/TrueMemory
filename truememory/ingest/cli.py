@@ -344,7 +344,10 @@ def _run_setup(args):
     else:
         default_num = _TIER_NUM.get(existing_tier, "1")
         choice = input(f"  Choose tier [1/2/3] (default: {default_num}): ").strip() or default_num
-        tier = {"1": "edge", "2": "base", "3": "pro"}.get(choice, "edge")
+        tier = {"1": "edge", "2": "base", "3": "pro"}.get(choice)
+        if tier is None:
+            print(f"  \033[33m⚠ Invalid choice '{choice}', defaulting to Edge tier.\033[0m")
+            tier = "edge"
 
     # Pre-load the embedding model so first search isn't slow
     print()
