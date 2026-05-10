@@ -41,13 +41,16 @@ _lock = threading.Lock()
 _flush_thread: threading.Thread | None = None
 
 
-def init(config: dict) -> None:
-    """Initialize telemetry. Call once during MCP server startup."""
+def init(config: dict) -> dict | None:
+    """Initialize telemetry. Call once during MCP server startup.
+
+    Returns update info dict if a newer version is available, or None.
+    """
     global _enabled, _user_id, _flush_thread
 
     if not is_enabled():
         _enabled = False
-        return
+        return None
 
     _enabled = True
 
@@ -58,11 +61,7 @@ def init(config: dict) -> None:
         config["user_id"] = _user_id
         _save_user_id(config)
 
-    # Start background flush thread
-    _flush_thread = threading.Thread(target=_flush_loop, daemon=True)
-    _flush_thread.start()
-
-    # Track session start
+    # Track session start and do a synchronous flush to check for updates
     track("session_start", {
         "tier": config.get("tier", "edge"),
         "version": _get_version(),
@@ -70,6 +69,13 @@ def init(config: dict) -> None:
         "arch": platform.machine(),
         "python": platform.python_version(),
     })
+    update_info = _flush_sync()
+
+    # Start background flush thread for subsequent events
+    _flush_thread = threading.Thread(target=_flush_loop, daemon=True)
+    _flush_thread.start()
+
+    return update_info
 
 
 def is_enabled() -> bool:
@@ -165,21 +171,30 @@ def _flush_loop() -> None:
 
 def _flush() -> None:
     """Send batched events to the telemetry endpoint."""
+    _flush_sync()
+
+
+def _flush_sync() -> dict | None:
+    """Flush events and return the server response (for update checks)."""
     with _lock:
         if not _session_events:
-            return
+            return None
         batch = _session_events.copy()
         _session_events.clear()
 
     try:
         import httpx
-        httpx.post(
+        resp = httpx.post(
             _TELEMETRY_ENDPOINT,
             json={"events": batch},
             timeout=_HTTP_TIMEOUT,
         )
+        data = resp.json()
+        if data.get("update_available"):
+            return data
     except Exception:
         pass
+    return None
 
 
 def _save_user_id(config: dict) -> None:

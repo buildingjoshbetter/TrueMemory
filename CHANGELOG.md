@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.5] — 2026-05-10
+
+### Added
+- **Version update notifications** — on session start, TrueMemory checks the
+  telemetry server for newer versions and notifies the user via Claude if an
+  update is available. One-time per session, silent if server is unreachable. (#209)
+
 ## [0.6.4] — 2026-05-10
 
 ### Added

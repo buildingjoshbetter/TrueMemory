@@ -81,6 +81,27 @@ def _is_first_run() -> bool:
     return not ONBOARDED_MARKER.exists()
 
 
+def _check_for_update() -> str:
+    """Check if the MCP server wrote an update notice during startup."""
+    try:
+        update_path = Path.home() / ".truememory" / ".update_available"
+        if not update_path.exists():
+            return ""
+        data = json.loads(update_path.read_text(encoding="utf-8"))
+        # Delete the file so we only show the notice once
+        update_path.unlink(missing_ok=True)
+        if data.get("update_available"):
+            return (
+                "<truememory-update>\n"
+                f"A new version of TrueMemory is available: v{data.get('latest_version', '?')}. "
+                f"Tell the user: \"{data.get('message', 'Run: uv tool upgrade truememory')}\"\n"
+                "</truememory-update>"
+            )
+    except Exception:
+        pass
+    return ""
+
+
 def main():
     args = _parse_args()
 
@@ -94,6 +115,11 @@ def main():
             context = _first_run_context()
         else:
             context = recall_memories(input_data, user_id=args.user, db_path=args.db)
+
+        # Check for available updates
+        update_notice = _check_for_update()
+        if update_notice:
+            context = (context or "") + "\n\n" + update_notice
 
         if context:
             output = {"additionalContext": context}
