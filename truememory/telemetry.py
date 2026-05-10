@@ -187,6 +187,7 @@ def _save_user_id(config: dict) -> None:
     try:
         config_path = Path.home() / ".truememory" / "config.json"
         config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.parent.chmod(0o700)
         config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
         config_path.chmod(0o600)
     except Exception:
