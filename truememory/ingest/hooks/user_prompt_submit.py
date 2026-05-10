@@ -66,7 +66,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main():
-    _parse_args()  # accept installer-passed flags even though we don't use them
+    args = _parse_args()
 
     try:
         input_data = json.load(sys.stdin)
@@ -75,6 +75,7 @@ def main():
 
     prompt = input_data.get("prompt", "").strip()
     session_id = input_data.get("session_id", "unknown")
+    transcript_path = input_data.get("transcript_path", "")
 
     if not prompt or len(prompt) < 3:
         return
@@ -84,6 +85,27 @@ def main():
         _prune_old_buffers()
     except Exception:
         pass  # Never crash the hook
+
+    # Incremental extraction: if enough time has passed since the last
+    # extraction, trigger background ingestion of the transcript so far.
+    # This captures memories during long-running sessions without waiting
+    # for the Stop hook. The encoding gate + dedup pipeline handles
+    # overlap with the Stop hook's extraction gracefully.
+    if transcript_path and Path(transcript_path).exists():
+        try:
+            interval = int(os.environ.get("TRUEMEMORY_INCREMENTAL_INTERVAL", "14400"))
+            from truememory.ingest.hooks._shared import should_extract, mark_extracted
+            if should_extract(interval):
+                from truememory.ingest.hooks.stop import (
+                    _has_enough_messages, _run_background_ingestion,
+                )
+                if _has_enough_messages(transcript_path, 5):
+                    _run_background_ingestion(
+                        transcript_path, session_id, args.user, args.db,
+                    )
+                    mark_extracted()
+        except Exception:
+            pass  # Never crash the hook
 
 
 def buffer_message(session_id: str, prompt: str):
