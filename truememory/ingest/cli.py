@@ -82,6 +82,11 @@ def main():
     p_setup = sub.add_parser("setup", help="Interactive first-time setup wizard")
     p_setup.add_argument("--non-interactive", action="store_true", help="Skip prompts, use defaults + env vars")
 
+    # --- upgrade-tier command ---
+    p_upgrade = sub.add_parser("upgrade-tier", help="Switch embedding tier (edge/base/pro)")
+    p_upgrade.add_argument("tier", choices=["edge", "base", "pro"], help="Target tier")
+    p_upgrade.add_argument("--force", action="store_true", help="Re-embed even if tier is unchanged")
+
     args = parser.parse_args()
 
     if args.command == "ingest":
@@ -102,6 +107,8 @@ def main():
         _run_facts(args)
     elif args.command == "setup":
         _run_setup(args)
+    elif args.command == "upgrade-tier":
+        _run_upgrade_tier(args)
     else:
         parser.print_help()
 
@@ -118,7 +125,8 @@ def _run_ingest(args):
     except ImportError:
         print(
             "ERROR: truememory is not installed.\n"
-            "       Install with: pip install truememory\n"
+            '       Install with: uv tool install truememory  (or: pip install truememory)\n'
+            "       If already installed, ensure ~/.local/bin is on your PATH.\n"
             "       (truememory-ingest depends on truememory>=0.1.3)",
             file=sys.stderr,
         )
@@ -325,9 +333,9 @@ def _run_setup(args):
     existing_tier = config.get("tier", "")
     print("  \033[1mEmbedding Tier\033[0m")
     print("  ─────────────")
-    print("  [1] Edge — 89.6% LoCoMo, CPU-only, ~30MB install. Works anywhere.")
-    print("  [2] Base — 92.0% LoCoMo, GPU recommended, ~1.5GB install. No API key needed.")
-    print("  [3] Pro  — 93.0% LoCoMo, GPU recommended, ~1.5GB install. Requires LLM API key (HyDE).")
+    print("  [1] Edge — 89.6% LoCoMo, lightweight. Works anywhere.")
+    print("  [2] Base — 92.0% LoCoMo, higher accuracy. No API key needed.")
+    print("  [3] Pro  — 93.0% LoCoMo, maximum accuracy. Requires LLM API key for HyDE.")
     print()
 
     _TIER_NUM = {"edge": "1", "base": "2", "pro": "3"}
@@ -336,45 +344,12 @@ def _run_setup(args):
     else:
         default_num = _TIER_NUM.get(existing_tier, "1")
         choice = input(f"  Choose tier [1/2/3] (default: {default_num}): ").strip() or default_num
-        tier = {"1": "edge", "2": "base", "3": "pro"}.get(choice, "edge")
+        tier = {"1": "edge", "2": "base", "3": "pro"}.get(choice)
+        if tier is None:
+            print(f"  \033[33m⚠ Invalid choice '{choice}', defaulting to Edge tier.\033[0m")
+            tier = "edge"
 
-    if tier in ("base", "pro"):
-        try:
-            import sentence_transformers  # noqa: F401
-            print(f"  \033[32m✓ {tier.capitalize()} dependencies already installed\033[0m")
-        except ImportError:
-            print(f'  \033[33m⚠ {tier.capitalize()} tier requires GPU extras.\033[0m')
-            print('  \033[33m  curl installer: uv tool install "truememory[gpu]"\033[0m')
-            print('  \033[33m  pip:            pip install "truememory[gpu]"\033[0m')
-            if not args.non_interactive:
-                do_install = input("  Install now? [y/N]: ").strip().lower()
-                if do_install == "y":
-                    import subprocess
-                    # bound pip with a 10-minute timeout —
-                    # long enough for model downloads from slow mirrors,
-                    # short enough that a dead mirror doesn't wedge setup.
-                    try:
-                        subprocess.run(
-                            [sys.executable, "-m", "pip", "install",
-                             "truememory[gpu]"],
-                            timeout=600,
-                        )
-                    except subprocess.TimeoutExpired:
-                        print(
-                            '  \033[33m⚠ Install timed out after '
-                            '10 minutes. Try running directly:\n'
-                            '    uv tool install "truememory[gpu]"   (curl installer)\n'
-                            '    pip install "truememory[gpu]"       (pip)\n'
-                            '  then re-run `truememory-ingest setup`.\033[0m',
-                            file=sys.stderr,
-                        )
-                        print("  Falling back to Edge tier.")
-                        tier = "edge"
-                else:
-                    print("  Falling back to Edge tier.")
-                    tier = "edge"
-
-    # Pre-download the embedding model so first search isn't slow
+    # Pre-load the embedding model so first search isn't slow
     print()
     print("  \033[1mDownloading embedding model...\033[0m")
     try:
@@ -504,6 +479,88 @@ def _run_setup(args):
     print()
     print("  \033[2mThanks for using TrueMemory, a Sauron company.\033[0m")
     print()
+
+
+def _run_upgrade_tier(args):
+    """Switch embedding tier and re-embed all memories with the new model."""
+    tier = args.tier.lower().strip()
+    config = _load_truememory_config()
+    old_tier = config.get("tier", "edge")
+
+    if tier == old_tier and not args.force:
+        print(f"Already on {tier} tier. Use --force to re-embed anyway.")
+        return
+
+    print(f"Switching from {old_tier} to {tier}...")
+
+    # Save tier to config
+    config["tier"] = tier
+    _save_truememory_config(config)
+
+    # Switch active models and re-embed.
+    # All models are pre-downloaded during install — this just switches
+    # which one is active and re-embeds existing memories.
+    os.environ.pop("HF_HUB_OFFLINE", None)
+    os.environ.pop("TRANSFORMERS_OFFLINE", None)
+    try:
+        os.environ["TRUEMEMORY_EMBED_MODEL"] = tier
+        from truememory.vector_search import set_embedding_model
+        set_embedding_model(tier)
+
+        from truememory.reranker import set_active_tier
+        set_active_tier(tier)
+
+        from truememory import Memory
+        mem = Memory()
+        engine = mem._engine
+        engine._ensure_connection()
+        conn = engine.conn
+        count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+
+        if count > 0:
+            print(f"  Re-embedding {count} memories with {tier} model...")
+            conn.execute("DROP TABLE IF EXISTS vec_messages")
+            conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
+            conn.commit()
+            from truememory.vector_search import (
+                build_separation_vectors,
+                build_vectors,
+                init_vec_table,
+            )
+            init_vec_table(conn)
+            build_vectors(conn)
+            build_separation_vectors(conn)
+            print(f"  \033[32m✓ {count} memories re-embedded\033[0m")
+        else:
+            print("  No existing memories to re-embed.")
+    except Exception as e:
+        print(f"\033[31mError during tier switch: {e}\033[0m", file=sys.stderr)
+        print("Config was saved. Re-run to retry, or use truememory-ingest setup.")
+        sys.exit(1)
+    finally:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+    _tier_descriptions = {
+        "edge": "Edge — 89.6% LoCoMo, Model2Vec + MiniLM",
+        "base": "Base — 92.0% LoCoMo, Qwen3 + gte-modernbert",
+        "pro": "Pro  — 93.0% LoCoMo, Qwen3 + gte-modernbert + HyDE",
+    }
+    print()
+    print(f"\033[32m✓ Tier switched: {_tier_descriptions.get(tier, tier)}\033[0m")
+    print()
+    print("\033[1mIMPORTANT:\033[0m If Claude is currently running, start a new session")
+    print("for the tier change to take effect.")
+    if tier == "pro":
+        has_key = bool(
+            config.get("anthropic_api_key")
+            or config.get("openrouter_api_key")
+            or config.get("openai_api_key")
+        )
+        if not has_key:
+            print()
+            print("\033[33mPro tier works without an API key, but HyDE search is disabled.")
+            print("Run truememory-ingest setup to add one, or set ANTHROPIC_API_KEY.\033[0m")
 
 
 def _run_install(args):
@@ -774,7 +831,8 @@ def _run_status(args):
         print(f"  [OK] truememory {version} importable")
     except ImportError as e:
         print(f"  [FAIL] truememory not importable: {e}")
-        print("         Install with: pip install truememory")
+        print('         Install with: uv tool install truememory  (or: pip install truememory)')
+        print("         If already installed, ensure ~/.local/bin is on your PATH.")
         return
 
     # 2. LLM backend

@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -48,6 +49,25 @@ BACKLOG_DIR = Path(os.environ.get(
 # embedding models at once — ~600MB RSS each on Pro, easy OOM on laptops.
 # Tunable via env var; POSIX-only via pgrep (on Windows the cap is a no-op).
 SPAWN_CAP = int(os.environ.get("TRUEMEMORY_INGEST_SPAWN_CAP", "2"))
+
+
+def _sanitize_session_id(session_id: str) -> str:
+    """Sanitize session_id to prevent path traversal."""
+    safe = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64]
+    return safe or "unknown"
+
+
+def _prune_old_files(directory: Path, retention_days: int = 30) -> None:
+    """Delete files in directory older than retention_days."""
+    if not directory.exists():
+        return
+    cutoff = time.time() - (retention_days * 86400)
+    for path in directory.iterdir():
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            continue
 
 
 def _parse_args() -> argparse.Namespace:
@@ -104,11 +124,17 @@ def _writable_dirs_ok() -> bool:
     """
     try:
         TRACE_DIR.mkdir(parents=True, exist_ok=True)
+        TRACE_DIR.chmod(0o700)
         LOG_DIR.mkdir(parents=True, exist_ok=True)
+        LOG_DIR.chmod(0o700)
     except OSError as e:
         print(f"truememory-ingest stop hook: cannot create ~/.truememory dirs: {e}",
               file=sys.stderr)
         return False
+
+    _prune_old_files(TRACE_DIR)
+    _prune_old_files(LOG_DIR)
+    _prune_old_files(BACKLOG_DIR)
 
     # Check disk free space — abort if less than 10 MB available
     try:
@@ -224,7 +250,8 @@ def _queue_to_backlog(
     try:
         from datetime import datetime, timezone
         BACKLOG_DIR.mkdir(parents=True, exist_ok=True)
-        marker = BACKLOG_DIR / f"{session_id or 'unknown'}.json"
+        BACKLOG_DIR.chmod(0o700)
+        marker = BACKLOG_DIR / f"{_sanitize_session_id(session_id)}.json"
         marker.write_text(json.dumps({
             "transcript_path": transcript_path,
             "session_id": session_id,
@@ -281,8 +308,9 @@ def _run_background_ingestion(
         cmd.extend(["--session", session_id])
 
     # Save trace for debugging
-    trace_path = TRACE_DIR / f"{session_id}.json"
-    log_path = LOG_DIR / f"{session_id}.log"
+    safe_session = _sanitize_session_id(session_id)
+    trace_path = TRACE_DIR / f"{safe_session}.json"
+    log_path = LOG_DIR / f"{safe_session}.log"
     cmd.extend(["--trace", str(trace_path)])
 
     # OS-specific subprocess detachment kwargs

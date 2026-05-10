@@ -43,6 +43,19 @@ from truememory.fts_search import search_fts
 logger = logging.getLogger(__name__)
 
 # ───────────────────────────────────────────────────────────────────────────
+# Table-name allowlist — validated before any f-string SQL interpolation
+# to prevent table-name injection in delete_all / forget.
+# ───────────────────────────────────────────────────────────────────────────
+
+_ALLOWED_TABLES = frozenset({
+    "messages", "vec_messages", "vec_messages_sep", "entity_profiles",
+    "entity_style_vectors", "entity_relationships", "fact_timeline",
+    "summaries", "episodes", "landmark_events", "causal_edges",
+    "surprise_scores", "message_clusters", "cluster_centroids",
+    "messages_fts",
+})
+
+# ───────────────────────────────────────────────────────────────────────────
 # Optional modules — each import is wrapped so missing deps don't break
 # the engine.  Capability flags track what's available at runtime.
 # ───────────────────────────────────────────────────────────────────────────
@@ -450,6 +463,8 @@ class TrueMemoryEngine:
                     ("causal_edges", "cause_msg_id"),
                     ("causal_edges", "effect_msg_id"),
                 ]:
+                    if table not in _ALLOWED_TABLES:
+                        raise ValueError(f"Invalid table name: {table}")
                     try:
                         self.conn.execute(
                             f"DELETE FROM {table} WHERE {col} IN ({placeholders})",
@@ -505,6 +520,8 @@ class TrueMemoryEngine:
             # Clean vector tables for deleted message IDs
             if msg_ids:
                 for vec_table in ("vec_messages", "vec_messages_sep"):
+                    if vec_table not in _ALLOWED_TABLES:
+                        raise ValueError(f"Invalid table name: {vec_table}")
                     try:
                         self.conn.execute(
                             f"DELETE FROM {vec_table} WHERE rowid IN ({placeholders})",
@@ -528,6 +545,8 @@ class TrueMemoryEngine:
                 "causal_edges",
                 "entity_relationships",
             ):
+                if table not in _ALLOWED_TABLES:
+                    raise ValueError(f"Invalid table name: {table}")
                 try:
                     self.conn.execute(f"DELETE FROM {table}")
                 except Exception:
@@ -535,6 +554,8 @@ class TrueMemoryEngine:
 
             # Clear vector tables
             for vec_table in ("vec_messages", "vec_messages_sep"):
+                if vec_table not in _ALLOWED_TABLES:
+                    raise ValueError(f"Invalid table name: {vec_table}")
                 try:
                     self.conn.execute(f"DELETE FROM {vec_table}")
                 except Exception:

@@ -120,7 +120,7 @@ The database is created automatically at `~/.truememory/memories.db`.
 
 ## 🏗️ Edge / Base / Pro
 
-Same architecture, three tiers. Trade off install size and hardware for accuracy.
+Same architecture, three tiers. All included in a single install — switch anytime.
 
 | | Edge | Base | Pro |
 |---|------|------|-----|
@@ -132,7 +132,7 @@ Same architecture, three tiers. Trade off install size and hardware for accuracy
 | **Reranker** | MiniLM-L-6-v2 (22M) | gte-reranker-modernbert (149M) | gte-reranker-modernbert (149M) |
 | **HyDE** | off | off | on (requires LLM API key) |
 | **Runs on** | Any machine, CPU only | 4GB+ RAM, CPU or GPU | 4GB+ RAM + LLM API key |
-| **Install size** | ~30MB | ~1.5GB | ~1.5GB |
+| **Model size** | ~30MB | ~1.5GB | ~1.5GB |
 
 **Edge** works everywhere. **Base** is the strongest fully-offline tier. **Pro** adds HyDE query expansion for the highest scores.
 
@@ -310,7 +310,7 @@ Everything lives locally in a single SQLite file at `~/.truememory/memories.db`.
 
 **How do I switch tiers (Edge → Base → Pro)?**
 
-Call `truememory_configure(tier="base")` (or `"pro"`) in any session. TrueMemory will automatically download the new models and re-embed all your existing memories. Base/Pro require `pip install "truememory[gpu]"` for the larger models. Pro also needs an API key for HyDE query expansion.
+Call `truememory_configure(tier="base")` (or `"pro"`) in any session, or run `truememory-ingest upgrade-tier base` from the terminal. All tier models are included in the standard install — switching just re-embeds your existing memories with the new model. Pro also needs an API key for HyDE query expansion.
 
 **I switched tiers and search results seem off. How do I fix it?**
 

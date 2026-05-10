@@ -61,10 +61,10 @@ main() {
   esac
 
   if [ -n "$TRUEMEMORY_SOURCE" ]; then
-    PKG_SPEC="${TRUEMEMORY_SOURCE}[gpu]"
+    PKG_SPEC="${TRUEMEMORY_SOURCE}"
     say "using custom source: $TRUEMEMORY_SOURCE"
   else
-    PKG_SPEC="truememory[gpu]"
+    PKG_SPEC="truememory"
   fi
 
   # ---------- preflight ----------
@@ -197,6 +197,9 @@ BANNER
   printf '    truememory-ingest install            %b# re-install hooks%b\n' "$DIM" "$RESET"
   printf '    uv tool upgrade truememory     %b# update to latest%b\n' "$DIM" "$RESET"
   printf '    uv tool uninstall truememory   %b# uninstall%b\n' "$DIM" "$RESET"
+  printf '\n'
+  printf '  %bNote:%b If commands are not found, open a new terminal window\n' "$YELLOW" "$RESET"
+  printf '        or run: %bsource ~/.zshrc%b  (or %bsource ~/.bashrc%b)\n' "$BOLD" "$RESET" "$BOLD" "$RESET"
   printf '\n'
 }
 

@@ -157,6 +157,10 @@ class EncodingGate:
         user_id: str = "",
     ):
         self.memory = memory
+        if not (0.0 <= threshold <= 1.0):
+            clamped = max(0.0, min(1.0, threshold))
+            log.warning("gate threshold %.2f outside [0, 1], clamped to %.2f", threshold, clamped)
+            threshold = clamped
         self.threshold = threshold
         if w_novelty is None:
             w_novelty = float(os.environ.get("TRUEMEMORY_GATE_W_NOVELTY", "0.25"))

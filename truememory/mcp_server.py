@@ -418,7 +418,7 @@ def _set_reranker(model_name: str):
         _clear_reranker_error()
     except ImportError as e:
         _record_reranker_error(
-            f"ImportError: {e} — install truememory[gpu] for reranker support"
+            f"ImportError: {e} — reinstall truememory to restore reranker support"
         )
     except Exception as e:
         _record_reranker_error(f"{type(e).__name__}: {e}")
@@ -523,8 +523,14 @@ def truememory_store(
         user_id: Owner of this memory (e.g. a person's name).
         metadata: Optional JSON string of metadata.
     """
+    MAX_CONTENT_LENGTH = 50_000
+    if len(content) > MAX_CONTENT_LENGTH:
+        return json.dumps({"error": f"Content too large ({len(content)} chars). Maximum is {MAX_CONTENT_LENGTH}."})
     m = _get_memory()
-    meta = json.loads(metadata) if metadata else None
+    try:
+        meta = json.loads(metadata) if metadata else None
+    except (json.JSONDecodeError, ValueError):
+        meta = None
     result = m.add(content=content, user_id=user_id or None, metadata=meta)
     return json.dumps(result, indent=2)
 
@@ -547,6 +553,10 @@ def truememory_search(
         user_id: Filter results to this user (optional).
         limit: Maximum number of results to return.
     """
+    limit = max(1, min(limit, 200))
+    MAX_QUERY_LENGTH = 2000
+    if len(query) > MAX_QUERY_LENGTH:
+        query = query[:MAX_QUERY_LENGTH]
     _set_reranker(_current_reranker())
     llm_fn = _get_llm_fn()
     uid = user_id or None
@@ -582,6 +592,10 @@ def truememory_search_deep(
         user_id: Filter results to this user (optional).
         limit: Maximum number of results to return.
     """
+    limit = max(1, min(limit, 200))
+    MAX_QUERY_LENGTH = 2000
+    if len(query) > MAX_QUERY_LENGTH:
+        query = query[:MAX_QUERY_LENGTH]
     _set_reranker(_DEEP_RERANKER)
     llm_fn = _get_llm_fn()
     uid = user_id or None
@@ -658,12 +672,12 @@ def truememory_stats() -> str:
             "\n"
             "**Choose your tier:**\n"
             "\n"
-            "- **Edge** — 89.6% accuracy on LoCoMo. CPU-only, works anywhere. "
-            "Lightweight (~30MB). No API key needed.\n"
-            "- **Base** — 92.0% accuracy on LoCoMo. GPU recommended. "
-            "Qwen3 @ 256d + gte-reranker (~1.5GB). No API key needed.\n"
-            "- **Pro** — 93.0% accuracy on LoCoMo. GPU recommended. "
-            "Same as Base plus HyDE query expansion. Requires an API key.\n"
+            "- **Edge** — 89.6% accuracy on LoCoMo. Lightweight, works anywhere. "
+            "No API key needed.\n"
+            "- **Base** — 92.0% accuracy on LoCoMo. Higher accuracy with "
+            "Qwen3 embeddings + gte-reranker. No API key needed.\n"
+            "- **Pro** — 93.0% accuracy on LoCoMo. Maximum accuracy — "
+            "same as Base plus HyDE query expansion. Requires an API key.\n"
             "\n"
             "Which would you like: **Edge**, **Base**, or **Pro**?"
         )
@@ -712,20 +726,6 @@ def truememory_configure(
                 "error": "api_provider must be one of: anthropic, openrouter, openai",
             })
 
-    # Check Base / Pro dependencies before committing (both need sentence-transformers
-    # for the Qwen3 embedder + gte-reranker).
-    if tier in ("base", "pro"):
-        try:
-            import sentence_transformers  # noqa: F401
-        except ImportError:
-            return json.dumps({
-                "error": f"{tier.capitalize()} tier requires GPU extras. "
-                         f"If you installed via the curl installer, run:  uv tool install \"truememory[gpu]\"  "
-                         f"If you used pip, run:  pip install \"truememory[gpu]\"  "
-                         f"Then restart Claude and try again.",
-                "current_tier": _load_config().get("tier", "edge"),
-            })
-
     # Save to persistent config
     config = _load_config()
     old_tier = config.get("tier", "edge")
@@ -740,8 +740,9 @@ def truememory_configure(
     # Invalidate cached LLM function so it picks up the new key
     if api_key:
         global _cached_llm_fn, _cached_llm_fn_built
-        _cached_llm_fn = None
-        _cached_llm_fn_built = False
+        with _llm_cache_lock:
+            _cached_llm_fn = None
+            _cached_llm_fn_built = False
         # Clear stored LLM errors for the provider we just re-keyed
         _clear_llm_error(api_provider)
 
@@ -802,7 +803,8 @@ def truememory_configure(
                 rebuild_error = f"{type(e).__name__}: {e}"
                 log.exception("truememory_configure re-embed failed")
             finally:
-                _memory = None  # Always force re-init, even on failure
+                with _memory_lock:
+                    _memory = None  # Always force re-init, even on failure
     finally:
         # Always restore offline mode, even if set_embedding_model or the
         # rebuild block raised before we got to their own cleanup.
@@ -811,9 +813,9 @@ def truememory_configure(
 
     # Build result with onboarding info
     _tier_descriptions = {
-        "edge": "Edge: Model2Vec embeddings (8M params), MiniLM reranker (~30MB)",
-        "base": "Base: Qwen3 embeddings (256d), gte-reranker-modernbert (~1.5GB)",
-        "pro": "Pro: Qwen3 + HyDE query expansion (~1.5GB + API key)",
+        "edge": "Edge: Model2Vec embeddings (8M params), MiniLM reranker",
+        "base": "Base: Qwen3 embeddings (256d), gte-reranker-modernbert",
+        "pro": "Pro: Qwen3 + HyDE query expansion",
     }
     result = {
         "status": "configured",
@@ -1133,6 +1135,7 @@ def _setup_claude():
     else:
         if not claude_bin:
             print("  Claude Code CLI not found on PATH.")
+            print("  If you just installed it, try opening a new terminal window.")
         if not desktop_config_path.parent.exists():
             print("  Claude Desktop not detected.")
         print()
@@ -1151,7 +1154,7 @@ TrueMemory MCP server — persistent memory for AI agents.
 
 Options:
   --setup       Auto-configure TrueMemory as an MCP server in Claude Code
-                and/or Claude Desktop. Run this once after `pip install`.
+                and/or Claude Desktop. Run this once after installing.
   --help, -h    Show this help message and exit.
   --version, -V Show version and exit.
 
@@ -1227,8 +1230,24 @@ def main():
     # load in background threads (~2.5s) while the MCP handshake
     # completes (~1-3s), so the first search arrives with warm models.
     _preload_models()
-    mcp.run(transport="stdio")
-    return 0
+
+    # Force-exit after mcp.run() to avoid PyTorch teardown deadlocks.
+    # PyTorch's C++ threads (OpenMP pools, autograd engine) deadlock against
+    # Python's interpreter shutdown on all platforms. On Windows the hang is
+    # indefinite; on macOS/Linux it's usually temporary but still wasteful.
+    # os._exit(0) bypasses teardown entirely. SQLite WAL handles this safely.
+    try:
+        mcp.run(transport="stdio")
+    except (BrokenPipeError, EOFError, KeyboardInterrupt):
+        pass
+    finally:
+        global _memory
+        if _memory is not None:
+            try:
+                _memory._engine.conn.close()
+            except Exception:
+                pass
+        os._exit(0)
 
 
 if __name__ == "__main__":

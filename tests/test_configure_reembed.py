@@ -63,9 +63,8 @@ def test_rebuild_exception_surfaces_in_result(server, monkeypatch):
 
     monkeypatch.setattr(vs, "build_vectors", _boom)
 
-    # Switch tier (edge → base) which triggers re-embed. truememory_configure
-    # imports sentence_transformers to validate the tier has its deps — stub
-    # the import so this test doesn't require the [gpu] extra installed.
+    # Switch tier (edge → base) which triggers re-embed. Stub
+    # sentence_transformers import so this test works in minimal envs.
     import builtins
     real_import = builtins.__import__
 

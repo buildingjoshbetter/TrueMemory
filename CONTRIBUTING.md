@@ -284,6 +284,27 @@ Use [GitHub Issues](https://github.com/buildingjoshbetter/TrueMemory/issues). In
 
 ---
 
-## License
+## License and Intellectual Property
 
-By contributing, you agree that your contributions will be licensed under the [AGPL-3.0 License](LICENSE). Free for personal and research use. Commercial use requires a separate license.
+TrueMemory is licensed under the [AGPL-3.0 License](LICENSE). Free for personal and research use. Commercial use requires a separate license from Sauron Labs.
+
+### Contributor Agreement
+
+By submitting a pull request or any other contribution (including code, documentation, or other materials) to this repository, you agree to the following terms:
+
+**Copyright License.** You hereby grant, and agree to grant, to Sauron Labs a non-exclusive, perpetual, irrevocable, worldwide, fully-paid, royalty-free, transferable copyright license to reproduce, prepare derivative works of, publicly display, publicly perform, sublicense, and distribute your contributions and such derivative works, with the right to sublicense the foregoing rights through multiple tiers of sublicensees.
+
+**Patent License.** To the extent you have or will have patent rights to grant, you hereby grant, and agree to grant, to Sauron Labs a non-exclusive, perpetual, irrevocable, worldwide, fully-paid, royalty-free, transferable patent license to make, have made, use, offer to sell, sell, import, and otherwise transfer your contributions, for any patent claims infringed by your contributions alone or by combination of your contributions with the project, with the right to sublicense these rights through multiple tiers of sublicensees.
+
+**Moral Rights.** To the fullest extent permitted under applicable law, you hereby waive, and agree not to assert, all of your "moral rights" in or relating to your contributions for the benefit of Sauron Labs, its assigns, and their respective direct and indirect sublicensees.
+
+**Commercial Use.** You agree that Sauron Labs is free to use, license, sublicense, relicense, and commercialize your contributions without restriction, including under licenses other than AGPL-3.0 and in proprietary or closed-source products, without compensation or further approval.
+
+**Representations.** You confirm that:
+
+1. Each contribution is your original work.
+2. Your contribution does not infringe any third-party intellectual property rights.
+3. You are legally entitled to grant the above licenses. If your employer has rights to intellectual property that you create, you represent that you have received permission to make contributions on behalf of that employer, that your employer has waived such rights for your contributions to this project, or that your employer has executed a separate agreement with Sauron Labs.
+4. This agreement is a condition of contributing and contributions cannot be revoked.
+
+This ensures that Sauron Labs can maintain, distribute, and commercially license TrueMemory as a unified codebase. If you have questions, contact legal@sauronlabs.ai.
