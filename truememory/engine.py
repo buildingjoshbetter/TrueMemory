@@ -725,6 +725,27 @@ class TrueMemoryEngine:
                     exc_info=True,
                 )
 
+        # Style vector hash migration: Python's hash() was replaced with a
+        # stable hashlib-based hash in v0.6.3. Existing style vectors were
+        # computed with the old non-deterministic hash and must be rebuilt.
+        if "entity_style_vectors" in tables and "metadata" in tables:
+            try:
+                row = self.conn.execute(
+                    "SELECT value FROM metadata WHERE key = 'style_vec_hash_version'"
+                ).fetchone()
+                if row is None or row[0] != "2":
+                    if _HAS_STYLE_VEC:
+                        from truememory.personality_style_vec import build_entity_style_vectors
+                        build_entity_style_vectors(self.conn)
+                        logger.info("Style vectors rebuilt with stable hash (one-time migration)")
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                        ("style_vec_hash_version", "2"),
+                    )
+                    self.conn.commit()
+            except Exception:
+                logger.debug("Style vector migration failed", exc_info=True)
+
         # Load sqlite-vec extension if available.
         # upgrade DEBUG → WARNING and track failure in a
         # module-level state so ``truememory_stats.health`` can report
