@@ -31,6 +31,12 @@ All TrueMemory environment variables and their defaults.
 | `TRUEMEMORY_MIN_SALIENCE` | (auto) | Override minimum salience in search |
 | `TRUEMEMORY_ENTITY_SHEETS` | `0` | Set to `1` to enable entity profile summaries |
 
+## Ingestion
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TRUEMEMORY_INGEST_LOCK` | `~/.truememory/ingest.lock` | Path to cross-process ingestion lock file |
+
 ## Hooks
 
 | Variable | Default | Description |

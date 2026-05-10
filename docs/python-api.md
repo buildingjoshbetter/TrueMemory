@@ -6,9 +6,14 @@ The `Memory` class is the primary interface for embedding TrueMemory in Python a
 from truememory import Memory
 ```
 
-## Memory(path=None)
+## Memory(path=None, alpha_surprise=None)
 
 Create a Memory instance. The database is created automatically if it doesn't exist.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `path` | `str \| None` | `None` | Path to SQLite database. Defaults to `~/.truememory/memories.db`. |
+| `alpha_surprise` | `float \| None` | `None` | L5 surprise boost coefficient. If None, reads from `TRUEMEMORY_ALPHA_SURPRISE` env var (default 0.2). |
 
 ```python
 m = Memory()                          # default: ~/.truememory/memories.db
@@ -38,7 +43,7 @@ Store a memory. Returns a dict with the new memory's `id`, `content`, and `times
 
 ```python
 result = m.add("Prefers TypeScript over JavaScript", user_id="alice")
-# {"id": 42, "content": "Prefers TypeScript over JavaScript", "timestamp": "2026-05-10T..."}
+# {"id": 42, "content": "Prefers TypeScript over JavaScript", "user_id": "alice", "created_at": "2026-05-10T..."}
 ```
 
 ---
@@ -147,9 +152,24 @@ m.delete_all()                   # delete ALL memories (use with caution)
 
 ---
 
+## m.update(memory_id, content) → dict | None
+
+Update an existing memory's content. Returns the updated memory dict, or `None` if not found.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `memory_id` | `int` | The ID of the memory to update. |
+| `content` | `str` | The new content to replace the existing memory. |
+
+```python
+m.update(42, "Prefers TypeScript and Bun over JavaScript and npm")
+```
+
+---
+
 ## m.stats() → dict
 
-Return memory system statistics including message count, capabilities, and tier info.
+Return memory system statistics including message count and capabilities.
 
 ```python
 stats = m.stats()
