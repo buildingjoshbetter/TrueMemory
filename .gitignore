@@ -66,6 +66,8 @@ truememory/episodes.py
 
 # Planning docs (not part of the package)
 NAME_CANDIDATES.md
+ISSUE_TRIAGE.md
+SECURITY_REVIEW_PROMPT.md
 
 # Duplicate template
 /CLAUDE_TEMPLATE.md
