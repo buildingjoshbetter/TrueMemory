@@ -20,7 +20,8 @@ STATE_FILE = Path.home() / ".truememory" / "integrations.json"
 def _get_all_adapters() -> list[CLIAdapter]:
     """Return instances of all known CLI adapters."""
     from truememory.hooks.adapters.claude import ClaudeAdapter
-    return [ClaudeAdapter()]
+    from truememory.hooks.adapters.openclaw import OpenClawAdapter
+    return [ClaudeAdapter(), OpenClawAdapter()]
 
 
 def detect_installed() -> list[CLIAdapter]:
