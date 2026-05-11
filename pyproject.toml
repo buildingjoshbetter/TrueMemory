@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "truememory"
-version = "0.6.6"
+version = "0.6.7"
 description = "SOTA-level agent memory at zero infrastructure cost."
 readme = "README.md"
 license = "AGPL-3.0-only"

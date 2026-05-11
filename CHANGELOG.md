@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.7] — 2026-05-10
+
+### Added
+- **Comprehensive API documentation** — Python SDK reference, MCP tool reference,
+  CLI reference, environment variables, getting started guide, tier selection guide,
+  debugging guide. All verified against source code. (#212)
+- **Email prompt for existing users** — session start asks for email if not yet
+  provided, ensuring the telemetry dashboard captures emails from all users.
+- **Stronger onboarding email prompt** — setup guide actively asks for email
+  instead of marking it optional.
+
 ## [0.6.6] — 2026-05-10
 
 ### Fixed
