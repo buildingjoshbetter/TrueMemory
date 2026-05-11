@@ -82,6 +82,7 @@ def main():
     # --- setup command (first-time onboarding) ---
     p_setup = sub.add_parser("setup", help="Interactive first-time setup wizard")
     p_setup.add_argument("--non-interactive", action="store_true", help="Skip prompts, use defaults + env vars")
+    p_setup.add_argument("--cli", default="", help="Comma-separated CLI IDs to configure (e.g. claude,kimi,hermes)")
 
     # --- upgrade-tier command ---
     p_upgrade = sub.add_parser("upgrade-tier", help="Switch embedding tier (edge/base/pro)")
@@ -323,6 +324,73 @@ def _save_truememory_config(config: dict) -> None:
         )
 
 
+def _setup_cli_integrations(args, config):
+    """Step 3 of setup: detect installed CLIs and configure TrueMemory."""
+    from truememory.hooks.registry import detect_installed, get_adapter
+    from truememory.hooks.cli import install_cli
+
+    cli_arg = getattr(args, "cli", "")
+
+    if cli_arg:
+        requested_ids = [c.strip() for c in cli_arg.split(",") if c.strip()]
+        for cli_id in requested_ids:
+            adapter = get_adapter(cli_id)
+            if adapter is None:
+                print(f"  \033[33m⚠ Unknown CLI: {cli_id}\033[0m")
+                continue
+            print(f"  Setting up {adapter.name}...")
+            if install_cli(cli_id, user_id=config.get("user_id", "")):
+                print(f"  \033[32m✓ {adapter.name} — configured\033[0m")
+            else:
+                print(f"  \033[31m✗ {adapter.name} — failed\033[0m")
+        return
+
+    installed = detect_installed()
+
+    if not installed:
+        print("  No supported CLIs detected. Install hooks manually later with:")
+        print("    truememory-ingest setup --cli <name>")
+        return
+
+    print("  \033[1mCLI Integration\033[0m")
+    print("  ──────────────")
+    for i, adapter in enumerate(installed, 1):
+        status = "\033[32m✓\033[0m" if adapter.is_configured() else " "
+        print(f"  [{i}] {status} {adapter.name}")
+    print(f"  [a] All detected ({len(installed)})")
+    print()
+
+    if args.non_interactive:
+        selected = installed
+    else:
+        choice = input(f"  Which CLIs to set up? [1-{len(installed)}/a] (default: a): ").strip().lower()
+        if not choice or choice == "a":
+            selected = installed
+        else:
+            selected = []
+            for part in choice.replace(",", " ").split():
+                try:
+                    idx = int(part) - 1
+                    if 0 <= idx < len(installed):
+                        selected.append(installed[idx])
+                except ValueError:
+                    pass
+            if not selected:
+                selected = installed
+
+    print()
+    for adapter in selected:
+        print(f"  Setting up {adapter.name}...")
+        if install_cli(adapter.cli_id, user_id=config.get("user_id", "")):
+            print(f"  \033[32m✓ {adapter.name} — MCP server configured, hooks installed\033[0m")
+        else:
+            print(f"  \033[31m✗ {adapter.name} — setup failed\033[0m")
+
+    if len(selected) > 1:
+        names = ", ".join(a.name for a in selected)
+        print(f"\n  TrueMemory is ready. Your memories sync across {names}.")
+
+
 def _run_setup(args):
     """Interactive first-time setup wizard for TrueMemory."""
     print(_SAURON_BANNER)
@@ -455,19 +523,9 @@ def _run_setup(args):
     print()
     print(f"  \033[32m✓ Config saved to {_TRUEMEMORY_CONFIG_PATH}\033[0m")
 
-    # ── Step 3: Install hooks ─────────────────────────────────────────
+    # ── Step 3: CLI integration ─────────────────────────────────────────
     print()
-    if not args.non_interactive:
-        do_hooks = input("  Install Claude Code hooks now? [Y/n]: ").strip().lower()
-    else:
-        do_hooks = "y"
-
-    if do_hooks != "n":
-        class _InstallArgs:
-            user = config.get("user_id", "")
-            db = None
-            dry_run = False
-        _run_install(_InstallArgs())
+    _setup_cli_integrations(args, config)
 
     # ���─ Done ──────────────────────────────────────────────────────────
     print()
