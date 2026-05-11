@@ -8,31 +8,28 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
-
 # -- Import tests --
 
 def test_import_hooks_package():
-    import truememory.hooks
+    import truememory.hooks  # noqa: F401
 
 def test_import_core():
-    from truememory.hooks.core import recall_memories
-    from truememory.hooks.core import buffer_message
-    from truememory.hooks.core import prune_old_buffers
-    from truememory.hooks.core import save_snapshot
-    from truememory.hooks.core import run_background_ingestion
+    from truememory.hooks.core import recall_memories  # noqa: F401
+    from truememory.hooks.core import buffer_message  # noqa: F401
+    from truememory.hooks.core import prune_old_buffers  # noqa: F401
+    from truememory.hooks.core import save_snapshot  # noqa: F401
+    from truememory.hooks.core import run_background_ingestion  # noqa: F401
 
 def test_import_base_adapter():
-    from truememory.hooks.adapters.base import CLIAdapter
+    from truememory.hooks.adapters.base import CLIAdapter  # noqa: F401
 
 def test_import_claude_adapter():
-    from truememory.hooks.adapters.claude import ClaudeAdapter
+    from truememory.hooks.adapters.claude import ClaudeAdapter  # noqa: F401
 
 def test_import_registry():
-    from truememory.hooks.registry import detect_installed
-    from truememory.hooks.registry import detect_configured
-    from truememory.hooks.registry import get_adapter
+    from truememory.hooks.registry import detect_installed  # noqa: F401
+    from truememory.hooks.registry import detect_configured  # noqa: F401
+    from truememory.hooks.registry import get_adapter  # noqa: F401
 
 
 # -- CLIAdapter interface --

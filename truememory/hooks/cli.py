@@ -6,11 +6,8 @@ delegate to for per-CLI hook installation and management.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
-from truememory.hooks.adapters.base import CLIAdapter
 from truememory.hooks.registry import (
-    detect_installed,
     get_adapter,
     mark_configured,
     mark_unconfigured,
