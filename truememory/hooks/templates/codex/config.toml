@@ -1,0 +1,24 @@
+# TrueMemory MCP server registration for Codex CLI
+# See: https://github.com/buildingjoshbetter/TrueMemory
+
+[mcp_servers.truememory]
+command = "/path/to/python"
+args = ["-m", "truememory.mcp_server"]
+
+# TrueMemory lifecycle hooks
+# These scripts use the same JSON stdin/stdout protocol as Claude Code.
+
+[[hooks]]
+event = "SessionStart"
+command = "/path/to/python /path/to/truememory/ingest/hooks/session_start.py"
+timeout = 10000
+
+[[hooks]]
+event = "Stop"
+command = "/path/to/python /path/to/truememory/ingest/hooks/stop.py"
+timeout = 5000
+
+[[hooks]]
+event = "UserPromptSubmit"
+command = "/path/to/python /path/to/truememory/ingest/hooks/user_prompt_submit.py"
+timeout = 5000
