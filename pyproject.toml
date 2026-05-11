@@ -33,14 +33,15 @@ dependencies = [
     "httpx>=0.27.0,<1.0",
     "sentence-transformers>=3.0.0,<6.0",
     "torch>=2.0.0,<3.0",
+    "anthropic>=0.80.0,<1.0",
 ]
 
 [project.optional-dependencies]
-# gpu/reranker kept as empty aliases so existing `pip install truememory[gpu]`
-# commands still work. All models are now included in the base install.
+# gpu/reranker/agentic kept as empty aliases so existing
+# `pip install truememory[gpu]` or `truememory[agentic]` still work.
 reranker = []
 gpu = []
-agentic = ["anthropic>=0.80.0,<1.0"]
+agentic = []
 dev = ["pytest>=7.0,<10.0", "ruff>=0.4,<1.0", "build>=1.2,<2.0", "twine>=5.0,<7.0"]
 all = ["truememory[agentic]"]
 

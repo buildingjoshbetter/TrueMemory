@@ -170,7 +170,12 @@ def get_reranker(model_name: str | None = None, device: str | None = None):
         if device is None:
             try:
                 import torch
-                device = "cuda:0" if torch.cuda.is_available() else "cpu"
+                if torch.cuda.is_available():
+                    device = "cuda:0"
+                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                    device = "mps"
+                else:
+                    device = "cpu"
             except ImportError:
                 device = "cpu"
 
