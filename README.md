@@ -27,7 +27,7 @@
 - **93.0% on LoCoMo, 92.0% on LongMemEval, SOTA on BEAM-1M.** Beats every live-retrieval memory system across three major benchmarks. Independently reproducible.
 - **Runs locally on a single SQLite file.** Zero cloud, zero API keys for Edge and Base tiers. Your memories never leave your machine.
 - **Neuroscience-inspired architecture.** Six retrieval layers plus an encoding gate that filters noise from signal before anything gets stored.
-- **Works with Claude Code, Codex CLI, Cursor, and Claude Desktop.** Lifecycle hooks capture conversations automatically. No manual work needed.
+- **Works with Claude Code, Codex CLI, Cursor, Gemini CLI, and Claude Desktop.** Lifecycle hooks capture conversations automatically. No manual work needed.
 
 ---
 
