@@ -229,7 +229,6 @@ class KimiAdapter(CLIAdapter):
 
         lines = text.splitlines(keepends=True)
         cleaned: list[str] = []
-        skip_block = False
 
         i = 0
         while i < len(lines):
