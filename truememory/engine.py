@@ -335,6 +335,50 @@ class TrueMemoryEngine:
                 self._has_vectors = False
 
         self._has_hybrid = _HAS_HYBRID and self._has_vectors
+
+        # Qwen3 NaN fix: macOS SDPA kernel produces NaN embeddings.
+        # Re-embed once for Base/Pro users on macOS.
+        import sys as _sys
+        if _sys.platform == "darwin" and self._has_vectors:
+            try:
+                _embed_model = os.environ.get("TRUEMEMORY_EMBED_MODEL", "edge")
+                if _embed_model in ("base", "pro", "qwen3_256"):
+                    _tables = {r[0] for r in self.conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()}
+                    if "metadata" in _tables:
+                        _row = self.conn.execute(
+                            "SELECT value FROM metadata WHERE key = 'qwen3_nan_fix_applied'"
+                        ).fetchone()
+                        if _row is None:
+                            from truememory.vector_search import (
+                                build_vectors as _bv,
+                                build_separation_vectors as _bsv,
+                                init_vec_table as _ivt,
+                            )
+                            self.conn.execute("DROP TABLE IF EXISTS vec_messages")
+                            self.conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
+                            self.conn.commit()
+                            _ivt(self.conn)
+                            _bv(self.conn)
+                            _bsv(self.conn)
+                            logger.warning(
+                                "Qwen3 NaN fix: re-embedded all vectors with "
+                                "eager attention (one-time macOS migration)"
+                            )
+                            self.conn.execute(
+                                "INSERT OR REPLACE INTO metadata (key, value) "
+                                "VALUES (?, ?)",
+                                ("qwen3_nan_fix_applied", "1"),
+                            )
+                            self.conn.commit()
+            except Exception:
+                logger.warning(
+                    "Qwen3 NaN migration failed — run "
+                    "'truememory-ingest upgrade-tier base --force' to fix manually",
+                    exc_info=True,
+                )
+
         self.ready = True
 
     # ──────────────────────────────────────────────────────────────────────
