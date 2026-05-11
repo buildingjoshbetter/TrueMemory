@@ -157,6 +157,9 @@ CREATE TABLE IF NOT EXISTS metadata (
     value TEXT NOT NULL,
     updated_at TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender);
+CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 """
 
 
@@ -190,6 +193,9 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA cache_size=-64000")
+    conn.execute("PRAGMA mmap_size=268435456")
     conn.executescript(_SCHEMA_SQL)
     conn.commit()
     return conn
@@ -228,11 +234,11 @@ def bulk_replace_messages(conn: sqlite3.Connection, messages: list[dict]) -> int
     except sqlite3.OperationalError:
         pass  # FTS table might already be clean
 
-    for msg in messages:
-        conn.execute(
-            """INSERT INTO messages
-               (content, sender, recipient, timestamp, category, modality)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+    conn.executemany(
+        """INSERT INTO messages
+           (content, sender, recipient, timestamp, category, modality)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        [
             (
                 msg["content"],
                 msg.get("sender", ""),
@@ -240,8 +246,10 @@ def bulk_replace_messages(conn: sqlite3.Connection, messages: list[dict]) -> int
                 msg.get("timestamp", ""),
                 msg.get("category", ""),
                 msg.get("modality", ""),
-            ),
-        )
+            )
+            for msg in messages
+        ],
+    )
 
     conn.commit()
     return len(messages)
