@@ -1425,6 +1425,21 @@ def main():
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
+    # Limit BLAS / OpenMP threads to avoid catastrophic oversubscription when
+    # multiple MCP procs run concurrently (Claude Code spawns one MCP proc per
+    # session, sub-agents fan-out can push this to 10+ on a single host). With
+    # default thread counts each proc tries to use every CPU core for embedding
+    # inference; N procs * N cores → N^2 threads competing for N cores →
+    # context-switching collapse. Empirical symptom: 19-minute m.add() hangs
+    # under sub-agent load (see ~/.truememory/logs/mcp-debug.log).
+    #
+    # Using setdefault so users can opt out by setting these explicitly (e.g.
+    # OMP_NUM_THREADS=4 for a beefy single-proc workstation).
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+
     # Initialize telemetry (fire-and-forget, opt-out via TRUEMEMORY_TELEMETRY=off)
     # Update check now runs in background thread inside telemetry.init()
     try:
