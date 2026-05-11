@@ -416,7 +416,7 @@ def build_vectors(
         texts = [m["content"] for m in batch]
         ids = [m["id"] for m in batch]
 
-        embeddings = model.encode(texts)  # shape (len(batch), 256)
+        embeddings = model.encode(texts, show_progress_bar=False)
 
         for msg_id, embedding in zip(ids, embeddings):
             conn.execute(
@@ -624,7 +624,7 @@ def build_separation_vectors(
             texts.append(sep_text)
             ids.append(m["id"])
 
-        embeddings = model.encode(texts)
+        embeddings = model.encode(texts, show_progress_bar=False)
 
         for msg_id, embedding in zip(ids, embeddings):
             conn.execute(
