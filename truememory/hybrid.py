@@ -169,8 +169,13 @@ def search_hybrid(
     # ------------------------------------------------------------------
     # 1. Retrieve candidates from all engines.
     # ------------------------------------------------------------------
+    from truememory.vector_search import get_model, serialize_f32
+    _q_model = get_model()
+    _q_emb = _q_model.encode([query])[0]
+    _q_blob = serialize_f32(_q_emb)
+
     fts_results = search_fts(conn, query, limit=_CANDIDATE_POOL)
-    vec_results = search_vector(conn, query, limit=_CANDIDATE_POOL)
+    vec_results = search_vector(conn, query, limit=_CANDIDATE_POOL, _query_blob=_q_blob)
 
     sep_results: list[dict] = []
     if _has_sep:
@@ -184,7 +189,7 @@ def search_hybrid(
             ).fetchone()
             sender_count = unique_senders_row[0] if unique_senders_row else 0
             if sender_count > 5:
-                sep_results = search_vector_separation(conn, query, limit=_CANDIDATE_POOL)
+                sep_results = search_vector_separation(conn, query, limit=_CANDIDATE_POOL, _query_blob=_q_blob)
         except Exception:
             pass
 

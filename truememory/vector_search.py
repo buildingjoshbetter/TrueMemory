@@ -418,11 +418,10 @@ def build_vectors(
 
         embeddings = model.encode(texts)  # shape (len(batch), 256)
 
-        for msg_id, embedding in zip(ids, embeddings):
-            conn.execute(
-                "INSERT INTO vec_messages(rowid, embedding) VALUES (?, ?)",
-                (msg_id, serialize_f32(embedding)),
-            )
+        conn.executemany(
+            "INSERT INTO vec_messages(rowid, embedding) VALUES (?, ?)",
+            [(mid, serialize_f32(emb)) for mid, emb in zip(ids, embeddings)],
+        )
 
         total += len(batch)
 
@@ -439,6 +438,7 @@ def search_vector(
     conn: sqlite3.Connection,
     query: str,
     limit: int = 10,
+    _query_blob: bytes | None = None,
 ) -> list[dict]:
     """
     Search for messages by vector similarity.
@@ -461,16 +461,19 @@ def search_vector(
                built (see :func:`init_vec_table`, :func:`build_vectors`).
         query: Natural-language search string.
         limit: Maximum number of results to return.
+        _query_blob: Pre-computed serialized embedding (skip encoding if given).
 
     Returns:
         List of result dicts sorted by descending similarity, each containing:
         ``id``, ``content``, ``sender``, ``recipient``, ``timestamp``,
         ``category``, ``modality``, ``score``.
     """
-    model = get_model()
-    query_embedding = model.encode([query])[0]  # shape (256,)
+    if _query_blob is None:
+        model = get_model()
+        query_embedding = model.encode([query])[0]
+        _query_blob = serialize_f32(query_embedding)
 
-    query_blob = serialize_f32(query_embedding)
+    query_blob = _query_blob
 
     # sqlite-vec requires k=? in WHERE clause for KNN queries.
     # We do the KNN search first, then JOIN with messages for full data.
@@ -626,11 +629,10 @@ def build_separation_vectors(
 
         embeddings = model.encode(texts)
 
-        for msg_id, embedding in zip(ids, embeddings):
-            conn.execute(
-                "INSERT INTO vec_messages_sep(rowid, embedding) VALUES (?, ?)",
-                (msg_id, serialize_f32(embedding)),
-            )
+        conn.executemany(
+            "INSERT INTO vec_messages_sep(rowid, embedding) VALUES (?, ?)",
+            [(mid, serialize_f32(emb)) for mid, emb in zip(ids, embeddings)],
+        )
 
         total += len(batch)
 
@@ -667,6 +669,7 @@ def search_vector_separation(
     query: str,
     sender: str | None = None,
     limit: int = 10,
+    _query_blob: bytes | None = None,
 ) -> list[dict]:
     """
     Search using separation embeddings.
@@ -683,20 +686,23 @@ def search_vector_separation(
         sender: Optional sender name to prepend to the query for
                 sender-aware matching.
         limit:  Maximum number of results to return.
+        _query_blob: Pre-computed serialized embedding (skip encoding if given).
+                     Ignored when *sender* is set (different query text).
 
     Returns:
         List of result dicts sorted by descending similarity.
     """
-    model = get_model()
-
-    # Build query with optional sender context
     if sender:
+        model = get_model()
         query_text = f"{sender}: {query}"
+        query_embedding = model.encode([query_text])[0]
+        query_blob = serialize_f32(query_embedding)
+    elif _query_blob is not None:
+        query_blob = _query_blob
     else:
-        query_text = query
-
-    query_embedding = model.encode([query_text])[0]
-    query_blob = serialize_f32(query_embedding)
+        model = get_model()
+        query_embedding = model.encode([query])[0]
+        query_blob = serialize_f32(query_embedding)
 
     rows = conn.execute(
         """

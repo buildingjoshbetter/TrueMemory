@@ -440,7 +440,6 @@ def insert_message(conn: sqlite3.Connection, msg: dict) -> int:
             msg.get("modality", ""),
         ),
     )
-    conn.commit()
     return cursor.lastrowid
 
 

@@ -72,13 +72,22 @@ def init(config: dict) -> dict | None:
     if config.get("email"):
         session_props["email"] = config["email"]
     track("session_start", session_props)
-    update_info = _flush_sync()
 
-    # Start background flush thread for subsequent events
+    def _init_flush():
+        info = _flush_sync()
+        if info and info.get("update_available"):
+            try:
+                _p = Path.home() / ".truememory" / ".update_available"
+                _p.write_text(json.dumps(info), encoding="utf-8")
+            except Exception:
+                pass
+
+    threading.Thread(target=_init_flush, daemon=True).start()
+
     _flush_thread = threading.Thread(target=_flush_loop, daemon=True)
     _flush_thread.start()
 
-    return update_info
+    return None
 
 
 def is_enabled() -> bool:

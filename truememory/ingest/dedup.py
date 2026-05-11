@@ -97,12 +97,9 @@ def check_duplicate(
             unrelated (heuristic path only). When ``config`` is provided,
             any non-empty search result is sent to the LLM.
     """
-    # Stage 1: Vector search for similar memories
+    # Stage 1: Vector search for similar memories (lightweight cosine only)
     try:
-        if user_id:
-            results = memory.search(fact, user_id=user_id, limit=3)
-        else:
-            results = memory.search(fact, limit=3)
+        results = memory.search_vectors(fact, limit=3) or []
     except Exception as e:
         log.warning("Dedup search failed: %s", e)
         return DedupDecision(action=DedupAction.ADD, fact=fact, reason="search failed, defaulting to add")

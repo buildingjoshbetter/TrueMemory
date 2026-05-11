@@ -194,10 +194,9 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> s
     for query in queries:
         added_this_query = 0
         try:
+            results = memory._engine.search(query, limit=per_query_limit * 3, _skip_reranker=True)
             if user_id:
-                results = memory.search(query, user_id=user_id, limit=per_query_limit * 3)
-            else:
-                results = memory.search(query, limit=per_query_limit * 3)
+                results = [r for r in results if r.get("sender", "") == user_id]
 
             for r in results:
                 if added_this_query >= per_query_limit:
