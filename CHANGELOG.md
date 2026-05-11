@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.6.8] — 2026-05-11
+
+### Fixed
+- **CRITICAL: Qwen3 NaN embeddings on macOS** — PyTorch SDPA kernel produces
+  NaN embeddings for Qwen3 on macOS. Added platform-gated
+  `attn_implementation="eager"` and one-time auto-migration to re-embed
+  corrupted vectors. (#215)
+- **anthropic missing from core dependencies** — `anthropic` was in optional
+  `[agentic]` extras but `install.sh` installs the base package, so every user
+  fell back to OpenRouter. Moved to core dependencies. (#216)
+
+### Performance
+- **MPS device detection for reranker** — CrossEncoder now uses Apple Silicon
+  GPU instead of falling back to CPU (~150-500ms saved per search). (#216)
+- **Session start 2-4x faster** — skip cross-encoder reranker for recall
+  queries (reranker adds latency but doesn't improve recall quality). (#217)
+- **Non-blocking telemetry** — initial flush moved to background thread so MCP
+  server startup doesn't block on HTTP POST (up to 3s saved). (#217)
+- **Faster ingestion dedup** — use lightweight `search_vectors()` instead of
+  full 6-layer `search()` pipeline for duplicate detection. (#217)
+- **Hybrid search query caching** — pre-compute query embedding once and share
+  across vector + separation search (~50ms saved per search). (#217)
+- **executemany for vector builds** — batch INSERT for both `build_vectors()`
+  and `build_separation_vectors()`. (#217)
+- **Remove double commit** — `insert_message()` no longer commits redundantly
+  (engine.add() handles it). (#217)
+- **SQLite performance PRAGMAs** — `synchronous=NORMAL` (~2x faster writes
+  with WAL), 64MB page cache, 256MB memory-mapped I/O. (#218)
+- **Missing indexes** — added `idx_messages_sender` and
+  `idx_messages_timestamp` for faster WHERE/DISTINCT queries. (#218)
+- **Batch bulk_replace** — converted row-by-row INSERT to `executemany()`. (#218)
+- **Suppress progress bars** — `show_progress_bar=False` on batch encode
+  calls to prevent tqdm noise during vector rebuilds. (#218)
+
 ## [0.6.7] — 2026-05-10
 
 ### Added
