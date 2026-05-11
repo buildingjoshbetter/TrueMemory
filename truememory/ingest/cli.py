@@ -20,6 +20,7 @@ from truememory.ingest.models import LLMConfig, hydrate_config
 
 
 def main():
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     from truememory import __version__ as _tm_version
     parser = argparse.ArgumentParser(
         description="TrueMemory Ingestion — biomimetic memory encoding",
