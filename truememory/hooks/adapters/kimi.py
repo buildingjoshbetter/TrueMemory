@@ -12,7 +12,6 @@ import logging
 import shlex
 import shutil
 import sys
-import tomllib
 from pathlib import Path
 
 from truememory.hooks.adapters.base import CLIAdapter
@@ -168,8 +167,30 @@ class KimiAdapter(CLIAdapter):
         if not toml_text.strip():
             return []
         try:
+            import tomllib
             data = tomllib.loads(toml_text)
             return data.get("hooks", [])
+        except ModuleNotFoundError:
+            import re
+            hooks: list[dict] = []
+            for block in re.split(r'(?=^\[\[hooks\]\])', toml_text, flags=re.MULTILINE):
+                if not block.strip().startswith("[[hooks]]"):
+                    continue
+                entry: dict[str, str] = {}
+                for line in block.splitlines()[1:]:
+                    line = line.strip()
+                    if not line or line.startswith("["):
+                        break
+                    m = re.match(r'(\w+)\s*=\s*"([^"]*)"', line)
+                    if m:
+                        entry[m.group(1)] = m.group(2)
+                    else:
+                        m = re.match(r'(\w+)\s*=\s*(\d+)', line)
+                        if m:
+                            entry[m.group(1)] = m.group(2)
+                if entry:
+                    hooks.append(entry)
+            return hooks
         except Exception:
             return []
 
