@@ -21,10 +21,11 @@ def _get_all_adapters() -> list[CLIAdapter]:
     """Return instances of all known CLI adapters."""
     from truememory.hooks.adapters.claude import ClaudeAdapter
     from truememory.hooks.adapters.codex import CodexAdapter
+    from truememory.hooks.adapters.gemini import GeminiAdapter
     from truememory.hooks.adapters.kimi import KimiAdapter
     from truememory.hooks.adapters.hermes import HermesAdapter
     from truememory.hooks.adapters.openclaw import OpenClawAdapter
-    return [ClaudeAdapter(), CodexAdapter(), KimiAdapter(), HermesAdapter(), OpenClawAdapter()]
+    return [ClaudeAdapter(), CodexAdapter(), GeminiAdapter(), KimiAdapter(), HermesAdapter(), OpenClawAdapter()]
 
 
 def detect_installed() -> list[CLIAdapter]:
