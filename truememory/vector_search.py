@@ -152,9 +152,14 @@ def get_model():
             _embedding_dim = 384
         elif resolved == "qwen3_256":
             from sentence_transformers import SentenceTransformer
+            import sys as _sys
+            _mkwargs = {}
+            if _sys.platform == "darwin":
+                _mkwargs["attn_implementation"] = "eager"
             _model = SentenceTransformer(
                 "Qwen/Qwen3-Embedding-0.6B",
                 truncate_dim=256,
+                model_kwargs=_mkwargs or None,
             )
             _embedding_dim = 256
         else:
