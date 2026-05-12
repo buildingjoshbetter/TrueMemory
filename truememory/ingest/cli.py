@@ -89,6 +89,14 @@ def main():
     p_upgrade.add_argument("tier", choices=["edge", "base", "pro"], help="Target tier")
     p_upgrade.add_argument("--force", action="store_true", help="Re-embed even if tier is unchanged")
 
+    # --- migrate-memory command ---
+    p_migrate = sub.add_parser("migrate-memory", help="Migrate MEMORY.md facts into TrueMemory")
+    p_migrate.add_argument("--path", default=None, help="Path to MEMORY.md (auto-detected if not specified)")
+    p_migrate.add_argument("--db", default=None, help="Path to truememory database")
+    p_migrate.add_argument("--dry-run", action="store_true", help="Print facts without storing")
+    p_migrate.add_argument("--no-backup", action="store_true", help="Skip backup of original MEMORY.md")
+    p_migrate.add_argument("--slim", action="store_true", help="Replace MEMORY.md with slim template after migration")
+
     args = parser.parse_args()
 
     if args.command == "ingest":
@@ -111,6 +119,8 @@ def main():
         _run_setup(args)
     elif args.command == "upgrade-tier":
         _run_upgrade_tier(args)
+    elif args.command == "migrate-memory":
+        _run_migrate_memory(args)
     else:
         parser.print_help()
 
@@ -620,6 +630,45 @@ def _run_upgrade_tier(args):
             print()
             print("\033[33mPro tier works without an API key, but HyDE search is disabled.")
             print("Run truememory-ingest setup to add one, or set ANTHROPIC_API_KEY.\033[0m")
+
+
+def _run_migrate_memory(args):
+    """Migrate MEMORY.md facts into TrueMemory."""
+    from truememory.ingest.migrate_memory_md import migrate, auto_detect_memory_md
+
+    if args.path:
+        memory_md_path = Path(args.path)
+    else:
+        memory_md_path = auto_detect_memory_md()
+        if memory_md_path is None:
+            print("ERROR: Could not auto-detect MEMORY.md path.", file=sys.stderr)
+            print("Specify --path explicitly.", file=sys.stderr)
+            sys.exit(1)
+
+    if not memory_md_path.exists():
+        print(f"ERROR: MEMORY.md not found at {memory_md_path}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Migrating facts from: {memory_md_path}")
+
+    result = migrate(
+        memory_md_path=memory_md_path,
+        db_path=args.db,
+        dry_run=args.dry_run,
+        backup=not args.no_backup,
+        write_slim_template=args.slim,
+    )
+
+    if args.dry_run:
+        print(f"\nDry run complete. Would migrate {result.get('migrated', 0)} facts.")
+    else:
+        print(f"\nMigration complete:")
+        print(f"  Migrated:   {result.get('migrated', 0)}")
+        print(f"  Skipped:    {result.get('skipped', 0)}")
+        print(f"  Duplicates: {result.get('duplicates', 0)}")
+        print(f"  Errors:     {result.get('errors', 0)}")
+        if result.get('backup_path'):
+            print(f"  Backup:     {result['backup_path']}")
 
 
 def _run_install(args):
