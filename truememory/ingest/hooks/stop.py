@@ -28,8 +28,28 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-GATE_THRESHOLD = float(os.environ.get("TRUEMEMORY_GATE_THRESHOLD", "0.30"))
-MIN_MESSAGES = int(os.environ.get("TRUEMEMORY_MIN_MESSAGES", "5"))
+def _safe_float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return default
+
+
+GATE_THRESHOLD = _safe_float_env("TRUEMEMORY_GATE_THRESHOLD", 0.30)
+MIN_MESSAGES = _safe_int_env("TRUEMEMORY_MIN_MESSAGES", 5)
 TRACE_DIR = Path(os.environ.get(
     "TRUEMEMORY_TRACE_DIR",
     str(Path.home() / ".truememory" / "traces"),
@@ -47,8 +67,11 @@ BACKLOG_DIR = Path(os.environ.get(
 # cap concurrent ingest processes. N parallel Stop hooks
 # (multi-session close, session-restart loop) would otherwise load N
 # embedding models at once — ~600MB RSS each on Pro, easy OOM on laptops.
-# Tunable via env var; POSIX-only via pgrep (on Windows the cap is a no-op).
-SPAWN_CAP = int(os.environ.get("TRUEMEMORY_INGEST_SPAWN_CAP", "2"))
+# Unified env var across stop.py and hooks/core.py.
+SPAWN_CAP = int(os.environ.get(
+    "TRUEMEMORY_SPAWN_CAP",
+    os.environ.get("TRUEMEMORY_INGEST_SPAWN_CAP", "2"),
+))
 
 
 def _sanitize_session_id(session_id: str) -> str:
@@ -325,58 +348,50 @@ def _run_background_ingestion(
     else:
         detach_kwargs["start_new_session"] = True
 
-    # refuse to spawn if we're already at the concurrent-ingest
-    # cap. Over-cap events queue to the backlog so the memories aren't lost.
-    active = _count_active_ingest_processes()
-    if active >= SPAWN_CAP:
-        log.warning(
-            "stop hook: at spawn cap (%d active / cap %d); queueing session "
-            "%r to backlog for later",
-            active, SPAWN_CAP, session_id,
-        )
-        _queue_to_backlog(
-            transcript_path, session_id, user_id, db_path,
-            reason=f"spawn_cap_reached:{active}>=SPAWN_CAP={SPAWN_CAP}",
-        )
-        return
+    # Use flock-based spawn gate to prevent the TOCTOU race where N hooks
+    # all check pgrep simultaneously, all see 0, and all spawn.
+    from truememory.hooks.core import spawn_gate
 
-    log_file = None
-    try:
-        # Open the log file and hand it to the subprocess. We MUST close our
-        # parent-side handle after Popen — the subprocess has its own dup'd
-        # copy, so closing ours here is safe and prevents FD leaks across
-        # many invocations of this hook (one per session).
-        log_file = open(log_path, "a", encoding="utf-8")
-        subprocess.Popen(
-            cmd,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            close_fds=(sys.platform != "win32"),
-            **detach_kwargs,
-        )
-    except Exception as e:
-        # NEVER fall back to synchronous inline ingestion —
-        # that blocks Claude Code's shutdown for 10–60s. Queue instead;
-        # a later session's drain path will re-attempt.
-        log.warning(
-            "stop hook: background launch failed (%s); queueing session "
-            "%r to backlog for later",
-            e, session_id,
-        )
-        _queue_to_backlog(
-            transcript_path, session_id, user_id, db_path,
-            reason=f"popen_failed:{type(e).__name__}:{e}",
-        )
-    finally:
-        # Always close our parent-side handle to prevent FD leaks.
-        # The subprocess still has its own dup'd copy of the FD and will
-        # continue writing to the log file normally.
-        if log_file is not None:
-            try:
-                log_file.close()
-            except Exception:
-                pass
+    with spawn_gate() as allowed:
+        if not allowed:
+            log.warning(
+                "stop hook: at spawn cap (cap %d); queueing session "
+                "%r to backlog for later",
+                SPAWN_CAP, session_id,
+            )
+            _queue_to_backlog(
+                transcript_path, session_id, user_id, db_path,
+                reason=f"spawn_cap_reached:SPAWN_CAP={SPAWN_CAP}",
+            )
+            return
+
+        log_file = None
+        try:
+            log_file = open(log_path, "a", encoding="utf-8")
+            subprocess.Popen(
+                cmd,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                close_fds=(sys.platform != "win32"),
+                **detach_kwargs,
+            )
+        except Exception as e:
+            log.warning(
+                "stop hook: background launch failed (%s); queueing session "
+                "%r to backlog for later",
+                e, session_id,
+            )
+            _queue_to_backlog(
+                transcript_path, session_id, user_id, db_path,
+                reason=f"popen_failed:{type(e).__name__}:{e}",
+            )
+        finally:
+            if log_file is not None:
+                try:
+                    log_file.close()
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":

@@ -64,6 +64,21 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 
+def _safe_float_env(name: str, default: float) -> float:
+    """Read a float from an env var, falling back to default on bad values."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        log.warning(
+            "env var %s=%r is not a valid number, using default %.2f",
+            name, raw, default,
+        )
+        return default
+
+
 # Try to import truememory's existing scoring modules. If they're not
 # available (older truememory or partial install), fall back to
 # internal heuristics.
@@ -163,16 +178,16 @@ class EncodingGate:
             threshold = clamped
         self.threshold = threshold
         if w_novelty is None:
-            w_novelty = float(os.environ.get("TRUEMEMORY_GATE_W_NOVELTY", "0.25"))
+            w_novelty = _safe_float_env("TRUEMEMORY_GATE_W_NOVELTY", 0.25)
         if w_salience is None:
-            w_salience = float(os.environ.get("TRUEMEMORY_GATE_W_SALIENCE", "0.20"))
+            w_salience = _safe_float_env("TRUEMEMORY_GATE_W_SALIENCE", 0.20)
         if w_prediction_error is None:
-            w_prediction_error = float(os.environ.get("TRUEMEMORY_GATE_W_PE", "0.30"))
+            w_prediction_error = _safe_float_env("TRUEMEMORY_GATE_W_PE", 0.30)
         self.w_novelty = w_novelty
         self.w_salience = w_salience
         self.w_prediction_error = w_prediction_error
         if salience_floor is None:
-            salience_floor = float(os.environ.get("TRUEMEMORY_GATE_SALIENCE_FLOOR", "0.10"))
+            salience_floor = _safe_float_env("TRUEMEMORY_GATE_SALIENCE_FLOOR", 0.10)
         self.salience_floor = salience_floor
         self.user_id = user_id
         # Normalized weights so the final score lands in [0, 1]

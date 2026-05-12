@@ -135,13 +135,21 @@ def _check_email_needed() -> str:
 
 
 def _drain_backlog() -> None:
-    """Process queued sessions from the backlog directory."""
+    """Process queued sessions from the backlog directory.
+
+    Uses the flock-based spawn gate from core to prevent the avalanche
+    scenario where N concurrent SessionStart hooks all drain simultaneously,
+    spawning N × _DRAIN_CAP ingest processes.
+    """
     if not BACKLOG_DIR.exists():
         return
     try:
         markers = sorted(BACKLOG_DIR.glob("*.json"))[:_DRAIN_CAP]
     except Exception:
         return
+
+    from truememory.hooks.core import spawn_gate
+
     for marker_path in markers:
         try:
             data = json.loads(marker_path.read_text(encoding="utf-8"))
@@ -149,24 +157,30 @@ def _drain_backlog() -> None:
             if not transcript or not Path(transcript).exists():
                 marker_path.unlink(missing_ok=True)
                 continue
-            import subprocess
-            cmd = [
-                sys.executable, "-m", "truememory.ingest.cli",
-                "ingest", transcript,
-            ]
-            session_id = data.get("session_id", "")
-            if session_id:
-                cmd.extend(["--session", session_id])
-            if data.get("user_id"):
-                cmd.extend(["--user", data["user_id"]])
-            if data.get("db_path"):
-                cmd.extend(["--db", data["db_path"]])
-            subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+
+            with spawn_gate() as allowed:
+                if not allowed:
+                    log.info("Drain: spawn cap reached, leaving remaining backlog for next session")
+                    return
+
+                import subprocess
+                cmd = [
+                    sys.executable, "-m", "truememory.ingest.cli",
+                    "ingest", transcript,
+                ]
+                session_id = data.get("session_id", "")
+                if session_id:
+                    cmd.extend(["--session", session_id])
+                if data.get("user_id"):
+                    cmd.extend(["--user", data["user_id"]])
+                if data.get("db_path"):
+                    cmd.extend(["--db", data["db_path"]])
+                subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
             marker_path.unlink(missing_ok=True)
             log.info("Drained backlog session: %s", data.get("session_id", "?"))
         except Exception as e:

@@ -71,5 +71,36 @@ module.exports = {
         // Never block agent shutdown
       }
     });
+
+    api.on("before_user_message", async (ctx) => {
+      try {
+        const input = JSON.stringify({
+          session_id: ctx.sessionId || "openclaw",
+          cwd: process.cwd(),
+          user_prompt: ctx.userPrompt || "",
+        });
+        execSync(
+          `echo '${input.replace(/'/g, "\\'")}' | ${PYTHON_PATH} ${path.join(hooksDir, "user_prompt_submit.py")}`,
+          { encoding: "utf-8", timeout: 5000 }
+        );
+      } catch (err) {
+        // Never block user message processing
+      }
+    });
+
+    api.on("before_compress", async (ctx) => {
+      try {
+        const input = JSON.stringify({
+          session_id: ctx.sessionId || "openclaw",
+          transcript_path: ctx.transcriptPath || "",
+        });
+        execSync(
+          `echo '${input.replace(/'/g, "\\'")}' | ${PYTHON_PATH} ${path.join(hooksDir, "compact.py")}`,
+          { encoding: "utf-8", timeout: 5000 }
+        );
+      } catch (err) {
+        // Never block compression
+      }
+    });
   },
 };

@@ -6,12 +6,14 @@ modules.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,13 +31,47 @@ MAX_BUFFER_SIZE = int(os.environ.get("TRUEMEMORY_BUFFER_MAX_BYTES", str(10 * 102
 TRACE_DIR = Path.home() / ".truememory" / "traces"
 LOG_DIR = Path.home() / ".truememory" / "logs"
 BACKLOG_DIR = Path.home() / ".truememory" / "backlog"
-SPAWN_CAP = int(os.environ.get("TRUEMEMORY_SPAWN_CAP", "3"))
+SPAWN_CAP = int(os.environ.get(
+    "TRUEMEMORY_SPAWN_CAP",
+    os.environ.get("TRUEMEMORY_INGEST_SPAWN_CAP", "2"),
+))
+SPAWN_LOCK_PATH = Path.home() / ".truememory" / ".spawn.lock"
 
 try:
     import fcntl
     _HAS_FCNTL = True
 except ImportError:
     _HAS_FCNTL = False
+
+
+@contextmanager
+def spawn_gate():
+    """Acquire an exclusive file lock before checking/spawning ingest processes.
+
+    Prevents the TOCTOU race where N hooks all check pgrep simultaneously,
+    all see 0 active processes, and all spawn — causing N × 600 MB of
+    embedding models to load at once.
+
+    Yields True if spawning is allowed (under SPAWN_CAP), False otherwise.
+    On Windows (no fcntl), falls back to best-effort pgrep without a lock.
+    """
+    if not _HAS_FCNTL:
+        yield _count_active_ingest_processes() < SPAWN_CAP
+        return
+
+    SPAWN_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd = None
+    try:
+        fd = os.open(str(SPAWN_LOCK_PATH), os.O_CREAT | os.O_WRONLY, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield _count_active_ingest_processes() < SPAWN_CAP
+    finally:
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(fd)
 
 
 def recall_memories(
@@ -295,41 +331,41 @@ def run_background_ingestion(
     else:
         detach_kwargs["start_new_session"] = True
 
-    active = _count_active_ingest_processes()
-    if active >= SPAWN_CAP:
-        log.warning(
-            "core: at spawn cap (%d active / cap %d); queueing session %r",
-            active, SPAWN_CAP, session_id,
-        )
-        _queue_to_backlog(
-            transcript_path, session_id, user_id, db_path,
-            reason=f"spawn_cap_reached:{active}>=SPAWN_CAP={SPAWN_CAP}",
-        )
-        return
+    with spawn_gate() as allowed:
+        if not allowed:
+            log.warning(
+                "core: at spawn cap (cap %d); queueing session %r",
+                SPAWN_CAP, session_id,
+            )
+            _queue_to_backlog(
+                transcript_path, session_id, user_id, db_path,
+                reason=f"spawn_cap_reached:SPAWN_CAP={SPAWN_CAP}",
+            )
+            return
 
-    log_file = None
-    try:
-        log_file = open(log_path, "a", encoding="utf-8")
-        subprocess.Popen(
-            cmd,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            close_fds=(sys.platform != "win32"),
-            **detach_kwargs,
-        )
-    except Exception as e:
-        log.error("core: Popen failed: %s — queueing to backlog", e)
-        _queue_to_backlog(
-            transcript_path, session_id, user_id, db_path,
-            reason=f"popen_failed:{e}",
-        )
-    finally:
-        if log_file is not None:
-            try:
-                log_file.close()
-            except OSError:
-                pass
+        log_file = None
+        try:
+            log_file = open(log_path, "a", encoding="utf-8")
+            subprocess.Popen(
+                cmd,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                close_fds=(sys.platform != "win32"),
+                **detach_kwargs,
+            )
+        except Exception as e:
+            log.error("core: Popen failed: %s — queueing to backlog", e)
+            _queue_to_backlog(
+                transcript_path, session_id, user_id, db_path,
+                reason=f"popen_failed:{e}",
+            )
+        finally:
+            if log_file is not None:
+                try:
+                    log_file.close()
+                except OSError:
+                    pass
 
 
 def _queue_to_backlog(

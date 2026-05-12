@@ -35,6 +35,10 @@ _HOOK_EVENTS = {
         "script": "user_prompt_submit.py",
         "timeout": 5000,
     },
+    "PreCompact": {
+        "script": "compact.py",
+        "timeout": 5000,
+    },
 }
 
 _TRUEMEMORY_MARKER = "truememory"

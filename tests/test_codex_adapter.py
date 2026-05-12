@@ -129,7 +129,7 @@ def test_install_hooks_creates_toml(tmp_path, monkeypatch):
     assert 'event = "Stop"' in text
     assert 'event = "UserPromptSubmit"' in text
     assert "truememory" in text.lower()
-    assert "PreCompact" not in text
+    assert 'event = "PreCompact"' in text
 
 
 def test_install_hooks_preserves_existing_toml(tmp_path, monkeypatch):

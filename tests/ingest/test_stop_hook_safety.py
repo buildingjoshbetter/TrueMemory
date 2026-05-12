@@ -22,13 +22,17 @@ from pathlib import Path
 
 
 def test_spawn_cap_blocks_when_at_cap(monkeypatch, tmp_path):
-    """When `_count_active_ingest_processes()` reports >= SPAWN_CAP,
-    `_run_background_ingestion` must NOT call Popen and must write a
-    backlog marker explaining why."""
+    """When spawn_gate reports at-cap, `_run_background_ingestion` must NOT
+    call Popen and must write a backlog marker explaining why."""
+    from contextlib import contextmanager
     from truememory.ingest.hooks import stop as stop_mod
+    from truememory.hooks import core as core_mod
 
-    monkeypatch.setattr(stop_mod, "SPAWN_CAP", 2)
-    monkeypatch.setattr(stop_mod, "_count_active_ingest_processes", lambda: 2)
+    @contextmanager
+    def _gate_at_cap():
+        yield False
+
+    monkeypatch.setattr(core_mod, "spawn_gate", _gate_at_cap)
     monkeypatch.setattr(stop_mod, "BACKLOG_DIR", tmp_path / "backlog")
     monkeypatch.setattr(stop_mod, "TRACE_DIR", tmp_path / "traces")
     monkeypatch.setattr(stop_mod, "LOG_DIR", tmp_path / "logs")
@@ -37,7 +41,7 @@ def test_spawn_cap_blocks_when_at_cap(monkeypatch, tmp_path):
 
     def _record_popen(*args, **kwargs):
         popen_calls.append((args, kwargs))
-        return type("DummyProc", (), {"pid": 0})()
+        return type("DummyProc", (), {"pid": 0, "__enter__": lambda s: s, "__exit__": lambda *a: None})()
 
     monkeypatch.setattr(subprocess, "Popen", _record_popen)
 
@@ -60,10 +64,15 @@ def test_spawn_cap_blocks_when_at_cap(monkeypatch, tmp_path):
 
 def test_spawn_cap_allows_spawn_under_cap(monkeypatch, tmp_path):
     """Under the cap, Popen must be called and no backlog marker written."""
+    from contextlib import contextmanager
     from truememory.ingest.hooks import stop as stop_mod
+    from truememory.hooks import core as core_mod
 
-    monkeypatch.setattr(stop_mod, "SPAWN_CAP", 4)
-    monkeypatch.setattr(stop_mod, "_count_active_ingest_processes", lambda: 1)
+    @contextmanager
+    def _gate_under_cap():
+        yield True
+
+    monkeypatch.setattr(core_mod, "spawn_gate", _gate_under_cap)
     monkeypatch.setattr(stop_mod, "BACKLOG_DIR", tmp_path / "backlog")
     monkeypatch.setattr(stop_mod, "TRACE_DIR", tmp_path / "traces")
     monkeypatch.setattr(stop_mod, "LOG_DIR", tmp_path / "logs")
@@ -73,7 +82,7 @@ def test_spawn_cap_allows_spawn_under_cap(monkeypatch, tmp_path):
 
     def _record_popen(*args, **kwargs):
         popen_calls.append((args, kwargs))
-        return type("DummyProc", (), {"pid": 123})()
+        return type("DummyProc", (), {"pid": 123, "__enter__": lambda s: s, "__exit__": lambda *a: None})()
 
     monkeypatch.setattr(subprocess, "Popen", _record_popen)
 
@@ -124,10 +133,15 @@ def test_popen_failure_queues_backlog_not_inline(monkeypatch, tmp_path):
     """When subprocess.Popen raises (disk full, permission denied, etc.),
     the hook must write a backlog marker and NOT fall back to inline
     ingestion — that path blocks Claude Code's shutdown."""
+    from contextlib import contextmanager
     from truememory.ingest.hooks import stop as stop_mod
+    from truememory.hooks import core as core_mod
 
-    monkeypatch.setattr(stop_mod, "SPAWN_CAP", 99)
-    monkeypatch.setattr(stop_mod, "_count_active_ingest_processes", lambda: 0)
+    @contextmanager
+    def _gate_allows():
+        yield True
+
+    monkeypatch.setattr(core_mod, "spawn_gate", _gate_allows)
     monkeypatch.setattr(stop_mod, "BACKLOG_DIR", tmp_path / "backlog")
     monkeypatch.setattr(stop_mod, "TRACE_DIR", tmp_path / "traces")
     monkeypatch.setattr(stop_mod, "LOG_DIR", tmp_path / "logs")

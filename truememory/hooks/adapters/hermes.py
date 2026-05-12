@@ -32,6 +32,14 @@ _PLUGIN_HOOKS = {
         "name": "truememory-session-end",
         "script": "stop.py",
     },
+    "on_user_prompt": {
+        "name": "truememory-user-prompt",
+        "script": "user_prompt_submit.py",
+    },
+    "on_pre_compact": {
+        "name": "truememory-pre-compact",
+        "script": "compact.py",
+    },
 }
 
 _TRUEMEMORY_MARKER = "truememory"

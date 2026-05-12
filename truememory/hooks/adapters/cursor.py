@@ -28,6 +28,10 @@ _HOOK_EVENTS = {
         "script": "stop.py",
         "timeout": 5000,
     },
+    "userPromptSubmit": {
+        "script": "user_prompt_submit.py",
+        "timeout": 5000,
+    },
     "preCompact": {
         "script": "compact.py",
         "timeout": 5000,

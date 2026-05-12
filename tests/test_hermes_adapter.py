@@ -110,15 +110,19 @@ def test_install_hooks_creates_cli_config(tmp_path, monkeypatch):
 
     data = yaml.safe_load(cli_config.read_text(encoding="utf-8"))
     plugins = data["plugins"]
-    assert len(plugins) == 2
+    assert len(plugins) == 4
 
     names = {p["name"] for p in plugins}
     assert "truememory-session-start" in names
     assert "truememory-session-end" in names
+    assert "truememory-user-prompt" in names
+    assert "truememory-pre-compact" in names
 
     events = {p["event"] for p in plugins}
     assert "on_session_start" in events
     assert "on_session_end" in events
+    assert "on_user_prompt" in events
+    assert "on_pre_compact" in events
 
 
 def test_install_hooks_preserves_existing(tmp_path, monkeypatch):

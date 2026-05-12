@@ -544,6 +544,7 @@ def truememory_store(
         user_id: Owner of this memory (e.g. a person's name).
         metadata: Optional JSON string of metadata.
     """
+    _touch_search_time()
     MAX_CONTENT_LENGTH = 50_000
     if len(content) > MAX_CONTENT_LENGTH:
         return json.dumps({"error": f"Content too large ({len(content)} chars). Maximum is {MAX_CONTENT_LENGTH}."})

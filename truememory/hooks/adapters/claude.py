@@ -123,6 +123,14 @@ class ClaudeAdapter(CLIAdapter):
                 else:
                     del hooks[event]
             settings["hooks"] = hooks
+
+            # Also remove the MCP server entry (JSON-level fallback for when
+            # `claude mcp remove` fails or the CLI is not on PATH)
+            mcp_servers = settings.get("mcpServers", {})
+            if "truememory" in mcp_servers:
+                del mcp_servers["truememory"]
+                settings["mcpServers"] = mcp_servers
+
             self.config_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
         except (json.JSONDecodeError, OSError):
             pass
