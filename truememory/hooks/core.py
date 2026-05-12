@@ -48,6 +48,8 @@ except ImportError:
 
 def _pid_is_alive(pid: int) -> bool:
     """Check if a PID is still running."""
+    if pid <= 0:
+        return False
     try:
         os.kill(pid, 0)
         return True
