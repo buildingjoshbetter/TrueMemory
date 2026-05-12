@@ -160,6 +160,13 @@ CREATE TABLE IF NOT EXISTS metadata (
 
 CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
+CREATE INDEX IF NOT EXISTS idx_messages_episode_id ON messages(episode_id);
+CREATE INDEX IF NOT EXISTS idx_messages_category ON messages(category);
+CREATE INDEX IF NOT EXISTS idx_fact_timeline_subject ON fact_timeline(subject);
+CREATE INDEX IF NOT EXISTS idx_summaries_entity ON summaries(entity);
+CREATE INDEX IF NOT EXISTS idx_summaries_period ON summaries(period);
+CREATE INDEX IF NOT EXISTS idx_entity_relationships_a ON entity_relationships(entity_a);
+CREATE INDEX IF NOT EXISTS idx_landmark_events_timestamp ON landmark_events(timestamp);
 """
 
 
@@ -435,6 +442,9 @@ def insert_message(conn: sqlite3.Connection, msg: dict) -> int:
     Returns:
         The new row's integer ID.
     """
+    content = msg.get("content", "")
+    if not content or not content.strip():
+        raise ValueError("content cannot be empty or whitespace-only")
     cursor = conn.execute(
         """INSERT INTO messages
            (content, sender, recipient, timestamp, category, modality)

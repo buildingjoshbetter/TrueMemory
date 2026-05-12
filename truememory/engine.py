@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import threading
+import warnings
 import time
 import sqlite3
 from pathlib import Path
@@ -717,6 +718,12 @@ class TrueMemoryEngine:
 
         Returns self for chaining: ``engine = TrueMemoryEngine(path).open()``
         """
+        warnings.warn(
+            "open() is deprecated — production code uses _ensure_connection()/create_db()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found: {self.db_path}")
 
@@ -724,6 +731,9 @@ class TrueMemoryEngine:
         self.conn.row_factory = None  # Use default tuple rows
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.execute("PRAGMA cache_size=-64000")
+        self.conn.execute("PRAGMA mmap_size=268435456")
 
         # Detect available tables
         tables = {
