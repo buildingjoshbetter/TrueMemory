@@ -140,6 +140,13 @@ def get_current_reranker_name() -> str:
     return get_reranker_name_for_tier(_active_tier)
 
 
+def unload_reranker() -> None:
+    """Release the reranker model from memory."""
+    global _model
+    with _lock:
+        _model = None
+
+
 def get_reranker(model_name: str | None = None, device: str | None = None):
     """
     Lazy-load the cross-encoder reranker (singleton).

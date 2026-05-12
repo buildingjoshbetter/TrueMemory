@@ -22,12 +22,19 @@ Configuration via environment variables:
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
+
+try:
+    import resource as _resource_mod
+except ImportError:
+    _resource_mod = None
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -200,11 +207,23 @@ _llm_error_lock = threading.Lock()
 _current_llm_provider_name: str | None = None
 
 
+_SECRET_RE = re.compile(
+    r'(sk-[a-zA-Z0-9_-]{5})[a-zA-Z0-9_.-]*'
+    r'|(key[=:\s]+["\']?)[a-zA-Z0-9_-]{20,}'
+    r'|(Bearer\s+)[a-zA-Z0-9_.-]{20,}',
+    re.IGNORECASE,
+)
+
+
+def _sanitize_error(msg: str) -> str:
+    return _SECRET_RE.sub(lambda m: (m.group(1) or m.group(2) or m.group(3)) + "...REDACTED", msg)
+
+
 def _record_llm_error(provider: str, err: Exception) -> None:
+    sanitized = _sanitize_error(f"{type(err).__name__}: {err}")
     with _llm_error_lock:
-        _llm_last_error[provider] = f"{type(err).__name__}: {err}"
-    log.warning("HyDE LLM init failed (%s): %s: %s",
-                provider, type(err).__name__, err)
+        _llm_last_error[provider] = sanitized
+    log.warning("HyDE LLM init failed (%s): %s", provider, sanitized)
 
 
 def _clear_llm_error(provider: str) -> None:
@@ -528,6 +547,9 @@ def truememory_store(
     MAX_CONTENT_LENGTH = 50_000
     if len(content) > MAX_CONTENT_LENGTH:
         return json.dumps({"error": f"Content too large ({len(content)} chars). Maximum is {MAX_CONTENT_LENGTH}."})
+    MAX_METADATA_LENGTH = 10_000
+    if metadata and len(metadata) > MAX_METADATA_LENGTH:
+        return json.dumps({"error": f"Metadata too large ({len(metadata)} chars). Maximum is {MAX_METADATA_LENGTH}."})
     m = _get_memory()
     try:
         meta = json.loads(metadata) if metadata else None
@@ -556,6 +578,9 @@ def truememory_search(
         user_id: Filter results to this user (optional).
         limit: Maximum number of results to return.
     """
+    if not query or not query.strip():
+        return json.dumps([])
+    _touch_search_time()
     limit = max(1, min(limit, 200))
     MAX_QUERY_LENGTH = 2000
     if len(query) > MAX_QUERY_LENGTH:
@@ -564,6 +589,8 @@ def truememory_search(
     llm_fn = _get_llm_fn()
     uid = user_id or None
     queries = [q.strip() for q in query.split("|") if q.strip()]
+    if not queries:
+        return json.dumps([])
 
     if len(queries) == 1:
         m = _get_memory()
@@ -596,6 +623,9 @@ def truememory_search_deep(
         user_id: Filter results to this user (optional).
         limit: Maximum number of results to return.
     """
+    if not query or not query.strip():
+        return json.dumps([])
+    _touch_search_time()
     limit = max(1, min(limit, 200))
     MAX_QUERY_LENGTH = 2000
     if len(query) > MAX_QUERY_LENGTH:
@@ -604,6 +634,8 @@ def truememory_search_deep(
     llm_fn = _get_llm_fn()
     uid = user_id or None
     queries = [q.strip() for q in query.split("|") if q.strip()]
+    if not queries:
+        return json.dumps([])
 
     if len(queries) == 1:
         m = _get_memory()
@@ -658,6 +690,9 @@ def truememory_stats() -> str:
     stats["tier"] = config.get("tier", "edge")
     stats["tier_configured"] = "tier" in config
     stats["health"] = _build_health_payload()
+    stats["rss_mb"] = round(_get_rss_mb(), 1)
+    if _MAX_RSS_MB:
+        stats["max_rss_mb"] = _MAX_RSS_MB
 
     if not stats["tier_configured"]:
         stats["setup_required"] = True
@@ -932,57 +967,90 @@ def truememory_entity_profile(entity: str) -> str:
 # Background model preloading
 # ---------------------------------------------------------------------------
 
+_MODEL_IDLE_TIMEOUT_SEC = int(os.environ.get("TRUEMEMORY_MODEL_IDLE_SEC", "300"))
+_MAX_RSS_MB = int(os.environ.get("TRUEMEMORY_MAX_RSS_MB", "0"))
+_last_search_time: float = 0.0
+_idle_timer: threading.Timer | None = None
+_idle_timer_lock = threading.Lock()
+
+
+def _get_rss_mb() -> float:
+    if _resource_mod is None:
+        return 0.0
+    ru = _resource_mod.getrusage(_resource_mod.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":
+        return ru / (1024 * 1024)
+    return ru / 1024
+
+
+def _unload_models() -> None:
+    try:
+        from truememory.vector_search import unload_model
+        unload_model()
+    except Exception:
+        pass
+    try:
+        from truememory.reranker import unload_reranker
+        unload_reranker()
+    except Exception:
+        pass
+    gc.collect()
+    log.info("Models unloaded (idle timeout). RSS=%.0f MB", _get_rss_mb())
+
+
+def _check_idle_unload() -> None:
+    global _idle_timer
+    elapsed = time.monotonic() - _last_search_time
+    if _last_search_time > 0 and elapsed >= _MODEL_IDLE_TIMEOUT_SEC:
+        _unload_models()
+    with _idle_timer_lock:
+        _idle_timer = None
+
+
+def _touch_search_time() -> None:
+    global _last_search_time, _idle_timer
+    _last_search_time = time.monotonic()
+    if _MODEL_IDLE_TIMEOUT_SEC <= 0:
+        return
+    with _idle_timer_lock:
+        if _idle_timer is not None:
+            _idle_timer.cancel()
+        _idle_timer = threading.Timer(_MODEL_IDLE_TIMEOUT_SEC, _check_idle_unload)
+        _idle_timer.daemon = True
+        _idle_timer.start()
+
+
 def _preload_models():
     """Pre-load ML models in background threads so the first search is fast.
 
-    Without preloading, the first search pays:
-      - sentence_transformers import: ~2,300ms
-      - CrossEncoder init: ~70ms
-      - model2vec load: ~170ms
-      Total: ~2,500ms+ on first query
-
-    With preloading, these costs are absorbed during MCP handshake/init,
-    so the first search sees the same latency as subsequent searches.
+    Set TRUEMEMORY_LAZY_MODELS=1 to skip preloading (models load on first search).
     """
-    def _load_embedding_model_and_db():
-        """Pre-load the embedding model and initialize the DB connection.
+    if os.environ.get("TRUEMEMORY_LAZY_MODELS", "") == "1":
+        log.info("Model preloading disabled (TRUEMEMORY_LAZY_MODELS=1)")
+        return
 
-        Opening the DB + loading sqlite-vec + initializing the Memory singleton
-        adds ~50-100ms on first access. Doing it here means _get_memory() is
-        instant on the first tool call.
-        """
+    def _load_embedding_model_and_db():
         try:
             from truememory.vector_search import get_model
             get_model()
         except Exception:
-            pass  # Graceful degradation — model loads lazily on first search
+            pass
         try:
             _get_memory()
         except Exception:
             pass
 
     def _load_reranker():
-        """Pre-import sentence_transformers and load the default reranker.
-
-        The sentence_transformers import alone is ~2.3s (torch, transformers,
-        huggingface_hub). Loading it here means it's cached by the time
-        the first search needs it.
-        """
         try:
             from truememory.reranker import get_reranker
             get_reranker(model_name=_current_reranker())
         except Exception:
-            pass  # Graceful degradation — reranker loads lazily on first search
+            pass
 
-    # Fire both loads in parallel background threads.
-    # daemon=True so they don't block server shutdown.
     t1 = threading.Thread(target=_load_embedding_model_and_db, daemon=True)
     t2 = threading.Thread(target=_load_reranker, daemon=True)
     t1.start()
     t2.start()
-    # Don't join — let them finish in the background while the server
-    # handles the MCP handshake. The singleton locks in each module
-    # ensure thread safety if a search arrives before loading finishes.
 
 
 # ---------------------------------------------------------------------------

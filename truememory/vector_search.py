@@ -129,6 +129,13 @@ def get_embedding_dim(name: str | None = None) -> int:
     return _MODEL_DIMS.get(name, 256)
 
 
+def unload_model() -> None:
+    """Release the embedding model from memory."""
+    global _model
+    with _lock:
+        _model = None
+
+
 def get_model():
     """Lazy-load the embedding model (singleton)."""
     global _model, _embedding_dim
