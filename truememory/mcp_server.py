@@ -1055,6 +1055,88 @@ def _preload_models():
 
 
 # ---------------------------------------------------------------------------
+# Background backlog drainer
+# ---------------------------------------------------------------------------
+
+_BACKLOG_DRAIN_INTERVAL = int(os.environ.get("TRUEMEMORY_DRAIN_INTERVAL_SEC", "60"))
+_BACKLOG_DIR = Path.home() / ".truememory" / "backlog"
+
+
+def _backlog_drainer() -> None:
+    """Background thread that drains the ingest backlog while the MCP server is alive.
+
+    Checks every _BACKLOG_DRAIN_INTERVAL seconds for queued session
+    transcripts and processes them through the spawn gate (hard cap at
+    SPAWN_CAP concurrent ingest processes). Runs as a daemon thread so
+    it dies automatically when the MCP server exits.
+    """
+    import time as _time
+    _time.sleep(10)
+
+    while True:
+        try:
+            if _BACKLOG_DIR.exists():
+                markers = sorted(_BACKLOG_DIR.glob("*.json"))
+                if markers:
+                    _drain_one_from_backlog(markers)
+        except Exception:
+            pass
+        _time.sleep(_BACKLOG_DRAIN_INTERVAL)
+
+
+def _drain_one_from_backlog(markers: list[Path]) -> None:
+    """Drain a single backlog item if a spawn slot is available."""
+    import subprocess as _subprocess
+    from truememory.hooks.core import spawn_gate, register_spawned_pid
+
+    for marker_path in markers[:1]:
+        try:
+            data = json.loads(marker_path.read_text(encoding="utf-8"))
+            transcript = data.get("transcript_path", "")
+            if not transcript or not Path(transcript).exists():
+                marker_path.unlink(missing_ok=True)
+                return
+
+            with spawn_gate() as allowed:
+                if not allowed:
+                    return
+
+                cmd = [
+                    sys.executable, "-m", "truememory.ingest.cli",
+                    "ingest", transcript,
+                ]
+                session_id = data.get("session_id", "")
+                if session_id:
+                    cmd.extend(["--session", session_id])
+                if data.get("user_id"):
+                    cmd.extend(["--user", data["user_id"]])
+                if data.get("db_path"):
+                    cmd.extend(["--db", data["db_path"]])
+                proc = _subprocess.Popen(
+                    cmd,
+                    stdout=_subprocess.DEVNULL,
+                    stderr=_subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                register_spawned_pid(proc.pid)
+
+            marker_path.unlink(missing_ok=True)
+            log.info("Backlog drainer: processed session %s", data.get("session_id", "?"))
+        except Exception:
+            pass
+
+
+def _start_backlog_drainer() -> None:
+    """Launch the background backlog drainer thread."""
+    if _BACKLOG_DRAIN_INTERVAL <= 0:
+        log.info("Backlog drainer disabled (TRUEMEMORY_DRAIN_INTERVAL_SEC=0)")
+        return
+    t = threading.Thread(target=_backlog_drainer, daemon=True, name="backlog-drainer")
+    t.start()
+    log.info("Backlog drainer started (interval=%ds)", _BACKLOG_DRAIN_INTERVAL)
+
+
+# ---------------------------------------------------------------------------
 # Auto-setup for Claude Code and Claude Desktop
 # ---------------------------------------------------------------------------
 
@@ -1335,6 +1417,11 @@ def main():
     # load in background threads (~2.5s) while the MCP handshake
     # completes (~1-3s), so the first search arrives with warm models.
     _preload_models()
+
+    # Start background backlog drainer — processes queued session
+    # transcripts every 60s while the MCP server is alive, respecting
+    # the spawn cap. Dies automatically when the server exits.
+    _start_backlog_drainer()
 
     # Force-exit after mcp.run() to avoid PyTorch teardown deadlocks.
     # PyTorch's C++ threads (OpenMP pools, autograd engine) deadlock against
