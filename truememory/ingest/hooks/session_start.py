@@ -31,6 +31,8 @@ log = logging.getLogger(__name__)
 
 MEMORY_LIMIT = int(os.environ.get("TRUEMEMORY_RECALL_LIMIT", "25"))
 ONBOARDED_MARKER = Path.home() / ".truememory" / ".onboarded"
+BACKLOG_DIR = Path.home() / ".truememory" / "backlog"
+_DRAIN_CAP = 3
 
 BANNER = r"""
 ████████╗██████╗ ██╗   ██╗███████╗    ███╗   ███╗███████╗███╗   ███╗ ██████╗ ██████╗ ██╗   ██╗
@@ -88,9 +90,16 @@ def _check_for_update() -> str:
         if not update_path.exists():
             return ""
         data = json.loads(update_path.read_text(encoding="utf-8"))
-        # Delete the file so we only show the notice once
-        update_path.unlink(missing_ok=True)
+        if data.get("shown"):
+            return ""
         if data.get("update_available"):
+            data["shown"] = True
+            try:
+                tmp = update_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(data), encoding="utf-8")
+                tmp.rename(update_path)
+            except Exception:
+                pass
             return (
                 "<truememory-update>\n"
                 f"A new version of TrueMemory is available: v{data.get('latest_version', '?')}. "
@@ -125,8 +134,47 @@ def _check_email_needed() -> str:
     return ""
 
 
+def _drain_backlog() -> None:
+    """Process queued sessions from the backlog directory."""
+    if not BACKLOG_DIR.exists():
+        return
+    try:
+        markers = sorted(BACKLOG_DIR.glob("*.json"))[:_DRAIN_CAP]
+    except Exception:
+        return
+    for marker_path in markers:
+        try:
+            data = json.loads(marker_path.read_text(encoding="utf-8"))
+            transcript = data.get("transcript_path", "")
+            if not transcript or not Path(transcript).exists():
+                marker_path.unlink(missing_ok=True)
+                continue
+            import subprocess
+            cmd = [
+                sys.executable, "-m", "truememory.ingest.cli", "ingest",
+                "--transcript", transcript,
+                "--session-id", data.get("session_id", "unknown"),
+            ]
+            if data.get("user_id"):
+                cmd.extend(["--user", data["user_id"]])
+            if data.get("db_path"):
+                cmd.extend(["--db", data["db_path"]])
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            marker_path.unlink(missing_ok=True)
+            log.info("Drained backlog session: %s", data.get("session_id", "?"))
+        except Exception as e:
+            log.debug("Failed to drain backlog entry %s: %s", marker_path.name, e)
+
+
 def main():
     args = _parse_args()
+
+    _drain_backlog()
 
     try:
         input_data = json.load(sys.stdin)
