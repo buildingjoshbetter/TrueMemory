@@ -78,7 +78,9 @@ def init(config: dict) -> dict | None:
         if info and info.get("update_available"):
             try:
                 _p = Path.home() / ".truememory" / ".update_available"
-                _p.write_text(json.dumps(info), encoding="utf-8")
+                _tmp = _p.with_suffix(".tmp")
+                _tmp.write_text(json.dumps(info), encoding="utf-8")
+                _tmp.rename(_p)
             except Exception:
                 pass
 

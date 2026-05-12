@@ -65,6 +65,86 @@ def _parse_args() -> argparse.Namespace:
     return args
 
 
+import re
+
+_EMAIL_RE = re.compile(r'[\w.+-]+@[\w-]+\.[\w.-]+')
+
+_RECALL_RE = re.compile(
+    r'\b(?:what(?:\'s|\s+is|\s+was|\s+are|\s+were|\s+did|\s+do)\b'
+    r'|who\s+(?:is|was|did)\b'
+    r'|when\s+(?:is|was|did)\b'
+    r'|where\s+(?:is|was|did|does)\b'
+    r'|do\s+you\s+remember\b'
+    r'|did\s+(?:we|i|you)\b'
+    r'|what\'s\s+my\b'
+    r'|what\s+do\s+I\b'
+    r'|remind\s+me\b'
+    r'|have\s+(?:we|i)\s+(?:ever|already)\b'
+    r'|my\s+(?:favorite|preferred|usual)\b)',
+    re.IGNORECASE,
+)
+
+_CODE_RE = re.compile(
+    r'\b(?:function|class|def|import|const|let|var|return|console\.log|print\(|TypeError|SyntaxError)\b'
+    r'|```'
+    r'|(?:what\s+does\s+(?:this|the)\s+(?:function|code|class|method)\b)',
+    re.IGNORECASE,
+)
+
+
+def _detect_recall(prompt: str) -> bool:
+    if len(prompt) < 10 or len(prompt) > 500:
+        return False
+    if _CODE_RE.search(prompt):
+        return False
+    return bool(_RECALL_RE.search(prompt))
+
+
+def _try_auto_recall(prompt: str, user_id: str, db_path: str) -> str | None:
+    """Search TrueMemory if prompt looks like a recall question."""
+    if not _detect_recall(prompt):
+        return None
+    try:
+        from truememory.client import Memory
+        m = Memory(path=db_path or None)
+        results = m.search(prompt, user_id=user_id or None, limit=5)
+        if not results:
+            return None
+        lines = []
+        for r in results[:5]:
+            content = r.get("content", "")[:200]
+            lines.append(f"- {content}")
+        return (
+            "<truememory-recall>\n"
+            "Relevant memories for this question:\n"
+            + "\n".join(lines)
+            + "\n</truememory-recall>"
+        )
+    except Exception:
+        return None
+
+
+def _try_capture_email(prompt: str) -> None:
+    """If the user typed an email and config has no email, save it."""
+    try:
+        config_path = Path.home() / ".truememory" / "config.json"
+        if not config_path.exists():
+            return
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        if config.get("email"):
+            return
+        match = _EMAIL_RE.search(prompt)
+        if not match:
+            return
+        email = match.group(0)
+        config["email"] = email
+        tmp = config_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        tmp.rename(config_path)
+    except Exception:
+        pass
+
+
 def main():
     args = _parse_args()
 
@@ -85,6 +165,8 @@ def main():
         _prune_old_buffers()
     except Exception:
         pass  # Never crash the hook
+
+    _try_capture_email(prompt)
 
     # Incremental extraction: if enough time has passed since the last
     # extraction, trigger background ingestion of the transcript so far.
@@ -109,6 +191,10 @@ def main():
                     mark_extracted()
         except Exception:
             pass  # Never crash the hook
+
+    recall_context = _try_auto_recall(prompt, args.user, args.db)
+    if recall_context:
+        print(json.dumps({"additionalContext": recall_context}))
 
 
 def buffer_message(session_id: str, prompt: str):

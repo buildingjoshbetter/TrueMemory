@@ -28,7 +28,22 @@ function Ok($msg)   { Write-Host "[truememory] $msg" -ForegroundColor Green }
 function Warn($msg) { Write-Host "[truememory] $msg" -ForegroundColor Red }
 function Die($msg)  { Warn "error: $msg"; exit 1 }
 
+# ---------- execution policy check ----------
+$policy = Get-ExecutionPolicy -Scope CurrentUser
+if ($policy -eq "Restricted" -or $policy -eq "Undefined") {
+    $machinePolicy = Get-ExecutionPolicy -Scope LocalMachine
+    if ($machinePolicy -eq "Restricted" -or $machinePolicy -eq "Undefined") {
+        Warn "PowerShell execution policy is '$policy'. Scripts may be blocked."
+        Warn "Run this to fix: Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned"
+        Warn "Then re-run the installer."
+        exit 1
+    }
+}
+
 # ---------- main ----------
+$stepsDone = 0
+function Step-Done { $script:stepsDone++ }
+
 $TRUEMEMORY_PY = if ($env:TRUEMEMORY_PY) { $env:TRUEMEMORY_PY } else { "3.12" }
 $TRUEMEMORY_SOURCE = if ($env:TRUEMEMORY_SOURCE) { $env:TRUEMEMORY_SOURCE } else { "" }
 
