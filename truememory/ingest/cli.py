@@ -662,7 +662,7 @@ def _run_migrate_memory(args):
     if args.dry_run:
         print(f"\nDry run complete. Would migrate {result.get('migrated', 0)} facts.")
     else:
-        print(f"\nMigration complete:")
+        print("\nMigration complete:")
         print(f"  Migrated:   {result.get('migrated', 0)}")
         print(f"  Skipped:    {result.get('skipped', 0)}")
         print(f"  Duplicates: {result.get('duplicates', 0)}")
