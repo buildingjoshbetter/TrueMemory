@@ -24,6 +24,7 @@ Output: None (silent hook, no additionalContext)
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -64,8 +65,6 @@ def _parse_args() -> argparse.Namespace:
     args, _ = p.parse_known_args()
     return args
 
-
-import re
 
 _EMAIL_RE = re.compile(r'[\w.+-]+@[\w-]+\.[\w.-]+')
 
