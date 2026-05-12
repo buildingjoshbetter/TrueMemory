@@ -2,7 +2,6 @@
 
 import sqlite3
 import tempfile
-import threading
 from pathlib import Path
 
 import pytest
