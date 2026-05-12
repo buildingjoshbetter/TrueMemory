@@ -70,8 +70,14 @@ def _strip_json5_comments(text: str) -> str:
             i = nl if nl != -1 else len(text)
         elif text[i] == ',':
             j = i + 1
-            while j < len(text) and text[j] in ' \t\n\r':
-                j += 1
+            while j < len(text):
+                if text[j] in ' \t\n\r':
+                    j += 1
+                elif text[j:j+2] == '//':
+                    nl = text.find('\n', j)
+                    j = nl + 1 if nl != -1 else len(text)
+                else:
+                    break
             if j < len(text) and text[j] in '}]':
                 i = j
             else:
