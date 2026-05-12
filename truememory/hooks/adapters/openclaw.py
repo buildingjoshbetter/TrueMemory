@@ -45,12 +45,35 @@ def _read_json_config(path: Path) -> dict:
 
 
 def _strip_json5_comments(text: str) -> str:
-    """Best-effort removal of single-line // comments and trailing commas."""
+    """Best-effort removal of single-line // comments and trailing commas.
+
+    Respects quoted strings — ``//`` inside ``"..."`` is preserved.
+    """
     import re
-    text = re.sub(r'(?m)^\s*//.*$', '', text)
-    text = re.sub(r'//[^\n]*', '', text)
-    text = re.sub(r',(\s*[}\]])', r'\1', text)
-    return text
+    result: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i] == '"':
+            j = i + 1
+            while j < len(text):
+                if text[j] == '\\':
+                    j += 2
+                    continue
+                if text[j] == '"':
+                    j += 1
+                    break
+                j += 1
+            result.append(text[i:j])
+            i = j
+        elif text[i:i+2] == '//':
+            nl = text.find('\n', i)
+            i = nl if nl != -1 else len(text)
+        else:
+            result.append(text[i])
+            i += 1
+    stripped = ''.join(result)
+    stripped = re.sub(r',(\s*[}\]])', r'\1', stripped)
+    return stripped
 
 
 class OpenClawAdapter(CLIAdapter):

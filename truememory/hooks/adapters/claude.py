@@ -84,6 +84,15 @@ class ClaudeAdapter(CLIAdapter):
         _run_install(args)
 
     def uninstall(self) -> None:
+        try:
+            import subprocess
+            subprocess.run(
+                ["claude", "mcp", "remove", "truememory"],
+                check=False,
+                capture_output=True,
+            )
+        except FileNotFoundError:
+            pass
         if not self.config_path.exists():
             return
         try:

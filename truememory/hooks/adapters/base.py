@@ -64,3 +64,23 @@ class CLIAdapter(ABC):
     @abstractmethod
     def get_system_prompt_content(self) -> str:
         """Return the TrueMemory system prompt content for this CLI."""
+
+
+def get_generic_system_prompt() -> str:
+    """Return the TrueMemory system prompt for non-Claude CLIs."""
+    template = Path(__file__).parent.parent.parent / "ingest" / "CLAUDE_TEMPLATE.md"
+    if template.exists():
+        try:
+            content = template.read_text(encoding="utf-8").strip()
+            content = content.replace("Claude Code's built-in auto-memory", "The host CLI's built-in memory")
+            content = content.replace("(`MEMORY.md` files under `~/.claude/projects/*/memory/`)", "")
+            return content
+        except OSError:
+            pass
+    return (
+        "# TrueMemory — Persistent Memory\n\n"
+        "You have access to TrueMemory MCP tools for persistent memory.\n"
+        "- Use `truememory_store` to save user facts, preferences, and decisions.\n"
+        "- Use `truememory_search` to recall stored memories before answering.\n"
+        "- Search TrueMemory FIRST on any 'do you remember' question.\n"
+    )
