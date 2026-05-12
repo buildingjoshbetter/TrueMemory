@@ -74,11 +74,15 @@ def reciprocal_rank_fusion(
         - ``rrf_score`` -- the raw RRF score.
         - ``score`` -- alias for ``rrf_score`` (for API consistency).
     """
+    non_empty = [rl for rl in result_lists if rl]
+    if not non_empty:
+        return []
+
     # Accumulate scores and keep the best copy of each document.
     scores: dict[int, float] = defaultdict(float)
     best_doc: dict[int, dict] = {}
 
-    for result_list in result_lists:
+    for result_list in non_empty:
         for rank_0, doc in enumerate(result_list):
             doc_id = doc["id"]
             rank_1 = rank_0 + 1  # RRF uses 1-based ranks

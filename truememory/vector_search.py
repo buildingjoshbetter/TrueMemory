@@ -475,6 +475,8 @@ def search_vector(
         ``id``, ``content``, ``sender``, ``recipient``, ``timestamp``,
         ``category``, ``modality``, ``score``.
     """
+    limit = max(1, min(limit, 4096))
+
     if _query_blob is None:
         model = get_model()
         query_embedding = model.encode([query])[0]
@@ -623,13 +625,12 @@ def build_separation_vectors(
     for start in range(0, len(messages), _BATCH_SIZE):
         batch = messages[start : start + _BATCH_SIZE]
 
-        # Build separation texts with metadata
         texts = []
         ids = []
         for m in batch:
-            sep_text = (
-                f"{m.get('sender', '?')} to {m.get('recipient', '?')} "
-                f"on {m.get('timestamp', '?')[:10]}: {m['content']}"
+            sep_text = _build_sep_text(
+                m.get("sender", "?"), m.get("recipient", "?"),
+                m.get("timestamp", "?"), m["content"],
             )
             texts.append(sep_text)
             ids.append(m["id"])
@@ -648,9 +649,16 @@ def build_separation_vectors(
     return total
 
 
+def _build_sep_text(sender: str, recipient: str, timestamp: str, content: str) -> str:
+    return (
+        f"{sender or '?'} to {recipient or '?'} "
+        f"on {(timestamp or '?')[:10]}: {content}"
+    )
+
+
 def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> None:
     """
-    Embed a single message and insert it into ``vec_messages``.
+    Embed a single message and insert into ``vec_messages`` and ``vec_messages_sep``.
 
     This is the incremental counterpart to :func:`build_vectors` — it embeds
     one message at a time (~5ms with Model2Vec) for use with the production
@@ -668,6 +676,21 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
         "INSERT INTO vec_messages(rowid, embedding) VALUES (?, ?)",
         (message_id, serialize_f32(embedding)),
     )
+
+    try:
+        row = conn.execute(
+            "SELECT sender, recipient, timestamp FROM messages WHERE id = ?",
+            (message_id,),
+        ).fetchone()
+        if row:
+            sep_text = _build_sep_text(row[0], row[1], row[2], content)
+            sep_embedding = model.encode([sep_text])[0]
+            conn.execute(
+                "INSERT INTO vec_messages_sep(rowid, embedding) VALUES (?, ?)",
+                (message_id, serialize_f32(sep_embedding)),
+            )
+    except Exception:
+        logger.debug("Failed to create separation vector for message %d", message_id, exc_info=True)
     # Caller is responsible for committing
 
 
@@ -699,6 +722,8 @@ def search_vector_separation(
     Returns:
         List of result dicts sorted by descending similarity.
     """
+    limit = max(1, min(limit, 4096))
+
     if sender:
         model = get_model()
         query_text = f"{sender}: {query}"
