@@ -659,11 +659,15 @@ class TrueMemoryEngine:
             if content is not None and self._has_vectors:
                 try:
                     from truememory.vector_search import embed_single
-                    # Remove old embedding, insert new
+                    # Remove old embeddings from both vector tables, insert new
                     try:
                         self.conn.execute("DELETE FROM vec_messages WHERE rowid = ?", (memory_id,))
                     except Exception:
                         logger.debug("Failed to delete old vector embedding for message %d", memory_id, exc_info=True)
+                    try:
+                        self.conn.execute("DELETE FROM vec_messages_sep WHERE rowid = ?", (memory_id,))
+                    except Exception:
+                        logger.debug("Failed to delete old sep vector for message %d", memory_id, exc_info=True)
                     embed_single(self.conn, memory_id, content)
                 except Exception:
                     logger.warning("Vector embedding failed for message %d", memory_id, exc_info=True)

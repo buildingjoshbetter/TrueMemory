@@ -8,6 +8,15 @@ Claude Code's built-in auto-memory (`MEMORY.md` files under `~/.claude/projects/
 
 When the `truememory` MCP server is connected, follow these rules:
 
+## CRITICAL: Anti-Cannibalization Rule
+
+MEMORY.md may contain personal facts that were cached from earlier sessions. **Do not answer personal or user-specific questions using MEMORY.md alone.** Verify via `truememory_search` whenever a personal fact would affect your response. TrueMemory has orders of magnitude more memories than MEMORY.md, with full temporal tracking, contradiction detection, and salience scoring. MEMORY.md is a lossy, potentially stale cache; TrueMemory is the source of truth.
+
+- For **personal/user-specific questions** (preferences, history, "do you remember", facts about the user): always call `truememory_search` to verify, even if you see a relevant fact in MEMORY.md or context.
+- For **technical/coding questions** with no personal dimension: no TrueMemory search needed — use normal tools.
+- **If MEMORY.md conflicts with TrueMemory**, prefer TrueMemory. If the conflict is high-impact, ask the user to confirm.
+- **Do not write personal facts, preferences, or PII into MEMORY.md.** Store them via `truememory_store` only. MEMORY.md should contain only operational and project notes.
+
 ## Auto-Recall (every session)
 - At the START of each conversation, call `truememory_search` with a broad query about the user (e.g. "user preferences and context") to load relevant memories before responding.
 - Before making recommendations, check TrueMemory for stored preferences.

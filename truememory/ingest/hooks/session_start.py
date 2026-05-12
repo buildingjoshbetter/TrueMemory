@@ -151,10 +151,12 @@ def _drain_backlog() -> None:
                 continue
             import subprocess
             cmd = [
-                sys.executable, "-m", "truememory.ingest.cli", "ingest",
-                "--transcript", transcript,
-                "--session-id", data.get("session_id", "unknown"),
+                sys.executable, "-m", "truememory.ingest.cli",
+                "ingest", transcript,
             ]
+            session_id = data.get("session_id", "")
+            if session_id:
+                cmd.extend(["--session", session_id])
             if data.get("user_id"):
                 cmd.extend(["--user", data["user_id"]])
             if data.get("db_path"):
