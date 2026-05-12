@@ -4,15 +4,16 @@ Without the _init_lock, concurrent threads calling add() on a fresh engine
 race through _ensure_connection(), creating orphaned connections and
 potential deadlocks.
 """
+import os
 import tempfile
 import threading
 
 from truememory.engine import TrueMemoryEngine
 
 
-def test_concurrent_add_no_data_loss():
+def test_concurrent_add_no_data_loss(tmp_path):
     """5 threads calling add() on a fresh engine should all succeed."""
-    db = tempfile.mktemp(suffix=".db")
+    db = str(tmp_path / "test_add.db")
     eng = TrueMemoryEngine(db_path=db)
 
     errors = []
@@ -35,9 +36,9 @@ def test_concurrent_add_no_data_loss():
     assert len(results) == 5, f"Expected 5 results, got {len(results)}"
 
 
-def test_concurrent_search_on_fresh_engine():
+def test_concurrent_search_on_fresh_engine(tmp_path):
     """Multiple threads searching before any add() should not crash."""
-    db = tempfile.mktemp(suffix=".db")
+    db = str(tmp_path / "test_search.db")
     eng = TrueMemoryEngine(db_path=db)
 
     errors = []
