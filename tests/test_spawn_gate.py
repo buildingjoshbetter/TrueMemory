@@ -21,7 +21,9 @@ def test_spawn_gate_yields_true_under_cap(tmp_path, monkeypatch):
 
     monkeypatch.setattr(core, "SPAWN_CAP", 3)
     monkeypatch.setattr(core, "SPAWN_LOCK_PATH", tmp_path / ".spawn.lock")
-    monkeypatch.setattr(core, "_count_active_ingest_processes", lambda: 1)
+    monkeypatch.setattr(core, "SPAWN_PIDS_PATH", tmp_path / ".spawn_pids")
+    # Write 1 fake live PID (current process, known alive)
+    (tmp_path / ".spawn_pids").write_text(f"{os.getpid()}\n")
 
     with core.spawn_gate() as allowed:
         assert allowed is True
@@ -31,9 +33,11 @@ def test_spawn_gate_yields_false_at_cap(tmp_path, monkeypatch):
     """When at or above SPAWN_CAP, gate yields False."""
     from truememory.hooks import core
 
-    monkeypatch.setattr(core, "SPAWN_CAP", 2)
+    monkeypatch.setattr(core, "SPAWN_CAP", 1)
     monkeypatch.setattr(core, "SPAWN_LOCK_PATH", tmp_path / ".spawn.lock")
-    monkeypatch.setattr(core, "_count_active_ingest_processes", lambda: 2)
+    monkeypatch.setattr(core, "SPAWN_PIDS_PATH", tmp_path / ".spawn_pids")
+    # Write 1 fake live PID (current process, known alive) — at cap of 1
+    (tmp_path / ".spawn_pids").write_text(f"{os.getpid()}\n")
 
     with core.spawn_gate() as allowed:
         assert allowed is False

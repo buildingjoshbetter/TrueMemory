@@ -36,23 +36,69 @@ SPAWN_CAP = int(os.environ.get(
     os.environ.get("TRUEMEMORY_INGEST_SPAWN_CAP", "2"),
 ))
 SPAWN_LOCK_PATH = Path.home() / ".truememory" / ".spawn.lock"
+SPAWN_PIDS_PATH = Path.home() / ".truememory" / ".spawn_pids"
 
 try:
     import fcntl
+    import signal
     _HAS_FCNTL = True
 except ImportError:
     _HAS_FCNTL = False
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """Check if a PID is still running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _read_live_pids() -> list[int]:
+    """Read PIDs from the tracking file, filtering out dead ones."""
+    if not SPAWN_PIDS_PATH.exists():
+        return []
+    try:
+        raw = SPAWN_PIDS_PATH.read_text(encoding="utf-8").strip()
+        if not raw:
+            return []
+        pids = [int(p) for p in raw.split("\n") if p.strip()]
+        return [p for p in pids if _pid_is_alive(p)]
+    except (OSError, ValueError):
+        return []
+
+
+def _write_pids(pids: list[int]) -> None:
+    """Write PID list to the tracking file."""
+    try:
+        SPAWN_PIDS_PATH.write_text(
+            "\n".join(str(p) for p in pids) + "\n" if pids else "",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def register_spawned_pid(pid: int) -> None:
+    """Record a newly spawned PID. Must be called while holding the flock."""
+    live = _read_live_pids()
+    live.append(pid)
+    _write_pids(live)
 
 
 @contextmanager
 def spawn_gate():
     """Acquire an exclusive file lock before checking/spawning ingest processes.
 
-    Prevents the TOCTOU race where N hooks all check pgrep simultaneously,
-    all see 0 active processes, and all spawn — causing N × 600 MB of
-    embedding models to load at once.
+    Uses a PID tracking file instead of pgrep to get an exact count —
+    pgrep has a race window between Popen() and the process appearing
+    in the process table, which can leak extra spawns past the cap.
 
     Yields True if spawning is allowed (under SPAWN_CAP), False otherwise.
+    Callers MUST call register_spawned_pid(proc.pid) inside the gate
+    after a successful Popen, before the context manager exits.
+
     On Windows (no fcntl), falls back to best-effort pgrep without a lock.
     """
     if not _HAS_FCNTL:
@@ -64,7 +110,9 @@ def spawn_gate():
     try:
         fd = os.open(str(SPAWN_LOCK_PATH), os.O_CREAT | os.O_WRONLY, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX)
-        yield _count_active_ingest_processes() < SPAWN_CAP
+        live = _read_live_pids()
+        _write_pids(live)
+        yield len(live) < SPAWN_CAP
     finally:
         if fd is not None:
             try:
@@ -346,7 +394,7 @@ def run_background_ingestion(
         log_file = None
         try:
             log_file = open(log_path, "a", encoding="utf-8")
-            subprocess.Popen(
+            proc = subprocess.Popen(
                 cmd,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
@@ -354,6 +402,7 @@ def run_background_ingestion(
                 close_fds=(sys.platform != "win32"),
                 **detach_kwargs,
             )
+            register_spawned_pid(proc.pid)
         except Exception as e:
             log.error("core: Popen failed: %s — queueing to backlog", e)
             _queue_to_backlog(

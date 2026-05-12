@@ -350,7 +350,7 @@ def _run_background_ingestion(
 
     # Use flock-based spawn gate to prevent the TOCTOU race where N hooks
     # all check pgrep simultaneously, all see 0, and all spawn.
-    from truememory.hooks.core import spawn_gate
+    from truememory.hooks.core import spawn_gate, register_spawned_pid
 
     with spawn_gate() as allowed:
         if not allowed:
@@ -368,7 +368,7 @@ def _run_background_ingestion(
         log_file = None
         try:
             log_file = open(log_path, "a", encoding="utf-8")
-            subprocess.Popen(
+            proc = subprocess.Popen(
                 cmd,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
@@ -376,6 +376,7 @@ def _run_background_ingestion(
                 close_fds=(sys.platform != "win32"),
                 **detach_kwargs,
             )
+            register_spawned_pid(proc.pid)
         except Exception as e:
             log.warning(
                 "stop hook: background launch failed (%s); queueing session "

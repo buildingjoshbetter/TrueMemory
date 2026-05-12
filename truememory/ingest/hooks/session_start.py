@@ -148,7 +148,7 @@ def _drain_backlog() -> None:
     except Exception:
         return
 
-    from truememory.hooks.core import spawn_gate
+    from truememory.hooks.core import spawn_gate, register_spawned_pid
 
     for marker_path in markers:
         try:
@@ -175,12 +175,13 @@ def _drain_backlog() -> None:
                     cmd.extend(["--user", data["user_id"]])
                 if data.get("db_path"):
                     cmd.extend(["--db", data["db_path"]])
-                subprocess.Popen(
+                proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,
                 )
+                register_spawned_pid(proc.pid)
             marker_path.unlink(missing_ok=True)
             log.info("Drained backlog session: %s", data.get("session_id", "?"))
         except Exception as e:
