@@ -182,7 +182,7 @@ def _drain_backlog() -> None:
                     start_new_session=True,
                 )
                 register_spawned_pid(proc.pid)
-            marker_path.unlink(missing_ok=True)
+                marker_path.unlink(missing_ok=True)
             log.info("Drained backlog session: %s", data.get("session_id", "?"))
         except Exception as e:
             log.debug("Failed to drain backlog entry %s: %s", marker_path.name, e)
