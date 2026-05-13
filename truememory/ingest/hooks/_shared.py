@@ -11,6 +11,11 @@ DEFAULT_INTERVAL = 14400  # 4 hours in seconds
 EXTRACTED_DIR = Path.home() / ".truememory" / "extracted"
 
 
+def _safe_session_id(session_id: str) -> str:
+    """Sanitize session_id to prevent path traversal."""
+    return "".join(c for c in session_id if c.isalnum() or c in "-_")[:64]
+
+
 def should_extract(interval: int = DEFAULT_INTERVAL) -> bool:
     """Check if enough time has elapsed since the last incremental extraction."""
     if not MARKER_PATH.exists():
@@ -45,9 +50,15 @@ def should_extract_session(session_id: str, transcript_path: str) -> bool:
     """
     if not session_id or session_id == "unknown":
         return True
+    if not transcript_path or not transcript_path.strip():
+        return True
+
+    safe_id = _safe_session_id(session_id)
+    if not safe_id:
+        return True
 
     EXTRACTED_DIR.mkdir(parents=True, exist_ok=True)
-    marker = EXTRACTED_DIR / session_id
+    marker = EXTRACTED_DIR / safe_id
 
     if not marker.exists():
         return True
@@ -75,11 +86,17 @@ def mark_session_extracted(session_id: str, transcript_path: str) -> None:
     """
     if not session_id or session_id == "unknown":
         return
+    if not transcript_path or not transcript_path.strip():
+        return
+
+    safe_id = _safe_session_id(session_id)
+    if not safe_id:
+        return
 
     try:
         EXTRACTED_DIR.mkdir(parents=True, exist_ok=True)
         current_size = Path(transcript_path).stat().st_size
-        marker = EXTRACTED_DIR / session_id
+        marker = EXTRACTED_DIR / safe_id
         marker.write_text(json.dumps({
             "size": current_size,
             "timestamp": time.time(),
