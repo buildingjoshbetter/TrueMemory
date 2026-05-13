@@ -43,6 +43,7 @@ _GPU_PROCESS_COST_GB = {"base": 1.0, "pro": 1.2}
 
 _HARD_FLOOR = 1
 _WARN_CONSECUTIVE_THRESHOLD = 2
+_RAMP_UP_COOLDOWN_SECONDS = 120
 
 # State file for persisting cap + swap readings across cascade processes
 _SPAWN_CAP_STATE_PATH = Path.home() / ".truememory" / ".spawn_cap_state"
@@ -156,7 +157,10 @@ def _load_cap_state() -> dict:
         return {}
 
 
-def _save_cap_state(cap: int, warn_count: int, swap_gb: float) -> None:
+def _save_cap_state(
+    cap: int, warn_count: int, swap_gb: float,
+    last_ramp_time: float | None = None,
+) -> None:
     """Persist spawn cap state to disk atomically.
 
     Must be called while holding the spawn flock.
@@ -165,12 +169,15 @@ def _save_cap_state(cap: int, warn_count: int, swap_gb: float) -> None:
         import json as _json
         _SPAWN_CAP_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp = _SPAWN_CAP_STATE_PATH.with_suffix(".tmp")
-        tmp.write_text(_json.dumps({
+        data = {
             "cap": cap,
             "warn_count": warn_count,
             "last_swap_gb": swap_gb,
             "timestamp": time.time(),
-        }), encoding="utf-8")
+        }
+        if last_ramp_time is not None:
+            data["last_ramp_time"] = last_ramp_time
+        tmp.write_text(_json.dumps(data), encoding="utf-8")
         tmp.rename(_SPAWN_CAP_STATE_PATH)
     except Exception:
         pass
@@ -231,6 +238,7 @@ def _get_spawn_cap() -> int:
     current_cap = state.get("cap", _HARD_FLOOR)
     warn_count = state.get("warn_count", 0)
     last_swap_gb = state.get("last_swap_gb", 0.0)
+    last_ramp_time = state.get("last_ramp_time", 0.0)
 
     # Bug 1 fix: parse actual free percentage from memory_pressure
     free_pct = _get_memory_free_pct()
@@ -249,7 +257,7 @@ def _get_spawn_cap() -> int:
             "delta=%.1fGB) → cap=%d",
             free_pct, pressure, swap_gb, swap_gb - last_swap_gb, _HARD_FLOOR,
         )
-        _save_cap_state(current_cap, warn_count, swap_gb)
+        _save_cap_state(current_cap, warn_count, swap_gb, 0.0)
         return _HARD_FLOOR
 
     # Sustained warn: halve after 2+ consecutive readings (hysteresis)
@@ -261,18 +269,20 @@ def _get_spawn_cap() -> int:
                 "Spawn cap: WARN sustained (%d checks, free=%d%%) → cap=%d",
                 warn_count, free_pct, current_cap,
             )
-            _save_cap_state(current_cap, warn_count, swap_gb)
+            _save_cap_state(current_cap, warn_count, swap_gb, 0.0)
             return current_cap
     else:
         warn_count = 0
 
-    # Healthy: ramp up by 1 toward ceiling
-    if current_cap < ceiling:
+    # Healthy: ramp up by 1 toward ceiling, but only every _RAMP_UP_COOLDOWN_SECONDS
+    now = time.time()
+    if current_cap < ceiling and (now - last_ramp_time) >= _RAMP_UP_COOLDOWN_SECONDS:
         current_cap += 1
+        last_ramp_time = now
         log.info("Spawn cap: ramp-up → cap=%d (ceiling=%d, free=%d%%)",
                  current_cap, ceiling, free_pct)
 
-    _save_cap_state(current_cap, warn_count, swap_gb)
+    _save_cap_state(current_cap, warn_count, swap_gb, last_ramp_time)
     return current_cap
 
 
