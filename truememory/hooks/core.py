@@ -31,13 +31,23 @@ MAX_BUFFER_SIZE = int(os.environ.get("TRUEMEMORY_BUFFER_MAX_BYTES", str(10 * 102
 TRACE_DIR = Path.home() / ".truememory" / "traces"
 LOG_DIR = Path.home() / ".truememory" / "logs"
 BACKLOG_DIR = Path.home() / ".truememory" / "backlog"
-_SPAWN_CAP_OVERRIDE = os.environ.get(
-    "TRUEMEMORY_SPAWN_CAP",
-    os.environ.get("TRUEMEMORY_INGEST_SPAWN_CAP", ""),
-)
-_SPAWN_CAP_EDGE = 3
-_SPAWN_CAP_GPU = 2
-_MEMORY_PRESSURE_THRESHOLD = 0.80
+# ---------------------------------------------------------------------------
+# Dynamic spawn cap — adapts to tier, hardware, and system health
+# ---------------------------------------------------------------------------
+
+# Edge: CPU-bound (Model2Vec is numpy, no GPU). Cap by core count.
+_EDGE_HARD_CEILING = 8
+# Base/Pro: GPU-bound (Qwen3 on MPS). Cap by unified memory.
+_GPU_HARD_CEILING = 6
+_GPU_OS_RESERVE_GB = 2
+_GPU_PROCESS_COST_GB = {"base": 1.0, "pro": 1.2}
+
+_HARD_FLOOR = 1
+_WARN_CONSECUTIVE_THRESHOLD = 2
+
+# State file for persisting cap + swap readings across cascade processes
+_SPAWN_CAP_STATE_PATH = Path.home() / ".truememory" / ".spawn_cap_state"
+_STATE_EXPIRY_SECONDS = 300
 
 
 def _get_current_tier() -> str:
@@ -51,46 +61,220 @@ def _get_current_tier() -> str:
     return "edge"
 
 
-def _get_memory_available_ratio() -> float:
-    """Return fraction of physical memory that is free (0.0 - 1.0)."""
+def _get_physical_cores() -> int:
+    """Physical CPU core count (not logical/hyperthreaded)."""
     try:
-        import subprocess as _sp
-        result = _sp.run(
+        result = subprocess.run(
+            ["sysctl", "-n", "hw.physicalcpu"],
+            capture_output=True, text=True, timeout=2,
+        )
+        return int(result.stdout.strip())
+    except Exception:
+        return os.cpu_count() or 4
+
+
+def _get_total_memory_gb() -> int:
+    """Total unified memory in GB (Apple Silicon shares CPU + GPU)."""
+    try:
+        result = subprocess.run(
             ["sysctl", "-n", "hw.memsize"],
             capture_output=True, text=True, timeout=2,
         )
-        total = int(result.stdout.strip())
-        result2 = _sp.run(
-            ["vm_stat"],
+        return int(result.stdout.strip()) // (1024 ** 3)
+    except Exception:
+        return 8
+
+
+def _get_memory_free_pct() -> int:
+    """macOS system-wide memory free percentage (0-100).
+
+    Parses the `memory_pressure` command output line:
+      System-wide memory free percentage: 81%
+    """
+    try:
+        import re
+        result = subprocess.run(
+            ["memory_pressure"],
+            capture_output=True, text=True, timeout=5,
+        )
+        match = re.search(r"free percentage:\s*(\d+)%", result.stdout)
+        if match:
+            return int(match.group(1))
+        return 100
+    except Exception:
+        return 100
+
+
+def _classify_memory_pressure(free_pct: int) -> str:
+    """Map free memory percentage to pressure level."""
+    if free_pct < 15:
+        return "critical"
+    if free_pct < 40:
+        return "warn"
+    return "normal"
+
+
+def _get_swap_used_gb() -> float:
+    """Current swap usage in GB on macOS.
+
+    Parses `sysctl vm.swapusage` output like:
+      vm.swapusage: total = 2048.00M  used = 1024.00M  free = 1024.00M
+    Handles both M (megabytes) and G (gigabytes) units.
+    """
+    try:
+        import re
+        result = subprocess.run(
+            ["sysctl", "vm.swapusage"],
             capture_output=True, text=True, timeout=2,
         )
-        pages_free = 0
-        page_size = 16384
-        for line in result2.stdout.splitlines():
-            if "page size of" in line:
-                page_size = int(line.split()[-2])
-            if "Pages free" in line:
-                pages_free += int(line.split()[-1].rstrip("."))
-            if "Pages inactive" in line:
-                pages_free += int(line.split()[-1].rstrip("."))
-        free_bytes = pages_free * page_size
-        return free_bytes / total if total > 0 else 0.5
+        match = re.search(r"used\s*=\s*([\d.]+)([MG])", result.stdout)
+        if match:
+            val = float(match.group(1))
+            unit = match.group(2)
+            return val / 1024.0 if unit == "M" else val
+        return 0.0
     except Exception:
-        return 0.5
+        return 0.0
+
+
+def _load_cap_state() -> dict:
+    """Load persisted spawn cap state from disk.
+
+    Returns dict with keys: cap, warn_count, last_swap_gb, timestamp.
+    State expires after _STATE_EXPIRY_SECONDS (e.g., after reboot).
+    Must be called while holding the spawn flock.
+    """
+    try:
+        if not _SPAWN_CAP_STATE_PATH.exists():
+            return {}
+        import json as _json
+        data = _json.loads(_SPAWN_CAP_STATE_PATH.read_text(encoding="utf-8"))
+        ts = data.get("timestamp", 0)
+        if time.time() - ts > _STATE_EXPIRY_SECONDS:
+            return {}
+        return data
+    except Exception:
+        return {}
+
+
+def _save_cap_state(cap: int, warn_count: int, swap_gb: float) -> None:
+    """Persist spawn cap state to disk atomically.
+
+    Must be called while holding the spawn flock.
+    """
+    try:
+        import json as _json
+        _SPAWN_CAP_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _SPAWN_CAP_STATE_PATH.with_suffix(".tmp")
+        tmp.write_text(_json.dumps({
+            "cap": cap,
+            "warn_count": warn_count,
+            "last_swap_gb": swap_gb,
+            "timestamp": time.time(),
+        }), encoding="utf-8")
+        tmp.rename(_SPAWN_CAP_STATE_PATH)
+    except Exception:
+        pass
+
+
+def _compute_ceiling(tier: str) -> int:
+    """Compute the hard ceiling using the correct metric for each tier.
+
+    Edge:     CPU core count (Model2Vec is numpy, CPU-only, RAM irrelevant)
+    Base/Pro: Unified memory (Qwen3 loads ~1-1.2GB per process via MPS)
+    """
+    if tier == "edge":
+        cores = _get_physical_cores()
+        return min(max(_HARD_FLOOR, cores - 1), _EDGE_HARD_CEILING)
+
+    total_gb = _get_total_memory_gb()
+    cost_gb = _GPU_PROCESS_COST_GB.get(tier, 1.2)
+    usable_gb = total_gb - _GPU_OS_RESERVE_GB
+    memory_slots = max(_HARD_FLOOR, int(usable_gb / cost_gb))
+    return min(memory_slots, _GPU_HARD_CEILING)
+
+
+def _is_swap_growing(current_swap_gb: float, last_swap_gb: float) -> bool:
+    """Detect actively growing swap (not just historical usage)."""
+    delta = current_swap_gb - last_swap_gb
+    return delta > 0.5
 
 
 def _get_spawn_cap() -> int:
-    """Return the effective spawn cap, adapting to tier and memory pressure."""
-    if _SPAWN_CAP_OVERRIDE:
-        return int(_SPAWN_CAP_OVERRIDE)
+    """Return the effective spawn cap with ramp-up/ramp-down.
+
+    Algorithm:
+    1. Compute ceiling using the correct metric per tier:
+       - Edge: physical CPU cores - 1 (capped at 8)
+       - Base/Pro: (unified_memory - 2GB) / model_cost (capped at 6)
+    2. Load persisted state (cap, warn_count, swap baseline)
+    3. Check memory pressure (parsed from free percentage, not string match)
+    4. Check swap growth (delta from last reading, not absolute value)
+    5. Ramp down immediately on critical/growing swap
+    6. Halve on sustained warn (2+ consecutive, hysteresis)
+    7. Ramp up by 1 per tick toward ceiling when healthy
+    8. Persist state for next cascade process
+    9. Env var override bypasses everything (for power users)
+    """
+    # Bug 3 fix: read env var at call time, not module load
+    override = os.environ.get(
+        "TRUEMEMORY_SPAWN_CAP",
+        os.environ.get("TRUEMEMORY_INGEST_SPAWN_CAP", ""),
+    )
+    if override:
+        return int(override)
+
     tier = _get_current_tier()
-    cap = _SPAWN_CAP_EDGE if tier == "edge" else _SPAWN_CAP_GPU
-    free_ratio = _get_memory_available_ratio()
-    if free_ratio < (1.0 - _MEMORY_PRESSURE_THRESHOLD):
-        cap = max(1, cap // 2)
-        log.warning("Memory pressure high (%.0f%% used), reducing spawn cap to %d",
-                    (1.0 - free_ratio) * 100, cap)
-    return cap
+    ceiling = _compute_ceiling(tier)
+
+    # Bug 2 fix: load persisted state from disk
+    state = _load_cap_state()
+    current_cap = state.get("cap", _HARD_FLOOR)
+    warn_count = state.get("warn_count", 0)
+    last_swap_gb = state.get("last_swap_gb", 0.0)
+
+    # Bug 1 fix: parse actual free percentage from memory_pressure
+    free_pct = _get_memory_free_pct()
+    pressure = _classify_memory_pressure(free_pct)
+
+    # Bug 4 fix: check swap growth, not absolute value
+    swap_gb = _get_swap_used_gb()
+    swap_growing = _is_swap_growing(swap_gb, last_swap_gb)
+
+    # Emergency: critical pressure or actively growing swap
+    if pressure == "critical" or swap_growing:
+        current_cap = _HARD_FLOOR
+        warn_count = 0
+        log.warning(
+            "Spawn cap: EMERGENCY (free=%d%%, pressure=%s, swap=%.1fGB, "
+            "delta=%.1fGB) → cap=%d",
+            free_pct, pressure, swap_gb, swap_gb - last_swap_gb, _HARD_FLOOR,
+        )
+        _save_cap_state(current_cap, warn_count, swap_gb)
+        return _HARD_FLOOR
+
+    # Sustained warn: halve after 2+ consecutive readings (hysteresis)
+    if pressure == "warn":
+        warn_count += 1
+        if warn_count >= _WARN_CONSECUTIVE_THRESHOLD:
+            current_cap = max(_HARD_FLOOR, current_cap // 2)
+            log.warning(
+                "Spawn cap: WARN sustained (%d checks, free=%d%%) → cap=%d",
+                warn_count, free_pct, current_cap,
+            )
+            _save_cap_state(current_cap, warn_count, swap_gb)
+            return current_cap
+    else:
+        warn_count = 0
+
+    # Healthy: ramp up by 1 toward ceiling
+    if current_cap < ceiling:
+        current_cap += 1
+        log.info("Spawn cap: ramp-up → cap=%d (ceiling=%d, free=%d%%)",
+                 current_cap, ceiling, free_pct)
+
+    _save_cap_state(current_cap, warn_count, swap_gb)
+    return current_cap
 
 
 SPAWN_CAP = 2
