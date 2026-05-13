@@ -362,18 +362,20 @@ def _run_background_ingestion(
 
     # Use flock-based spawn gate to prevent the TOCTOU race where N hooks
     # all check pgrep simultaneously, all see 0, and all spawn.
-    from truememory.hooks.core import spawn_gate, register_spawned_pid
+    from truememory.hooks.core import spawn_gate, register_spawned_pid, _load_cap_state
+
+    effective_cap = _load_cap_state().get("cap", SPAWN_CAP)
 
     with spawn_gate() as allowed:
         if not allowed:
             log.warning(
                 "stop hook: at spawn cap (cap %d); queueing session "
                 "%r to backlog for later",
-                SPAWN_CAP, session_id,
+                effective_cap, session_id,
             )
             _queue_to_backlog(
                 transcript_path, session_id, user_id, db_path,
-                reason=f"spawn_cap_reached:SPAWN_CAP={SPAWN_CAP}",
+                reason=f"spawn_cap_reached:SPAWN_CAP={effective_cap}",
             )
             return
 
