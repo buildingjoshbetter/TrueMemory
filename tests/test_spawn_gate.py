@@ -11,6 +11,15 @@ import os
 import subprocess
 from contextlib import contextmanager
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _disable_ramp_cooldown(monkeypatch):
+    """Disable the 120s ramp-up cooldown in all tests so ramp-up is instant."""
+    from truememory.hooks import core
+    monkeypatch.setattr(core, "_RAMP_UP_COOLDOWN_SECONDS", 0)
+
 
 # ---------------------------------------------------------------------------
 # Spawn gate tests
@@ -344,6 +353,29 @@ def test_single_warn_does_not_reduce(tmp_path, monkeypatch):
     cap = core._get_spawn_cap()
     state = _json_load(tmp_path / ".state")
     assert state["warn_count"] == 0, "Warn count should reset"
+
+
+def test_ramp_up_cooldown_prevents_rapid_ramp(tmp_path, monkeypatch):
+    """With cooldown enabled, rapid cascade calls should NOT ramp up every tick."""
+    from truememory.hooks import core
+
+    monkeypatch.delenv("TRUEMEMORY_SPAWN_CAP", raising=False)
+    monkeypatch.delenv("TRUEMEMORY_INGEST_SPAWN_CAP", raising=False)
+    monkeypatch.setattr(core, "_get_current_tier", lambda: "edge")
+    monkeypatch.setattr(core, "_get_physical_cores", lambda: 10)
+    monkeypatch.setattr(core, "_get_memory_free_pct", lambda: 90)
+    monkeypatch.setattr(core, "_get_swap_used_gb", lambda: 0.0)
+    monkeypatch.setattr(core, "_SPAWN_CAP_STATE_PATH", tmp_path / ".state")
+    monkeypatch.setattr(core, "_RAMP_UP_COOLDOWN_SECONDS", 120)
+
+    caps = []
+    for _ in range(10):
+        caps.append(core._get_spawn_cap())
+
+    # First call: state empty → floor(1), ramps to 2 (last_ramp_time=0 is old)
+    # Subsequent calls: cooldown not elapsed → stays at 2
+    assert caps[0] == 2, f"First call should ramp from floor to 2, got {caps[0]}"
+    assert max(caps) == 2, f"With 120s cooldown, rapid calls should stay at 2, got max {max(caps)}"
 
 
 def _json_load(path):
