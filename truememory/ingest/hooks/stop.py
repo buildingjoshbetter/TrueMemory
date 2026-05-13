@@ -137,8 +137,17 @@ def main():
     if not _has_enough_messages(transcript_path, MIN_MESSAGES):
         return
 
-    # Run ingestion in the background so we don't block Claude Code
+    from truememory.ingest.hooks._shared import should_extract_session, mark_session_extracted
+    if not should_extract_session(session_id, transcript_path):
+        log.info("stop hook: session %s already extracted at this size, skipping", session_id)
+        return
+
     _run_background_ingestion(transcript_path, session_id, args.user, args.db)
+
+    try:
+        mark_session_extracted(session_id, transcript_path)
+    except Exception:
+        pass
 
 
 def _writable_dirs_ok() -> bool:

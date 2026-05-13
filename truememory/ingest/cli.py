@@ -218,6 +218,12 @@ def _run_ingest(args):
     if args.trace:
         save_trace(result, args.trace)
 
+    try:
+        from truememory.ingest.hooks._shared import mark_session_extracted
+        mark_session_extracted(args.session, args.transcript)
+    except Exception:
+        pass
+
     _cascade_next()
 
 
