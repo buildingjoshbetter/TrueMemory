@@ -375,7 +375,32 @@ def init_vec_table(conn: sqlite3.Connection) -> None:
 # Batch embedding & storage
 # ---------------------------------------------------------------------------
 
-_BATCH_SIZE = 100
+_BATCH_SIZE_CPU = 100
+_BATCH_SIZE_MPS = int(os.environ.get("TRUEMEMORY_MPS_BATCH_SIZE", "16"))
+
+
+def _get_batch_size() -> int:
+    """Return batch size appropriate for the current device."""
+    try:
+        import torch
+        if torch.backends.mps.is_available():
+            return _BATCH_SIZE_MPS
+    except Exception:
+        pass
+    return _BATCH_SIZE_CPU
+
+
+def _flush_mps_cache() -> None:
+    """Release MPS GPU memory after each batch to prevent accumulation."""
+    try:
+        import torch
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+            torch.mps.synchronize()
+    except Exception:
+        pass
+    import gc
+    gc.collect()
 
 
 def build_vectors(
@@ -389,9 +414,9 @@ def build_vectors(
     ``messages`` table.  Otherwise it uses the supplied list (each dict must
     have an ``"id"`` and ``"content"`` key).
 
-    Embedding is performed in batches of 100 for efficiency.  Existing rows
-    in ``vec_messages`` are cleared before inserting to keep the vector index
-    in sync with the messages table.
+    Batch size adapts to the device: 100 on CPU (Edge tier), 16 on MPS
+    (Base/Pro tier) to keep GPU memory under ~4GB on 8GB machines.
+    MPS cache is flushed between batches to prevent memory accumulation.
 
     Args:
         conn:     Open database connection with sqlite-vec already loaded
@@ -402,7 +427,6 @@ def build_vectors(
     Returns:
         Number of vectors inserted.
     """
-    # Fetch messages from DB if not provided.
     if messages is None:
         rows = conn.execute(
             "SELECT id, content FROM messages ORDER BY id"
@@ -412,25 +436,35 @@ def build_vectors(
     if not messages:
         return 0
 
-    # Clear existing vectors for a clean rebuild.
     conn.execute("DELETE FROM vec_messages")
 
     model = get_model()
+    batch_size = _get_batch_size()
     total = 0
 
-    for start in range(0, len(messages), _BATCH_SIZE):
-        batch = messages[start : start + _BATCH_SIZE]
-        texts = [m["content"] for m in batch]
-        ids = [m["id"] for m in batch]
+    try:
+        import torch
+        no_grad = torch.no_grad()
+    except ImportError:
+        from contextlib import nullcontext
+        no_grad = nullcontext()
 
-        embeddings = model.encode(texts, show_progress_bar=False)
+    with no_grad:
+        for start in range(0, len(messages), batch_size):
+            batch = messages[start : start + batch_size]
+            texts = [m["content"] for m in batch]
+            ids = [m["id"] for m in batch]
 
-        conn.executemany(
-            "INSERT INTO vec_messages(rowid, embedding) VALUES (?, ?)",
-            [(mid, serialize_f32(emb)) for mid, emb in zip(ids, embeddings)],
-        )
+            embeddings = model.encode(texts, show_progress_bar=False)
 
-        total += len(batch)
+            conn.executemany(
+                "INSERT INTO vec_messages(rowid, embedding) VALUES (?, ?)",
+                [(mid, serialize_f32(emb)) for mid, emb in zip(ids, embeddings)],
+            )
+
+            total += len(batch)
+            del embeddings
+            _flush_mps_cache()
 
     conn.commit()
     _write_embedder_metadata(conn)
@@ -620,29 +654,40 @@ def build_separation_vectors(
     conn.execute("DELETE FROM vec_messages_sep")
 
     model = get_model()
+    batch_size = _get_batch_size()
     total = 0
 
-    for start in range(0, len(messages), _BATCH_SIZE):
-        batch = messages[start : start + _BATCH_SIZE]
+    try:
+        import torch
+        no_grad = torch.no_grad()
+    except ImportError:
+        from contextlib import nullcontext
+        no_grad = nullcontext()
 
-        texts = []
-        ids = []
-        for m in batch:
-            sep_text = _build_sep_text(
-                m.get("sender", "?"), m.get("recipient", "?"),
-                m.get("timestamp", "?"), m["content"],
+    with no_grad:
+        for start in range(0, len(messages), batch_size):
+            batch = messages[start : start + batch_size]
+
+            texts = []
+            ids = []
+            for m in batch:
+                sep_text = _build_sep_text(
+                    m.get("sender", "?"), m.get("recipient", "?"),
+                    m.get("timestamp", "?"), m["content"],
+                )
+                texts.append(sep_text)
+                ids.append(m["id"])
+
+            embeddings = model.encode(texts, show_progress_bar=False)
+
+            conn.executemany(
+                "INSERT INTO vec_messages_sep(rowid, embedding) VALUES (?, ?)",
+                [(mid, serialize_f32(emb)) for mid, emb in zip(ids, embeddings)],
             )
-            texts.append(sep_text)
-            ids.append(m["id"])
 
-        embeddings = model.encode(texts, show_progress_bar=False)
-
-        conn.executemany(
-            "INSERT INTO vec_messages_sep(rowid, embedding) VALUES (?, ?)",
-            [(mid, serialize_f32(emb)) for mid, emb in zip(ids, embeddings)],
-        )
-
-        total += len(batch)
+            total += len(batch)
+            del embeddings
+            _flush_mps_cache()
 
     conn.commit()
     _write_embedder_metadata(conn)

@@ -73,16 +73,20 @@ def test_spawn_cap_allows_spawn_under_cap(monkeypatch, tmp_path):
         yield True
 
     monkeypatch.setattr(core_mod, "spawn_gate", _gate_under_cap)
+    monkeypatch.setattr(core_mod, "register_spawned_pid", lambda pid: None)
     monkeypatch.setattr(stop_mod, "BACKLOG_DIR", tmp_path / "backlog")
     monkeypatch.setattr(stop_mod, "TRACE_DIR", tmp_path / "traces")
     monkeypatch.setattr(stop_mod, "LOG_DIR", tmp_path / "logs")
     (tmp_path / "logs").mkdir()
 
-    popen_calls = []
+    ingest_calls = []
 
     def _record_popen(*args, **kwargs):
-        popen_calls.append((args, kwargs))
-        return type("DummyProc", (), {"pid": 123, "__enter__": lambda s: s, "__exit__": lambda *a: None})()
+        cmd = args[0] if args else kwargs.get("args", [])
+        proc = type("DummyProc", (), {"pid": 123, "__enter__": lambda s: s, "__exit__": lambda *a: None})()
+        if isinstance(cmd, (list, tuple)) and any("truememory.ingest.cli" in str(c) for c in cmd):
+            ingest_calls.append((args, kwargs))
+        return proc
 
     monkeypatch.setattr(subprocess, "Popen", _record_popen)
 
@@ -93,7 +97,7 @@ def test_spawn_cap_allows_spawn_under_cap(monkeypatch, tmp_path):
         db_path="/tmp/fake.db",
     )
 
-    assert len(popen_calls) == 1, "Popen must be called when under the cap"
+    assert len(ingest_calls) == 1, "Popen must be called when under the cap"
     backlog = tmp_path / "backlog"
     assert not backlog.exists() or not list(backlog.glob("*.json"))
 
