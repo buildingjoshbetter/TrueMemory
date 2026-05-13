@@ -6,7 +6,6 @@ modules.
 """
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import os
@@ -283,7 +282,6 @@ SPAWN_PIDS_PATH = Path.home() / ".truememory" / ".spawn_pids"
 
 try:
     import fcntl
-    import signal
     _HAS_FCNTL = True
 except ImportError:
     _HAS_FCNTL = False
