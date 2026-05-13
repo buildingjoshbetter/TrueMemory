@@ -216,10 +216,77 @@ def _run_ingest(args):
     _print_result(result)
 
     if args.trace:
-        # save_trace never raises now — it logs a warning and returns False
-        # on failure so the ingestion's exit code isn't contaminated by a
-        # diagnostic write failure (Bug #3).
         save_trace(result, args.trace)
+
+    _cascade_next()
+
+
+def _cascade_next() -> None:
+    """Spawn the next backlog ingest process if work remains and slots are free.
+
+    This creates a self-sustaining chain: each ingest process spawns the
+    next one before exiting. The chain terminates naturally when the
+    backlog is empty or the spawn cap is reached. SessionStart hooks
+    act as a backup kickstarter if the chain breaks.
+    """
+    import subprocess as _sp
+
+    backlog_dir = Path.home() / ".truememory" / "backlog"
+    if not backlog_dir.exists():
+        return
+
+    try:
+        markers = sorted(backlog_dir.glob("*.json"))
+    except Exception:
+        return
+
+    if not markers:
+        return
+
+    try:
+        from truememory.hooks.core import spawn_gate, register_spawned_pid
+    except ImportError:
+        return
+
+    for marker_path in markers[:1]:
+        try:
+            import json as _json
+            data = _json.loads(marker_path.read_text(encoding="utf-8"))
+            transcript = data.get("transcript_path", "")
+            if not transcript or not Path(transcript).exists():
+                marker_path.unlink(missing_ok=True)
+                continue
+
+            with spawn_gate() as allowed:
+                if not allowed:
+                    return
+
+                cmd = [
+                    sys.executable, "-m", "truememory.ingest.cli",
+                    "ingest", transcript,
+                ]
+                session_id = data.get("session_id", "")
+                if session_id:
+                    cmd.extend(["--session", session_id])
+                if data.get("user_id"):
+                    cmd.extend(["--user", data["user_id"]])
+                if data.get("db_path"):
+                    cmd.extend(["--db", data["db_path"]])
+                proc = _sp.Popen(
+                    cmd,
+                    stdout=_sp.DEVNULL,
+                    stderr=_sp.DEVNULL,
+                    start_new_session=True,
+                )
+                register_spawned_pid(proc.pid)
+
+            marker_path.unlink(missing_ok=True)
+            logging.getLogger(__name__).info(
+                "Cascade: spawned next ingest for session %s (PID %d)",
+                data.get("session_id", "?"), proc.pid,
+            )
+        except Exception:
+            pass
 
 
 def _preflight_writable_target(target: str | None, *, kind: str) -> bool:
