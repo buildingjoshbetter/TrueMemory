@@ -4,8 +4,6 @@ Without the _init_lock, concurrent threads calling add() on a fresh engine
 race through _ensure_connection(), creating orphaned connections and
 potential deadlocks.
 """
-import os
-import tempfile
 import threading
 
 from truememory.engine import TrueMemoryEngine

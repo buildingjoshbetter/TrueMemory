@@ -1148,12 +1148,12 @@ def _drain_batch_from_backlog(markers: list[Path]) -> None:
 
 def _start_backlog_drainer() -> None:
     """Launch the background backlog drainer thread."""
-    if _BACKLOG_DRAIN_INTERVAL <= 0:
+    if _BACKLOG_DRAIN_INTERVAL_NORMAL <= 0:
         log.info("Backlog drainer disabled (TRUEMEMORY_DRAIN_INTERVAL_SEC=0)")
         return
     t = threading.Thread(target=_backlog_drainer, daemon=True, name="backlog-drainer")
     t.start()
-    log.info("Backlog drainer started (interval=%ds)", _BACKLOG_DRAIN_INTERVAL)
+    log.info("Backlog drainer started (interval=%ds)", _BACKLOG_DRAIN_INTERVAL_NORMAL)
 
 
 # ---------------------------------------------------------------------------
