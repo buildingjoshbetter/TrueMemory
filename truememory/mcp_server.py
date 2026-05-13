@@ -1139,8 +1139,8 @@ def _drain_batch_from_backlog(markers: list[Path]) -> None:
                     start_new_session=True,
                 )
                 register_spawned_pid(proc.pid)
+                marker_path.unlink(missing_ok=True)
 
-            marker_path.unlink(missing_ok=True)
             log.info("Backlog drainer: processed session %s", data.get("session_id", "?"))
         except Exception:
             pass

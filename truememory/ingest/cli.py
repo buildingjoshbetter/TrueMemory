@@ -285,8 +285,8 @@ def _cascade_next() -> None:
                     start_new_session=True,
                 )
                 register_spawned_pid(proc.pid)
+                marker_path.unlink(missing_ok=True)
 
-            marker_path.unlink(missing_ok=True)
             logging.getLogger(__name__).info(
                 "Cascade: spawned next ingest for session %s (PID %d)",
                 data.get("session_id", "?"), proc.pid,
