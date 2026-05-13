@@ -1058,17 +1058,17 @@ def _preload_models():
 # Background backlog drainer
 # ---------------------------------------------------------------------------
 
-_BACKLOG_DRAIN_INTERVAL = int(os.environ.get("TRUEMEMORY_DRAIN_INTERVAL_SEC", "60"))
+_BACKLOG_DRAIN_INTERVAL_NORMAL = int(os.environ.get("TRUEMEMORY_DRAIN_INTERVAL_SEC", "30"))
+_BACKLOG_DRAIN_INTERVAL_IDLE = 120
+_BACKLOG_LARGE_THRESHOLD = 20
 _BACKLOG_DIR = Path.home() / ".truememory" / "backlog"
 
 
 def _backlog_drainer() -> None:
     """Background thread that drains the ingest backlog while the MCP server is alive.
 
-    Checks every _BACKLOG_DRAIN_INTERVAL seconds for queued session
-    transcripts and processes them through the spawn gate (hard cap at
-    SPAWN_CAP concurrent ingest processes). Runs as a daemon thread so
-    it dies automatically when the MCP server exits.
+    Fills all available spawn slots each tick instead of draining one at a time.
+    Interval adapts: 30s when backlog is large (>20), 120s when small/empty.
     """
     import time as _time
     _time.sleep(10)
@@ -1076,13 +1076,16 @@ def _backlog_drainer() -> None:
     while True:
         try:
             _reap_children()
+            backlog_count = 0
             if _BACKLOG_DIR.exists():
                 markers = sorted(_BACKLOG_DIR.glob("*.json"))
+                backlog_count = len(markers)
                 if markers:
-                    _drain_one_from_backlog(markers)
+                    _drain_batch_from_backlog(markers)
         except Exception:
             pass
-        _time.sleep(_BACKLOG_DRAIN_INTERVAL)
+        interval = _BACKLOG_DRAIN_INTERVAL_NORMAL if backlog_count > _BACKLOG_LARGE_THRESHOLD else _BACKLOG_DRAIN_INTERVAL_IDLE
+        _time.sleep(interval)
 
 
 def _reap_children() -> None:
@@ -1101,18 +1104,18 @@ def _reap_children() -> None:
         pass
 
 
-def _drain_one_from_backlog(markers: list[Path]) -> None:
-    """Drain a single backlog item if a spawn slot is available."""
+def _drain_batch_from_backlog(markers: list[Path]) -> None:
+    """Fill all available spawn slots from the backlog."""
     import subprocess as _subprocess
     from truememory.hooks.core import spawn_gate, register_spawned_pid
 
-    for marker_path in markers[:1]:
+    for marker_path in markers:
         try:
             data = json.loads(marker_path.read_text(encoding="utf-8"))
             transcript = data.get("transcript_path", "")
             if not transcript or not Path(transcript).exists():
                 marker_path.unlink(missing_ok=True)
-                return
+                continue
 
             with spawn_gate() as allowed:
                 if not allowed:

@@ -30,13 +30,12 @@ def test_spawn_gate_yields_true_under_cap(tmp_path, monkeypatch):
 
 
 def test_spawn_gate_yields_false_at_cap(tmp_path, monkeypatch):
-    """When at or above SPAWN_CAP, gate yields False."""
+    """When at or above the dynamic cap, gate yields False."""
     from truememory.hooks import core
 
-    monkeypatch.setattr(core, "SPAWN_CAP", 1)
+    monkeypatch.setattr(core, "_get_spawn_cap", lambda: 1)
     monkeypatch.setattr(core, "SPAWN_LOCK_PATH", tmp_path / ".spawn.lock")
     monkeypatch.setattr(core, "SPAWN_PIDS_PATH", tmp_path / ".spawn_pids")
-    # Write 1 fake live PID (current process, known alive) — at cap of 1
     (tmp_path / ".spawn_pids").write_text(f"{os.getpid()}\n")
 
     with core.spawn_gate() as allowed:
@@ -48,42 +47,42 @@ def test_spawn_gate_windows_fallback(tmp_path, monkeypatch):
     from truememory.hooks import core
 
     monkeypatch.setattr(core, "_HAS_FCNTL", False)
-    monkeypatch.setattr(core, "SPAWN_CAP", 5)
+    monkeypatch.setattr(core, "_get_spawn_cap", lambda: 5)
     monkeypatch.setattr(core, "_count_active_ingest_processes", lambda: 0)
 
     with core.spawn_gate() as allowed:
         assert allowed is True
 
 
-def test_spawn_cap_env_var_unified(monkeypatch):
-    """TRUEMEMORY_SPAWN_CAP takes precedence over TRUEMEMORY_INGEST_SPAWN_CAP."""
-    monkeypatch.setenv("TRUEMEMORY_SPAWN_CAP", "7")
-    monkeypatch.setenv("TRUEMEMORY_INGEST_SPAWN_CAP", "99")
+def test_spawn_cap_env_var_override(monkeypatch):
+    """TRUEMEMORY_SPAWN_CAP env var overrides dynamic tier-based cap."""
+    from truememory.hooks import core
 
     import importlib
-    from truememory.hooks import core
+    monkeypatch.setenv("TRUEMEMORY_SPAWN_CAP", "7")
     importlib.reload(core)
     try:
-        assert core.SPAWN_CAP == 7
+        assert core._get_spawn_cap() == 7
     finally:
         monkeypatch.delenv("TRUEMEMORY_SPAWN_CAP")
-        monkeypatch.delenv("TRUEMEMORY_INGEST_SPAWN_CAP")
         importlib.reload(core)
 
 
-def test_spawn_cap_fallback_env_var(monkeypatch):
-    """When TRUEMEMORY_SPAWN_CAP is not set, falls back to TRUEMEMORY_INGEST_SPAWN_CAP."""
-    monkeypatch.delenv("TRUEMEMORY_SPAWN_CAP", raising=False)
-    monkeypatch.setenv("TRUEMEMORY_INGEST_SPAWN_CAP", "5")
-
-    import importlib
+def test_spawn_cap_tier_aware(monkeypatch):
+    """Edge tier gets higher cap than Base/Pro."""
     from truememory.hooks import core
-    importlib.reload(core)
-    try:
-        assert core.SPAWN_CAP == 5
-    finally:
-        monkeypatch.delenv("TRUEMEMORY_INGEST_SPAWN_CAP")
-        importlib.reload(core)
+
+    monkeypatch.setattr(core, "_SPAWN_CAP_OVERRIDE", "")
+    monkeypatch.setattr(core, "_get_memory_available_ratio", lambda: 0.5)
+
+    monkeypatch.setattr(core, "_get_current_tier", lambda: "edge")
+    assert core._get_spawn_cap() == core._SPAWN_CAP_EDGE
+
+    monkeypatch.setattr(core, "_get_current_tier", lambda: "base")
+    assert core._get_spawn_cap() == core._SPAWN_CAP_GPU
+
+    monkeypatch.setattr(core, "_get_current_tier", lambda: "pro")
+    assert core._get_spawn_cap() == core._SPAWN_CAP_GPU
 
 
 def test_drain_backlog_respects_spawn_cap(tmp_path, monkeypatch):

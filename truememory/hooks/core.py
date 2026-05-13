@@ -31,10 +31,69 @@ MAX_BUFFER_SIZE = int(os.environ.get("TRUEMEMORY_BUFFER_MAX_BYTES", str(10 * 102
 TRACE_DIR = Path.home() / ".truememory" / "traces"
 LOG_DIR = Path.home() / ".truememory" / "logs"
 BACKLOG_DIR = Path.home() / ".truememory" / "backlog"
-SPAWN_CAP = int(os.environ.get(
+_SPAWN_CAP_OVERRIDE = os.environ.get(
     "TRUEMEMORY_SPAWN_CAP",
-    os.environ.get("TRUEMEMORY_INGEST_SPAWN_CAP", "2"),
-))
+    os.environ.get("TRUEMEMORY_INGEST_SPAWN_CAP", ""),
+)
+_SPAWN_CAP_EDGE = 3
+_SPAWN_CAP_GPU = 2
+_MEMORY_PRESSURE_THRESHOLD = 0.80
+
+
+def _get_current_tier() -> str:
+    try:
+        import json as _json
+        config_path = Path.home() / ".truememory" / "config.json"
+        if config_path.exists():
+            return _json.loads(config_path.read_text(encoding="utf-8")).get("tier", "edge")
+    except Exception:
+        pass
+    return "edge"
+
+
+def _get_memory_available_ratio() -> float:
+    """Return fraction of physical memory that is free (0.0 - 1.0)."""
+    try:
+        import subprocess as _sp
+        result = _sp.run(
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True, text=True, timeout=2,
+        )
+        total = int(result.stdout.strip())
+        result2 = _sp.run(
+            ["vm_stat"],
+            capture_output=True, text=True, timeout=2,
+        )
+        pages_free = 0
+        page_size = 16384
+        for line in result2.stdout.splitlines():
+            if "page size of" in line:
+                page_size = int(line.split()[-2])
+            if "Pages free" in line:
+                pages_free += int(line.split()[-1].rstrip("."))
+            if "Pages inactive" in line:
+                pages_free += int(line.split()[-1].rstrip("."))
+        free_bytes = pages_free * page_size
+        return free_bytes / total if total > 0 else 0.5
+    except Exception:
+        return 0.5
+
+
+def _get_spawn_cap() -> int:
+    """Return the effective spawn cap, adapting to tier and memory pressure."""
+    if _SPAWN_CAP_OVERRIDE:
+        return int(_SPAWN_CAP_OVERRIDE)
+    tier = _get_current_tier()
+    cap = _SPAWN_CAP_EDGE if tier == "edge" else _SPAWN_CAP_GPU
+    free_ratio = _get_memory_available_ratio()
+    if free_ratio < (1.0 - _MEMORY_PRESSURE_THRESHOLD):
+        cap = max(1, cap // 2)
+        log.warning("Memory pressure high (%.0f%% used), reducing spawn cap to %d",
+                    (1.0 - free_ratio) * 100, cap)
+    return cap
+
+
+SPAWN_CAP = 2
 SPAWN_LOCK_PATH = Path.home() / ".truememory" / ".spawn.lock"
 SPAWN_PIDS_PATH = Path.home() / ".truememory" / ".spawn_pids"
 
@@ -113,8 +172,10 @@ def spawn_gate():
 
     On Windows (no fcntl), falls back to best-effort pgrep without a lock.
     """
+    cap = _get_spawn_cap()
+
     if not _HAS_FCNTL:
-        yield _count_active_ingest_processes() < SPAWN_CAP
+        yield _count_active_ingest_processes() < cap
         return
 
     SPAWN_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -124,7 +185,7 @@ def spawn_gate():
         fcntl.flock(fd, fcntl.LOCK_EX)
         live = _read_live_pids()
         _write_pids(live)
-        yield len(live) < SPAWN_CAP
+        yield len(live) < cap
     finally:
         if fd is not None:
             try:
