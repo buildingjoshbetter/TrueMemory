@@ -110,6 +110,9 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main():
+    if os.environ.get("TRUEMEMORY_EXTRACTION"):
+        return
+
     args = _parse_args()
 
     try:

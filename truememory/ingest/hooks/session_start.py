@@ -189,6 +189,9 @@ def _drain_backlog() -> None:
 
 
 def main():
+    if os.environ.get("TRUEMEMORY_EXTRACTION"):
+        return
+
     args = _parse_args()
 
     _drain_backlog()

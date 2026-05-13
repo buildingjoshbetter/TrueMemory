@@ -399,6 +399,7 @@ def _complete_claude_cli(config: LLMConfig, prompt: str, system: str) -> str:
     # Strip ANTHROPIC_API_KEY so the CLI uses OAuth/keychain auth rather
     # than a potentially stale key from the parent environment.
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    env["TRUEMEMORY_EXTRACTION"] = "1"
 
     try:
         proc = subprocess.run(

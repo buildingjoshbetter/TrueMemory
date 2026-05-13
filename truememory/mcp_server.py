@@ -1148,6 +1148,8 @@ def _drain_batch_from_backlog(markers: list[Path]) -> None:
 
 def _start_backlog_drainer() -> None:
     """Launch the background backlog drainer thread."""
+    if os.environ.get("TRUEMEMORY_EXTRACTION"):
+        return
     if _BACKLOG_DRAIN_INTERVAL_NORMAL <= 0:
         log.info("Backlog drainer disabled (TRUEMEMORY_DRAIN_INTERVAL_SEC=0)")
         return

@@ -145,6 +145,9 @@ def _try_capture_email(prompt: str) -> None:
 
 
 def main():
+    if os.environ.get("TRUEMEMORY_EXTRACTION"):
+        return
+
     args = _parse_args()
 
     try:
