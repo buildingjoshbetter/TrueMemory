@@ -423,6 +423,33 @@ class TrueMemoryEngine:
 
         self._ensure_connection()
 
+        # Pre-compute both embeddings OUTSIDE the write lock.
+        #
+        # Previously embed_single() — which makes two model.encode() calls
+        # (~10-50ms each) — ran inside _write_lock, serializing all
+        # concurrent stores through the encoding step. Encoding is
+        # thread-safe (PyTorch releases the GIL inside .encode()), so
+        # concurrent stores can encode in parallel; they only need to
+        # contend for the lock at the actual INSERTs, which are microseconds.
+        #
+        # This is the engine half of the parallel-store-hang fix; the MCP
+        # half is async-ifying the @mcp.tool() handlers in mcp_server.py.
+        content_blob = None
+        sep_blob = None
+        if self._has_vectors:
+            try:
+                from truememory.vector_search import (
+                    _build_sep_text,
+                    get_model,
+                    serialize_f32,
+                )
+                model = get_model()
+                content_blob = serialize_f32(model.encode([content])[0])
+                sep_text = _build_sep_text(sender, recipient, timestamp, content)
+                sep_blob = serialize_f32(model.encode([sep_text])[0])
+            except Exception:
+                logger.debug("Failed to pre-compute embeddings during add()", exc_info=True)
+
         with self._write_lock:
             msg = {
                 "content": content,
@@ -434,13 +461,20 @@ class TrueMemoryEngine:
             }
             new_id = insert_message(self.conn, msg)
 
-            # Embed the message for vector search
-            if self._has_vectors:
+            # Insert pre-computed vector embeddings (no encoding here — μs-level).
+            if self._has_vectors and content_blob is not None:
                 try:
-                    from truememory.vector_search import embed_single
-                    embed_single(self.conn, new_id, content)
+                    self.conn.execute(
+                        "INSERT INTO vec_messages(rowid, embedding) VALUES (?, ?)",
+                        (new_id, content_blob),
+                    )
+                    if sep_blob is not None:
+                        self.conn.execute(
+                            "INSERT INTO vec_messages_sep(rowid, embedding) VALUES (?, ?)",
+                            (new_id, sep_blob),
+                        )
                 except Exception:
-                    logger.debug("Failed to embed message %s during add()", new_id, exc_info=True)
+                    logger.debug("Failed to insert pre-computed vectors for message %s", new_id, exc_info=True)
 
             # Incrementally update entity profile
             if self._has_personality and sender:

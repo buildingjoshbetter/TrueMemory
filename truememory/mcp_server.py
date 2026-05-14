@@ -22,6 +22,7 @@ Configuration via environment variables:
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import json
 import logging
@@ -530,7 +531,7 @@ def _parallel_search(queries, user_id, internal_limit, llm_fn, output_limit):
 
 @mcp.tool()
 @_tracked("tool_store")
-def truememory_store(
+async def truememory_store(
     content: str,
     user_id: str = "",
     metadata: str = "",
@@ -556,13 +557,17 @@ def truememory_store(
         meta = json.loads(metadata) if metadata else None
     except (json.JSONDecodeError, ValueError):
         meta = None
-    result = m.add(content=content, user_id=user_id or None, metadata=meta)
+    # Run engine.add in a thread so the FastMCP event loop stays free to
+    # accept concurrent JSON-RPC requests (fixes parallel-store hang).
+    result = await asyncio.to_thread(
+        m.add, content=content, user_id=user_id or None, metadata=meta
+    )
     return json.dumps(result, indent=2)
 
 
 @mcp.tool()
 @_tracked("tool_search")
-def truememory_search(
+async def truememory_search(
     query: str,
     user_id: str = "",
     limit: int = 10,
@@ -595,18 +600,21 @@ def truememory_search(
 
     if len(queries) == 1:
         m = _get_memory()
-        results = m.search_deep(
+        results = await asyncio.to_thread(
+            m.search_deep,
             queries[0], user_id=uid, limit=_SEARCH_INTERNAL_LIMIT, llm_fn=llm_fn,
         )
         return json.dumps(results[:limit], indent=2)
 
-    results = _parallel_search(queries, uid, _SEARCH_INTERNAL_LIMIT, llm_fn, limit)
+    results = await asyncio.to_thread(
+        _parallel_search, queries, uid, _SEARCH_INTERNAL_LIMIT, llm_fn, limit
+    )
     return json.dumps(results, indent=2)
 
 
 @mcp.tool()
 @_tracked("tool_search_deep")
-def truememory_search_deep(
+async def truememory_search_deep(
     query: str,
     user_id: str = "",
     limit: int = 10,
@@ -640,25 +648,28 @@ def truememory_search_deep(
 
     if len(queries) == 1:
         m = _get_memory()
-        results = m.search_deep(
+        results = await asyncio.to_thread(
+            m.search_deep,
             queries[0], user_id=uid, limit=_DEEP_INTERNAL_LIMIT, llm_fn=llm_fn,
         )
         return json.dumps(results[:limit], indent=2)
 
-    results = _parallel_search(queries, uid, _DEEP_INTERNAL_LIMIT, llm_fn, limit)
+    results = await asyncio.to_thread(
+        _parallel_search, queries, uid, _DEEP_INTERNAL_LIMIT, llm_fn, limit
+    )
     return json.dumps(results, indent=2)
 
 
 @mcp.tool()
 @_tracked("tool_get")
-def truememory_get(memory_id: int) -> str:
+async def truememory_get(memory_id: int) -> str:
     """Get a specific memory by its ID.
 
     Args:
         memory_id: The integer ID of the memory to retrieve.
     """
     m = _get_memory()
-    result = m.get(memory_id)
+    result = await asyncio.to_thread(m.get, memory_id)
     if result is None:
         return json.dumps({"error": f"Memory {memory_id} not found"})
     return json.dumps(result, indent=2)
@@ -666,26 +677,30 @@ def truememory_get(memory_id: int) -> str:
 
 @mcp.tool()
 @_tracked("tool_forget")
-def truememory_forget(memory_id: int) -> str:
+async def truememory_forget(memory_id: int) -> str:
     """Delete a memory by its ID.
 
     Args:
         memory_id: The integer ID of the memory to delete.
     """
     m = _get_memory()
-    deleted = m.delete(memory_id)
+    deleted = await asyncio.to_thread(m.delete, memory_id)
     return json.dumps({"deleted": deleted, "memory_id": memory_id})
 
 
 @mcp.tool()
 @_tracked("tool_stats")
-def truememory_stats() -> str:
+async def truememory_stats() -> str:
     """Get memory system statistics. On first run, returns a welcome message
     and setup instructions — present these to the user to walk them through
     choosing Edge, Base, or Pro tier."""
     m = _get_memory()
-    m._engine._ensure_connection()
-    stats = m.stats()
+    # Stats touches the DB (ensure_connection + COUNT queries) — run in a
+    # thread so the event loop stays free for other MCP requests.
+    def _gather_stats():
+        m._engine._ensure_connection()
+        return m.stats()
+    stats = await asyncio.to_thread(_gather_stats)
     config = _load_config()
     stats["version"] = __version__
     stats["tier"] = config.get("tier", "edge")
@@ -942,7 +957,7 @@ def truememory_configure(
 
 @mcp.tool()
 @_tracked("tool_entity_profile")
-def truememory_entity_profile(entity: str) -> str:
+async def truememory_entity_profile(entity: str) -> str:
     """Get the personality profile for an entity (person).
 
     Returns communication style, preferences, traits, and topics
@@ -952,16 +967,19 @@ def truememory_entity_profile(entity: str) -> str:
         entity: Name of the person/entity to look up.
     """
     m = _get_memory()
-    m._engine._ensure_connection()
 
-    try:
-        from truememory.personality import get_entity_profile
-        profile = get_entity_profile(m._engine.conn, entity)
-        if profile:
-            return json.dumps(profile, indent=2, default=str)
-        return json.dumps({"error": f"No profile found for '{entity}'"})
-    except Exception as e:
-        return json.dumps({"error": str(e)})
+    def _lookup():
+        m._engine._ensure_connection()
+        try:
+            from truememory.personality import get_entity_profile
+            profile = get_entity_profile(m._engine.conn, entity)
+            if profile:
+                return json.dumps(profile, indent=2, default=str)
+            return json.dumps({"error": f"No profile found for '{entity}'"})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    return await asyncio.to_thread(_lookup)
 
 
 # ---------------------------------------------------------------------------
