@@ -175,20 +175,33 @@ def _drain_backlog() -> None:
                     cmd.extend(["--user", data["user_id"]])
                 if data.get("db_path"):
                     cmd.extend(["--db", data["db_path"]])
+                from truememory.ingest.hooks._shared import _safe_session_id
+                _log_dir = Path.home() / ".truememory" / "logs"
+                _log_dir.mkdir(parents=True, exist_ok=True)
+                _safe_sid = _safe_session_id(data.get('session_id', 'unknown')) or 'unknown'
+                _log_file = open(
+                    _log_dir / f"{_safe_sid}.log",
+                    "a", encoding="utf-8",
+                )
                 proc = subprocess.Popen(
                     cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stdout=_log_file,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
                     start_new_session=True,
                 )
+                _log_file.close()
                 register_spawned_pid(proc.pid)
-            marker_path.unlink(missing_ok=True)
+                marker_path.unlink(missing_ok=True)
             log.info("Drained backlog session: %s", data.get("session_id", "?"))
         except Exception as e:
             log.debug("Failed to drain backlog entry %s: %s", marker_path.name, e)
 
 
 def main():
+    if os.environ.get("TRUEMEMORY_EXTRACTION"):
+        return
+
     args = _parse_args()
 
     _drain_backlog()

@@ -1132,15 +1132,25 @@ def _drain_batch_from_backlog(markers: list[Path]) -> None:
                     cmd.extend(["--user", data["user_id"]])
                 if data.get("db_path"):
                     cmd.extend(["--db", data["db_path"]])
+                from truememory.ingest.hooks._shared import _safe_session_id
+                _log_dir = Path.home() / ".truememory" / "logs"
+                _log_dir.mkdir(parents=True, exist_ok=True)
+                _safe_sid = _safe_session_id(data.get('session_id', 'unknown')) or 'unknown'
+                _log_file = open(
+                    _log_dir / f"{_safe_sid}.log",
+                    "a", encoding="utf-8",
+                )
                 proc = _subprocess.Popen(
                     cmd,
-                    stdout=_subprocess.DEVNULL,
-                    stderr=_subprocess.DEVNULL,
+                    stdout=_log_file,
+                    stderr=_subprocess.STDOUT,
+                    stdin=_subprocess.DEVNULL,
                     start_new_session=True,
                 )
+                _log_file.close()
                 register_spawned_pid(proc.pid)
+                marker_path.unlink(missing_ok=True)
 
-            marker_path.unlink(missing_ok=True)
             log.info("Backlog drainer: processed session %s", data.get("session_id", "?"))
         except Exception:
             pass
@@ -1148,6 +1158,8 @@ def _drain_batch_from_backlog(markers: list[Path]) -> None:
 
 def _start_backlog_drainer() -> None:
     """Launch the background backlog drainer thread."""
+    if os.environ.get("TRUEMEMORY_EXTRACTION"):
+        return
     if _BACKLOG_DRAIN_INTERVAL_NORMAL <= 0:
         log.info("Backlog drainer disabled (TRUEMEMORY_DRAIN_INTERVAL_SEC=0)")
         return

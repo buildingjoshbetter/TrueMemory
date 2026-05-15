@@ -145,6 +145,9 @@ def _try_capture_email(prompt: str) -> None:
 
 
 def main():
+    if os.environ.get("TRUEMEMORY_EXTRACTION"):
+        return
+
     args = _parse_args()
 
     try:
@@ -154,7 +157,6 @@ def main():
 
     prompt = input_data.get("prompt", "").strip()
     session_id = input_data.get("session_id", "unknown")
-    transcript_path = input_data.get("transcript_path", "")
 
     if not prompt or len(prompt) < 3:
         return
@@ -167,29 +169,9 @@ def main():
 
     _try_capture_email(prompt)
 
-    # Incremental extraction: if enough time has passed since the last
-    # extraction, trigger background ingestion of the transcript so far.
-    # This captures memories during long-running sessions without waiting
-    # for the Stop hook. The encoding gate + dedup pipeline handles
-    # overlap with the Stop hook's extraction gracefully.
-    if transcript_path and Path(transcript_path).exists():
-        try:
-            interval = int(os.environ.get("TRUEMEMORY_INCREMENTAL_INTERVAL", "14400"))
-            from truememory.ingest.hooks._shared import should_extract, mark_extracted
-            if should_extract(interval):
-                from truememory.ingest.hooks.stop import (
-                    _has_enough_messages, _run_background_ingestion,
-                    TRACE_DIR, LOG_DIR,
-                )
-                TRACE_DIR.mkdir(parents=True, exist_ok=True)
-                LOG_DIR.mkdir(parents=True, exist_ok=True)
-                if _has_enough_messages(transcript_path, 5):
-                    _run_background_ingestion(
-                        transcript_path, session_id, args.user, args.db,
-                    )
-                    mark_extracted()
-        except Exception:
-            pass  # Never crash the hook
+    # Incremental extraction disabled (Fix Sprint v3): extraction now
+    # happens only on session close (Stop) and context compression
+    # (Compact), both gated by per-session transcript-size idempotency.
 
     recall_context = _try_auto_recall(prompt, args.user, args.db)
     if recall_context:

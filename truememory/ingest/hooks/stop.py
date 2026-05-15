@@ -110,6 +110,9 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main():
+    if os.environ.get("TRUEMEMORY_EXTRACTION"):
+        return
+
     args = _parse_args()
 
     try:
@@ -134,8 +137,17 @@ def main():
     if not _has_enough_messages(transcript_path, MIN_MESSAGES):
         return
 
-    # Run ingestion in the background so we don't block Claude Code
+    from truememory.ingest.hooks._shared import should_extract_session, mark_session_extracted
+    if not should_extract_session(session_id, transcript_path):
+        log.info("stop hook: session %s already extracted at this size, skipping", session_id)
+        return
+
     _run_background_ingestion(transcript_path, session_id, args.user, args.db)
+
+    try:
+        mark_session_extracted(session_id, transcript_path)
+    except Exception:
+        pass
 
 
 def _writable_dirs_ok() -> bool:
@@ -350,18 +362,20 @@ def _run_background_ingestion(
 
     # Use flock-based spawn gate to prevent the TOCTOU race where N hooks
     # all check pgrep simultaneously, all see 0, and all spawn.
-    from truememory.hooks.core import spawn_gate, register_spawned_pid
+    from truememory.hooks.core import spawn_gate, register_spawned_pid, _load_cap_state
+
+    effective_cap = _load_cap_state().get("cap", SPAWN_CAP)
 
     with spawn_gate() as allowed:
         if not allowed:
             log.warning(
                 "stop hook: at spawn cap (cap %d); queueing session "
                 "%r to backlog for later",
-                SPAWN_CAP, session_id,
+                effective_cap, session_id,
             )
             _queue_to_backlog(
                 transcript_path, session_id, user_id, db_path,
-                reason=f"spawn_cap_reached:SPAWN_CAP={SPAWN_CAP}",
+                reason=f"spawn_cap_reached:SPAWN_CAP={effective_cap}",
             )
             return
 

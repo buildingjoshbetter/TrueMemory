@@ -644,15 +644,17 @@ def run_background_ingestion(
     else:
         detach_kwargs["start_new_session"] = True
 
+    effective_cap = _load_cap_state().get("cap", SPAWN_CAP)
+
     with spawn_gate() as allowed:
         if not allowed:
             log.warning(
                 "core: at spawn cap (cap %d); queueing session %r",
-                SPAWN_CAP, session_id,
+                effective_cap, session_id,
             )
             _queue_to_backlog(
                 transcript_path, session_id, user_id, db_path,
-                reason=f"spawn_cap_reached:SPAWN_CAP={SPAWN_CAP}",
+                reason=f"spawn_cap_reached:SPAWN_CAP={effective_cap}",
             )
             return
 

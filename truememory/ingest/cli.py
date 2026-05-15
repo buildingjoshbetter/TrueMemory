@@ -218,6 +218,12 @@ def _run_ingest(args):
     if args.trace:
         save_trace(result, args.trace)
 
+    try:
+        from truememory.ingest.hooks._shared import mark_session_extracted
+        mark_session_extracted(args.session, args.transcript)
+    except Exception:
+        pass
+
     _cascade_next()
 
 
@@ -279,8 +285,8 @@ def _cascade_next() -> None:
                     start_new_session=True,
                 )
                 register_spawned_pid(proc.pid)
+                marker_path.unlink(missing_ok=True)
 
-            marker_path.unlink(missing_ok=True)
             logging.getLogger(__name__).info(
                 "Cascade: spawned next ingest for session %s (PID %d)",
                 data.get("session_id", "?"), proc.pid,

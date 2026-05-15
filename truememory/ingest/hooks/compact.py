@@ -43,6 +43,9 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main():
+    if os.environ.get("TRUEMEMORY_EXTRACTION"):
+        return
+
     args = _parse_args()
 
     try:
@@ -67,14 +70,9 @@ def main():
     except Exception as e:
         log.error("Compact hook failed: %s", e)
 
-    # Background extraction: context is about to be compressed, so run
-    # the full extraction pipeline on the transcript before it's lost.
-    # The snapshot above is a lightweight breadcrumb; this does deep
-    # LLM-based fact extraction. Uses the shared timestamp marker to
-    # coordinate with the UserPromptSubmit incremental trigger.
     try:
-        from truememory.ingest.hooks._shared import should_extract, mark_extracted
-        if should_extract(interval=0):
+        from truememory.ingest.hooks._shared import should_extract_session, mark_session_extracted
+        if should_extract_session(session_id, transcript_path):
             from truememory.ingest.hooks.stop import (
                 _has_enough_messages, _run_background_ingestion,
                 TRACE_DIR, LOG_DIR,
@@ -86,7 +84,7 @@ def main():
                     transcript_path, session_id,
                     user_id=args.user, db_path=args.db,
                 )
-                mark_extracted()
+                mark_session_extracted(session_id, transcript_path)
     except Exception as e:
         log.error("Compact background extraction failed: %s", e)
 
