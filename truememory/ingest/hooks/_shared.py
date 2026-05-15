@@ -52,9 +52,27 @@ def should_extract_session(session_id: str, transcript_path: str) -> bool:
     except (json.JSONDecodeError, OSError, ValueError):
         return True
 
+    # If the process that wrote this marker is still alive, an extraction
+    # is already running for this session — skip to avoid piling up
+    # concurrent extractions of the same actively-growing transcript.
+    marker_pid = data.get("pid", 0)
+    if marker_pid and _pid_is_alive(marker_pid):
+        return False
+
     if current_size < last_size:
         return True
     return (current_size - last_size) > 1024
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """Check if a PID is still running."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
 
 
 def mark_session_extracted(session_id: str, transcript_path: str) -> None:
