@@ -140,9 +140,22 @@ def _drain_backlog() -> None:
     Uses the flock-based spawn gate from core to prevent the avalanche
     scenario where N concurrent SessionStart hooks all drain simultaneously,
     spawning N × _DRAIN_CAP ingest processes.
+
+    Uses atomic rename (.json → .processing) to prevent TOCTOU races where
+    multiple drainers read the same marker before either acquires the flock.
     """
     if not BACKLOG_DIR.exists():
         return
+
+    import time as _time
+
+    for stale in BACKLOG_DIR.glob("*.processing"):
+        try:
+            if _time.time() - stale.stat().st_mtime > 300:
+                stale.rename(stale.with_suffix(".json"))
+        except OSError:
+            pass
+
     try:
         markers = sorted(BACKLOG_DIR.glob("*.json"))[:_DRAIN_CAP]
     except Exception:
@@ -151,16 +164,26 @@ def _drain_backlog() -> None:
     from truememory.hooks.core import spawn_gate, register_spawned_pid
 
     for marker_path in markers:
+        claimed_path = marker_path.with_suffix(".processing")
         try:
-            data = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker_path.rename(claimed_path)
+        except (FileNotFoundError, OSError):
+            continue
+
+        try:
+            data = json.loads(claimed_path.read_text(encoding="utf-8"))
             transcript = data.get("transcript_path", "")
             if not transcript or not Path(transcript).exists():
-                marker_path.unlink(missing_ok=True)
+                claimed_path.unlink(missing_ok=True)
                 continue
 
             with spawn_gate() as allowed:
                 if not allowed:
                     log.info("Drain: spawn cap reached, leaving remaining backlog for next session")
+                    try:
+                        claimed_path.rename(marker_path)
+                    except OSError:
+                        pass
                     return
 
                 import subprocess
@@ -192,9 +215,13 @@ def _drain_backlog() -> None:
                 )
                 _log_file.close()
                 register_spawned_pid(proc.pid)
-                marker_path.unlink(missing_ok=True)
+            claimed_path.unlink(missing_ok=True)
             log.info("Drained backlog session: %s", data.get("session_id", "?"))
         except Exception as e:
+            try:
+                claimed_path.rename(marker_path)
+            except OSError:
+                pass
             log.debug("Failed to drain backlog entry %s: %s", marker_path.name, e)
 
 

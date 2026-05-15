@@ -1105,20 +1105,44 @@ def _reap_children() -> None:
 
 
 def _drain_batch_from_backlog(markers: list[Path]) -> None:
-    """Fill all available spawn slots from the backlog."""
+    """Fill all available spawn slots from the backlog.
+
+    Uses atomic rename (.json → .processing) to prevent TOCTOU races where
+    multiple drainers read the same marker before either acquires the flock.
+    """
     import subprocess as _subprocess
+    import time as _time
     from truememory.hooks.core import spawn_gate, register_spawned_pid
 
+    backlog_dir = markers[0].parent if markers else None
+    if backlog_dir:
+        for stale in backlog_dir.glob("*.processing"):
+            try:
+                if _time.time() - stale.stat().st_mtime > 300:
+                    stale.rename(stale.with_suffix(".json"))
+            except OSError:
+                pass
+
     for marker_path in markers:
+        claimed_path = marker_path.with_suffix(".processing")
         try:
-            data = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker_path.rename(claimed_path)
+        except (FileNotFoundError, OSError):
+            continue
+
+        try:
+            data = json.loads(claimed_path.read_text(encoding="utf-8"))
             transcript = data.get("transcript_path", "")
             if not transcript or not Path(transcript).exists():
-                marker_path.unlink(missing_ok=True)
+                claimed_path.unlink(missing_ok=True)
                 continue
 
             with spawn_gate() as allowed:
                 if not allowed:
+                    try:
+                        claimed_path.rename(marker_path)
+                    except OSError:
+                        pass
                     return
 
                 cmd = [
@@ -1149,11 +1173,14 @@ def _drain_batch_from_backlog(markers: list[Path]) -> None:
                 )
                 _log_file.close()
                 register_spawned_pid(proc.pid)
-                marker_path.unlink(missing_ok=True)
 
+            claimed_path.unlink(missing_ok=True)
             log.info("Backlog drainer: processed session %s", data.get("session_id", "?"))
         except Exception:
-            pass
+            try:
+                claimed_path.rename(marker_path)
+            except OSError:
+                pass
 
 
 def _start_backlog_drainer() -> None:

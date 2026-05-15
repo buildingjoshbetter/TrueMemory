@@ -234,12 +234,23 @@ def _cascade_next() -> None:
     next one before exiting. The chain terminates naturally when the
     backlog is empty or the spawn cap is reached. SessionStart hooks
     act as a backup kickstarter if the chain breaks.
+
+    Uses atomic rename (.json → .processing) to prevent TOCTOU races where
+    multiple drainers read the same marker before either acquires the flock.
     """
     import subprocess as _sp
+    import time as _time
 
     backlog_dir = Path.home() / ".truememory" / "backlog"
     if not backlog_dir.exists():
         return
+
+    for stale in backlog_dir.glob("*.processing"):
+        try:
+            if _time.time() - stale.stat().st_mtime > 300:
+                stale.rename(stale.with_suffix(".json"))
+        except OSError:
+            pass
 
     try:
         markers = sorted(backlog_dir.glob("*.json"))
@@ -255,16 +266,26 @@ def _cascade_next() -> None:
         return
 
     for marker_path in markers[:1]:
+        claimed_path = marker_path.with_suffix(".processing")
+        try:
+            marker_path.rename(claimed_path)
+        except (FileNotFoundError, OSError):
+            continue
+
         try:
             import json as _json
-            data = _json.loads(marker_path.read_text(encoding="utf-8"))
+            data = _json.loads(claimed_path.read_text(encoding="utf-8"))
             transcript = data.get("transcript_path", "")
             if not transcript or not Path(transcript).exists():
-                marker_path.unlink(missing_ok=True)
+                claimed_path.unlink(missing_ok=True)
                 continue
 
             with spawn_gate() as allowed:
                 if not allowed:
+                    try:
+                        claimed_path.rename(marker_path)
+                    except OSError:
+                        pass
                     return
 
                 cmd = [
@@ -285,14 +306,17 @@ def _cascade_next() -> None:
                     start_new_session=True,
                 )
                 register_spawned_pid(proc.pid)
-                marker_path.unlink(missing_ok=True)
 
+            claimed_path.unlink(missing_ok=True)
             logging.getLogger(__name__).info(
                 "Cascade: spawned next ingest for session %s (PID %d)",
                 data.get("session_id", "?"), proc.pid,
             )
         except Exception:
-            pass
+            try:
+                claimed_path.rename(marker_path)
+            except OSError:
+                pass
 
 
 def _preflight_writable_target(target: str | None, *, kind: str) -> bool:
