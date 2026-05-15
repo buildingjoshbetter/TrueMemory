@@ -33,6 +33,9 @@ MEMORY_LIMIT = int(os.environ.get("TRUEMEMORY_RECALL_LIMIT", "25"))
 ONBOARDED_MARKER = Path.home() / ".truememory" / ".onboarded"
 BACKLOG_DIR = Path.home() / ".truememory" / "backlog"
 _DRAIN_CAP = 3
+_SCAN_MARKER = Path.home() / ".truememory" / ".last_stale_scan"
+_SCAN_INTERVAL = 900  # 15 minutes
+_SCAN_CAP = 3  # max sessions to queue per scan
 
 BANNER = r"""
 ████████╗██████╗ ██╗   ██╗███████╗    ███╗   ███╗███████╗███╗   ███╗ ██████╗ ██████╗ ██╗   ██╗
@@ -225,6 +228,82 @@ def _drain_backlog() -> None:
             log.debug("Failed to drain backlog entry %s: %s", marker_path.name, e)
 
 
+def _scan_stale_sessions() -> None:
+    """Find transcripts from recent sessions that were never extracted.
+
+    Runs at most once per _SCAN_INTERVAL. Scans Claude Code's project
+    directories for session transcripts modified in the last 24 hours
+    that have no corresponding extraction marker.
+    """
+    import time
+    import re
+
+    if _SCAN_MARKER.exists():
+        try:
+            if time.time() - _SCAN_MARKER.stat().st_mtime < _SCAN_INTERVAL:
+                return
+        except OSError:
+            pass
+
+    try:
+        _SCAN_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        _SCAN_MARKER.write_text(str(time.time()), encoding="utf-8")
+    except OSError:
+        pass
+
+    claude_dir = Path.home() / ".claude" / "projects"
+    if not claude_dir.exists():
+        return
+
+    from truememory.ingest.hooks._shared import EXTRACTED_DIR, _safe_session_id
+    from truememory.ingest.hooks.stop import _queue_to_backlog
+
+    uuid_re = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+    cutoff = time.time() - 86400
+    queued = 0
+
+    for project_dir in claude_dir.iterdir():
+        if not project_dir.is_dir():
+            continue
+        for transcript in project_dir.iterdir():
+            if transcript.suffix != ".jsonl":
+                continue
+            if not transcript.is_file():
+                continue
+            session_id = transcript.stem
+            if not uuid_re.match(session_id):
+                continue
+            try:
+                stat = transcript.stat()
+                if stat.st_mtime < cutoff:
+                    continue
+                if stat.st_size < 5000:
+                    continue
+            except OSError:
+                continue
+
+            safe_id = _safe_session_id(session_id)
+            if not safe_id:
+                continue
+
+            marker = EXTRACTED_DIR / safe_id
+            if marker.exists():
+                continue
+
+            _queue_to_backlog(
+                str(transcript), session_id, "", "",
+                reason="stale_session_recovery",
+            )
+            queued += 1
+            if queued >= _SCAN_CAP:
+                break
+        if queued >= _SCAN_CAP:
+            break
+
+    if queued > 0:
+        log.info("Stale session scanner: queued %d unextracted sessions", queued)
+
+
 def main():
     if os.environ.get("TRUEMEMORY_EXTRACTION"):
         return
@@ -232,6 +311,7 @@ def main():
     args = _parse_args()
 
     _drain_backlog()
+    _scan_stale_sessions()
 
     try:
         input_data = json.load(sys.stdin)

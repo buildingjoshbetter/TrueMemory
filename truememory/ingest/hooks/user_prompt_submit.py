@@ -169,9 +169,24 @@ def main():
 
     _try_capture_email(prompt)
 
-    # Incremental extraction disabled (Fix Sprint v3): extraction now
-    # happens only on session close (Stop) and context compression
-    # (Compact), both gated by per-session transcript-size idempotency.
+    transcript_path = input_data.get("transcript_path", "")
+    if transcript_path and Path(transcript_path).exists():
+        try:
+            from truememory.ingest.hooks._shared import should_extract_session, mark_session_extracted
+            if should_extract_session(session_id, transcript_path):
+                from truememory.ingest.hooks.stop import (
+                    _has_enough_messages, _run_background_ingestion,
+                    TRACE_DIR, LOG_DIR,
+                )
+                TRACE_DIR.mkdir(parents=True, exist_ok=True)
+                LOG_DIR.mkdir(parents=True, exist_ok=True)
+                if _has_enough_messages(transcript_path, 10):
+                    _run_background_ingestion(
+                        transcript_path, session_id, args.user, args.db,
+                    )
+                    mark_session_extracted(session_id, transcript_path)
+        except Exception:
+            pass
 
     recall_context = _try_auto_recall(prompt, args.user, args.db)
     if recall_context:
