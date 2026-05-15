@@ -337,6 +337,11 @@ class TrueMemoryEngine:
                     sqlite_vec.load(self.conn)
                     self.conn.enable_load_extension(False)
                     init_vec_table(self.conn)
+                    try:
+                        from truememory.vector_search import migrate_legacy_vec_tables
+                        migrate_legacy_vec_tables(self.conn)
+                    except Exception:
+                        logger.debug("Legacy vec table migration skipped", exc_info=True)
                     self._has_vectors = True
                 except Exception:
                     logger.debug("Failed to load sqlite-vec extension", exc_info=True)
