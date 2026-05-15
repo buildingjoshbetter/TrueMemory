@@ -21,6 +21,7 @@ Output (stdout JSON):
 """
 
 import argparse
+import fcntl
 import json
 import logging
 import os
@@ -156,14 +157,8 @@ def _drain_backlog() -> None:
     if not BACKLOG_DIR.exists():
         return
 
-    import time as _time
-
-    for stale in BACKLOG_DIR.glob("*.processing"):
-        try:
-            if _time.time() - stale.stat().st_mtime > 300:
-                stale.rename(stale.with_suffix(".json"))
-        except OSError:
-            pass
+    from truememory.ingest.hooks._shared import cleanup_stale_processing, check_extraction_budget, record_stale_processing_pid
+    cleanup_stale_processing(BACKLOG_DIR)
 
     try:
         markers = sorted(BACKLOG_DIR.glob("*.json"))[:_DRAIN_CAP]
@@ -185,6 +180,14 @@ def _drain_backlog() -> None:
             if not transcript or not Path(transcript).exists():
                 claimed_path.unlink(missing_ok=True)
                 continue
+
+            if not check_extraction_budget():
+                log.info("Drain: extraction budget exhausted, leaving backlog for next hour")
+                try:
+                    claimed_path.rename(marker_path)
+                except OSError:
+                    pass
+                return
 
             with spawn_gate() as allowed:
                 if not allowed:
@@ -224,6 +227,7 @@ def _drain_backlog() -> None:
                 )
                 _log_file.close()
                 register_spawned_pid(proc.pid)
+                record_stale_processing_pid(claimed_path, proc.pid)
             claimed_path.unlink(missing_ok=True)
             log.info("Drained backlog session: %s", data.get("session_id", "?"))
         except Exception as e:
@@ -277,81 +281,91 @@ def _scan_stale_sessions() -> None:
     import time
     import re
 
-    if _SCAN_MARKER.exists():
-        try:
-            if time.time() - _SCAN_MARKER.stat().st_mtime < _SCAN_INTERVAL:
-                return
-        except OSError:
-            pass
-
+    _SCAN_MARKER.parent.mkdir(parents=True, exist_ok=True)
     try:
-        _SCAN_MARKER.parent.mkdir(parents=True, exist_ok=True)
-        _SCAN_MARKER.write_text(str(time.time()), encoding="utf-8")
-    except OSError:
-        pass
-
-    claude_dir = Path.home() / ".claude" / "projects"
-    if not claude_dir.exists():
+        scan_fd = os.open(str(_SCAN_MARKER), os.O_RDWR | os.O_CREAT)
+        fcntl.flock(scan_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
         return
 
-    from truememory.ingest.hooks._shared import EXTRACTED_DIR, _safe_session_id, mark_session_extracted
-    from truememory.ingest.hooks.stop import _queue_to_backlog
+    try:
+        try:
+            if _SCAN_MARKER.exists():
+                if time.time() - _SCAN_MARKER.stat().st_mtime < _SCAN_INTERVAL:
+                    return
+            os.lseek(scan_fd, 0, os.SEEK_SET)
+            os.ftruncate(scan_fd, 0)
+            os.write(scan_fd, str(time.time()).encode("utf-8"))
+        except OSError:
+            return
 
-    uuid_re = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
-    cutoff = time.time() - 86400
-    queued = 0
-    skipped_noise = 0
+        claude_dir = Path.home() / ".claude" / "projects"
+        if not claude_dir.exists():
+            return
 
-    for project_dir in claude_dir.iterdir():
-        if not project_dir.is_dir():
-            continue
-        for transcript in project_dir.iterdir():
-            if transcript.suffix != ".jsonl":
+        from truememory.ingest.hooks._shared import EXTRACTED_DIR, _safe_session_id, mark_session_extracted
+        from truememory.ingest.hooks.stop import _queue_to_backlog
+
+        uuid_re = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+        cutoff = time.time() - 86400
+        queued = 0
+        skipped_noise = 0
+
+        for project_dir in claude_dir.iterdir():
+            if not project_dir.is_dir():
                 continue
-            if not transcript.is_file():
-                continue
-            session_id = transcript.stem
-            if not uuid_re.match(session_id):
-                continue
-            try:
-                stat = transcript.stat()
-                if stat.st_mtime < cutoff:
+            for transcript in project_dir.iterdir():
+                if transcript.suffix != ".jsonl":
                     continue
-                if stat.st_size < 5000:
+                if not transcript.is_file():
                     continue
-            except OSError:
-                continue
-
-            safe_id = _safe_session_id(session_id)
-            if not safe_id:
-                continue
-
-            marker = EXTRACTED_DIR / safe_id
-            if marker.exists():
-                continue
-
-            if _is_extraction_transcript(transcript):
+                session_id = transcript.stem
+                if not uuid_re.match(session_id):
+                    continue
                 try:
-                    mark_session_extracted(session_id, str(transcript))
-                except Exception:
-                    pass
-                skipped_noise += 1
-                continue
+                    stat = transcript.stat()
+                    if stat.st_mtime < cutoff:
+                        continue
+                    if stat.st_size < 5000:
+                        continue
+                except OSError:
+                    continue
 
-            _queue_to_backlog(
-                str(transcript), session_id, "", "",
-                reason="stale_session_recovery",
-            )
-            queued += 1
+                safe_id = _safe_session_id(session_id)
+                if not safe_id:
+                    continue
+
+                marker = EXTRACTED_DIR / safe_id
+                if marker.exists():
+                    continue
+
+                if _is_extraction_transcript(transcript):
+                    try:
+                        mark_session_extracted(session_id, str(transcript))
+                    except Exception:
+                        pass
+                    skipped_noise += 1
+                    continue
+
+                _queue_to_backlog(
+                    str(transcript), session_id, "", "",
+                    reason="stale_session_recovery",
+                )
+                queued += 1
+                if queued >= _SCAN_CAP:
+                    break
             if queued >= _SCAN_CAP:
                 break
-        if queued >= _SCAN_CAP:
-            break
 
-    if queued > 0:
-        log.info("Stale session scanner: queued %d unextracted sessions", queued)
-    if skipped_noise > 0:
-        log.info("Stale session scanner: skipped %d extraction noise transcripts", skipped_noise)
+        if queued > 0:
+            log.info("Stale session scanner: queued %d unextracted sessions", queued)
+        if skipped_noise > 0:
+            log.info("Stale session scanner: skipped %d extraction noise transcripts", skipped_noise)
+    finally:
+        try:
+            os.close(scan_fd)
+        except OSError:
+            pass
 
 
 def main():

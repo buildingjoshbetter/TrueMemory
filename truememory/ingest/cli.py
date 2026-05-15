@@ -239,18 +239,13 @@ def _cascade_next() -> None:
     multiple drainers read the same marker before either acquires the flock.
     """
     import subprocess as _sp
-    import time as _time
 
     backlog_dir = Path.home() / ".truememory" / "backlog"
     if not backlog_dir.exists():
         return
 
-    for stale in backlog_dir.glob("*.processing"):
-        try:
-            if _time.time() - stale.stat().st_mtime > 300:
-                stale.rename(stale.with_suffix(".json"))
-        except OSError:
-            pass
+    from truememory.ingest.hooks._shared import cleanup_stale_processing, check_extraction_budget, record_stale_processing_pid
+    cleanup_stale_processing(backlog_dir)
 
     try:
         markers = sorted(backlog_dir.glob("*.json"))
@@ -280,6 +275,13 @@ def _cascade_next() -> None:
                 claimed_path.unlink(missing_ok=True)
                 continue
 
+            if not check_extraction_budget():
+                try:
+                    claimed_path.rename(marker_path)
+                except OSError:
+                    pass
+                return
+
             with spawn_gate() as allowed:
                 if not allowed:
                     try:
@@ -306,6 +308,7 @@ def _cascade_next() -> None:
                     start_new_session=True,
                 )
                 register_spawned_pid(proc.pid)
+                record_stale_processing_pid(claimed_path, proc.pid)
 
             claimed_path.unlink(missing_ok=True)
             logging.getLogger(__name__).info(

@@ -372,6 +372,15 @@ def _run_background_ingestion(
     else:
         detach_kwargs["start_new_session"] = True
 
+    from truememory.ingest.hooks._shared import check_extraction_budget
+    if not check_extraction_budget():
+        log.warning("stop hook: extraction budget exhausted (20/hr); queueing session %r", session_id)
+        _queue_to_backlog(
+            transcript_path, session_id, user_id, db_path,
+            reason="extraction_budget_exhausted",
+        )
+        return 0
+
     # Use flock-based spawn gate to prevent the TOCTOU race where N hooks
     # all check pgrep simultaneously, all see 0, and all spawn.
     from truememory.hooks.core import spawn_gate, register_spawned_pid, _load_cap_state

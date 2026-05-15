@@ -1111,17 +1111,12 @@ def _drain_batch_from_backlog(markers: list[Path]) -> None:
     multiple drainers read the same marker before either acquires the flock.
     """
     import subprocess as _subprocess
-    import time as _time
     from truememory.hooks.core import spawn_gate, register_spawned_pid
 
     backlog_dir = markers[0].parent if markers else None
     if backlog_dir:
-        for stale in backlog_dir.glob("*.processing"):
-            try:
-                if _time.time() - stale.stat().st_mtime > 300:
-                    stale.rename(stale.with_suffix(".json"))
-            except OSError:
-                pass
+        from truememory.ingest.hooks._shared import cleanup_stale_processing
+        cleanup_stale_processing(backlog_dir)
 
     for marker_path in markers:
         claimed_path = marker_path.with_suffix(".processing")
@@ -1136,6 +1131,15 @@ def _drain_batch_from_backlog(markers: list[Path]) -> None:
             if not transcript or not Path(transcript).exists():
                 claimed_path.unlink(missing_ok=True)
                 continue
+
+            from truememory.ingest.hooks._shared import check_extraction_budget, record_stale_processing_pid
+            if not check_extraction_budget():
+                log.info("Backlog drainer: extraction budget exhausted, pausing until next hour")
+                try:
+                    claimed_path.rename(marker_path)
+                except OSError:
+                    pass
+                return
 
             with spawn_gate() as allowed:
                 if not allowed:
@@ -1173,6 +1177,7 @@ def _drain_batch_from_backlog(markers: list[Path]) -> None:
                 )
                 _log_file.close()
                 register_spawned_pid(proc.pid)
+                record_stale_processing_pid(claimed_path, proc.pid)
 
             claimed_path.unlink(missing_ok=True)
             log.info("Backlog drainer: processed session %s", data.get("session_id", "?"))

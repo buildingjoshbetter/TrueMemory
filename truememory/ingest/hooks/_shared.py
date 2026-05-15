@@ -1,11 +1,20 @@
 """Shared utilities for TrueMemory hooks."""
 
 from pathlib import Path
+import fcntl
 import json
+import logging
 import os
 import time
 
+log = logging.getLogger(__name__)
+
 EXTRACTED_DIR = Path.home() / ".truememory" / "extracted"
+
+_BUDGET_FILE = Path.home() / ".truememory" / ".extraction_budget"
+_MAX_EXTRACTIONS_PER_HOUR = int(os.environ.get("TRUEMEMORY_MAX_EXTRACTIONS_PER_HOUR", "20"))
+
+_STALE_PROCESSING_THRESHOLD = 1800  # 30 minutes
 
 
 def _safe_session_id(session_id: str) -> str:
@@ -73,6 +82,72 @@ def _pid_is_alive(pid: int) -> bool:
         return True
     except (OSError, ProcessLookupError):
         return False
+
+
+def check_extraction_budget() -> bool:
+    """Check if the hourly extraction budget allows another extraction.
+
+    Returns True if extraction is allowed, False if budget is exhausted.
+    Uses flock for atomicity across concurrent processes.
+    """
+    if _MAX_EXTRACTIONS_PER_HOUR <= 0:
+        return True
+    try:
+        _BUDGET_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(_BUDGET_FILE), os.O_RDWR | os.O_CREAT)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            raw = os.read(fd, 4096).decode("utf-8", errors="replace").strip()
+            data = json.loads(raw) if raw else {}
+        except (json.JSONDecodeError, ValueError):
+            data = {}
+        current_hour = int(time.time() // 3600)
+        if data.get("hour") != current_hour:
+            data = {"hour": current_hour, "count": 0}
+        if data["count"] >= _MAX_EXTRACTIONS_PER_HOUR:
+            os.close(fd)
+            return False
+        data["count"] += 1
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, json.dumps(data).encode("utf-8"))
+        os.close(fd)
+        return True
+    except OSError:
+        return True
+
+
+def record_stale_processing_pid(processing_path: Path, pid: int) -> None:
+    """Write the spawned PID into a .processing file for liveness checks."""
+    try:
+        data = json.loads(processing_path.read_text(encoding="utf-8"))
+        data["claimed_pid"] = pid
+        processing_path.write_text(json.dumps(data), encoding="utf-8")
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
+def cleanup_stale_processing(backlog_dir: Path) -> None:
+    """Restore .processing files whose owning process has died.
+
+    Uses a 30-minute threshold AND PID liveness check. Only restores
+    if the file is old enough AND the claiming process is no longer running.
+    """
+    for stale in backlog_dir.glob("*.processing"):
+        try:
+            age = time.time() - stale.stat().st_mtime
+            if age <= _STALE_PROCESSING_THRESHOLD:
+                continue
+            try:
+                data = json.loads(stale.read_text(encoding="utf-8"))
+                pid = data.get("claimed_pid", 0)
+                if pid and _pid_is_alive(pid):
+                    continue
+            except (json.JSONDecodeError, OSError):
+                pass
+            stale.rename(stale.with_suffix(".json"))
+        except OSError:
+            pass
 
 
 def mark_session_extracted(session_id: str, transcript_path: str, spawned_pid: int = 0) -> None:
