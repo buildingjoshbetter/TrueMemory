@@ -1132,10 +1132,12 @@ def _drain_batch_from_backlog(markers: list[Path]) -> None:
                     cmd.extend(["--user", data["user_id"]])
                 if data.get("db_path"):
                     cmd.extend(["--db", data["db_path"]])
+                from truememory.ingest.hooks._shared import _safe_session_id
                 _log_dir = Path.home() / ".truememory" / "logs"
                 _log_dir.mkdir(parents=True, exist_ok=True)
+                _safe_sid = _safe_session_id(data.get('session_id', 'unknown')) or 'unknown'
                 _log_file = open(
-                    _log_dir / f"{data.get('session_id', 'unknown')}.log",
+                    _log_dir / f"{_safe_sid}.log",
                     "a", encoding="utf-8",
                 )
                 proc = _subprocess.Popen(
