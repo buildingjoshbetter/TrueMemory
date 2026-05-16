@@ -379,6 +379,12 @@ def _get_llm_fn():
 _SEARCH_INTERNAL_LIMIT = 100   # Benchmark sweet spot
 _DEEP_INTERNAL_LIMIT = 500     # Beyond benchmark — maximum recall
 
+# Hard ceiling on a single truememory_search / truememory_search_deep call.
+# Protects against any single LLM-call, reranker-load, or SQLite-lock stall
+# escalating into a multi-minute MCP-client hang. 60s is generous — typical
+# Pro-tier search_deep completes in ~10s — but it's still recoverable.
+_SEARCH_TIMEOUT_S = 60.0
+
 # Tiered rerankers: standard search resolves per-tier via _current_reranker()
 # so Base / Pro get gte-reranker-modernbert-base (paper §2.0). The deep
 # reranker is tier-independent by design — it's a "maximum recall" escape
@@ -568,96 +574,196 @@ async def truememory_store(
 @mcp.tool()
 @_tracked("tool_search")
 async def truememory_search(
-    query: str,
+    query: str = "",
     user_id: str = "",
     limit: int = 10,
+    queries: list[str] | None = None,
 ) -> str:
     """Search memories using the full agentic retrieval pipeline (HyDE query
     expansion, cross-encoder reranking, multi-round retrieval).
 
-    Supports multiple queries separated by | for parallel execution.
-    Example: "user preferences | project context | recent decisions"
-    All queries run simultaneously and results are merged and deduplicated.
+    For multi-topic parallel search, pass an explicit ``queries`` list.
+    Each entry runs as its own search_deep in parallel (up to 5 workers)
+    and results are merged + deduplicated. Example::
+
+        queries=["user preferences", "project context", "recent decisions"]
+
+    Pipe-separated queries in ``query`` ("A | B | C") are still supported
+    for backward compatibility but DEPRECATED — they often fire by accident
+    when agents include ``|`` as natural-prose punctuation. Prefer the
+    explicit ``queries`` list.
+
+    A hard 60s timeout protects against any single stall (LLM call,
+    reranker load, SQLite lock) escalating into a multi-minute hang.
 
     Args:
-        query: Natural language search query. Use | to separate multiple queries.
+        query: Natural language search query (single topic). For parallel
+            multi-topic search, use ``queries`` instead.
         user_id: Filter results to this user (optional).
         limit: Maximum number of results to return.
+        queries: Explicit list of queries to run in parallel. Preferred
+            over pipe-separated ``query`` for multi-topic search.
     """
-    if not query or not query.strip():
-        return json.dumps([])
     _touch_search_time()
     limit = max(1, min(limit, 200))
     MAX_QUERY_LENGTH = 2000
-    if len(query) > MAX_QUERY_LENGTH:
-        query = query[:MAX_QUERY_LENGTH]
+
+    # Resolve which queries to run. Explicit ``queries`` wins; otherwise
+    # fall back to pipe-split (deprecated) or single-query.
+    if queries:
+        queries_to_run = [
+            q.strip()[:MAX_QUERY_LENGTH]
+            for q in queries
+            if q and q.strip()
+        ]
+    else:
+        if not query or not query.strip():
+            return json.dumps([])
+        if len(query) > MAX_QUERY_LENGTH:
+            query = query[:MAX_QUERY_LENGTH]
+        if "|" in query:
+            log.warning(
+                "truememory_search: pipe-separated queries in `query` are "
+                "deprecated; pass an explicit `queries` list instead. "
+                "Got %d splits from query=%r",
+                query.count("|") + 1, query[:80],
+            )
+            queries_to_run = [q.strip() for q in query.split("|") if q.strip()]
+        else:
+            queries_to_run = [query.strip()]
+
+    if not queries_to_run:
+        return json.dumps([])
+
     _set_reranker(_current_reranker())
     llm_fn = _get_llm_fn()
     uid = user_id or None
-    queries = [q.strip() for q in query.split("|") if q.strip()]
-    if not queries:
-        return json.dumps([])
 
-    if len(queries) == 1:
-        m = _get_memory()
-        results = await asyncio.to_thread(
-            m.search_deep,
-            queries[0], user_id=uid, limit=_SEARCH_INTERNAL_LIMIT, llm_fn=llm_fn,
+    try:
+        if len(queries_to_run) == 1:
+            m = _get_memory()
+            results = await asyncio.wait_for(
+                asyncio.to_thread(
+                    m.search_deep,
+                    queries_to_run[0], user_id=uid,
+                    limit=_SEARCH_INTERNAL_LIMIT, llm_fn=llm_fn,
+                ),
+                timeout=_SEARCH_TIMEOUT_S,
+            )
+            return json.dumps(results[:limit], indent=2)
+
+        results = await asyncio.wait_for(
+            asyncio.to_thread(
+                _parallel_search, queries_to_run, uid,
+                _SEARCH_INTERNAL_LIMIT, llm_fn, limit,
+            ),
+            timeout=_SEARCH_TIMEOUT_S,
         )
-        return json.dumps(results[:limit], indent=2)
-
-    results = await asyncio.to_thread(
-        _parallel_search, queries, uid, _SEARCH_INTERNAL_LIMIT, llm_fn, limit
-    )
-    return json.dumps(results, indent=2)
+        return json.dumps(results, indent=2)
+    except asyncio.TimeoutError:
+        log.error(
+            "truememory_search exceeded %.0fs timeout — aborting. queries=%d",
+            _SEARCH_TIMEOUT_S, len(queries_to_run),
+        )
+        return json.dumps({
+            "error": f"search timed out after {int(_SEARCH_TIMEOUT_S)}s",
+            "queries": len(queries_to_run),
+        })
 
 
 @mcp.tool()
 @_tracked("tool_search_deep")
 async def truememory_search_deep(
-    query: str,
+    query: str = "",
     user_id: str = "",
     limit: int = 10,
+    queries: list[str] | None = None,
 ) -> str:
     """Maximum-depth memory search (top_k=500, multi-round, full reranking).
     Uses a heavier cross-encoder (BAAI/bge-reranker-v2-m3, 568M params) than
     the standard tier-selected reranker — higher recall at higher latency.
 
     Use when truememory_search doesn't find what you need, or for questions
-    requiring evidence scattered across many memories. Supports multiple
-    queries separated by | for parallel execution.
+    requiring evidence scattered across many memories.
+
+    For multi-topic parallel search, pass an explicit ``queries`` list.
+    Pipe-separated queries in ``query`` are still supported but DEPRECATED
+    (see ``truememory_search`` for rationale).
+
+    A hard 60s timeout protects against any single stall escalating into a
+    multi-minute hang.
 
     Args:
-        query: Natural language search query. Use | to separate multiple queries.
+        query: Natural language search query (single topic). For parallel
+            multi-topic search, use ``queries`` instead.
         user_id: Filter results to this user (optional).
         limit: Maximum number of results to return.
+        queries: Explicit list of queries to run in parallel. Preferred
+            over pipe-separated ``query`` for multi-topic search.
     """
-    if not query or not query.strip():
-        return json.dumps([])
     _touch_search_time()
     limit = max(1, min(limit, 200))
     MAX_QUERY_LENGTH = 2000
-    if len(query) > MAX_QUERY_LENGTH:
-        query = query[:MAX_QUERY_LENGTH]
+
+    if queries:
+        queries_to_run = [
+            q.strip()[:MAX_QUERY_LENGTH]
+            for q in queries
+            if q and q.strip()
+        ]
+    else:
+        if not query or not query.strip():
+            return json.dumps([])
+        if len(query) > MAX_QUERY_LENGTH:
+            query = query[:MAX_QUERY_LENGTH]
+        if "|" in query:
+            log.warning(
+                "truememory_search_deep: pipe-separated queries in `query` "
+                "are deprecated; pass an explicit `queries` list instead. "
+                "Got %d splits from query=%r",
+                query.count("|") + 1, query[:80],
+            )
+            queries_to_run = [q.strip() for q in query.split("|") if q.strip()]
+        else:
+            queries_to_run = [query.strip()]
+
+    if not queries_to_run:
+        return json.dumps([])
+
     _set_reranker(_DEEP_RERANKER)
     llm_fn = _get_llm_fn()
     uid = user_id or None
-    queries = [q.strip() for q in query.split("|") if q.strip()]
-    if not queries:
-        return json.dumps([])
 
-    if len(queries) == 1:
-        m = _get_memory()
-        results = await asyncio.to_thread(
-            m.search_deep,
-            queries[0], user_id=uid, limit=_DEEP_INTERNAL_LIMIT, llm_fn=llm_fn,
+    try:
+        if len(queries_to_run) == 1:
+            m = _get_memory()
+            results = await asyncio.wait_for(
+                asyncio.to_thread(
+                    m.search_deep,
+                    queries_to_run[0], user_id=uid,
+                    limit=_DEEP_INTERNAL_LIMIT, llm_fn=llm_fn,
+                ),
+                timeout=_SEARCH_TIMEOUT_S,
+            )
+            return json.dumps(results[:limit], indent=2)
+
+        results = await asyncio.wait_for(
+            asyncio.to_thread(
+                _parallel_search, queries_to_run, uid,
+                _DEEP_INTERNAL_LIMIT, llm_fn, limit,
+            ),
+            timeout=_SEARCH_TIMEOUT_S,
         )
-        return json.dumps(results[:limit], indent=2)
-
-    results = await asyncio.to_thread(
-        _parallel_search, queries, uid, _DEEP_INTERNAL_LIMIT, llm_fn, limit
-    )
-    return json.dumps(results, indent=2)
+        return json.dumps(results, indent=2)
+    except asyncio.TimeoutError:
+        log.error(
+            "truememory_search_deep exceeded %.0fs timeout — aborting. queries=%d",
+            _SEARCH_TIMEOUT_S, len(queries_to_run),
+        )
+        return json.dumps({
+            "error": f"search timed out after {int(_SEARCH_TIMEOUT_S)}s",
+            "queries": len(queries_to_run),
+        })
 
 
 @mcp.tool()
