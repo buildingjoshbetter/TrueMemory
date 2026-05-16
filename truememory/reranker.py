@@ -43,6 +43,15 @@ _model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 _lock = threading.Lock()
 _inference_lock = threading.Lock()  # Protects concurrent model.predict() calls
 
+# Runtime health flag. Set to True if the preload watchdog in
+# mcp_server._preload_models times out or if CrossEncoder construction raises
+# during preload. When True, rerank() / rerank_with_fusion() /
+# rerank_with_modality_fusion() return the original candidate ordering
+# instead of calling get_reranker(), so search stays responsive even when
+# the HuggingFace download stalls or the model cache is corrupt. Cleared
+# only on process restart.
+_load_failed: bool = False
+
 # ---------------------------------------------------------------------------
 # Tier-aware reranker resolution (v0.4.0 paper §2.0)
 # ---------------------------------------------------------------------------
@@ -145,6 +154,34 @@ def unload_reranker() -> None:
     global _model
     with _lock:
         _model = None
+
+
+def is_degraded() -> bool:
+    """True if reranker preload timed out or raised during startup.
+
+    Callers (rerank entrypoints) use this to short-circuit and return the
+    original candidate ordering rather than calling get_reranker() — which
+    would block on the same stalled load that caused the degraded mark.
+    Reset only on process restart.
+    """
+    return _load_failed
+
+
+def mark_degraded(reason: str) -> None:
+    """Mark the reranker as degraded so future rerank() calls fall back.
+
+    Called by the preload watchdog in mcp_server._preload_models when
+    CrossEncoder construction exceeds TRUEMEMORY_RERANKER_TIMEOUT_SEC, or
+    when the load thread raises. Idempotent — only logs the first time
+    to avoid spamming.
+    """
+    global _load_failed
+    if not _load_failed:
+        log.warning(
+            "Reranker degraded: %s. Search will return non-reranked results "
+            "until process restart.", reason,
+        )
+    _load_failed = True
 
 
 def get_reranker(model_name: str | None = None, device: str | None = None):
@@ -255,6 +292,11 @@ def rerank(
     if len(results) <= 1:
         return results[:top_k]
 
+    if _load_failed:
+        # Degraded mode: preload timed out or raised. Don't call
+        # get_reranker — that would block on the same stalled load.
+        return results[:top_k]
+
     model = get_reranker(model_name=model_name, device=device)
 
     # Build (query, content) pairs
@@ -303,6 +345,9 @@ def rerank_with_fusion(
     if not results:
         return []
 
+    if _load_failed:
+        return results[:top_k]
+
     reranked = rerank(query, results, top_k=len(results), **kwargs)
     return _normalize_and_fuse(reranked, rerank_weight, rrf_weight, top_k)
 
@@ -330,6 +375,9 @@ def rerank_with_modality_fusion(
     """
     if not results:
         return []
+
+    if _load_failed:
+        return results[:top_k]
 
     reranked = rerank(query, results, top_k=len(results), **kwargs)
     question_type = _classify_question_type(query)

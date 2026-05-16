@@ -1045,10 +1045,21 @@ def _touch_search_time() -> None:
         _idle_timer.start()
 
 
+_RERANKER_LOAD_TIMEOUT_SEC = int(
+    os.environ.get("TRUEMEMORY_RERANKER_TIMEOUT_SEC", "30")
+)
+
+
 def _preload_models():
     """Pre-load ML models in background threads so the first search is fast.
 
     Set TRUEMEMORY_LAZY_MODELS=1 to skip preloading (models load on first search).
+
+    Reranker load is bounded by TRUEMEMORY_RERANKER_TIMEOUT_SEC (default 30s).
+    If CrossEncoder construction hangs — typically a corrupt HuggingFace cache,
+    a blocked download, or a Windows Defender ASR rule denying a sentencepiece
+    shim — the watchdog marks the reranker degraded and search falls back to
+    non-reranked results instead of blocking every subsequent MCP call.
     """
     if os.environ.get("TRUEMEMORY_LAZY_MODELS", "") == "1":
         log.info("Model preloading disabled (TRUEMEMORY_LAZY_MODELS=1)")
@@ -1069,13 +1080,24 @@ def _preload_models():
         try:
             from truememory.reranker import get_reranker
             get_reranker(model_name=_current_reranker())
-        except Exception:
-            pass
+        except Exception as e:
+            from truememory.reranker import mark_degraded
+            mark_degraded(f"preload raised {type(e).__name__}: {e}")
+
+    def _watch_reranker(thread: threading.Thread):
+        thread.join(timeout=_RERANKER_LOAD_TIMEOUT_SEC)
+        if thread.is_alive():
+            from truememory.reranker import mark_degraded
+            mark_degraded(
+                f"preload exceeded {_RERANKER_LOAD_TIMEOUT_SEC}s (override "
+                "with TRUEMEMORY_RERANKER_TIMEOUT_SEC)"
+            )
 
     t1 = threading.Thread(target=_load_embedding_model_and_db, daemon=True)
     t2 = threading.Thread(target=_load_reranker, daemon=True)
     t1.start()
     t2.start()
+    threading.Thread(target=_watch_reranker, args=(t2,), daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
