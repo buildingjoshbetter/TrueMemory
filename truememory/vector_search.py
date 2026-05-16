@@ -180,13 +180,28 @@ def unload_model() -> None:
 
 
 def get_model():
-    """Lazy-load the embedding model (singleton)."""
+    """Lazy-load the embedding model (singleton).
+
+    When the shared model server is enabled (default), returns a proxy
+    that routes inference to the server process. Falls back to local
+    loading if the server is unavailable.
+    """
     global _model, _embedding_dim
     if _model is not None:
         return _model  # Fast path, no lock needed
     with _lock:
         if _model is not None:
             return _model  # Another thread loaded it
+
+        from truememory.model_client import use_model_server, get_embedding_proxy
+        if use_model_server():
+            try:
+                proxy = get_embedding_proxy(tier=EMBEDDING_MODEL)
+                _model = proxy
+                return _model
+            except Exception:
+                pass  # Fall through to local loading
+
         resolved = EMBEDDING_MODEL
         if resolved == "model2vec":
             from model2vec import StaticModel

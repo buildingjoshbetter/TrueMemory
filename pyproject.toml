@@ -49,6 +49,7 @@ all = ["truememory[agentic]"]
 [project.scripts]
 truememory-mcp = "truememory.mcp_server:main"
 truememory-ingest = "truememory.ingest.cli:main"
+truememory-model-server = "truememory.model_server:main"
 
 [project.urls]
 Homepage = "https://github.com/buildingjoshbetter/TrueMemory"
