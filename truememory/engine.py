@@ -61,6 +61,44 @@ _ALLOWED_COLUMNS = frozenset({
     "source_message_id", "cause_msg_id", "effect_msg_id",
 })
 
+
+# SQLite's default SQLITE_MAX_VARIABLE_NUMBER is 999 on older builds
+# (Debian/Ubuntu system packages still default here as of 2026) and 32766
+# on newer builds. Use a conservative chunk size so DELETE ... WHERE id IN
+# (...) never trips the limit across either build. The constant is small
+# enough to stay well below 999 even after Python's runtime overhead;
+# tuning above 500 buys little because the dominant cost is the per-batch
+# WHERE-clause evaluation, not the round trip.
+_SQLITE_IN_CHUNK = 500
+
+
+def _delete_in_chunks(
+    conn,
+    table: str,
+    col: str,
+    ids: list[int],
+    chunk_size: int = _SQLITE_IN_CHUNK,
+) -> None:
+    """DELETE FROM {table} WHERE {col} IN (?, ?, ...) chunked to avoid
+    SQLite's variable-count limit.
+
+    Caller is responsible for validating ``table`` and ``col`` against the
+    module-level allowlists BEFORE calling — this helper performs no
+    sanitization. Errors raised by SQLite are surfaced to the caller; this
+    function does not swallow exceptions, because the caller's logging
+    context (which user / which scope) is more useful than a generic
+    "delete failed" line here.
+    """
+    if not ids:
+        return
+    for i in range(0, len(ids), chunk_size):
+        chunk = ids[i:i + chunk_size]
+        placeholders = ",".join("?" * len(chunk))
+        conn.execute(
+            f"DELETE FROM {table} WHERE {col} IN ({placeholders})",
+            chunk,
+        )
+
 # ───────────────────────────────────────────────────────────────────────────
 # Optional modules — each import is wrapped so missing deps don't break
 # the engine.  Capability flags track what's available at runtime.
@@ -343,8 +381,18 @@ class TrueMemoryEngine:
                     except Exception:
                         logger.debug("Legacy vec table migration skipped", exc_info=True)
                     self._has_vectors = True
-                except Exception:
-                    logger.debug("Failed to load sqlite-vec extension", exc_info=True)
+                except Exception as exc:
+                    # Surface to the module-level tracker so truememory_stats'
+                    # health payload reflects the FTS-only degradation. The
+                    # previous DEBUG-only log meant operators saw normal
+                    # search results that were silently missing the vector
+                    # tier with no diagnostic signal.
+                    global _vectors_load_error
+                    _vectors_load_error = f"{type(exc).__name__}: {exc}"
+                    logger.warning(
+                        "Failed to load sqlite-vec extension — search will "
+                        "fall back to FTS-only mode: %s", exc, exc_info=True,
+                    )
                     self._has_vectors = False
 
             self._has_hybrid = _HAS_HYBRID and self._has_vectors
@@ -523,10 +571,11 @@ class TrueMemoryEngine:
                 )
                 deleted = cursor.rowcount > 0
 
-                # Clean up related tables scoped to this user
+                # Clean up related tables scoped to this user.
+                # Chunked at 500 ids per IN clause so a user with >999
+                # messages doesn't hit SQLite's SQLITE_MAX_VARIABLE_NUMBER
+                # default and silently fail every related-table cleanup.
                 if msg_ids:
-                    placeholders = ",".join("?" * len(msg_ids))
-
                     for table, col in [
                         ("fact_timeline", "source_message_id"),
                         ("landmark_events", "source_message_id"),
@@ -538,10 +587,7 @@ class TrueMemoryEngine:
                         if col not in _ALLOWED_COLUMNS:
                             raise ValueError(f"Invalid column name: {col}")
                         try:
-                            self.conn.execute(
-                                f"DELETE FROM {table} WHERE {col} IN ({placeholders})",
-                                msg_ids,
-                            )
+                            _delete_in_chunks(self.conn, table, col, msg_ids)
                         except Exception:
                             logger.warning("Failed to clean %s for user %s", table, user_id, exc_info=True)
 
@@ -578,27 +624,21 @@ class TrueMemoryEngine:
                 except Exception:
                     logger.warning("Failed to clean summaries for user %s", user_id, exc_info=True)
 
-                # Clean episodes linked to this user's messages
+                # Clean episodes linked to this user's messages — chunked
+                # for the same SQLITE_MAX_VARIABLE_NUMBER reason as above.
                 if episode_ids:
-                    ep_placeholders = ",".join("?" * len(episode_ids))
                     try:
-                        self.conn.execute(
-                            f"DELETE FROM episodes WHERE id IN ({ep_placeholders})",
-                            episode_ids,
-                        )
+                        _delete_in_chunks(self.conn, "episodes", "id", episode_ids)
                     except Exception:
                         logger.warning("Failed to clean episodes for user %s", user_id, exc_info=True)
 
-                # Clean vector tables for deleted message IDs
+                # Clean vector tables for deleted message IDs (chunked).
                 if msg_ids:
                     for vec_table in ("vec_messages", "vec_messages_sep"):
                         if vec_table not in _ALLOWED_TABLES:
                             raise ValueError(f"Invalid table name: {vec_table}")
                         try:
-                            self.conn.execute(
-                                f"DELETE FROM {vec_table} WHERE rowid IN ({placeholders})",
-                                msg_ids,
-                            )
+                            _delete_in_chunks(self.conn, vec_table, "rowid", msg_ids)
                         except Exception:
                             logger.warning("Failed to clean %s for user %s", vec_table, user_id, exc_info=True)
 
@@ -1731,7 +1771,10 @@ class TrueMemoryEngine:
         # ── Cross-encoder reranking (modality-aware) ──────────────────────
         if use_reranker and self._has_reranker and len(primary_results) > 1:
             try:
-                from truememory.reranker import rerank_with_modality_fusion
+                from truememory.reranker import (
+                    rerank_with_modality_fusion,
+                    is_degraded as _reranker_is_degraded,
+                )
                 final_results = rerank_with_modality_fusion(
                     query, primary_results[:limit * 5],
                     top_k=limit * 2 if (max_per_session > 0 or use_llm_reranker) else limit,
@@ -1739,18 +1782,34 @@ class TrueMemoryEngine:
                     rerank_weight=0.6,
                     device=reranker_device,
                 )
-                # ── LLM reranking (optional, after cross-encoder) ──────────
-                if use_llm_reranker and llm_fn and len(final_results) > limit:
-                    try:
-                        from truememory.reranker import rerank_with_llm
-                        _llm_cap = min(limit * 2, 50)
-                        final_results = rerank_with_llm(
-                            query, final_results[:_llm_cap],
-                            llm_fn=llm_fn, top_k=limit,
-                        )
-                    except Exception:
-                        logger.debug("LLM reranking failed in search_agentic()", exc_info=True)
-                return self._clean_results(final_results, limit, max_per_session=max_per_session)
+                # When the reranker is degraded (preload watchdog timed out
+                # or load raised), rerank_with_modality_fusion returns the
+                # original ordering with no `fused_score`. Don't claim the
+                # cross-encoder ran — fall through to the LLM fallback
+                # below so the user still gets the higher-quality option.
+                _cross_encoder_ran = bool(final_results) and (
+                    "fused_score" in final_results[0]
+                    or "rerank_score" in final_results[0]
+                )
+                if _cross_encoder_ran:
+                    # ── LLM reranking (optional, after cross-encoder) ──────
+                    if use_llm_reranker and llm_fn and len(final_results) > limit:
+                        try:
+                            from truememory.reranker import rerank_with_llm
+                            _llm_cap = min(limit * 2, 50)
+                            final_results = rerank_with_llm(
+                                query, final_results[:_llm_cap],
+                                llm_fn=llm_fn, top_k=limit,
+                            )
+                        except Exception:
+                            logger.debug("LLM reranking failed in search_agentic()", exc_info=True)
+                    return self._clean_results(final_results, limit, max_per_session=max_per_session)
+                # Cross-encoder degraded — proceed to LLM-only fallback path.
+                logger.debug(
+                    "Cross-encoder degraded (is_degraded=%s); falling "
+                    "through to LLM reranker / RRF ordering",
+                    _reranker_is_degraded() if callable(_reranker_is_degraded) else "unknown",
+                )
             except Exception:
                 logger.warning("Cross-encoder rerank failed in search_agentic()", exc_info=True)
 
