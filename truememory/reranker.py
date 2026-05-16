@@ -166,11 +166,18 @@ def get_reranker(model_name: str | None = None, device: str | None = None):
     global _model, _model_name
 
     name = model_name or get_current_reranker_name()
-    if _model is not None and name == _model_name:
-        return _model  # Fast path, no lock needed
+    # Bundle the two reads into a single tuple unpack so the GIL cannot
+    # release between observing `_model` and observing `_model_name`. The
+    # previous form risked a narrow TOCTOU window where a concurrent
+    # tier-switch had written `_model_name` but not yet `_model`, returning
+    # the old model under the new name.
+    cached_model, cached_name = _model, _model_name
+    if cached_model is not None and name == cached_name:
+        return cached_model  # Fast path, no lock needed
     with _lock:
-        if _model is not None and name == _model_name:
-            return _model  # Another thread loaded it
+        cached_model, cached_name = _model, _model_name
+        if cached_model is not None and name == cached_name:
+            return cached_model  # Another thread loaded it
 
         from sentence_transformers import CrossEncoder
 
