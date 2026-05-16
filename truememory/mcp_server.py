@@ -1288,6 +1288,30 @@ def _setup_claude():
         except Exception:
             return False
 
+    def _is_shim_path(cmd: str) -> bool:
+        """Return True if ``cmd`` is a setuptools / uv console-script shim
+        for ``truememory-mcp``.
+
+        Why we care: those shims have a per-install unique SHA-256 hash
+        and Windows Defender's ASR rule 01443614 ("Block executable files
+        from running unless they meet a prevalence, age, or trusted list
+        criteria") silently kills them at launch on hardened Win11
+        baselines. The canonical workaround is to invoke the same code
+        through the high-prevalence signed ``python.exe`` instead. When
+        ``--setup`` runs on a machine that already had a shim path baked
+        into the Claude config from a previous install, we migrate it
+        rather than preserve it.
+        """
+        if not cmd:
+            return False
+        lower = cmd.lower().replace("\\", "/")
+        return (
+            lower.endswith("/truememory-mcp.exe")
+            or lower.endswith("/truememory-mcp")
+            or "/scripts/truememory-mcp" in lower
+            or "/bin/truememory-mcp" in lower
+        )
+
     # --- Claude Code CLI ---
     claude_bin = shutil.which("claude")
     if claude_bin:
@@ -1323,17 +1347,30 @@ def _setup_claude():
                             existing_cmd = tokens[0]
                         break
 
-            if _path_exists(existing_cmd):
-                # Working entry — preserve it (don't clobber a dev venv).
+            if _is_shim_path(existing_cmd):
+                # ASR-vulnerable shim path baked in by a previous install
+                # — migrate to `python -m truememory.mcp_server`.
+                _run_claude([claude_bin, "mcp", "remove", "--scope", "user", "truememory"])
+                retry = _run_claude(add_cmd)
+                if retry is not None and retry.returncode == 0:
+                    configured.append("Claude Code (migrated from shim to python -m form)")
+                elif retry is not None:
+                    print(f"  Claude Code: migration failed — {retry.stderr.strip()}", file=sys.stderr)
+            elif _path_exists(existing_cmd):
+                # Working entry pointing at a real file — preserve it
+                # (don't clobber a dev venv).
                 configured.append("Claude Code (existing config preserved)")
             else:
-                # Stale entry — remove and re-add.
+                # Empty / unparseable / stale entry — remove and re-add.
+                # Treating empty as stale (rather than preserve) is the
+                # safer default: a parse miss + preserve would leave a
+                # broken entry in place with no diagnostic.
                 _run_claude([claude_bin, "mcp", "remove", "--scope", "user", "truememory"])
                 retry = _run_claude(add_cmd)
                 if retry is not None and retry.returncode == 0:
                     configured.append("Claude Code (stale entry replaced)")
                 elif retry is not None:
-                    print(f"  Claude Code: update failed — {retry.stderr.strip()}")
+                    print(f"  Claude Code: update failed — {retry.stderr.strip()}", file=sys.stderr)
         else:
             print(f"  Claude Code: failed — {result.stderr.strip()}")
 
@@ -1359,8 +1396,13 @@ def _setup_claude():
                 servers["truememory"] = {"command": python_path, "args": list(mcp_args)}
                 desktop_config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
                 configured.append("Claude Desktop")
+            elif _is_shim_path(existing_cmd):
+                # ASR-vulnerable shim path — migrate to `python -m`.
+                servers["truememory"] = {"command": python_path, "args": list(mcp_args)}
+                desktop_config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+                configured.append("Claude Desktop (migrated from shim to python -m form)")
             elif _path_exists(existing_cmd):
-                # Working entry — preserve it.
+                # Working entry pointing at a real file — preserve it.
                 configured.append("Claude Desktop (existing config preserved)")
             else:
                 # Stale entry — replace it.
@@ -1368,7 +1410,7 @@ def _setup_claude():
                 desktop_config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
                 configured.append("Claude Desktop (stale entry replaced)")
         except Exception as e:
-            print(f"  Claude Desktop: failed — {e}")
+            print(f"  Claude Desktop: failed — {e}", file=sys.stderr)
 
     # --- Report ---
     print()

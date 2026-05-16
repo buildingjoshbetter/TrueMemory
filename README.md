@@ -59,7 +59,7 @@ ${\color{#1a73e8}\textbf{\textsf{Step 3.}}}$ Wait 3-5 minutes for installation.
 
 &nbsp;
 
-${\color{#1a73e8}\textbf{\textsf{Step 4.}}}$ Quit Claude completely and reopen it (Mac: `Cmd+Q`, Windows: close all Claude windows).
+${\color{#1a73e8}\textbf{\textsf{Step 4.}}}$ Quit Claude completely and reopen it (Mac: `Cmd+Q`, Windows: right-click the Claude icon in the system tray → **Quit** — clicking X only minimizes it, the MCP config only loads at a full launch).
 
 &nbsp;
 
@@ -81,6 +81,19 @@ That's it. TrueMemory remembers your conversations automatically from here.
 #### What the installer does
 
 Installs [uv](https://docs.astral.sh/uv/) (Astral's Python tool manager) if needed, fetches a managed Python 3.12, installs TrueMemory with all tier models into an isolated tool environment, registers the MCP server, wires up lifecycle hooks, and merges instructions into `~/.claude/CLAUDE.md`. Your system Python is never touched. No sudo, no venvs, no pip struggle.
+
+#### Windows: hardened ASR baselines
+
+If you're on a Windows host that has Microsoft Defender's Attack-Surface-Reduction rule [01443614-cd74-433a-b99e-2ecdc07bfc25](https://learn.microsoft.com/en-us/defender-endpoint/attack-surface-reduction-rules-reference#block-executable-files-from-running-unless-they-meet-a-prevalence-age-or-trusted-list-criterion) set to **Block** (rather than the default Audit), the `truememory-mcp.exe` and `truememory-ingest.exe` shims may be silently killed at launch — they're setuptools/uv trampolines with a per-install unique hash, so they fail the cloud-prevalence check.
+
+The installer routes around this by invoking the module form (`python -m truememory.mcp_server`) through the signed `python.exe` wrapper. If you ever need to re-run setup manually on a Block-mode host:
+
+```powershell
+python -m truememory.mcp_server --setup
+python -m truememory.ingest.cli install
+```
+
+This is the same form the installer writes into Claude Code's MCP config, so the running server is unaffected — only the bare-shim invocations are.
 
 #### Audit the script
 
@@ -359,7 +372,7 @@ Find me on X [@Building_Josh](https://x.com/Building_Josh) · Follow us [@Sauron
   organization = {Sauron},
   year = {2026},
   url = {https://github.com/buildingjoshbetter/TrueMemory},
-  version = {0.6.0}
+  version = {0.6.8}
 }
 ```
 
