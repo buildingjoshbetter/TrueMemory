@@ -23,12 +23,13 @@ _PROFILES = {
 }
 
 # RAM thresholds in AVAILABLE GB (not percentage — percentage fails on high-baseline machines)
-_GOOD = {"ram_avail_gb": 4.0, "load": 3.5, "temp": 68.0}
-_BAD = {"ram_avail_gb": 2.0, "load": 9.0, "temp": 78.0}
-_CRITICAL = {"ram_avail_gb": 1.0, "load": 18.0, "temp": 86.0}
-_GOOD_NO_TEMP = {"ram_avail_gb": 4.0, "load": 3.5}
-_BAD_NO_TEMP = {"ram_avail_gb": 2.0, "load": 9.0}
-_CRITICAL_NO_TEMP = {"ram_avail_gb": 1.0, "load": 18.0}
+# Load thresholds are PER-CORE (divided by cpu_count at check time)
+_GOOD = {"ram_avail_gb": 4.0, "load_per_core": 0.7, "temp": 68.0}
+_BAD = {"ram_avail_gb": 2.0, "load_per_core": 2.0, "temp": 78.0}
+_CRITICAL = {"ram_avail_gb": 1.0, "load_per_core": 4.0, "temp": 86.0}
+_GOOD_NO_TEMP = {"ram_avail_gb": 4.0, "load_per_core": 0.7}
+_BAD_NO_TEMP = {"ram_avail_gb": 2.0, "load_per_core": 2.0}
+_CRITICAL_NO_TEMP = {"ram_avail_gb": 1.0, "load_per_core": 4.0}
 
 _SAMPLE_INTERVAL = 5
 _SAMPLES_PER_WINDOW = 2
@@ -122,22 +123,22 @@ class DynamicThrottler:
         return metrics
 
     def _is_good(self, metrics: dict) -> bool:
-        """All metrics in safe range. RAM: more available = better (above threshold)."""
+        """All metrics in safe range. RAM: more available = better. Load: per-core."""
         good = _GOOD if self.has_temp else _GOOD_NO_TEMP
         if metrics["ram_avail_gb"] < good["ram_avail_gb"]:
             return False
-        if metrics["load"] >= good["load"]:
+        if (metrics["load"] / self.cpu_count) >= good["load_per_core"]:
             return False
         if self.has_temp and metrics.get("temp", 0) >= good.get("temp", 999):
             return False
         return True
 
     def _is_bad(self, metrics: dict) -> bool:
-        """Any metric in danger zone. RAM: less available = worse (below threshold)."""
+        """Any metric in danger zone."""
         bad = _BAD if self.has_temp else _BAD_NO_TEMP
         if metrics["ram_avail_gb"] < bad["ram_avail_gb"]:
             return True
-        if metrics["load"] > bad["load"]:
+        if (metrics["load"] / self.cpu_count) > bad["load_per_core"]:
             return True
         if self.has_temp and metrics.get("temp", 0) > bad.get("temp", 999):
             return True
@@ -148,7 +149,7 @@ class DynamicThrottler:
         crit = _CRITICAL if self.has_temp else _CRITICAL_NO_TEMP
         if metrics["ram_avail_gb"] < crit["ram_avail_gb"]:
             return True
-        if metrics["load"] > crit["load"]:
+        if (metrics["load"] / self.cpu_count) > crit["load_per_core"]:
             return True
         if self.has_temp and metrics.get("temp", 0) > crit.get("temp", 999):
             return True
@@ -168,7 +169,7 @@ class DynamicThrottler:
     def _window_mean(self, window: list[dict]) -> dict:
         n = len(window)
         return {
-            "ram": sum(w["ram"] for w in window) / n,
+            "ram_avail_gb": sum(w["ram_avail_gb"] for w in window) / n,
             "load": sum(w["load"] for w in window) / n,
             "temp": sum(w["temp"] for w in window) / n,
         }
@@ -193,7 +194,7 @@ class DynamicThrottler:
         latest = window[-1]
         mean = self._window_mean(window)
         worst = {
-            "ram": max(w["ram"] for w in window),
+            "ram_avail_gb": min(w["ram_avail_gb"] for w in window),
             "load": max(w["load"] for w in window),
             "temp": max(w["temp"] for w in window),
         }
@@ -201,9 +202,9 @@ class DynamicThrottler:
         for sample in window:
             if self._is_critical(sample):
                 log.warning(
-                    "PANIC: critical reading ram=%.0f%% load=%.1f temp=%.0f — "
+                    "PANIC: critical reading ram_avail=%.1fGB load=%.1f temp=%.0f — "
                     "dropping to batch=1, sleeping %ds",
-                    sample["ram"],
+                    sample["ram_avail_gb"],
                     sample["load"],
                     sample["temp"],
                     _PANIC_SLEEP,
@@ -224,10 +225,10 @@ class DynamicThrottler:
             self.good_window_count = 0
             self.samples.clear()
             log.info(
-                "Throttle-down: %d→%d (ram=%.0f%% load=%.1f temp=%.0f)",
+                "Throttle-down: %d→%d (ram_avail=%.1fGB load=%.1f temp=%.0f)",
                 old,
                 self.batch_size,
-                worst["ram"],
+                worst["ram_avail_gb"],
                 worst["load"],
                 worst["temp"],
             )
@@ -249,10 +250,10 @@ class DynamicThrottler:
                 self.last_ramp_time = time.time()
                 self.good_window_count = 0
                 log.info(
-                    "Ramp-up: %d→%d (mean ram=%.0f%% load=%.1f)",
+                    "Ramp-up: %d→%d (mean ram_avail=%.1fGB load=%.1f)",
                     old,
                     self.batch_size,
-                    mean["ram"],
+                    mean["ram_avail_gb"],
                     mean["load"],
                 )
         else:
