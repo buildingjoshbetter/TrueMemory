@@ -286,10 +286,23 @@ class RebuildManager:
             set_embedding_model,
         )
 
+        vec_table = f"vec_messages_{to_group}"
+        try:
+            row = conn.execute(
+                f"SELECT MAX(rowid), COUNT(*) FROM {vec_table}"
+            ).fetchone()
+            last_id = row[0] or 0 if row else 0
+            vec_count = row[1] or 0 if row else 0
+        except sqlite3.OperationalError:
+            last_id = 0
+            vec_count = 0
+
         VectorCacheRegistry.set(
             conn,
             to_group,
             model_name=model_name_for_group(to_group),
+            last_embedded_id=last_id,
+            vector_count=vec_count,
         )
 
         set_embedding_model(target_tier)
