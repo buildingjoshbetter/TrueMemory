@@ -1,5 +1,33 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Hook subprocesses crashed on every Windows launch** —
+  ``truememory/ingest/hooks/_shared.py`` and
+  ``truememory/ingest/hooks/session_start.py`` both called bare
+  ``import fcntl`` at module top, with no ``try / except ImportError``
+  guard. ``fcntl`` is POSIX-only, so on Windows every import raised
+  ``ModuleNotFoundError`` before any function ran. That cascaded to every
+  hook process that imports from ``_shared`` (SessionStart,
+  UserPromptSubmit, Stop) — silently breaking the hook-based
+  memory-extraction pipeline on Windows. Guarded both imports with the same
+  ``_HAS_FCNTL`` flag pattern already used by ``ingest/pipeline.py``,
+  ``hooks/core.py``, and ``hooks/user_prompt_submit.py``. The two call
+  sites (``_shared.check_extraction_budget`` and
+  ``session_start._maybe_scan_for_orphaned_sessions``) now gate their
+  ``fcntl.flock`` calls on ``_HAS_FCNTL`` and fall through to a non-locking
+  path on Windows.
+
+### Tests
+- ``tests/ingest/test_hooks_windows_portability.py`` (8 tests) — pins
+  the ``_HAS_FCNTL`` flag contract on both modules, verifies
+  ``check_extraction_budget`` behaves correctly without ``fcntl``
+  (allows, enforces cap, resets hourly), and includes a POSIX-only
+  regression lock that ``fcntl.flock(LOCK_EX)`` is still acquired on
+  platforms where it's available — so a future refactor can't silently
+  drop cross-process coordination.
+
 ## [0.6.8] — 2026-05-11
 
 ### Fixed
