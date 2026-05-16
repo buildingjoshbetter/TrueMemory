@@ -1028,10 +1028,11 @@ def _touch_search_time() -> None:
 def _preload_models():
     """Pre-load ML models in background threads so the first search is fast.
 
-    Set TRUEMEMORY_LAZY_MODELS=1 to skip preloading (models load on first search).
+    Disabled by default (lazy load on first search). Set
+    TRUEMEMORY_PRELOAD_MODELS=1 to enable eager preloading.
     """
-    if os.environ.get("TRUEMEMORY_LAZY_MODELS", "") == "1":
-        log.info("Model preloading disabled (TRUEMEMORY_LAZY_MODELS=1)")
+    if os.environ.get("TRUEMEMORY_PRELOAD_MODELS", "") != "1":
+        log.info("Models will load on first search (set TRUEMEMORY_PRELOAD_MODELS=1 to preload)")
         return
 
     def _load_embedding_model_and_db():
