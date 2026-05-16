@@ -194,3 +194,157 @@ def test_preload_watchdog_does_not_mark_degraded_on_fast_load(
         "Watchdog fired on a fast load — this would make every boot report "
         "degraded mode, defeating the purpose of the fallback."
     )
+
+
+# ---------------------------------------------------------------------------
+# Bug #2 follow-on: _set_reranker must short-circuit when degraded
+# ---------------------------------------------------------------------------
+
+
+def test_set_reranker_short_circuits_when_degraded(
+    monkeypatch, _reset_reranker_degraded,
+):
+    """If the reranker is already degraded (watchdog fired), _set_reranker
+    must NOT call get_reranker. Otherwise every search call here would block
+    on the same reranker._lock that the stalled preload thread is holding,
+    defeating the async-handler + watchdog fix by serializing the thread pool.
+    """
+    from truememory import mcp_server as ms
+    from truememory import reranker as rr
+
+    rr.mark_degraded("simulated preload timeout")
+
+    called = []
+
+    def _spy(*_a, **_k):
+        called.append(True)
+        return None
+
+    monkeypatch.setattr(rr, "get_reranker", _spy)
+
+    ms._set_reranker("any-model")
+
+    assert called == [], (
+        "_set_reranker called get_reranker despite degraded mode — search "
+        "calls will block on the preload thread's lock."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bug #2 follow-on: degraded state must surface in F06 health payload
+# ---------------------------------------------------------------------------
+
+
+def test_watchdog_writes_to_health_payload_on_timeout(
+    monkeypatch, _reset_reranker_degraded,
+):
+    """When the watchdog marks degraded, the F06 health payload must reflect
+    it. Otherwise truememory_stats lies to the operator while search is
+    silently falling back. The watchdog calls both mark_degraded() AND
+    _record_reranker_error() so the existing health payload reads it.
+    """
+    from truememory import mcp_server as ms
+    from truememory import reranker as rr
+
+    # Reset health-payload state.
+    ms._clear_reranker_error()
+
+    monkeypatch.setattr(ms, "_RERANKER_LOAD_TIMEOUT_SEC", 1)
+    monkeypatch.setattr(rr, "get_reranker", lambda *_a, **_k: time.sleep(30))
+
+    import truememory.vector_search as vs
+    monkeypatch.setattr(vs, "get_model", lambda *_a, **_k: None)
+    monkeypatch.setattr(ms, "_get_memory", lambda: None)
+
+    ms._preload_models()
+
+    # Wait for watchdog to fire.
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if rr.is_degraded():
+            break
+        time.sleep(0.05)
+
+    # Give the watchdog's _record_reranker_error call a moment to land.
+    time.sleep(0.1)
+
+    health = ms._build_health_payload()
+    assert health["reranker"]["status"] == "degraded", (
+        f"Health payload still reports OK after watchdog timeout: {health['reranker']!r}"
+    )
+    assert "preload exceeded" in (health["reranker"]["last_error"] or ""), (
+        f"Expected timeout message in health payload, got: "
+        f"{health['reranker']['last_error']!r}"
+    )
+
+
+def test_load_reranker_exception_writes_to_health_payload(
+    monkeypatch, _reset_reranker_degraded,
+):
+    """If get_reranker raises during preload (not a timeout but an actual
+    exception like ImportError or a HuggingFace-cache OSError), the exception
+    path must also write to the health payload, not just mark degraded.
+    """
+    from truememory import mcp_server as ms
+    from truememory import reranker as rr
+
+    ms._clear_reranker_error()
+
+    monkeypatch.setattr(ms, "_RERANKER_LOAD_TIMEOUT_SEC", 5)
+
+    def _raise(*_a, **_k):
+        raise RuntimeError("simulated HF cache corruption")
+
+    monkeypatch.setattr(rr, "get_reranker", _raise)
+
+    import truememory.vector_search as vs
+    monkeypatch.setattr(vs, "get_model", lambda *_a, **_k: None)
+    monkeypatch.setattr(ms, "_get_memory", lambda: None)
+
+    ms._preload_models()
+
+    # Exception path is synchronous from the thread's perspective; give the
+    # thread a moment to run the except block.
+    time.sleep(0.2)
+
+    health = ms._build_health_payload()
+    assert health["reranker"]["status"] == "degraded"
+    assert "simulated HF cache corruption" in (health["reranker"]["last_error"] or "")
+
+
+# ---------------------------------------------------------------------------
+# Bug #2 follow-on: timeout validation rejects invalid values
+# ---------------------------------------------------------------------------
+
+
+def test_parse_reranker_timeout_accepts_positive():
+    from truememory.mcp_server import _parse_reranker_timeout
+    assert _parse_reranker_timeout("60", default=30) == 60
+    assert _parse_reranker_timeout("1", default=30) == 1
+
+
+def test_parse_reranker_timeout_clamps_zero_and_negative():
+    """0 and negative values are footgun inputs (a typo like
+    `TRUEMEMORY_RERANKER_TIMEOUT_SEC=` in a shell script becomes 0). Must
+    fall back to default — never silently disable the watchdog. The
+    legitimate "skip preload" path is TRUEMEMORY_LAZY_MODELS=1.
+    """
+    from truememory.mcp_server import _parse_reranker_timeout
+    assert _parse_reranker_timeout("0", default=30) == 30
+    assert _parse_reranker_timeout("-5", default=30) == 30
+
+
+def test_parse_reranker_timeout_rejects_non_integer():
+    """Non-integer values (e.g. a user typing '30s' or 'thirty') must not
+    crash the import. Fall back to default with a warning.
+    """
+    from truememory.mcp_server import _parse_reranker_timeout
+    assert _parse_reranker_timeout("30s", default=30) == 30
+    assert _parse_reranker_timeout("thirty", default=30) == 30
+    assert _parse_reranker_timeout("", default=30) == 30
+
+
+def test_parse_reranker_timeout_handles_unset():
+    from truememory.mcp_server import _parse_reranker_timeout
+    assert _parse_reranker_timeout(None, default=30) == 30
+    assert _parse_reranker_timeout(None, default=45) == 45

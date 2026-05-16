@@ -432,7 +432,21 @@ def _set_reranker(model_name: str):
     On failure: store the error in ``_reranker_last_error`` so F07's health
     payload can surface the degradation; log at WARNING once per distinct
     error to avoid spamming logs on every search call.
+
+    If the reranker has already been marked degraded (preload watchdog timed
+    out, or a prior load raised), short-circuit immediately. Without this,
+    every search call here would block on the same ``reranker._lock`` that
+    the stalled preload thread is holding, defeating the whole point of the
+    async-handler + watchdog fix by serializing the thread pool instead of
+    the event loop.
     """
+    try:
+        from truememory.reranker import is_degraded
+        if is_degraded():
+            return
+    except ImportError:
+        pass
+
     try:
         from truememory.reranker import get_reranker
         get_reranker(model_name=model_name)
@@ -1045,8 +1059,43 @@ def _touch_search_time() -> None:
         _idle_timer.start()
 
 
-_RERANKER_LOAD_TIMEOUT_SEC = int(
-    os.environ.get("TRUEMEMORY_RERANKER_TIMEOUT_SEC", "30")
+_RERANKER_LOAD_TIMEOUT_DEFAULT_SEC = 30
+
+
+def _parse_reranker_timeout(raw_value: str | None, default: int = 30) -> int:
+    """Parse the reranker preload timeout env value.
+
+    Clamps non-positive values to ``default`` with a warning so a typo
+    (``TRUEMEMORY_RERANKER_TIMEOUT_SEC=`` in a shell script → ``0``) can
+    never disable the safety net. The legitimate "skip preload entirely"
+    path is ``TRUEMEMORY_LAZY_MODELS=1``, not ``TIMEOUT_SEC=0``.
+
+    Non-integer values fall back to default with a warning. ``None``
+    (env var unset) returns ``default`` silently.
+    """
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        log.warning(
+            "TRUEMEMORY_RERANKER_TIMEOUT_SEC=%r is not an integer; using "
+            "default %ds.", raw_value, default,
+        )
+        return default
+    if value <= 0:
+        log.warning(
+            "TRUEMEMORY_RERANKER_TIMEOUT_SEC=%d is invalid (minimum 1s); "
+            "using default %ds. To skip preload entirely, set "
+            "TRUEMEMORY_LAZY_MODELS=1.", value, default,
+        )
+        return default
+    return value
+
+
+_RERANKER_LOAD_TIMEOUT_SEC = _parse_reranker_timeout(
+    os.environ.get("TRUEMEMORY_RERANKER_TIMEOUT_SEC"),
+    _RERANKER_LOAD_TIMEOUT_DEFAULT_SEC,
 )
 
 
@@ -1059,7 +1108,9 @@ def _preload_models():
     If CrossEncoder construction hangs — typically a corrupt HuggingFace cache,
     a blocked download, or a Windows Defender ASR rule denying a sentencepiece
     shim — the watchdog marks the reranker degraded and search falls back to
-    non-reranked results instead of blocking every subsequent MCP call.
+    non-reranked results instead of blocking every subsequent MCP call. The
+    degraded state is also written into the F06 health payload so
+    truememory_stats surfaces it without operators digging through logs.
     """
     if os.environ.get("TRUEMEMORY_LAZY_MODELS", "") == "1":
         log.info("Model preloading disabled (TRUEMEMORY_LAZY_MODELS=1)")
@@ -1082,16 +1133,20 @@ def _preload_models():
             get_reranker(model_name=_current_reranker())
         except Exception as e:
             from truememory.reranker import mark_degraded
-            mark_degraded(f"preload raised {type(e).__name__}: {e}")
+            reason = f"preload raised {type(e).__name__}: {e}"
+            mark_degraded(reason)
+            _record_reranker_error(reason)
 
     def _watch_reranker(thread: threading.Thread):
         thread.join(timeout=_RERANKER_LOAD_TIMEOUT_SEC)
         if thread.is_alive():
             from truememory.reranker import mark_degraded
-            mark_degraded(
+            reason = (
                 f"preload exceeded {_RERANKER_LOAD_TIMEOUT_SEC}s (override "
                 "with TRUEMEMORY_RERANKER_TIMEOUT_SEC)"
             )
+            mark_degraded(reason)
+            _record_reranker_error(reason)
 
     t1 = threading.Thread(target=_load_embedding_model_and_db, daemon=True)
     t2 = threading.Thread(target=_load_reranker, daemon=True)
