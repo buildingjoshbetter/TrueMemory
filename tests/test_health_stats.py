@@ -104,7 +104,8 @@ def test_health_vectors_degraded_surfaces_engine_error(server, monkeypatch):
 
 
 def test_truememory_stats_includes_health(server):
-    result_json = server.truememory_stats()
+    import asyncio
+    result_json = asyncio.run(server.truememory_stats())
     result = json.loads(result_json)
     assert "health" in result
     assert isinstance(result["health"], dict)
