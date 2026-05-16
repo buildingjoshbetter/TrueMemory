@@ -1,11 +1,23 @@
 """Shared utilities for TrueMemory hooks."""
 
 from pathlib import Path
-import fcntl
 import json
 import logging
 import os
 import time
+
+# fcntl is POSIX-only — Windows has no equivalent file-range locking primitive.
+# Without this guard the entire module fails to import on Windows, which in
+# turn breaks every Claude Code hook that imports from here (session_start,
+# user_prompt_submit, stop). The Windows code path falls back to non-atomic
+# read/write for the extraction budget; the worst-case race window allows
+# 1-2 extra extractions per hour, which is acceptable given the alternative
+# is no enforcement at all.
+try:
+    import fcntl  # type: ignore[import-not-found]
+    _HAS_FCNTL = True
+except ImportError:  # pragma: no cover — Windows path
+    _HAS_FCNTL = False
 
 log = logging.getLogger(__name__)
 
@@ -88,14 +100,23 @@ def check_extraction_budget() -> bool:
     """Check if the hourly extraction budget allows another extraction.
 
     Returns True if extraction is allowed, False if budget is exhausted.
-    Uses flock for atomicity across concurrent processes.
+
+    On POSIX, uses ``fcntl.flock`` for atomic read-modify-write — the only
+    safe way to coordinate this across the concurrent ingest processes the
+    backlog drainer spawns. On Windows (no ``fcntl``), falls back to a
+    non-atomic read-modify-write with a narrow race window: two processes
+    could both pass the check before either writes, briefly exceeding the
+    cap by 1-2 extractions per hour. This is acceptable given the
+    alternative is either no enforcement or a Windows-specific named-mutex
+    implementation whose complexity dwarfs the rare overshoot.
     """
     if _MAX_EXTRACTIONS_PER_HOUR <= 0:
         return True
     try:
         _BUDGET_FILE.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(_BUDGET_FILE), os.O_RDWR | os.O_CREAT)
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if _HAS_FCNTL:
+            fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             raw = os.read(fd, 4096).decode("utf-8", errors="replace").strip()
             data = json.loads(raw) if raw else {}
