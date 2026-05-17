@@ -67,6 +67,44 @@
   right-click the tray icon and Quit.
 - **README BibTeX citation version stale** — bumped from ``0.6.0`` to
   ``0.6.8`` to match ``pyproject.toml``.
+- **``_setup_claude`` clobbered existing config on a ``claude mcp list``
+  parse miss** — when ``claude mcp list`` succeeded but its output didn't
+  contain a line the parser could read (CLI format change, non-standard
+  registration name, etc.), ``existing_cmd`` stayed empty,
+  ``_path_exists("")`` returned False, and the code fell through to the
+  "stale entry → remove + re-add" branch, silently destroying any
+  working dev-venv path the user had set. Now an empty ``existing_cmd``
+  is treated as a parse miss: the existing registration is preserved
+  and a one-line note goes to stderr telling the user what happened and
+  how to recover. Mirror fix in the Claude Desktop branch for entries
+  with an empty / missing ``command`` field — those preserve the entry
+  (so any user-set ``env`` / ``args`` / ``cwd`` survive) and surface a
+  similar stderr note.
+- **``_setup_claude`` success-summary block wrote to stdout** — defence
+  in depth for the MCP stdio protocol. ``--setup`` exits before
+  ``mcp.run()`` so the current behaviour is safe, but a future refactor
+  that called ``_setup_claude`` mid-session would silently corrupt the
+  JSON-RPC transport on any bare ``print()``. Routed every
+  ``_setup_claude`` print (success summary + Claude Code failure path)
+  to ``sys.stderr``. User runs ``--setup`` interactively so the output
+  still lands in their terminal.
+- **``_run_install`` overwrote ``settings.json`` non-atomically** — the
+  previous ``settings_path.write_text(...)`` first truncated the file
+  then wrote it. A concurrent hook reader (SessionStart, Stop) that
+  landed inside that window parsed a partial / empty file and raised
+  ``JSONDecodeError`` — silently breaking the lifecycle hooks until the
+  next install run. Switched to tmp + ``Path.replace()``: atomic on
+  POSIX (``rename(2)``), best-effort on Windows (much narrower race
+  window than truncate + write). Falls back to direct write if rename
+  fails (cross-volume edge case) so the user never loses their hook
+  config.
+- **``_merge_claude_md`` clobbered the previous ``CLAUDE.md.bak``** —
+  the backup filename was a fixed ``.with_suffix(".md.bak")``, so every
+  re-run of ``truememory-ingest install`` silently overwrote the
+  previous backup. Re-installs across user changes (``--user`` arg
+  swap) or upgrades destroyed the backup chain. Timestamped the suffix
+  to ``CLAUDE.md.bak.<unix-ts>`` so every install run leaves its own
+  backup behind.
 
 ## [0.6.8] — 2026-05-11
 

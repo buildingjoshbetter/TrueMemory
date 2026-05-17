@@ -1360,19 +1360,37 @@ def _setup_claude():
                 # Working entry pointing at a real file — preserve it
                 # (don't clobber a dev venv).
                 configured.append("Claude Code (existing config preserved)")
-            else:
-                # Empty / unparseable / stale entry — remove and re-add.
-                # Treating empty as stale (rather than preserve) is the
-                # safer default: a parse miss + preserve would leave a
-                # broken entry in place with no diagnostic.
+            elif existing_cmd:
+                # Non-empty command path that doesn't resolve on disk —
+                # genuinely stale. Remove and re-add.
                 _run_claude([claude_bin, "mcp", "remove", "--scope", "user", "truememory"])
                 retry = _run_claude(add_cmd)
                 if retry is not None and retry.returncode == 0:
                     configured.append("Claude Code (stale entry replaced)")
                 elif retry is not None:
                     print(f"  Claude Code: update failed — {retry.stderr.strip()}", file=sys.stderr)
+            else:
+                # `claude mcp list` succeeded but our regex didn't find a
+                # truememory line we could parse. Could mean: (a) the
+                # claude CLI changed its output format, (b) the entry was
+                # registered under a non-standard name, (c) some other
+                # parse miss we don't recognize. The previous behaviour
+                # here was to treat empty-cmd as stale and force-remove —
+                # which silently clobbered any working dev-venv path the
+                # user had set up. Preserve the existing entry instead
+                # and surface a one-line note on stderr so a user who is
+                # actively debugging knows what happened.
+                configured.append("Claude Code (existing config — list parse miss, preserved)")
+                print(
+                    "  Claude Code: could not parse `claude mcp list` output for the "
+                    "truememory entry; leaving the existing registration untouched. "
+                    "If the MCP server isn't connecting, run "
+                    "`claude mcp remove --scope user truememory` and re-run "
+                    "`python -m truememory.mcp_server --setup`.",
+                    file=sys.stderr,
+                )
         else:
-            print(f"  Claude Code: failed — {result.stderr.strip()}")
+            print(f"  Claude Code: failed — {result.stderr.strip()}", file=sys.stderr)
 
     # --- Claude Desktop ---
     # pre-PR49, this path was hardcoded to the macOS
@@ -1404,33 +1422,55 @@ def _setup_claude():
             elif _path_exists(existing_cmd):
                 # Working entry pointing at a real file — preserve it.
                 configured.append("Claude Desktop (existing config preserved)")
-            else:
-                # Stale entry — replace it.
+            elif existing_cmd:
+                # Non-empty command path that doesn't resolve on disk —
+                # genuinely stale. Replace.
                 servers["truememory"] = {"command": python_path, "args": list(mcp_args)}
                 desktop_config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
                 configured.append("Claude Desktop (stale entry replaced)")
+            else:
+                # Entry exists but has an empty/missing `command` field —
+                # config is malformed but present. Preserve to avoid
+                # clobbering other fields the user may have set
+                # (env, args, cwd). Surface a stderr note so the user can
+                # fix it by hand.
+                configured.append("Claude Desktop (existing config — empty 'command', preserved)")
+                print(
+                    f"  Claude Desktop: the truememory entry in "
+                    f"{desktop_config_path} has an empty 'command' field; "
+                    f"leaving it as-is so any other fields you set are preserved. "
+                    f"Delete the entry manually and re-run setup to register "
+                    f"a fresh one.",
+                    file=sys.stderr,
+                )
         except Exception as e:
             print(f"  Claude Desktop: failed — {e}", file=sys.stderr)
 
     # --- Report ---
-    print()
-    print(f"  TrueMemory v{__version__}")
-    print()
+    # All output goes to stderr — defence in depth for the MCP stdio
+    # protocol. `--setup` returns before `mcp.run()` so stdout is not yet
+    # the JSON-RPC transport, but a future refactor that calls
+    # `_setup_claude` mid-session would silently corrupt the protocol on
+    # any bare `print()`. The user runs `--setup` interactively, so
+    # stderr lands in their terminal either way.
+    print(file=sys.stderr)
+    print(f"  TrueMemory v{__version__}", file=sys.stderr)
+    print(file=sys.stderr)
     if configured:
         for c in configured:
-            print(f"  + {c}")
-        print()
-        print("  Start a new Claude session — TrueMemory will walk you through setup.")
+            print(f"  + {c}", file=sys.stderr)
+        print(file=sys.stderr)
+        print("  Start a new Claude session — TrueMemory will walk you through setup.", file=sys.stderr)
     else:
         if not claude_bin:
-            print("  Claude Code CLI not found on PATH.")
-            print("  If you just installed it, try opening a new terminal window.")
+            print("  Claude Code CLI not found on PATH.", file=sys.stderr)
+            print("  If you just installed it, try opening a new terminal window.", file=sys.stderr)
         if not desktop_config_path.parent.exists():
-            print("  Claude Desktop not detected.")
-        print()
-        print("  Manual setup:")
-        print(f'    claude mcp add --scope user truememory -- "{python_path}" -m truememory.mcp_server')
-    print()
+            print("  Claude Desktop not detected.", file=sys.stderr)
+        print(file=sys.stderr)
+        print("  Manual setup:", file=sys.stderr)
+        print(f'    claude mcp add --scope user truememory -- "{python_path}" -m truememory.mcp_server', file=sys.stderr)
+    print(file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
