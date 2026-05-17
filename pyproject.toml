@@ -52,6 +52,9 @@ truememory-mcp = "truememory.mcp_server:main"
 truememory-ingest = "truememory.ingest.cli:main"
 truememory-model-server = "truememory.model_server:main"
 
+[tool.setuptools.package-data]
+truememory = ["assets/*.icns"]
+
 [project.urls]
 Homepage = "https://github.com/buildingjoshbetter/TrueMemory"
 Repository = "https://github.com/buildingjoshbetter/TrueMemory"

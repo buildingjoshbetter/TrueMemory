@@ -11,6 +11,9 @@ Set TRUEMEMORY_NO_MODEL_SERVER=1 to force local loading.
 import logging
 import os
 import pickle
+import platform
+import plistlib
+import shutil
 import socket
 import struct
 import subprocess
@@ -31,6 +34,88 @@ _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
 
 _SERVER_START_TIMEOUT = 30.0
 _REQUEST_TIMEOUT = 120.0
+
+_APP_BUNDLE_PATH = _TRUEMEMORY_DIR / "TrueMemory.app"
+_APP_EXECUTABLE = _APP_BUNDLE_PATH / "Contents" / "MacOS" / "TrueMemory"
+_LSREGISTER = (
+    "/System/Library/Frameworks/CoreServices.framework"
+    "/Frameworks/LaunchServices.framework/Support/lsregister"
+)
+
+
+def _ensure_app_bundle() -> str | None:
+    """Create a macOS .app bundle so Activity Monitor shows our icon.
+
+    Returns the path to the .app executable, or None on failure.
+    """
+    if platform.system() != "Darwin":
+        return None
+
+    real_python = os.path.realpath(sys.executable)
+
+    if _APP_EXECUTABLE.exists():
+        try:
+            if os.path.samefile(_APP_EXECUTABLE, real_python):
+                return str(_APP_EXECUTABLE)
+        except OSError:
+            pass
+
+    try:
+        if _APP_BUNDLE_PATH.exists():
+            shutil.rmtree(_APP_BUNDLE_PATH)
+
+        contents = _APP_BUNDLE_PATH / "Contents"
+        macos_dir = contents / "MacOS"
+        resources_dir = contents / "Resources"
+        macos_dir.mkdir(parents=True)
+        resources_dir.mkdir(parents=True)
+
+        os.link(real_python, _APP_EXECUTABLE)
+
+        # @executable_path/../lib/libpython*.dylib needs this symlink
+        python_root = Path(real_python).parent.parent
+        lib_dir = python_root / "lib"
+        if lib_dir.exists():
+            os.symlink(lib_dir, contents / "lib")
+
+        try:
+            from importlib.resources import files
+            icon_data = files("truememory.assets").joinpath("AppIcon.icns").read_bytes()
+            (resources_dir / "AppIcon.icns").write_bytes(icon_data)
+        except Exception:
+            pass
+
+        plist = {
+            "CFBundleExecutable": "TrueMemory",
+            "CFBundleIconFile": "AppIcon",
+            "CFBundleIdentifier": "network.sauron.truememory",
+            "CFBundleName": "TrueMemory",
+            "CFBundleDisplayName": "TrueMemory",
+            "CFBundlePackageType": "APPL",
+            "LSBackgroundOnly": True,
+            "LSUIElement": True,
+        }
+        with open(contents / "Info.plist", "wb") as f:
+            plistlib.dump(plist, f)
+
+        if os.path.exists(_LSREGISTER):
+            subprocess.run(
+                [_LSREGISTER, "-f", str(_APP_BUNDLE_PATH)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+
+        return str(_APP_EXECUTABLE)
+    except OSError as e:
+        if e.errno == 18:
+            log.debug("Cannot hardlink across devices, skipping app bundle")
+        else:
+            log.debug("Failed to create app bundle: %s", e)
+        return None
+    except Exception as e:
+        log.debug("Failed to create app bundle: %s", e)
+        return None
 
 
 def _server_is_alive() -> bool:
@@ -57,16 +142,38 @@ def _start_server() -> bool:
         return True
 
     log.info("Starting model server...")
+    app_exe = _ensure_app_bundle()
+    if app_exe:
+        cmd = [app_exe, "-m", "truememory.model_server"]
+        env = os.environ.copy()
+        env["PYTHONPATH"] = os.pathsep.join(sys.path)
+    else:
+        cmd = [sys.executable, "-m", "truememory.model_server"]
+        env = None
+
     try:
         subprocess.Popen(
-            [sys.executable, "-m", "truememory.model_server"],
+            cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            env=env,
         )
     except Exception as e:
         log.warning("Failed to start model server: %s", e)
-        return False
+        if app_exe:
+            try:
+                subprocess.Popen(
+                    [sys.executable, "-m", "truememory.model_server"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except Exception as e2:
+                log.warning("Fallback launch also failed: %s", e2)
+                return False
+        else:
+            return False
 
     deadline = time.time() + _SERVER_START_TIMEOUT
     while time.time() < deadline:
