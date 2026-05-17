@@ -20,6 +20,7 @@ What is NEVER tracked:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import platform
@@ -147,8 +148,38 @@ def identify(email: str, properties: dict | None = None) -> None:
 
 
 def tracked(event_name: str):
-    """Decorator that emits a telemetry event after a tool function runs."""
+    """Decorator that emits a telemetry event after a tool function runs.
+
+    Detects coroutine functions and returns an async wrapper for them so
+    FastMCP correctly sees them as `async def` and dispatches them on the
+    event loop. Without this branch, wrapping an `async def` MCP tool in
+    `@tracked` produces a sync wrapper that returns an unawaited coroutine
+    object, which silently breaks the tool AND defeats the entire purpose
+    of making the handler async in the first place.
+    """
     def decorator(fn):
+        if asyncio.iscoroutinefunction(fn):
+            @wraps(fn)
+            async def async_wrapper(*args, **kwargs):
+                if not _enabled:
+                    return await fn(*args, **kwargs)
+                start = time.monotonic()
+                success = True
+                try:
+                    return await fn(*args, **kwargs)
+                except Exception:
+                    success = False
+                    raise
+                finally:
+                    try:
+                        track(event_name, {
+                            "latency_ms": round((time.monotonic() - start) * 1000, 1),
+                            "success": success,
+                        })
+                    except Exception:
+                        pass
+            return async_wrapper
+
         @wraps(fn)
         def wrapper(*args, **kwargs):
             if not _enabled:
