@@ -57,11 +57,13 @@ def _start_server() -> bool:
         return True
 
     log.info("Starting model server...")
+    stderr_path = _TRUEMEMORY_DIR / "model_server.stderr"
     try:
+        stderr_file = open(stderr_path, "w")
         subprocess.Popen(
             [sys.executable, "-m", "truememory.model_server"],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=stderr_file,
             start_new_session=True,
         )
     except Exception as e:
@@ -75,6 +77,13 @@ def _start_server() -> bool:
             return True
         time.sleep(0.1)
 
+    # Server didn't start — check stderr for crash info
+    try:
+        stderr_content = stderr_path.read_text().strip()
+        if stderr_content:
+            log.error("Model server crashed:\n%s", stderr_content[-500:])
+    except OSError:
+        pass
     log.warning("Model server did not start within %.0fs", _SERVER_START_TIMEOUT)
     return False
 
