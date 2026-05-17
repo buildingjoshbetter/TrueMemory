@@ -67,3 +67,4 @@ truememory-ingest status
 - **Plugins not loading**: Check that `cli-config.yaml` is valid YAML (no tab characters).
 - **MCP not connecting**: Verify the Python path in `config.yaml`.
 - **Gateway users**: For Telegram/Discord/etc., a separate `handler.py` gateway hook is needed (see architecture docs).
+- **Windows (Defender ASR Block mode)**: if `truememory-ingest setup --cli hermes` is blocked by ASR rule `01443614` ("Block executable files from running unless they meet a prevalence, age, or trusted list criteria"), use the module form — the signed `python.exe` wrapper passes ASR: `python -m truememory.ingest.cli setup --cli hermes`. The same applies to every other `truememory-ingest` / `truememory-mcp` command; see [docs/guides/debugging.md](guides/debugging.md#windows-risky-action-blocked--defender-asr-kills-truememory-mcpexe) for the full list.

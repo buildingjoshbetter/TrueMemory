@@ -75,3 +75,4 @@ truememory-ingest status
 - **Plugin not loading**: Verify `~/.openclaw/plugins/truememory/plugin.json` exists and is valid JSON.
 - **Python not found**: Set the `TRUEMEMORY_PYTHON` environment variable to your Python path.
 - **JSON5 config**: OpenClaw uses JSON5. TrueMemory reads it but writes standard JSON — comments may be stripped on config updates.
+- **Windows (Defender ASR Block mode)**: if `truememory-ingest setup --cli openclaw` is blocked by ASR rule `01443614` ("Block executable files from running unless they meet a prevalence, age, or trusted list criteria"), use the module form — the signed `python.exe` wrapper passes ASR: `python -m truememory.ingest.cli setup --cli openclaw`. The same applies to every other `truememory-ingest` / `truememory-mcp` command; see [docs/guides/debugging.md](guides/debugging.md#windows-risky-action-blocked--defender-asr-kills-truememory-mcpexe) for the full list.

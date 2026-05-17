@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Documentation
+- **Windows Defender ASR callouts on every shim-invoking docs page** —
+  ``docs/cli.md``, ``docs/guides/debugging.md``, and all 6
+  ``docs/setup-*.md`` adapter pages (Cursor, Codex, Gemini, Hermes,
+  Kimi, OpenClaw) now document the ``python -m`` escape hatch for users
+  hitting Microsoft Defender ASR rule
+  ``01443614-cd74-433a-b99e-2ecdc07bfc25`` (which silently kills the
+  ``truememory-mcp.exe`` and ``truememory-ingest.exe`` shims on hardened
+  Win11 baselines because their per-install unique hash fails the cloud-
+  prevalence check). Consistent callout pattern in every file points at
+  the full troubleshooting block in ``docs/guides/debugging.md`` so the
+  rationale and command list live in one canonical place. No code
+  changes.
+
 ## [0.6.8] — 2026-05-11
 
 ### Fixed

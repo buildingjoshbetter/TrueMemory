@@ -2,6 +2,13 @@
 
 TrueMemory provides two CLI tools: `truememory-mcp` (MCP server) and `truememory-ingest` (ingestion and management).
 
+> **Windows (Defender ASR Block mode):** if `truememory-mcp` or `truememory-ingest` are blocked at launch by ASR rule `01443614` ("Block executable files from running unless they meet a prevalence, age, or trusted list criteria"), use the module form — the signed `python.exe` wrapper passes ASR:
+> ```powershell
+> python -m truememory.mcp_server --setup
+> python -m truememory.ingest.cli install
+> ```
+> The `--setup` command also auto-migrates an existing Claude MCP registration that points at the shim. Every command documented below has an equivalent `python -m truememory.{mcp_server,ingest.cli} <args>` form.
+
 ---
 
 ## truememory-mcp

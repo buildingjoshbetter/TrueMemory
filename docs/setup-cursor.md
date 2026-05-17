@@ -93,3 +93,4 @@ truememory-ingest status
 - **Hooks not firing**: Check that event names are camelCase (`sessionStart`, `stop`, `preCompact`). PascalCase will silently fail.
 - **Two config files**: MCP lives in `~/.cursor/mcp.json`, hooks live in `~/.cursor/hooks.json`. They are separate files.
 - **Version key**: `hooks.json` requires `"version": 1` at the top level.
+- **Windows (Defender ASR Block mode)**: if `truememory-ingest setup --cli cursor` is blocked by ASR rule `01443614` ("Block executable files from running unless they meet a prevalence, age, or trusted list criteria"), use the module form — the signed `python.exe` wrapper passes ASR: `python -m truememory.ingest.cli setup --cli cursor`. The same applies to every other `truememory-ingest` / `truememory-mcp` command; see [docs/guides/debugging.md](guides/debugging.md#windows-risky-action-blocked--defender-asr-kills-truememory-mcpexe) for the full list.

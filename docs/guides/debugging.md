@@ -44,6 +44,21 @@ You're running the command from a shell that doesn't have the uv tool directory 
 - Mac/Linux: `export PATH="$HOME/.local/bin:$PATH"`
 - Windows PowerShell: close and reopen PowerShell, or run `$env:Path = [System.Environment]::GetEnvironmentVariable("Path", "User") + ";" + $env:Path`
 
+### Windows: "Risky action blocked" / Defender ASR kills `truememory-mcp.exe`
+
+If Microsoft Defender's Attack-Surface-Reduction rule `01443614-cd74-433a-b99e-2ecdc07bfc25` ("Block executable files from running unless they meet a prevalence, age, or trusted list criteria") is set to **Block** mode (rather than the default Audit), the `truememory-mcp.exe` and `truememory-ingest.exe` shims are silently killed at launch. They're setuptools / uv trampolines with per-install unique hashes, so they fail the MS cloud-prevalence check before any user code runs.
+
+Use the module form instead — the `python.exe` wrapper is signed and high-prevalence, so it passes ASR:
+
+```powershell
+python -m truememory.mcp_server --setup     # re-run Claude auto-config
+python -m truememory.ingest.cli install     # re-install hooks
+python -m truememory.ingest.cli status      # check setup
+python -m truememory.ingest.cli logs        # tail logs
+```
+
+The `--setup` command also detects an existing Claude MCP registration pointing at the shim and auto-migrates it to the `python -m` form. After running, quit Claude Desktop from the system tray (clicking X only minimizes it) and relaunch — the MCP config only reloads at a full process launch.
+
 ### Memories not being stored
 
 1. Check that the session had at least 5 user messages (configurable via `TRUEMEMORY_MIN_MESSAGES`)
