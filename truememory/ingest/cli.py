@@ -954,7 +954,26 @@ def _run_install(args):
             if not already_present:
                 existing["hooks"][event].append(hook)
 
-    settings_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    # Atomic write: tmp + rename. The previous direct `write_text` first
+    # truncated the file and then wrote it; a concurrent hook reader
+    # (SessionStart, Stop) that landed inside that window would parse a
+    # partial / empty `settings.json` and fail with `JSONDecodeError`,
+    # silently breaking the lifecycle hooks. `Path.replace()` is atomic
+    # on POSIX (rename(2)) and best-effort on Windows (a much narrower
+    # window than truncate+write).
+    settings_tmp = settings_path.with_suffix(".json.tmp")
+    settings_tmp.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    try:
+        settings_tmp.replace(settings_path)
+    except OSError:
+        # Cross-volume or other rename failure — fall back to direct
+        # write (same race window as before, but at least we don't lose
+        # the user's settings).
+        settings_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        try:
+            settings_tmp.unlink()
+        except FileNotFoundError:
+            pass
     print(f"Hooks installed in {settings_path}")
     print(f"Events configured: {', '.join(settings['hooks'].keys())}")
 
@@ -1018,9 +1037,14 @@ def _merge_claude_md(template_path: Path, target_path: Path) -> None:
             print(f"  [WARN] Cannot read existing CLAUDE.md: {e}")
             return
 
-    # Back up the existing file before mutating it
+    # Back up the existing file before mutating it. Timestamp the
+    # backup filename so re-running `truememory-ingest install` doesn't
+    # clobber the previous backup. The fixed `.md.bak` suffix that lived
+    # here before lost backup chains for anyone who re-ran setup
+    # (different `--user` arg, post-upgrade re-install, etc.).
     if existing and target_path.exists():
-        backup_path = target_path.with_suffix(".md.bak")
+        import time as _time
+        backup_path = target_path.with_name(f"CLAUDE.md.bak.{int(_time.time())}")
         try:
             backup_path.write_text(existing, encoding="utf-8")
         except OSError:

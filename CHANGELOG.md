@@ -1,5 +1,111 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Installer trampolines blocked by Windows Defender ASR** —
+  ``install.ps1`` and ``install.sh`` invoked the
+  ``truememory-mcp --setup`` and ``truememory-ingest install`` console-
+  script shims directly. Those shims are setuptools / uv trampolines with
+  a per-install unique SHA-256, which Microsoft Defender's Attack-Surface-
+  Reduction rule
+  ``01443614-cd74-433a-b99e-2ecdc07bfc25`` ("Block executable files from
+  running unless they meet a prevalence, age, or trusted list criteria")
+  silently kills at ``CreateProcess`` time on hardened-dev-box
+  configurations: the binary has zero machines worth of MS cloud
+  prevalence so the launch is blocked before any user code runs. (The
+  rule defaults to Audit-only per DISA STIG and CIS Benchmark, but a
+  growing share of Windows-11 hardened-baseline images run it in Block
+  mode.) Switched both installers to invoke ``$toolPython -m
+  truememory.mcp_server --setup`` / ``$toolPython -m
+  truememory.ingest.cli install`` — the routing through the PSF-signed
+  high-prevalence ``python.exe`` is invisible to ASR. Same mechanic the
+  ``mcp_server._setup_claude`` writer already uses when it registers the
+  MCP server with Claude Code / Claude Desktop, so the installer is now
+  consistent with the runtime config it produces. Added a Windows-ASR
+  troubleshooting section to the installer's "done" banner and to the
+  README so users on the rare *Block*-mode hosts can re-run the
+  equivalent module form manually if upgrading.
+- **``_setup_claude`` auto-migrates stale shim paths in Claude config** —
+  users who had a prior install where the Claude Code / Claude Desktop
+  MCP server entry was registered with a bare ``truememory-mcp`` shim
+  path now get a one-time migration on the next ``--setup``: the
+  existing entry is detected as a setuptools console-script shim, the
+  registration is removed and re-added with the
+  ``[python_path, "-m", "truememory.mcp_server"]`` form. The previous
+  "existing config preserved" branch kept those stale shim paths in
+  place, which on ASR Block-mode Windows hosts meant every Claude
+  Desktop launch tried to spawn the blocked binary. Migration is
+  detected by suffix (``/truememory-mcp.exe`` or ``/truememory-mcp``)
+  and by canonical install-dir substrings (``/scripts/truememory-mcp``,
+  ``/bin/truememory-mcp``) so it works regardless of OS or install
+  method. Reported as "migrated from shim to python -m form" in the
+  setup output so the user can see what changed.
+- **Installer no longer aborts when tool venv python is unresolvable** —
+  the early ``Die`` introduced alongside the ASR fix made
+  ``TRUEMEMORY_SKIP_SETUP=1`` unusable: if the uv-tool venv layout
+  didn't match the expected ``Scripts/python.exe`` /
+  ``bin/python`` path, the installer aborted before honouring the skip.
+  Softened to a ``Warn`` that skips steps 4 and 5 with an actionable
+  re-run hint, matching the original installer's behaviour for the
+  model-download step.
+- **install.sh missing ``set -o pipefail``** — partial mid-pipeline
+  failures previously returned 0 and let the installer print "Installed
+  successfully" on a broken install. Added.
+- **install.ps1 ``$PKG_SPEC`` unquoted** — paths with spaces in
+  ``TRUEMEMORY_SOURCE`` were split into multiple arguments by
+  PowerShell's parser. Quoted.
+- **install.ps1 ``uv tool uninstall`` exit code unchecked** — a real
+  uninstall failure (locked files, permission issue) was silently
+  swallowed and the subsequent install masked it. Now warns on exit
+  > 1 (exit 1 just means "not installed" and is expected on fresh
+  boxes).
+- **README Step 4 Windows tray-quit instruction** — Windows users
+  closing all Claude windows but leaving Claude Desktop running in the
+  system tray would never see the MCP config reload, since the config
+  only loads at a full process launch. Updated to direct users to
+  right-click the tray icon and Quit.
+- **README BibTeX citation version stale** — bumped from ``0.6.0`` to
+  ``0.6.8`` to match ``pyproject.toml``.
+- **``_setup_claude`` clobbered existing config on a ``claude mcp list``
+  parse miss** — when ``claude mcp list`` succeeded but its output didn't
+  contain a line the parser could read (CLI format change, non-standard
+  registration name, etc.), ``existing_cmd`` stayed empty,
+  ``_path_exists("")`` returned False, and the code fell through to the
+  "stale entry → remove + re-add" branch, silently destroying any
+  working dev-venv path the user had set. Now an empty ``existing_cmd``
+  is treated as a parse miss: the existing registration is preserved
+  and a one-line note goes to stderr telling the user what happened and
+  how to recover. Mirror fix in the Claude Desktop branch for entries
+  with an empty / missing ``command`` field — those preserve the entry
+  (so any user-set ``env`` / ``args`` / ``cwd`` survive) and surface a
+  similar stderr note.
+- **``_setup_claude`` success-summary block wrote to stdout** — defence
+  in depth for the MCP stdio protocol. ``--setup`` exits before
+  ``mcp.run()`` so the current behaviour is safe, but a future refactor
+  that called ``_setup_claude`` mid-session would silently corrupt the
+  JSON-RPC transport on any bare ``print()``. Routed every
+  ``_setup_claude`` print (success summary + Claude Code failure path)
+  to ``sys.stderr``. User runs ``--setup`` interactively so the output
+  still lands in their terminal.
+- **``_run_install`` overwrote ``settings.json`` non-atomically** — the
+  previous ``settings_path.write_text(...)`` first truncated the file
+  then wrote it. A concurrent hook reader (SessionStart, Stop) that
+  landed inside that window parsed a partial / empty file and raised
+  ``JSONDecodeError`` — silently breaking the lifecycle hooks until the
+  next install run. Switched to tmp + ``Path.replace()``: atomic on
+  POSIX (``rename(2)``), best-effort on Windows (much narrower race
+  window than truncate + write). Falls back to direct write if rename
+  fails (cross-volume edge case) so the user never loses their hook
+  config.
+- **``_merge_claude_md`` clobbered the previous ``CLAUDE.md.bak``** —
+  the backup filename was a fixed ``.with_suffix(".md.bak")``, so every
+  re-run of ``truememory-ingest install`` silently overwrote the
+  previous backup. Re-installs across user changes (``--user`` arg
+  swap) or upgrades destroyed the backup chain. Timestamped the suffix
+  to ``CLAUDE.md.bak.<unix-ts>`` so every install run leaves its own
+  backup behind.
+
 ## [0.6.8] — 2026-05-11
 
 ### Fixed
