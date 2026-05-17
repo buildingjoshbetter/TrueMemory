@@ -75,6 +75,13 @@ class ThrottlerStateMachine:
             else:
                 return False
 
+        if self.state == self.STABLE:
+            if self.good_streak >= self.GOOD_WINDOWS_REQUIRED:
+                self.state = self.PROBING
+                log.info("Stable with %d good checks, re-entering PROBING", self.good_streak)
+            else:
+                return False
+
         if self.state != self.PROBING:
             return False
         if self.batch_size >= self.max_batch:
