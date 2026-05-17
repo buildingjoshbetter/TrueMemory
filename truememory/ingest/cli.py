@@ -826,8 +826,19 @@ def _run_install(args):
     import shlex
     py = sys.executable
 
+    _HOOK_MODULES = {
+        "session_start.py": "truememory.ingest.hooks.session_start",
+        "user_prompt_submit.py": "truememory.ingest.hooks.user_prompt_submit",
+        "stop.py": "truememory.ingest.hooks.stop",
+        "compact.py": "truememory.ingest.hooks.compact",
+    }
+
     def _build_command(hook_path: Path) -> str:
-        parts: list[str] = [py, str(hook_path)]
+        module = _HOOK_MODULES.get(hook_path.name)
+        if module:
+            parts: list[str] = [py, "-m", module]
+        else:
+            parts = [py, str(hook_path)]
         if args.user:
             parts.extend(["--user", args.user])
         if args.db:
