@@ -83,16 +83,19 @@ def test_version_short_flag_prints_current_version():
     assert __version__ in result.stdout
 
 
-@pytest.mark.skipif(not shutil.which("truememory-mcp"), reason="console script not on PATH")
 def test_help_via_console_script_does_not_hang():
-    """Explicit end-to-end test via the installed console script.
+    """Explicit end-to-end test via python -m (ASR-safe on Windows).
 
-    This is the exact invocation a user would type after `pip install truememory`.
+    Originally used the bare ``truememory-mcp`` console-script shim, which
+    triggers Windows Defender ASR rule 01443614 on low-prevalence hosts.
+    Replaced with ``[sys.executable, "-m", "truememory.mcp_server", "--help"]``
+    which routes through the signed python.exe binary and is ASR-clean.
+
     Uses a tight 15s timeout because the fix should return in milliseconds;
     a hang would mean the --help handling regressed back into the mcp.run() path.
     """
     result = subprocess.run(
-        ["truememory-mcp", "--help"],
+        [sys.executable, "-m", "truememory.mcp_server", "--help"],
         capture_output=True, text=True, timeout=15,
     )
     assert result.returncode == 0
@@ -133,12 +136,13 @@ def test_ingest_version_flag_exits_cleanly():
     matching `truememory-mcp --version` behavior. Before this patch the
     ingest CLI returned 'error: unrecognized arguments: --version' (exit 2),
     which was inconsistent with the MCP CLI.
+
+    Uses ``[sys.executable, "-m", "truememory.ingest.cli", "--version"]``
+    instead of the bare shim to avoid Windows Defender ASR rule 01443614
+    blocking low-prevalence console-script .exe files.
     """
-    bin_path = shutil.which("truememory-ingest")
-    if not bin_path:
-        pytest.skip("truememory-ingest console script not installed")
     result = subprocess.run(
-        [bin_path, "--version"],
+        [sys.executable, "-m", "truememory.ingest.cli", "--version"],
         capture_output=True, text=True, timeout=10,
     )
     assert result.returncode == 0, (

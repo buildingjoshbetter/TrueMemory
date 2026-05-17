@@ -301,11 +301,20 @@ def _cascade_next() -> None:
                     cmd.extend(["--user", data["user_id"]])
                 if data.get("db_path"):
                     cmd.extend(["--db", data["db_path"]])
+                # start_new_session is POSIX-only; guard with os.setsid probe.
+                _cascade_kwargs: dict = {}
+                if hasattr(os, "setsid"):
+                    _cascade_kwargs["start_new_session"] = True
+                else:
+                    _cascade_kwargs["creationflags"] = (
+                        _sp.CREATE_NEW_PROCESS_GROUP
+                        | getattr(_sp, "DETACHED_PROCESS", 0)
+                    )
                 proc = _sp.Popen(
                     cmd,
                     stdout=_sp.DEVNULL,
                     stderr=_sp.DEVNULL,
-                    start_new_session=True,
+                    **_cascade_kwargs,
                 )
                 register_spawned_pid(proc.pid)
                 record_stale_processing_pid(claimed_path, proc.pid)
