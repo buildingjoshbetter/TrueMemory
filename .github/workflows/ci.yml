@@ -15,12 +15,20 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+    # Windows reports failures on every PR (visible signal) but does not
+    # block merges yet — several in-flight PRs (#344 fcntl/WNOHANG, #345
+    # hooks guard, #351 subprocess portability, #352 test helper) still
+    # need to land before Windows can flip to required. Flip this off
+    # once the green baseline holds across two consecutive main-branch
+    # runs.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     steps:
       - uses: actions/checkout@v6
       - name: Set up Python ${{ matrix.python-version }}
