@@ -1,5 +1,35 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Windows subprocess portability** — `start_new_session=True` (POSIX-only)
+  replaced with a platform branch across `mcp_server.py`, `model_client.py`,
+  `ingest/cli.py`, and `ingest/hooks/session_start.py`. Windows receives
+  `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` via `creationflags` instead.
+  `_log_file` in the backlog-drainer Popen block is now closed in a `finally`
+  clause so the handle doesn't leak on `Popen()` exceptions. (PR-2b)
+- **model_server / model_client: AF_UNIX → portable socket** — Unix-domain
+  socket replaced with an AF_INET TCP loopback socket on Windows.
+  The server writes the OS-assigned port to `~/.truememory/model_server.port`;
+  the client reads it for connection discovery. POSIX behaviour (AF_UNIX via
+  `model.sock`) is unchanged. (PR-2b)
+- **model_server signal handling** — `SIGHUP` registration guarded with
+  `hasattr(signal, "SIGHUP")` so the server starts cleanly on Windows where
+  `SIGHUP` is absent. (PR-2b)
+- **hooks/core: cross-platform process queries** — `subprocess.run(["ps", ...])`
+  in `_pid_is_alive` and `subprocess.run(["pgrep", ...])` in
+  `_count_active_ingest_processes` replaced with `psutil.process_iter()` and
+  `psutil.Process()` calls. Eliminates the POSIX-only `ps`/`pgrep` dependency.
+  (PR-2b)
+- **test_cli_help.py: ASR-safe test invocations** — `test_help_via_console_script_does_not_hang`
+  and `test_ingest_version_flag_exits_cleanly` previously invoked bare console-script
+  shims (`truememory-mcp`, `truememory-ingest`), which trigger Windows Defender
+  ASR rule 01443614 on low-prevalence hosts. Both tests now use
+  `[sys.executable, "-m", "truememory.mcp_server", ...]` and
+  `[sys.executable, "-m", "truememory.ingest.cli", ...]` respectively, routing
+  through the signed `python.exe` binary. (PR-2b)
+
 ## [0.6.8] — 2026-05-11
 
 ### Fixed

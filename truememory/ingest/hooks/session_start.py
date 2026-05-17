@@ -218,14 +218,25 @@ def _drain_backlog() -> None:
                     _log_dir / f"{_safe_sid}.log",
                     "a", encoding="utf-8",
                 )
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=_log_file,
-                    stderr=subprocess.STDOUT,
-                    stdin=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-                _log_file.close()
+                # start_new_session is POSIX-only (setsid); guard before use.
+                _drain_kwargs: dict = {}
+                if hasattr(os, "setsid"):
+                    _drain_kwargs["start_new_session"] = True
+                else:
+                    _drain_kwargs["creationflags"] = (
+                        subprocess.CREATE_NEW_PROCESS_GROUP
+                        | getattr(subprocess, "DETACHED_PROCESS", 0)
+                    )
+                try:
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=_log_file,
+                        stderr=subprocess.STDOUT,
+                        stdin=subprocess.DEVNULL,
+                        **_drain_kwargs,
+                    )
+                finally:
+                    _log_file.close()
                 register_spawned_pid(proc.pid)
                 record_stale_processing_pid(claimed_path, proc.pid)
             claimed_path.unlink(missing_ok=True)
