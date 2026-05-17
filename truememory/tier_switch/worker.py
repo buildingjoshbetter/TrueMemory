@@ -136,13 +136,10 @@ class RebuildWorker:
                 except Exception as exc:
                     if self._is_oom_error(exc):
                         log.warning(
-                            "OOM at batch_size=%d, halving and retrying",
+                            "OOM at batch_size=%d, triggering BACKOFF",
                             batch_size,
                         )
-                        self.throttler.batch_size = max(
-                            1, self.throttler.batch_size // 2
-                        )
-                        self.throttler.last_throttle_time = time.time()
+                        self.throttler.on_oom()
                         DynamicThrottler.flush_gpu_cache()
                         continue
                     log.error(
@@ -163,7 +160,8 @@ class RebuildWorker:
                 last_id = batch[-1]["id"]
 
                 self.throttler.after_batch(batch_count, batch_time)
-                DynamicThrottler.flush_gpu_cache()
+                if self.throttler.should_flush_cache():
+                    DynamicThrottler.flush_gpu_cache()
 
                 VectorCacheRegistry.update_progress(
                     self.conn, self.target_group, last_id,
