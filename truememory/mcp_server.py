@@ -517,8 +517,15 @@ def _parallel_search(queries, user_id, internal_limit, llm_fn, output_limit):
                     if rid not in seen_ids:
                         merged.append(r)
                         seen_ids.add(rid)
-            except Exception:
-                pass  # Individual query failure doesn't kill the batch
+            except Exception as e:
+                # Individual query failure doesn't kill the batch — but
+                # log at DEBUG so an operator triaging "search quality
+                # dropped" has a breadcrumb. WARNING would be noisy
+                # because per-query timeouts are part of normal
+                # behaviour under load; DEBUG keeps the signal but
+                # requires `TRUEMEMORY_LOG_LEVEL=DEBUG` (or equivalent)
+                # to surface, matching the existing comment's framing.
+                log.debug("parallel search query failed: %s", e)
 
     merged.sort(key=lambda x: -x.get("score", 0))
     return merged[:output_limit]
@@ -1169,18 +1176,28 @@ def _drain_batch_from_backlog(markers: list[Path]) -> None:
                 _log_dir = Path.home() / ".truememory" / "logs"
                 _log_dir.mkdir(parents=True, exist_ok=True)
                 _safe_sid = _safe_session_id(data.get('session_id', 'unknown')) or 'unknown'
+                # try/finally around Popen so a raise during process spawn
+                # (resource error, fd exhaustion, ASR block, etc.) doesn't
+                # leak the file handle. A `with open(...)` block would
+                # close `_log_file` immediately after Popen returns, but
+                # Popen needs the FD to survive long enough for the child
+                # to inherit it. try/finally gives us the
+                # close-on-spawn-failure guarantee without the early-close
+                # hazard.
                 _log_file = open(
                     _log_dir / f"{_safe_sid}.log",
                     "a", encoding="utf-8",
                 )
-                proc = _subprocess.Popen(
-                    cmd,
-                    stdout=_log_file,
-                    stderr=_subprocess.STDOUT,
-                    stdin=_subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-                _log_file.close()
+                try:
+                    proc = _subprocess.Popen(
+                        cmd,
+                        stdout=_log_file,
+                        stderr=_subprocess.STDOUT,
+                        stdin=_subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+                finally:
+                    _log_file.close()
                 register_spawned_pid(proc.pid)
                 record_stale_processing_pid(claimed_path, proc.pid)
 

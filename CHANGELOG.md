@@ -1,5 +1,30 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **``_parallel_search`` silently swallowed per-query failures** —
+  ``mcp_server.py:_parallel_search`` ran each query in a thread-pool
+  future and wrapped ``f.result()`` in a bare
+  ``except Exception: pass``. Per-query timeouts and recoverable
+  failures are part of normal behaviour under load, so WARNING-level
+  logging would be noisy, but with no log call at all an operator
+  triaging "search quality dropped" had zero breadcrumb that any
+  query had failed. Replaced the bare ``pass`` with
+  ``log.debug("parallel search query failed: %s", e)`` — keeps the
+  signal recoverable with one log-level bump, no behaviour change for
+  the happy path.
+- **Backlog drainer leaked the spawn log file on Popen failure** —
+  ``mcp_server.py:_drain_batch_from_backlog`` opened the per-session
+  ``.log`` file, passed it to ``subprocess.Popen`` as ``stdout``, and
+  then called ``_log_file.close()`` AFTER the Popen returned. If Popen
+  raised (resource error, fd exhaustion, ASR block, child-binary
+  missing), ``close()`` never ran and the FD leaked on every spawn
+  failure. Wrapped the Popen call in ``try / finally`` so close always
+  runs. A ``with open(...)`` block would have been simpler but would
+  close the file too early — Popen needs the FD inheritable through
+  the child. The try/finally form preserves that contract.
+
 ## [0.6.8] — 2026-05-11
 
 ### Fixed
