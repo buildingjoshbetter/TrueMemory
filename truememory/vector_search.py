@@ -195,12 +195,9 @@ def get_model():
 
         from truememory.model_client import use_model_server, get_embedding_proxy
         if use_model_server():
-            try:
-                proxy = get_embedding_proxy(tier=EMBEDDING_MODEL)
-                _model = proxy
-                return _model
-            except Exception:
-                pass  # Fall through to local loading
+            proxy = get_embedding_proxy(tier=EMBEDDING_MODEL)
+            _model = proxy
+            return _model
 
         resolved = EMBEDDING_MODEL
         if resolved == "model2vec":
