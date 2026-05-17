@@ -822,7 +822,15 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
                 (message_id, serialize_f32(sep_embedding)),
             )
     except Exception:
-        logger.debug("Failed to create separation vector for message %d", message_id, exc_info=True)
+        # WARNING (not DEBUG): a missing separation vector means every future
+        # sender-aware search will silently fail to find this message. The
+        # row is in messages + vec_messages but invisible to the separation
+        # pipeline — silent search-quality degradation per stored memory.
+        logger.warning(
+            "Failed to create separation vector for message %d — "
+            "sender-aware search will not surface this row",
+            message_id, exc_info=True,
+        )
     # Caller is responsible for committing
 
 

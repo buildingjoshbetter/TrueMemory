@@ -1,5 +1,71 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **`engine.delete_all` silently fails for users with >999 messages** —
+  the ``DELETE FROM <table> WHERE <col> IN (?, ?, ...)`` clauses built
+  from ``msg_ids`` and ``episode_ids`` hit ``SQLite``'s
+  ``SQLITE_MAX_VARIABLE_NUMBER`` default of 999 (still the value on
+  Debian/Ubuntu system packages), raising ``OperationalError`` that the
+  existing ``except Exception: logger.warning(...)`` caught — every
+  related-table cleanup for the >999 case silently failed, leaking
+  ``fact_timeline`` / ``landmark_events`` / ``causal_edges`` /
+  ``vec_messages*`` / ``episodes`` rows for that user. Added
+  ``_delete_in_chunks`` helper that batches ``IN``-clause deletes at 500
+  ids per round trip; applied at all five call sites in
+  ``delete_all(user_id=...)``.
+- **`search_agentic` bypasses LLM-reranker fallback in degraded mode** —
+  when the cross-encoder reranker is degraded (preload watchdog timed
+  out, load raised), ``rerank_with_modality_fusion`` returns the original
+  ordering with no ``fused_score`` / ``rerank_score`` keys. The previous
+  code returned that unchanged and skipped the LLM-rerank fallback
+  immediately below, so degraded sessions got worse results AND lost the
+  fallback that exists for exactly this case. Detect "cross-encoder
+  didn't run" by inspecting result keys; fall through to the LLM block.
+- **`sqlite-vec` load failure invisible in health payload** —
+  ``engine._ensure_connection`` caught the extension-load exception and
+  set ``self._has_vectors = False`` but only logged at DEBUG. The
+  module-level ``_vectors_load_error`` tracker that
+  ``truememory_stats.health`` reads from was never populated, so search
+  silently fell back to FTS-only mode with no operator signal. Now
+  surfaces to ``_vectors_load_error`` AND logs at WARNING.
+- **Separation-vector failure logged at DEBUG hides per-memory loss** —
+  ``vector_search.build_separation_vector_single``'s
+  ``except Exception: logger.debug(...)`` meant a single encode failure
+  silently dropped one memory from every future sender-aware search.
+  Promoted to WARNING with explicit "sender-aware search will not surface
+  this row" context.
+- **`reranker.get_reranker` fast-path TOCTOU under concurrent tier
+  switch** — the fast-path check read ``_model`` and ``_model_name`` as
+  two separate global lookups. Under the GIL release between them, a
+  concurrent ``set_active_tier`` could observe a state where
+  ``_model_name`` had been written but ``_model`` hadn't, returning the
+  old model under the new name. Bundled the reads into a single tuple
+  unpack so both globals are observed atomically.
+- **`RebuildManager` check-then-write race on `_active_thread`** —
+  ``start_rebuild`` checked ``_active_thread.is_alive()`` without a lock,
+  then later assigned the new thread. Two concurrent
+  ``truememory_configure`` calls could both pass the ``is_alive()``
+  check and both spawn rebuild threads racing on the same DB. Added
+  ``_state_lock`` (``threading.Lock``) around every read / write of
+  ``_active_thread`` and ``_active_worker``; also fixed multiple conn
+  leaks on exception paths in ``start_rebuild`` and ``run_rebuild_sync``
+  by replacing the per-branch ``conn.close()`` calls with a single
+  ``try / finally``.
+- **`tier_switch/manager.py:_apply_config_switch` parses
+  ``config.json`` without `encoding="utf-8"`** — on Windows the default
+  codec is cp1252; a non-ASCII byte (e.g. an extended-char API key)
+  crashed the parse and silently dropped the tier switch.
+
+### Added
+- `tests/test_engine_tier_switch_hardening.py` (10 tests) — regression
+  locks for: ``_delete_in_chunks`` (empty / single / chunked / floor
+  below SQLite limit), reranker fast-path tuple bundle, ``RebuildManager``
+  ``_state_lock`` presence + ``cancel()`` usage, ``search_agentic``
+  degraded-mode fallthrough detection, separation-vector WARNING log
+  level, concurrent ``start_rebuild`` serialization.
+
 ## [0.6.8] — 2026-05-11
 
 ### Fixed

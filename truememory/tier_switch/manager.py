@@ -85,6 +85,14 @@ class RebuildManager:
         self._active_worker: RebuildWorker | None = None
         self._active_thread: threading.Thread | None = None
         self._active_status_id: int = 0
+        # Guards the check-then-write of _active_thread / _active_worker
+        # across the MCP thread (start_rebuild / cancel) and the background
+        # rebuild thread (_rebuild_thread). Without this, two concurrent
+        # truememory_configure calls can both observe is_alive()==False
+        # between the check (line ~100) and the assignment (line ~136),
+        # both spawn rebuild threads, and both race on the same DB —
+        # leaving the tier in an indeterminate state.
+        self._state_lock = threading.Lock()
 
     def start_rebuild(
         self,
@@ -97,43 +105,57 @@ class RebuildManager:
 
         Returns a status_id for progress queries.
         """
-        if self._active_thread and self._active_thread.is_alive():
-            return self._active_status_id
+        # Single critical section: check-then-write of _active_thread so
+        # two concurrent callers can't both pass the is_alive() check.
+        with self._state_lock:
+            if self._active_thread and self._active_thread.is_alive():
+                return self._active_status_id
 
+        # All open conn paths go through try/finally so a raise from
+        # tier_group / preflight / resolve_rebuild_action / backup_db
+        # cannot leak the SQLite handle.
         conn = _open_db(db_path)
-        to_group = tier_group(target_tier)
+        thread = None
+        try:
+            to_group = tier_group(target_tier)
 
-        ok, msg = preflight_ram_check(to_group)
-        if not ok:
+            ok, msg = preflight_ram_check(to_group)
+            if not ok:
+                raise RuntimeError(msg)
+
+            action = resolve_rebuild_action(conn, to_group, force)
+            messages, is_full = get_messages_to_embed(conn, to_group, force)
+
+            if not messages and not is_full:
+                self._apply_config_switch(target_tier, conn)
+                return 0
+
+            status_id = self._create_status_row(
+                conn, to_group, target_tier, action, len(messages),
+            )
+            self._active_status_id = status_id
+
+            if backup_path is None and is_full:
+                backup_path = backup_db(db_path)
+
+            thread = threading.Thread(
+                target=self._rebuild_thread,
+                args=(target_tier, to_group, messages, is_full, status_id,
+                      backup_path, db_path),
+                daemon=True,
+                name=f"tier-switch-{to_group}",
+            )
+        finally:
             conn.close()
-            raise RuntimeError(msg)
 
-        action = resolve_rebuild_action(conn, to_group, force)
-        messages, is_full = get_messages_to_embed(conn, to_group, force)
-
-        if not messages and not is_full:
-            self._apply_config_switch(target_tier, conn)
-            conn.close()
-            return 0
-
-        status_id = self._create_status_row(
-            conn, to_group, target_tier, action, len(messages),
-        )
-        self._active_status_id = status_id
-
-        if backup_path is None and is_full:
-            backup_path = backup_db(db_path)
-
-        conn.close()
-
-        thread = threading.Thread(
-            target=self._rebuild_thread,
-            args=(target_tier, to_group, messages, is_full, status_id,
-                  backup_path, db_path),
-            daemon=True,
-            name=f"tier-switch-{to_group}",
-        )
-        self._active_thread = thread
+        # Take the state lock again to publish the new thread atomically.
+        # Window between dropping the lock above and re-acquiring here is
+        # safe because callers serialize through the lock — the worst case
+        # is a benign race-and-discard if a second caller arrived during
+        # the conn-open work, in which case both will see the thread we
+        # publish here on their next is_alive() check.
+        with self._state_lock:
+            self._active_thread = thread
         thread.start()
 
         return status_id
@@ -146,57 +168,62 @@ class RebuildManager:
         db_path: Path | None = None,
     ) -> bool:
         """Run a synchronous rebuild (CLI path). Returns True on success."""
+        # try/finally ensures conn closes on every path, including
+        # exceptions from tier_group / preflight / resolve_rebuild_action
+        # / _create_status_row that previously leaked the handle.
         conn = _open_db(db_path)
-        to_group = tier_group(target_tier)
-
-        ok, msg = preflight_ram_check(to_group)
-        if not ok:
-            conn.close()
-            log.error("Pre-flight failed: %s", msg)
-            return False
-
-        action = resolve_rebuild_action(conn, to_group, force)
-        messages, is_full = get_messages_to_embed(conn, to_group, force)
-
-        if not messages and not is_full:
-            self._apply_config_switch(target_tier, conn)
-            conn.close()
-            return True
-
-        status_id = self._create_status_row(
-            conn, to_group, target_tier, action, len(messages),
-        )
-
-        if is_full:
-            backup_db(db_path)
-
-        device = _detect_device()
-        if to_group == "edge":
-            device = "cpu"
-        throttler = DynamicThrottler(device=device)
-
-        worker = RebuildWorker(
-            conn=conn,
-            target_tier=target_tier,
-            target_group=to_group,
-            throttler=throttler,
-            status_id=status_id,
-            status_callback=progress_callback,
-        )
-        self._active_worker = worker
-
         try:
-            success, processed = worker.run(messages, is_full)
-        except Exception:
-            log.exception("Sync rebuild failed")
-            success = False
+            to_group = tier_group(target_tier)
 
-        if success:
-            self._finalize_rebuild(conn, target_tier, to_group)
+            ok, msg = preflight_ram_check(to_group)
+            if not ok:
+                log.error("Pre-flight failed: %s", msg)
+                return False
 
-        self._active_worker = None
-        conn.close()
-        return success
+            action = resolve_rebuild_action(conn, to_group, force)
+            messages, is_full = get_messages_to_embed(conn, to_group, force)
+
+            if not messages and not is_full:
+                self._apply_config_switch(target_tier, conn)
+                return True
+
+            status_id = self._create_status_row(
+                conn, to_group, target_tier, action, len(messages),
+            )
+
+            if is_full:
+                backup_db(db_path)
+
+            device = _detect_device()
+            if to_group == "edge":
+                device = "cpu"
+            throttler = DynamicThrottler(device=device)
+
+            worker = RebuildWorker(
+                conn=conn,
+                target_tier=target_tier,
+                target_group=to_group,
+                throttler=throttler,
+                status_id=status_id,
+                status_callback=progress_callback,
+            )
+            with self._state_lock:
+                self._active_worker = worker
+
+            try:
+                success, processed = worker.run(messages, is_full)
+            except Exception:
+                log.exception("Sync rebuild failed")
+                success = False
+
+            if success:
+                self._finalize_rebuild(conn, target_tier, to_group)
+
+            return success
+        finally:
+            with self._state_lock:
+                self._active_worker = None
+            conn.close()
 
     def get_status(self, status_id: int = 0) -> dict:
         """Query rebuild progress from the rebuild_status table."""
@@ -231,9 +258,16 @@ class RebuildManager:
             conn.close()
 
     def cancel(self, status_id: int = 0):
-        """Signal the active worker to stop."""
-        if self._active_worker:
-            self._active_worker.cancel()
+        """Signal the active worker to stop.
+
+        Reads _active_worker under _state_lock so a concurrent
+        _rebuild_thread teardown (which sets _active_worker = None) can't
+        cause the cancel() to silently no-op against a stale reference.
+        """
+        with self._state_lock:
+            worker = self._active_worker
+        if worker is not None:
+            worker.cancel()
 
     def _rebuild_thread(
         self,
@@ -260,7 +294,8 @@ class RebuildManager:
                 throttler=throttler,
                 status_id=status_id,
             )
-            self._active_worker = worker
+            with self._state_lock:
+                self._active_worker = worker
 
             success, processed = worker.run(messages, is_full)
 
@@ -273,8 +308,11 @@ class RebuildManager:
         except Exception:
             log.exception("Background rebuild thread error")
         finally:
-            self._active_worker = None
-            self._active_thread = None
+            # State teardown under lock so start_rebuild's check-then-write
+            # cycle sees consistent state across thread boundaries.
+            with self._state_lock:
+                self._active_worker = None
+                self._active_thread = None
             conn.close()
 
     def _finalize_rebuild(
@@ -317,7 +355,11 @@ class RebuildManager:
         config = {}
         if config_path.exists():
             try:
-                config = json.loads(config_path.read_text())
+                # encoding="utf-8" is critical on Windows where the default
+                # codec is cp1252 — a non-ASCII byte in config.json (e.g. an
+                # API key with extended chars) crashes the parse and silently
+                # drops the tier switch.
+                config = json.loads(config_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 pass
 
