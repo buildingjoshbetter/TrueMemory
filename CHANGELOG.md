@@ -1,5 +1,34 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **``tests/test_cli_help.py:_run_cli`` helper preferred the ASR-blocked
+  shim** — the pre-fix helper called ``shutil.which("truememory-mcp")``
+  and used the bare ``.exe`` shim when present, falling back to
+  ``python -m`` only if the shim wasn't on PATH. On Windows hosts with
+  Microsoft Defender ASR rule ``01443614`` ("Block executable files
+  from running unless they meet a prevalence, age, or trusted list
+  criteria") in **Block** mode, the shim is silently killed at launch
+  — making 7 of the 9 tests in this file fail with
+  ``PermissionError [WinError 5] Access is denied`` even on a healthy
+  install. Rewrote the helper to always invoke
+  ``[sys.executable, "-m", "truememory.mcp_server"]``, routing through
+  the signed ``python.exe`` wrapper. Sibling fix in PR #351 covered
+  the 2 remaining tests in this file that bypass the helper entirely.
+- **``mcp_server.py`` `__main__` block dropped exit codes under
+  ``python -m`` invocation** — the bottom-of-file
+  ``if __name__ == "__main__": main()`` discarded ``main()``'s return
+  value, so exit-code-2 paths (unknown flag, positional-arg typo)
+  silently exited 0 when the server was invoked via
+  ``python -m truememory.mcp_server``. The setuptools console-script
+  wrapper around ``truememory-mcp`` already does ``sys.exit(main())``,
+  so the bug was invisible until anything routed through ``-m``.
+  Changed to ``sys.exit(main() or 0)``. Surfaced by the ``_run_cli``
+  helper rewrite above — 2 tests asserting ``returncode != 0`` were
+  passing under the shim and silently regressed to passing-as-0 under
+  ``-m`` until this line landed.
+
 ## [0.6.8] — 2026-05-11
 
 ### Fixed

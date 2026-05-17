@@ -16,23 +16,25 @@ import pytest
 from truememory import __version__
 
 
-def _truememory_mcp_bin() -> str | None:
-    """Locate the installed truememory-mcp console script, or None.
-
-    Prefer the script installed by pip. Fall back to invoking via
-    `python -m truememory.mcp_server` — slower because it re-runs all
-    module-level imports, but works in any environment where truememory
-    is importable.
-    """
-    return shutil.which("truememory-mcp")
-
-
 def _run_cli(args: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
-    bin_path = _truememory_mcp_bin()
-    if bin_path:
-        cmd = [bin_path] + args
-    else:
-        cmd = [sys.executable, "-m", "truememory.mcp_server"] + args
+    """Run the truememory-mcp CLI via the module form.
+
+    Always invokes ``[sys.executable, "-m", "truememory.mcp_server"]``
+    rather than the bare ``truememory-mcp`` console-script shim. The
+    shim path is faster (cached imports) but is a setuptools / uv
+    trampoline with a per-install unique hash — Windows Defender's
+    Attack-Surface-Reduction rule ``01443614`` ("Block executable files
+    from running unless they meet a prevalence, age, or trusted list
+    criteria") silently kills it at launch on hardened Win11 baselines.
+    Routing through the signed ``python.exe`` wrapper passes ASR
+    everywhere; the per-test re-import cost is negligible at test scale.
+
+    Replaces the pre-fix two-arm helper that called ``shutil.which`` and
+    preferred the shim when present — that branch fired exactly on
+    Block-mode ASR boxes, making 7 of the tests in this file fail with
+    ``PermissionError [WinError 5] Access is denied``.
+    """
+    cmd = [sys.executable, "-m", "truememory.mcp_server"] + args
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 

@@ -1519,4 +1519,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # `sys.exit(main())` rather than bare `main()` — so exit codes
+    # returned from `main()` propagate when invoked via
+    # ``python -m truememory.mcp_server``. The setuptools console-script
+    # wrapper around `truememory-mcp` already does `sys.exit(main())`
+    # for you; `-m` invocation does not, so the bare `main()` form
+    # silently masked exit-code-2 paths (unknown flag, positional arg
+    # typo) as exit 0 under `python -m`.
+    import sys as _sys
+    _sys.exit(main() or 0)
