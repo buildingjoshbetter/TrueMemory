@@ -53,6 +53,9 @@ _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
 class ModelServer:
     """Serves embedding and reranking over a Unix domain socket."""
 
+    _SUSTAINED_THRESHOLD = 10
+    _SUSTAINED_WINDOW = 30
+
     def __init__(self):
         self._embed_model = None
         self._embed_tier: str | None = None
@@ -61,6 +64,9 @@ class ModelServer:
         self._lock = threading.Lock()
         self._last_activity = time.time()
         self._running = True
+        self._embed_timestamps: list[float] = []
+        self._throttler = None
+        self._throttler_active = False
 
     def _get_embed_model(self, tier: str):
         if self._embed_model is not None and self._embed_tier == tier:
@@ -133,9 +139,35 @@ class ModelServer:
         if op == "embed":
             texts = request["texts"]
             tier = request.get("tier", "")
+
+            now = time.time()
+            self._embed_timestamps.append(now)
+            self._embed_timestamps = [
+                t for t in self._embed_timestamps
+                if now - t < self._SUSTAINED_WINDOW
+            ]
+
+            if (len(self._embed_timestamps) >= self._SUSTAINED_THRESHOLD
+                    and not self._throttler_active):
+                self._activate_throttler()
+
+            if self._throttler_active and self._throttler:
+                self._throttler.before_batch()
+
+            encode_start = time.time()
             with self._lock:
                 model = self._get_embed_model(tier)
                 vectors = model.encode(texts, show_progress_bar=False)
+            encode_time = time.time() - encode_start
+
+            if self._throttler_active and self._throttler:
+                self._throttler.after_batch(len(texts), encode_time)
+                if self._throttler.should_flush_cache():
+                    self._flush_mps_cache()
+
+            if self._throttler_active and len(self._embed_timestamps) < 3:
+                self._deactivate_throttler()
+
             return {"ok": True, "vectors": np.asarray(vectors, dtype=np.float32)}
 
         if op == "rerank":
@@ -149,6 +181,45 @@ class ModelServer:
             return {"ok": True, "scores": np.asarray(scores, dtype=np.float32)}
 
         return {"ok": False, "error": f"Unknown op: {op}"}
+
+    def _activate_throttler(self):
+        """Start adaptive throttling for sustained workload."""
+        try:
+            from truememory.tier_switch.throttler import DynamicThrottler
+        except ImportError:
+            log.warning("Cannot import DynamicThrottler — running without throttling")
+            return
+        device = "cpu"
+        try:
+            import torch
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device = "mps"
+        except ImportError:
+            pass
+        self._throttler = DynamicThrottler(device=device)
+        self._throttler_active = True
+        log.info(
+            "Sustained workload detected (%d requests in %ds) — throttler activated",
+            len(self._embed_timestamps), self._SUSTAINED_WINDOW,
+        )
+
+    def _deactivate_throttler(self):
+        """Stop adaptive throttling — workload ended."""
+        self._throttler = None
+        self._throttler_active = False
+        self._embed_timestamps.clear()
+        log.info("Workload ended — throttler deactivated")
+
+    def _flush_mps_cache(self):
+        """Flush MPS cache — only called when throttler says to."""
+        try:
+            import torch
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+                torch.mps.synchronize()
+        except Exception:
+            pass
+        gc.collect()
 
     def handle_client(self, conn: socket.socket):
         try:
