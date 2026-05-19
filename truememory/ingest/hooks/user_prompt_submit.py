@@ -15,6 +15,20 @@ Design notes:
 - Automatically prunes buffer files older than 7 days on each invocation
   so they don't grow unbounded.
 
+When to disable this hook:
+- This hook is purely defensive — it duplicates session JSONL into a flat
+  buffer file in case the transcript on disk gets corrupted. In practice:
+  * Claude Code's session JSONL files (~/.claude/projects/<workspace>/)
+    rarely corrupt, and when they do Claude Code keeps its own backups
+  * SessionEnd / Stop hooks read transcript_path directly — NOT this buffer
+  * The hook fires synchronously on every user prompt → adds ~50-200ms of
+    python.exe spawn cost per turn
+
+  For users with a stable Claude Code install, the buffer never gets read
+  in anger. Safe to omit from settings.json hooks block if turn-time
+  latency or subprocess overhead matters more than belt-and-suspenders
+  crash recovery.
+
 Input (stdin JSON):
     {"session_id": "...", "prompt": "...", "transcript_path": "..."}
 
