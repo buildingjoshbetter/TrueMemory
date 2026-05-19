@@ -35,6 +35,33 @@ def _safe_session_id(session_id: str) -> str:
     return "".join(c for c in session_id if c.isalnum() or c in "-_")[:64]
 
 
+def is_subagent_invocation(input_data: dict | None = None, transcript_path: str = "") -> bool:
+    """Detect whether this hook fire is from a Claude Code sub-agent (Task tool).
+
+    Hooks fire per-session, and sub-agents are separate sessions from the
+    orchestrator. Without a guard, every sub-agent spawn produces 1-3 hook
+    fires, which floods the user with terminal flashes and pollutes the
+    memory store with orchestrator-generated prompts (not real user input).
+
+    Two detection paths, either is sufficient:
+    1. ``input_data["agent_id"]`` or ``input_data["agent_type"]`` is present
+       (newer Claude Code versions include these fields in hook stdin JSON).
+    2. The transcript path contains ``/subagents/`` — Claude Code stores
+       sub-agent transcripts under
+       ``<project>/<session_id>/subagents/agent-<id>.jsonl``. Robust fallback
+       for older Claude Code versions that don't emit the agent_id field.
+    """
+    if isinstance(input_data, dict):
+        if input_data.get("agent_id") or input_data.get("agent_type"):
+            return True
+        tp = transcript_path or input_data.get("transcript_path", "")
+    else:
+        tp = transcript_path
+    if not tp:
+        return False
+    return "/subagents/" in tp.replace("\\", "/")
+
+
 def should_extract_session(session_id: str, transcript_path: str) -> bool:
     """Check if a session's transcript has new content since last extraction.
 

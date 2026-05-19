@@ -342,6 +342,16 @@ def main():
     except (json.JSONDecodeError, EOFError):
         return
 
+    # Skip sub-agent (Task tool) invocations entirely — their prompts are
+    # orchestrator-generated, not real user input, and the per-spawn hook
+    # cost is wasted. See _shared.is_subagent_invocation for detection.
+    try:
+        from truememory.ingest.hooks._shared import is_subagent_invocation
+        if is_subagent_invocation(input_data):
+            return
+    except ImportError:
+        pass
+
     prompt = input_data.get("prompt", "").strip()
     session_id = input_data.get("session_id", "unknown")
 

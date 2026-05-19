@@ -400,6 +400,16 @@ def main():
     except (json.JSONDecodeError, EOFError):
         input_data = {}
 
+    # Skip sub-agent (Task tool) invocations entirely — sub-agents shouldn't
+    # get the blanket recall + first-run banner; both are oriented to the
+    # human user opening Claude Code, not orchestrator-spawned helpers.
+    try:
+        from truememory.ingest.hooks._shared import is_subagent_invocation
+        if is_subagent_invocation(input_data):
+            return
+    except ImportError:
+        pass
+
     try:
         if _is_first_run():
             context = _first_run_context()
