@@ -33,7 +33,7 @@
 
 ## 🚀 Quick Start
 
-${\color{#1a73e8}\textbf{\textsf{Step 1.}}}$ Open a terminal.
+**<ins>Step 1.</ins>** Open a terminal.
 
 - **Mac:** `Cmd + Space`, type `Terminal`
 - **Linux:** `Ctrl + Alt + T`
@@ -41,7 +41,7 @@ ${\color{#1a73e8}\textbf{\textsf{Step 1.}}}$ Open a terminal.
 
 &nbsp;
 
-${\color{#1a73e8}\textbf{\textsf{Step 2.}}}$ Paste this and press Enter:
+**<ins>Step 2.</ins>** Paste this and press Enter:
 
 **Mac / Linux:**
 ```bash
@@ -55,15 +55,15 @@ irm https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install
 
 &nbsp;
 
-${\color{#1a73e8}\textbf{\textsf{Step 3.}}}$ Wait 3-5 minutes for installation.
+**<ins>Step 3.</ins>** Wait 3-5 minutes for installation.
 
 &nbsp;
 
-${\color{#1a73e8}\textbf{\textsf{Step 4.}}}$ Quit Claude completely and reopen it (Mac: `Cmd+Q`, Windows: close all Claude windows).
+**<ins>Step 4.</ins>** Quit Claude completely and reopen it (Mac: `Cmd+Q`, Windows: close all Claude windows).
 
 &nbsp;
 
-${\color{#1a73e8}\textbf{\textsf{Step 5.}}}$ Type **"Set up TrueMemory"** and pick Edge, Base, or Pro.
+**<ins>Step 5.</ins>** Type **"Set up TrueMemory"** and pick Edge, Base, or Pro.
 
 &nbsp;
 
