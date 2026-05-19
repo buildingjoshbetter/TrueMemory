@@ -791,7 +791,7 @@ def _run_install(args):
     Hooks installed:
     - SessionStart: injects relevant memories as additionalContext
     - UserPromptSubmit: buffers user messages (kept for future use)
-    - Stop: triggers background fact extraction after each session
+    - SessionEnd: triggers background fact extraction when the session terminates
     - PreCompact: saves context snapshot before Claude compresses conversation
 
     Note: the event is named ``PreCompact`` in Claude Code's settings.json
@@ -809,7 +809,7 @@ def _run_install(args):
     hook_files = {
         "SessionStart": hooks_dir / "session_start.py",
         "UserPromptSubmit": hooks_dir / "user_prompt_submit.py",
-        "Stop": hooks_dir / "stop.py",
+        "SessionEnd": hooks_dir / "stop.py",
         "PreCompact": hooks_dir / "compact.py",
     }
     missing = [name for name, path in hook_files.items() if not path.exists()]
@@ -1083,7 +1083,7 @@ def _run_status(args):
         try:
             settings = json.loads(settings_path.read_text(encoding="utf-8"))
             hooks = settings.get("hooks", {})
-            expected = ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact"]
+            expected = ["SessionStart", "UserPromptSubmit", "SessionEnd", "PreCompact"]
             installed = []
             missing = []
             for event in expected:

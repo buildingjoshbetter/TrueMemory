@@ -12,7 +12,7 @@
 #   4. Runs `truememory-mcp --setup` (code from PyPI) to auto-configure
 #      Claude Code and/or Claude Desktop. Set TRUEMEMORY_SKIP_SETUP=1 to skip.
 #   5. Runs `truememory-ingest install` to wire up lifecycle hooks
-#      (SessionStart, Stop, UserPromptSubmit, PreCompact) and merge
+#      (SessionStart, SessionEnd, UserPromptSubmit, PreCompact) and merge
 #      CLAUDE.md instructions so Claude uses TrueMemory proactively.
 #
 # Environment overrides:
