@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover — Windows path
 log = logging.getLogger(__name__)
 
 EXTRACTED_DIR = Path.home() / ".truememory" / "extracted"
+TURN_INJECTED_DIR = Path.home() / ".truememory" / "turn_injected"
 
 _BUDGET_FILE = Path.home() / ".truememory" / ".extraction_budget"
 _MAX_EXTRACTIONS_PER_HOUR = int(os.environ.get("TRUEMEMORY_MAX_EXTRACTIONS_PER_HOUR", "20"))
@@ -202,5 +203,97 @@ def mark_session_extracted(session_id: str, transcript_path: str, spawned_pid: i
             "timestamp": time.time(),
             "pid": spawned_pid or os.getpid(),
         }), encoding="utf-8")
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Turn-based memory injection (UserPromptSubmit) — per-session one-shot dedup
+# ---------------------------------------------------------------------------
+
+
+def count_user_turns(transcript_path: str) -> int:
+    """Count user turns in a Claude Code transcript file.
+
+    Mirrors the two-path parsing of ``stop._has_enough_messages`` but
+    returns the count instead of a bool gate. The "user" role is anything
+    with ``type``/``role`` set to ``"human"`` or ``"user"`` — string
+    substring counting is avoided so transcripts that mention the literal
+    words ``"human"``/``"user"`` in content don't inflate the total.
+    """
+    try:
+        content = Path(transcript_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+
+    if not content.strip():
+        return 0
+
+    # Try JSON array first (Claude Code may serialize as one array)
+    try:
+        if content.lstrip().startswith("["):
+            data = json.loads(content)
+            if isinstance(data, list):
+                count = 0
+                for entry in data:
+                    if isinstance(entry, dict):
+                        role = entry.get("type") or entry.get("role") or ""
+                        if role in ("human", "user"):
+                            count += 1
+                return count
+    except json.JSONDecodeError:
+        pass
+
+    # Fall back to JSONL (one JSON object per line — the common Claude Code shape)
+    count = 0
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict):
+            role = entry.get("type") or entry.get("role") or ""
+            if role in ("human", "user"):
+                count += 1
+    return count
+
+
+def _turn_injected_marker(session_id: str) -> Path:
+    safe_id = _safe_session_id(session_id)
+    return TURN_INJECTED_DIR / safe_id
+
+
+def already_injected(session_id: str) -> bool:
+    """Return True iff turn-based injection has already fired for this session."""
+    if not session_id or session_id == "unknown":
+        return False
+    safe_id = _safe_session_id(session_id)
+    if not safe_id:
+        return False
+    return _turn_injected_marker(session_id).exists()
+
+
+def mark_injected(session_id: str, meta: dict) -> None:
+    """Atomically record that turn-based injection has fired for this session.
+
+    Writes via tempfile + rename so partial writes can't corrupt the marker.
+    The ``meta`` dict records the trigger reason, query size, and result
+    count — useful for debugging via ``cat ~/.truememory/turn_injected/<id>``.
+    """
+    if not session_id or session_id == "unknown":
+        return
+    safe_id = _safe_session_id(session_id)
+    if not safe_id:
+        return
+    try:
+        TURN_INJECTED_DIR.mkdir(parents=True, exist_ok=True)
+        marker = _turn_injected_marker(session_id)
+        tmp = marker.with_suffix(".tmp")
+        payload = {**meta, "timestamp": time.time()}
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(marker)
     except OSError:
         pass
