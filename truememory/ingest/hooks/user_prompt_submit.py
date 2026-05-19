@@ -1,24 +1,36 @@
 #!/usr/bin/env python3
 """
-UserPromptSubmit Hook — Lightweight Message Buffer
-===================================================
+UserPromptSubmit Hook — Buffer + Recall + Turn-Based Injection
+==============================================================
 
-Fires on every user message submission. Appends a one-line JSON record
-to a per-session buffer so debugging tools can see what the user said
-even if the transcript is corrupted or truncated.
+Fires on every user message submission. Five things happen:
 
-Design notes:
-- The Stop hook reads `transcript_path` directly, not the buffer, so
-  this is defensive / diagnostic rather than load-bearing.
-- Uses `fcntl.flock` to make concurrent writes from overlapping sessions
-  safe (previously could interleave).
-- Automatically prunes buffer files older than 7 days on each invocation
-  so they don't grow unbounded.
+1. **Buffer write** — appends a one-line JSON record to a per-session
+   buffer (defensive snapshot in case the transcript file corrupts).
+2. **Email capture** — opportunistic scrape of the user's email into
+   ``~/.truememory/config.json`` when first observed.
+3. **Background-ingestion trigger** — when transcript has ≥10 user
+   messages and isn't already mid-extraction, spawns the cold-path
+   extractor (mirrors SessionEnd, catches sessions that don't terminate
+   cleanly).
+4. **Explicit-recall injection** (``_try_auto_recall``) — regex-gated
+   path that fires when the prompt matches a question pattern
+   (``"what's"``, ``"do you remember"``, etc.). Searches TrueMemory
+   with the raw prompt, emits a ``<truememory-recall>`` block.
+5. **Turn-based injection** (``_try_turn_based_injection``) — once per
+   session, when conversation has signal: ``turns >= 13`` OR
+   ``len(prompt) > 333``. Uses the last K user turns as a richer query,
+   runs ``Memory.search_deep`` with HyDE expansion (Claude CLI llm_fn),
+   emits a ``<truememory-context>`` block. Marker file dedupes re-fires.
+
+Both injection paths can emit on the same turn; combined output goes
+out as a single ``additionalContext`` JSON line to avoid double-emit.
 
 Input (stdin JSON):
     {"session_id": "...", "prompt": "...", "transcript_path": "..."}
 
-Output: None (silent hook, no additionalContext)
+Output (stdout): either nothing, or a single JSON line with
+    ``additionalContext`` containing the concatenated recall blocks.
 """
 
 import argparse
@@ -48,6 +60,26 @@ BUFFER_DIR = Path(os.environ.get(
 RETENTION_DAYS = int(os.environ.get("TRUEMEMORY_BUFFER_RETENTION_DAYS", "7"))
 # Max size per buffer file (bytes) before we rotate
 MAX_BUFFER_SIZE = int(os.environ.get("TRUEMEMORY_BUFFER_MAX_BYTES", str(10 * 1024 * 1024)))
+
+
+# ---------------------------------------------------------------------------
+# Turn-based memory injection — once-per-session targeted recall
+# ---------------------------------------------------------------------------
+
+# Fire injection when user turns reach this count (whichever trigger first wins).
+INJECT_AFTER_TURNS = int(os.environ.get("TRUEMEMORY_INJECT_AFTER_TURNS", "13"))
+# Fire injection when current prompt exceeds this character count (one substantive prompt is enough signal).
+INJECT_AFTER_CHARS = int(os.environ.get("TRUEMEMORY_INJECT_AFTER_CHARS", "333"))
+# Number of recent user turns to concatenate as the search query (richer semantic context than raw prompt alone).
+INJECT_QUERY_TURNS = int(os.environ.get("TRUEMEMORY_INJECT_QUERY_TURNS", "6"))
+# Per-turn truncation when joining turns into the query — prevents 100K-char pasted code from blowing up the embedding input.
+INJECT_QUERY_TURN_CHARS = int(os.environ.get("TRUEMEMORY_INJECT_QUERY_TURN_CHARS", "500"))
+# How many memories to fetch and inject.
+INJECT_RECALL_LIMIT = int(os.environ.get("TRUEMEMORY_INJECT_RECALL_LIMIT", "15"))
+# Per-bullet truncation in the emitted block (200 in the existing recall path; bumped to 300 for the once-per-session budget).
+INJECT_BULLET_CHARS = int(os.environ.get("TRUEMEMORY_INJECT_BULLET_CHARS", "300"))
+# Kill switch — set TRUEMEMORY_INJECT_DISABLED=1 to disable turn-based injection entirely.
+INJECT_DISABLED = os.environ.get("TRUEMEMORY_INJECT_DISABLED", "").lower() in ("1", "true", "yes")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -144,6 +176,161 @@ def _try_capture_email(prompt: str) -> None:
         pass
 
 
+def _build_turn_based_query(transcript_path: str, k: int) -> str:
+    """Return the last ``k`` user turns concatenated as a single search query.
+
+    Reads the transcript JSONL, collects user-role entries' content,
+    truncates each turn to ``INJECT_QUERY_TURN_CHARS`` so a single pasted
+    code block can't blow the embedding input to 100K chars, joins with
+    ``"\\n---\\n"`` so the vector encoder sees them as distinct passages.
+    Returns ``""`` if the transcript can't be parsed.
+    """
+    try:
+        content = Path(transcript_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    if not content.strip():
+        return ""
+
+    entries: list[str] = []
+    # Try JSON array first
+    try:
+        if content.lstrip().startswith("["):
+            data = json.loads(content)
+            if isinstance(data, list):
+                for entry in data:
+                    if not isinstance(entry, dict):
+                        continue
+                    role = entry.get("type") or entry.get("role") or ""
+                    if role not in ("human", "user"):
+                        continue
+                    msg = entry.get("content") or entry.get("message") or ""
+                    if isinstance(msg, list):  # Claude Code: content blocks
+                        msg = " ".join(
+                            b.get("text", "") for b in msg
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        )
+                    if isinstance(msg, str) and msg.strip():
+                        entries.append(msg.strip()[:INJECT_QUERY_TURN_CHARS])
+    except json.JSONDecodeError:
+        pass
+
+    if not entries:
+        # JSONL fallback
+        for line in content.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            role = entry.get("type") or entry.get("role") or ""
+            if role not in ("human", "user"):
+                continue
+            msg = entry.get("content") or entry.get("message") or ""
+            if isinstance(msg, dict):
+                msg = msg.get("content") or msg.get("text") or ""
+            if isinstance(msg, list):
+                msg = " ".join(
+                    b.get("text", "") for b in msg
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+            if isinstance(msg, str) and msg.strip():
+                entries.append(msg.strip()[:INJECT_QUERY_TURN_CHARS])
+
+    if not entries:
+        return ""
+
+    return "\n---\n".join(entries[-k:])
+
+
+def _try_turn_based_injection(
+    prompt: str,
+    session_id: str,
+    transcript_path: str,
+    user_id: str,
+    db_path: str,
+) -> str | None:
+    """One-shot per session: when the conversation has signal, search with
+    the last K user turns as a richer query and emit a
+    ``<truememory-context>`` block. Marker file prevents re-fire.
+    """
+    if INJECT_DISABLED:
+        return None
+    if not session_id or session_id == "unknown":
+        return None
+    if not transcript_path:
+        return None
+
+    try:
+        from truememory.ingest.hooks._shared import (
+            already_injected, mark_injected, count_user_turns,
+        )
+    except ImportError:
+        return None
+
+    if already_injected(session_id):
+        return None
+
+    # Gate — length first (cheap), then turn count (transcript I/O)
+    if len(prompt) > INJECT_AFTER_CHARS:
+        trigger = "length"
+    else:
+        try:
+            turns = count_user_turns(transcript_path)
+        except Exception:
+            return None
+        if turns < INJECT_AFTER_TURNS:
+            return None
+        trigger = "turns"
+
+    query = _build_turn_based_query(transcript_path, INJECT_QUERY_TURNS)
+    if not query.strip():
+        return None
+
+    # search_deep with llm_fn — HyDE expansion on Pro tier (Claude CLI).
+    # Gracefully degrades if mcp_server / Memory not importable in this env.
+    try:
+        from truememory.client import Memory
+        from truememory.mcp_server import _get_llm_fn  # singleton, cached
+        m = Memory(path=db_path or None)
+        llm_fn = _get_llm_fn()
+        results = m.search_deep(
+            query, user_id=user_id or None,
+            limit=INJECT_RECALL_LIMIT, llm_fn=llm_fn,
+        )
+    except Exception:
+        return None
+
+    if not results:
+        # Still mark — don't re-pay the search cost on every subsequent prompt
+        mark_injected(session_id, {
+            "trigger": trigger, "query_chars": len(query), "n_results": 0,
+        })
+        return None
+
+    lines = [
+        f"- {(r.get('content') or '')[:INJECT_BULLET_CHARS]}"
+        for r in results[:INJECT_RECALL_LIMIT]
+    ]
+    out = (
+        "<truememory-context>\n"
+        f"Relevant memories (turn-based injection, trigger={trigger}):\n"
+        + "\n".join(lines)
+        + "\n</truememory-context>"
+    )
+
+    mark_injected(session_id, {
+        "trigger": trigger,
+        "query_chars": len(query),
+        "n_results": len(results),
+    })
+    return out
+
+
 def main():
     if os.environ.get("TRUEMEMORY_EXTRACTION"):
         return
@@ -154,6 +341,16 @@ def main():
         input_data = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
         return
+
+    # Skip sub-agent (Task tool) invocations entirely — their prompts are
+    # orchestrator-generated, not real user input, and the per-spawn hook
+    # cost is wasted. See _shared.is_subagent_invocation for detection.
+    try:
+        from truememory.ingest.hooks._shared import is_subagent_invocation
+        if is_subagent_invocation(input_data):
+            return
+    except ImportError:
+        pass
 
     prompt = input_data.get("prompt", "").strip()
     session_id = input_data.get("session_id", "unknown")
@@ -188,9 +385,20 @@ def main():
         except Exception:
             pass
 
+    # Two injection paths, both can fire on the same turn. We MUST emit at most
+    # one `additionalContext` JSON line — Claude Code reads exactly one stdout
+    # JSON from the hook, so concat both blocks if both fire.
     recall_context = _try_auto_recall(prompt, args.user, args.db)
-    if recall_context:
+    turn_context = _try_turn_based_injection(
+        prompt, session_id, transcript_path, args.user, args.db,
+    )
+    if recall_context and turn_context:
+        combined = recall_context + "\n\n" + turn_context
+        print(json.dumps({"additionalContext": combined}))
+    elif recall_context:
         print(json.dumps({"additionalContext": recall_context}))
+    elif turn_context:
+        print(json.dumps({"additionalContext": turn_context}))
 
 
 def buffer_message(session_id: str, prompt: str):

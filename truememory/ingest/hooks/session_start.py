@@ -21,12 +21,24 @@ Output (stdout JSON):
 """
 
 import argparse
-import fcntl
 import json
 import logging
 import os
 import sys
 from pathlib import Path
+
+# fcntl is POSIX-only — Windows has no equivalent file-range locking. Without
+# this guard, every Claude Code session-start hook crashes on Windows with
+# ModuleNotFoundError before ever running. Only the orphaned-session scan
+# uses fcntl (advisory lock to prevent concurrent scans); the Windows path
+# skips the lock and proceeds — worst case is two processes scanning
+# simultaneously and queueing the same sessions, which the backlog drainer's
+# atomic rename already deduplicates.
+try:
+    import fcntl  # type: ignore[import-not-found]
+    _HAS_FCNTL = True
+except ImportError:  # pragma: no cover — Windows path
+    _HAS_FCNTL = False
 
 log = logging.getLogger(__name__)
 
@@ -284,7 +296,13 @@ def _scan_stale_sessions() -> None:
     _SCAN_MARKER.parent.mkdir(parents=True, exist_ok=True)
     try:
         scan_fd = os.open(str(_SCAN_MARKER), os.O_RDWR | os.O_CREAT)
-        fcntl.flock(scan_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if _HAS_FCNTL:
+            # POSIX: non-blocking advisory lock prevents concurrent scans.
+            # If another scan is in progress, exit early.
+            fcntl.flock(scan_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Windows: no advisory lock — concurrent scans may run simultaneously.
+        # The backlog drainer's atomic .json → .processing rename deduplicates
+        # any overlapping work, so the worst case is wasted CPU, not corruption.
     except (BlockingIOError, OSError):
         return
 
@@ -381,6 +399,16 @@ def main():
         input_data = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
         input_data = {}
+
+    # Skip sub-agent (Task tool) invocations entirely — sub-agents shouldn't
+    # get the blanket recall + first-run banner; both are oriented to the
+    # human user opening Claude Code, not orchestrator-spawned helpers.
+    try:
+        from truememory.ingest.hooks._shared import is_subagent_invocation
+        if is_subagent_invocation(input_data):
+            return
+    except ImportError:
+        pass
 
     try:
         if _is_first_run():

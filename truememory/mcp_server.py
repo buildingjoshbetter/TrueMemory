@@ -298,10 +298,46 @@ def _build_openai_llm(api_key: str):
     return _openai_llm
 
 
+def _build_claude_cli_llm(_unused_key: str = ""):
+    """Build llm_fn that calls the local ``claude`` CLI binary via subprocess.
+
+    Uses Claude Code subscription auth (OAuth/keychain) — no API key required.
+    Wraps the extraction-pipeline helper at
+    ``truememory.ingest.models._complete_claude_cli`` in a
+    ``(prompt: str) -> str`` closure compatible with search_deep's ``llm_fn``.
+
+    Default model is ``claude-haiku-4-5`` (cheap, fast, sufficient for HyDE
+    doc generation); override via ``TRUEMEMORY_HYDE_CLAUDE_MODEL``. Raises
+    ``RuntimeError`` if the CLI binary is not on PATH so the
+    ``_build_llm_fn`` loop can fall through to the next provider.
+    """
+    from truememory.ingest.models import (
+        _claude_cli_available,
+        _complete_claude_cli,
+        LLMConfig,
+    )
+
+    if not _claude_cli_available():
+        raise RuntimeError("claude CLI not on PATH")
+
+    model = os.environ.get("TRUEMEMORY_HYDE_CLAUDE_MODEL", "claude-haiku-4-5")
+    config = LLMConfig(provider="claude_cli", model=model)
+
+    def _claude_cli_llm(prompt: str) -> str:
+        return _complete_claude_cli(config, prompt, system="")
+
+    return _claude_cli_llm
+
+
 # Provider table — builders are looked up dynamically via module-level name
 # so tests can monkeypatch ``_build_anthropic_llm`` etc. without having to
 # reimport the module or mutate a frozen tuple of captured references.
+#
+# Priority 1: ``claude_cli`` — PATH-detected, uses Claude Code subscription
+# auth (no API key, zero cash spend). Falls through to the API-key providers
+# if the binary is missing or ``TRUEMEMORY_DISABLE_CLAUDE_CLI=1`` is set.
 _LLM_PROVIDERS = (
+    ("claude_cli", "", "", "_build_claude_cli_llm"),
     ("anthropic", "ANTHROPIC_API_KEY", "anthropic_api_key", "_build_anthropic_llm"),
     ("openrouter", "OPENROUTER_API_KEY", "openrouter_api_key", "_build_openrouter_llm"),
     ("openai", "OPENAI_API_KEY", "openai_api_key", "_build_openai_llm"),
@@ -309,24 +345,41 @@ _LLM_PROVIDERS = (
 
 
 def _build_llm_fn():
-    """Build an llm_fn from available API keys.
+    """Build an llm_fn from available providers.
 
-    Resolution order for each provider:
-      1. Environment variable (ANTHROPIC_API_KEY / OPENROUTER_API_KEY / OPENAI_API_KEY)
-      2. Persistent config (~/.truememory/config.json, written by ``truememory-ingest setup``)
+    Resolution order:
+      1. Claude CLI subscription (priority 1) — PATH-detected via
+         ``shutil.which("claude")``. Skipped when
+         ``TRUEMEMORY_DISABLE_CLAUDE_CLI=1`` is set.
+      2. Anthropic / OpenRouter / OpenAI — each by env var
+         (``ANTHROPIC_API_KEY`` / ``OPENROUTER_API_KEY`` / ``OPENAI_API_KEY``)
+         or ``~/.truememory/config.json`` key.
 
-    Provider priority: Anthropic direct → OpenRouter → OpenAI. On init
-    failure the error is logged at WARNING and stored in
+    On init failure the error is logged at WARNING and stored in
     ``_llm_last_error[provider]`` so ``truememory_stats.health`` (F07) can
     surface the degradation instead of silently returning None.
     """
     global _current_llm_provider_name
     config = _load_config()
+    cli_disabled = os.environ.get(
+        "TRUEMEMORY_DISABLE_CLAUDE_CLI", ""
+    ).lower() in ("1", "true", "yes")
     for provider, env_var, config_key, builder_name in _LLM_PROVIDERS:
+        builder = globals()[builder_name]
+        if provider == "claude_cli":
+            if cli_disabled:
+                continue
+            try:
+                fn = builder("")  # PATH-detected, no key arg used
+            except Exception as e:
+                _record_llm_error(provider, e)
+                continue
+            _clear_llm_error(provider)
+            _current_llm_provider_name = provider
+            return fn
         api_key = os.environ.get(env_var) or config.get(config_key)
         if not api_key:
             continue
-        builder = globals()[builder_name]
         try:
             fn = builder(api_key)
             _clear_llm_error(provider)
