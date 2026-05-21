@@ -17,7 +17,11 @@ except ImportError:
 
 
 def _set_mps_memory_cap():
-    """Set MPS memory cap BEFORE torch is imported."""
+    """Set MPS memory cap and BLAS thread limits BEFORE torch is imported."""
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_MAX_THREADS", "1")
     if os.environ.get("PYTORCH_MPS_HIGH_WATERMARK_RATIO"):
         return
     if psutil is not None:
