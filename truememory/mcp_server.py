@@ -170,6 +170,11 @@ Deep search (truememory_search_deep):
 - Also supports | separated parallel queries.
 - Retrieves 5x more candidates internally — best for questions requiring scattered evidence.
 
+Proactive search — BEFORE saying "I don't have":
+- Before saying you don't have credentials, API keys, passwords, SSH details, configuration, or infrastructure information, ALWAYS search TrueMemory first.
+- Common examples: API keys (OpenRouter, Anthropic, PyPI, GitHub tokens), SSH credentials and IP addresses, database passwords, service URLs, project configuration details.
+- If TrueMemory has the information, use it directly. Only say "I don't have X" after searching and confirming it's not stored.
+
 You should store and recall memories as naturally as a good assistant who remembers past conversations. Do not ask permission to remember things — just do it.""",
 )
 
@@ -672,6 +677,8 @@ def truememory_forget(memory_id: int) -> str:
     Args:
         memory_id: The integer ID of the memory to delete.
     """
+    if isinstance(memory_id, bool) or not isinstance(memory_id, int):
+        return json.dumps({"error": f"memory_id must be an integer, got {type(memory_id).__name__}"})
     m = _get_memory()
     deleted = m.delete(memory_id)
     return json.dumps({"deleted": deleted, "memory_id": memory_id})
@@ -759,6 +766,9 @@ def truememory_configure(
     tier = tier.lower().strip()
     if tier not in ("edge", "base", "pro"):
         return json.dumps({"error": "tier must be 'edge', 'base', or 'pro'"})
+
+    if api_key and len(api_key) > 256:
+        return json.dumps({"error": "api_key exceeds maximum length of 256 characters"})
 
     # Validate API key + provider pairing
     if api_key and not api_provider:

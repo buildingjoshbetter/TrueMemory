@@ -165,10 +165,12 @@ class OpenClawAdapter(CLIAdapter):
         return self._has_mcp_entry() and self._has_plugin()
 
     def get_system_prompt_path(self) -> Path | None:
-        return None
+        return _OPENCLAW_DIR / "truememory_prompt.md"
 
     def get_system_prompt_content(self) -> str:
-        return ""
+        from truememory.hooks.adapters.base import get_generic_system_prompt
+
+        return get_generic_system_prompt()
 
     # -- Private helpers --
 

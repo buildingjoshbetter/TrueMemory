@@ -82,6 +82,8 @@ class Memory:
         # partial JSON) used to pollute the DB with useless rows that
         # inflated `stats().message_count`. Warn rather than raise so
         # batch callers can continue; the skip-marker lets them detect.
+        if not isinstance(content, str):
+            raise TypeError(f"content must be a string, got {type(content).__name__}")
         if not content or not content.strip():
             import warnings
             warnings.warn(

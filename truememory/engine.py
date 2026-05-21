@@ -498,6 +498,8 @@ class TrueMemoryEngine:
         Returns:
             True if any rows were deleted from messages.
         """
+        if user_id is not None and not isinstance(user_id, str):
+            raise TypeError(f"user_id must be a string or None, got {type(user_id).__name__}")
         if isinstance(user_id, str) and not user_id.strip():
             raise ValueError("user_id cannot be an empty string")
 
@@ -1792,6 +1794,7 @@ class TrueMemoryEngine:
     # IN-clause parameter chunk size. SQLite default is 999 variables —
     # keep a healthy margin for any other bound params in the query.
     _SURPRISE_IN_CHUNK = 500
+    _warned_no_surprise = False
 
     def _source_is_blocked(self, source: str | None) -> bool:
         """True if any '+'-separated segment of `source` is in the
@@ -1885,13 +1888,12 @@ class TrueMemoryEngine:
                 )
                 surprise_map.update(dict(cur.fetchall()))
         except sqlite3.OperationalError as exc:
-            # Most likely surprise_scores table doesn't exist yet (cold
-            # DB before first consolidate). Surface at WARNING once per
-            # process so silent no-ops are visible.
-            logger.warning(
-                "L5 surprise boost unavailable: %s (run consolidate first)",
-                exc,
-            )
+            if not self._warned_no_surprise:
+                logger.warning(
+                    "L5 surprise boost unavailable: %s (run consolidate first)",
+                    exc,
+                )
+                self._warned_no_surprise = True
             return results
         except Exception:
             logger.warning(
@@ -2369,6 +2371,7 @@ Return ONLY the queries, one per line, no numbering or explanation:"""
 
     def get_stats(self) -> dict:
         """Return ingestion and search statistics."""
+        self._ensure_connection()
         stats = dict(self.stats)
 
         # Add live DB stats if connected.
