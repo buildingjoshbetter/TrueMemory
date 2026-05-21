@@ -20,9 +20,12 @@ What is NEVER tracked:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
+import re
+import subprocess
 import sys
 import threading
 import time
@@ -39,6 +42,53 @@ _user_id: str = ""
 _session_events: list[dict] = []
 _lock = threading.Lock()
 _flush_thread: threading.Thread | None = None
+
+
+_device_id_cache: str | None = None
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,10}$")
+
+
+def get_device_id() -> str:
+    """Return a SHA256-hashed machine ID for privacy-safe device counting."""
+    global _device_id_cache
+    if _device_id_cache is not None:
+        return _device_id_cache
+
+    raw = ""
+    try:
+        if sys.platform == "darwin":
+            out = subprocess.run(
+                ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in out.stdout.splitlines():
+                if "IOPlatformUUID" in line:
+                    raw = line.split('"')[-2]
+                    break
+        elif sys.platform == "linux":
+            mid = Path("/etc/machine-id")
+            if mid.exists():
+                raw = mid.read_text().strip()
+        elif sys.platform == "win32":
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\Cryptography",
+            )
+            raw, _ = winreg.QueryValueEx(key, "MachineGuid")
+            winreg.CloseKey(key)
+    except Exception:
+        pass
+
+    _device_id_cache = hashlib.sha256(raw.encode()).hexdigest()[:16] if raw else "unknown"
+    return _device_id_cache
+
+
+def _is_valid_email(email: str) -> bool:
+    """Basic email format check. Rejects garbage without being overly strict."""
+    if not email or len(email) > 254:
+        return False
+    return _EMAIL_RE.fullmatch(email) is not None
 
 
 def init(config: dict) -> dict | None:
@@ -68,6 +118,7 @@ def init(config: dict) -> dict | None:
         "platform": sys.platform,
         "arch": platform.machine(),
         "python": platform.python_version(),
+        "device_id": get_device_id(),
     }
     if config.get("email"):
         session_props["email"] = config["email"]
@@ -138,6 +189,8 @@ def track(event: str, properties: dict | None = None) -> None:
 def identify(email: str, properties: dict | None = None) -> None:
     """Register user identity (first-run only)."""
     if not _enabled:
+        return
+    if not _is_valid_email(email):
         return
 
     track("identify", {
