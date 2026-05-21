@@ -1485,6 +1485,15 @@ def main():
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+    if not os.environ.get("PYTORCH_MPS_HIGH_WATERMARK_RATIO"):
+        try:
+            import psutil
+            total_gb = psutil.virtual_memory().total / (1024**3)
+            ratio = str(min(0.08, 2.5 / total_gb)) if total_gb >= 16 else "0.19"
+        except Exception:
+            ratio = "0.19"
+        os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = ratio
+        os.environ.setdefault("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.0")
 
     # Initialize telemetry (fire-and-forget, opt-out via TRUEMEMORY_TELEMETRY=off)
     # Update check now runs in background thread inside telemetry.init()
