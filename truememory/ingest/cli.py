@@ -132,8 +132,8 @@ def _run_ingest(args):
     try:
         from truememory.model_client import ensure_server_running
         ensure_server_running()
-    except Exception:
-        pass  # Non-fatal — pipeline still works, just slower (local model load)
+    except Exception as e:
+        logging.getLogger(__name__).debug("Model server not available: %s", e)
 
     # Preflight: verify truememory is importable before we try to
     # construct a pipeline. This catches missing dependencies early with
