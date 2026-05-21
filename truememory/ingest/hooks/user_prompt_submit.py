@@ -75,6 +75,23 @@ _INJECTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+_INTENT_RE = re.compile(
+    r'(?:^|\b)(?:'
+    r'my\s+email\s+(?:is|address\s+is)\s+'
+    r'|email\s*:\s*'
+    r'|reach\s+me\s+at\s+'
+    r'|contact\s+me\s+at\s+'
+    r"|i(?:'m|\s+am)\s+at\s+"
+    r')',
+    re.IGNORECASE,
+)
+
+_TRIVIAL_WORDS = frozenset({
+    '', 'yeah', 'yep', 'yes', 'sure', 'ok', 'okay',
+    'here', "here's", 'its', "it's", 'use', 'try',
+    'please', 'thanks', 'thx', 'hi', 'hey',
+})
+
 _RECALL_RE = re.compile(
     r'\b(?:'
     r'what(?:\'s|\s+is|\s+was|\s+are|\s+were|\s+did|\s+do)\b'
@@ -140,7 +157,7 @@ def _try_auto_recall(prompt: str, user_id: str, db_path: str) -> str | None:
 
 
 def _try_capture_email(prompt: str) -> None:
-    """If the user typed an email and config has no email, save it."""
+    """If the user typed their email and config has no email, save it."""
     try:
         config_path = Path.home() / ".truememory" / "config.json"
         if not config_path.exists():
@@ -148,14 +165,38 @@ def _try_capture_email(prompt: str) -> None:
         config = json.loads(config_path.read_text(encoding="utf-8"))
         if config.get("email"):
             return
-        if len(prompt) > 200:
+
+        stripped = prompt.strip()
+        email = None
+
+        m = re.fullmatch(
+            r'[\w.+-]+@[\w-]+(?:\.[A-Za-z]{2,10}(?![A-Za-z])){1,3}',
+            stripped, re.ASCII,
+        )
+        if m:
+            email = m.group(0)
+
+        if email is None and len(stripped) < 80:
+            em = _EMAIL_RE.search(stripped)
+            if em:
+                remainder = stripped[:em.start()] + stripped[em.end():]
+                words = re.sub(r'[,.\s!?:]+', ' ', remainder).strip().lower().split()
+                if all(w in _TRIVIAL_WORDS for w in words):
+                    email = em.group(0)
+
+        if email is None:
+            if len(prompt) > 200:
+                return
+            if _INTENT_RE.search(prompt):
+                if _INJECTION_RE.search(prompt):
+                    return
+                em = _EMAIL_RE.search(prompt)
+                if em:
+                    email = em.group(0)
+
+        if email is None:
             return
-        if _INJECTION_RE.search(prompt):
-            return
-        match = _EMAIL_RE.search(prompt)
-        if not match:
-            return
-        email = match.group(0)
+
         config["email"] = email
         tmp = config_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(config, indent=2), encoding="utf-8")
