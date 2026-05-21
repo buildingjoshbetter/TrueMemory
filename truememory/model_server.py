@@ -9,16 +9,20 @@ TRUEMEMORY_MODEL_SERVER_IDLE env var).
 """
 
 import os
-import psutil
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 
 def _set_mps_memory_cap():
     """Set MPS memory cap BEFORE torch is imported."""
     if os.environ.get("PYTORCH_MPS_HIGH_WATERMARK_RATIO"):
         return
-    total_gb = psutil.virtual_memory().total / (1024**3)
-    if total_gb >= 32:
-        ratio = "0.55"
+    if psutil is not None:
+        total_gb = psutil.virtual_memory().total / (1024**3)
+        ratio = "0.55" if total_gb >= 32 else "0.50"
     else:
         ratio = "0.50"
     os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = ratio

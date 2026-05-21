@@ -183,7 +183,11 @@ def get_reranker(model_name: str | None = None, device: str | None = None):
                 _model_name = name
                 return _model
             except Exception:
-                pass  # Fall through to local loading
+                log.warning(
+                    "Model server available but reranker proxy failed — "
+                    "falling back to local model loading (high memory cost). "
+                    "Check ~/.truememory/model_server.stderr for details."
+                )
 
         from sentence_transformers import CrossEncoder
 

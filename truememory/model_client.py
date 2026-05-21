@@ -152,10 +152,12 @@ def _start_server() -> bool:
         env = None
 
     try:
+        _stderr_path = _TRUEMEMORY_DIR / "model_server.stderr"
+        _stderr_fh = open(_stderr_path, "a")
         subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=_stderr_fh,
             start_new_session=True,
             env=env,
         )
@@ -163,10 +165,11 @@ def _start_server() -> bool:
         log.warning("Failed to start model server: %s", e)
         if app_exe:
             try:
+                _stderr_fh2 = open(_stderr_path, "a")
                 subprocess.Popen(
                     [sys.executable, "-m", "truememory.model_server"],
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stderr=_stderr_fh2,
                     start_new_session=True,
                 )
             except Exception as e2:

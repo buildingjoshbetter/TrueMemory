@@ -999,6 +999,13 @@ def _unload_models() -> None:
         unload_reranker()
     except Exception:
         pass
+    try:
+        import torch
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+            torch.mps.synchronize()
+    except Exception:
+        pass
     gc.collect()
     log.info("Models unloaded (idle timeout). RSS=%.0f MB", _get_rss_mb())
 

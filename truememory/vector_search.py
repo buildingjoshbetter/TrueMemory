@@ -200,7 +200,11 @@ def get_model():
                 _model = proxy
                 return _model
             except Exception:
-                pass  # Fall through to local loading
+                logger.warning(
+                    "Model server available but embedding proxy failed — "
+                    "falling back to local model loading (high memory cost). "
+                    "Check ~/.truememory/model_server.stderr for details."
+                )
 
         resolved = EMBEDDING_MODEL
         if resolved == "model2vec":
