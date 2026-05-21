@@ -66,20 +66,36 @@ def _parse_args() -> argparse.Namespace:
     return args
 
 
-_EMAIL_RE = re.compile(r'[\w.+-]+@[\w-]+\.[\w.-]+')
+_EMAIL_RE = re.compile(r'[\w.+-]+@[\w-]+\.[A-Za-z]{2,10}')
+
+_INJECTION_RE = re.compile(
+    r'\b(?:DROP|SELECT|INSERT|DELETE|UPDATE|UNION|ALTER|EXEC)\b'
+    r'|[`{};]'
+    r'|--\s',
+    re.IGNORECASE,
+)
 
 _RECALL_RE = re.compile(
-    r'\b(?:what(?:\'s|\s+is|\s+was|\s+are|\s+were|\s+did|\s+do)\b'
+    r'\b(?:'
+    r'what(?:\'s|\s+is|\s+was|\s+are|\s+were|\s+did|\s+do)\b'
     r'|who\s+(?:is|was|did)\b'
     r'|when\s+(?:is|was|did)\b'
     r'|where\s+(?:is|was|did|does)\b'
     r'|do\s+you\s+remember\b'
-    r'|did\s+(?:we|i|you)\b'
+    r'|can\s+you\s+recall\b'
+    r'|remind\s+me\b'
     r'|what\'s\s+my\b'
     r'|what\s+do\s+I\b'
-    r'|remind\s+me\b'
+    r'|did\s+(?:we|i|you)\b'
     r'|have\s+(?:we|i)\s+(?:ever|already)\b'
-    r'|my\s+(?:favorite|preferred|usual)\b)',
+    r'|you\s+(?:told|said|mentioned)\b'
+    r'|(?:we|i)\s+(?:discussed|decided|agreed)\b'
+    r'|last\s+(?:time|session|conversation)\s+we\b'
+    r'|(?:earlier|previously)\s+(?:you|we|i)\b'
+    r'|yesterday\s+(?:you|we|i)\b'
+    r'|previous\s+(?:session|conversation|chat)\b'
+    r'|my\s+(?:favorite|preferred|usual)\b'
+    r')',
     re.IGNORECASE,
 )
 
@@ -132,10 +148,16 @@ def _try_capture_email(prompt: str) -> None:
         config = json.loads(config_path.read_text(encoding="utf-8"))
         if config.get("email"):
             return
+        if len(prompt) > 200:
+            return
+        if _INJECTION_RE.search(prompt):
+            return
         match = _EMAIL_RE.search(prompt)
         if not match:
             return
         email = match.group(0)
+        if not re.fullmatch(r'[\w.+-]+@[\w-]+\.[A-Za-z]{2,10}', email):
+            return
         config["email"] = email
         tmp = config_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(config, indent=2), encoding="utf-8")
