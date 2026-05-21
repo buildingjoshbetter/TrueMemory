@@ -23,6 +23,7 @@ new episodes or integrated into existing knowledge structures.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from enum import Enum
 
@@ -158,7 +159,6 @@ def _llm_dedup(
 
     # Parse response
     import json
-    import re
 
     response = response.strip()
     response = re.sub(r"^```(?:json)?\s*\n?", "", response)
@@ -206,8 +206,8 @@ def _llm_dedup(
 
 def _word_overlap(a: str, b: str) -> float:
     """Jaccard similarity on word sets."""
-    words_a = set(a.lower().split())
-    words_b = set(b.lower().split())
+    words_a = set(re.findall(r'\w+', a.lower()))
+    words_b = set(re.findall(r'\w+', b.lower()))
     union = words_a | words_b
     if not union:
         return 0.0

@@ -129,6 +129,12 @@ def _run_ingest(args):
     level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(level=level, format="%(levelname)s %(message)s")
 
+    try:
+        from truememory.model_client import ensure_server_running
+        ensure_server_running()
+    except Exception:
+        pass  # Non-fatal — pipeline still works, just slower (local model load)
+
     # Preflight: verify truememory is importable before we try to
     # construct a pipeline. This catches missing dependencies early with
     # an actionable error instead of a deep ModuleNotFoundError.
