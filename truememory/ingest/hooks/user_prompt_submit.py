@@ -66,7 +66,7 @@ def _parse_args() -> argparse.Namespace:
     return args
 
 
-_EMAIL_RE = re.compile(r'[\w.+-]+@[\w-]+\.[A-Za-z]{2,10}')
+_EMAIL_RE = re.compile(r'[\w.+-]+@[\w-]+(?:\.[A-Za-z]{2,10}(?![A-Za-z])){1,3}', re.ASCII)
 
 _INJECTION_RE = re.compile(
     r'\b(?:DROP|SELECT|INSERT|DELETE|UPDATE|UNION|ALTER|EXEC)\b'
@@ -156,8 +156,6 @@ def _try_capture_email(prompt: str) -> None:
         if not match:
             return
         email = match.group(0)
-        if not re.fullmatch(r'[\w.+-]+@[\w-]+\.[A-Za-z]{2,10}', email):
-            return
         config["email"] = email
         tmp = config_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(config, indent=2), encoding="utf-8")
