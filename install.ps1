@@ -87,8 +87,11 @@ if ($LASTEXITCODE -ne 0) {
 
 # ---------- step 3: install truememory as a uv tool ----------
 Say "installing $PKG_SPEC (~3-5 min on first run, downloads all tier models)..."
-& uv tool uninstall truememory *> $null
-& uv tool install --python $TRUEMEMORY_PY --force --refresh $PKG_SPEC > $null
+& uv tool uninstall truememory 2>$null *> $null
+if ($LASTEXITCODE -gt 1) {
+    Warn "uv tool uninstall returned $LASTEXITCODE — proceeding, but result may be partial"
+}
+& uv tool install --python $TRUEMEMORY_PY --force --refresh "$PKG_SPEC" > $null
 if ($LASTEXITCODE -ne 0) {
     Die "truememory install failed"
 }
@@ -107,28 +110,36 @@ if ($uvToolDir) {
     }
 }
 
+# Resolve tool venv python early (avoids Windows Defender ASR shim blocks)
+$toolPython = $null
+if ($uvToolDir) {
+    $candidate = Join-Path $uvToolDir "truememory\Scripts\python.exe"
+    if (Test-Path $candidate) { $toolPython = $candidate }
+}
+
 # ---------- step 4: auto-configure Claude ----------
 if ($env:TRUEMEMORY_SKIP_SETUP -eq "1") {
     Say "skipping Claude setup (TRUEMEMORY_SKIP_SETUP=1)"
+} elseif (-not $toolPython) {
+    Warn "could not locate tool venv python — skipping Claude setup."
+    Warn "Re-run manually: python -m truememory.mcp_server --setup"
 } else {
     Say "configuring Claude Code / Claude Desktop..."
-    & truememory-mcp --setup
+    & $toolPython -m truememory.mcp_server --setup
     if ($LASTEXITCODE -ne 0) {
-        Warn "auto-setup returned non-zero (you can re-run it with: truememory-mcp --setup)"
+        Warn "auto-setup returned non-zero (re-run: python -m truememory.mcp_server --setup)"
     }
 
     Say "installing hooks and CLAUDE.md instructions..."
-    & truememory-ingest install
+    & $toolPython -m truememory.ingest.cli install
     if ($LASTEXITCODE -ne 0) {
-        Warn "hook install returned non-zero (you can re-run it with: truememory-ingest install)"
+        Warn "hook install returned non-zero (re-run: python -m truememory.ingest.cli install)"
     }
 }
 
 # ---------- step 5: pre-download models for all tiers ----------
 Say "pre-downloading models for all tiers (Edge + Base + Pro)..."
 Say "  this takes 2-5 min but means tier switching just works afterward."
-
-$toolPython = Join-Path (& uv tool dir 2>$null) "truememory\Scripts\python.exe"
 if (Test-Path $toolPython) {
     Say "  [1/3] Edge reranker (MiniLM-L-6-v2, ~22MB)..."
     & $toolPython -c "from sentence_transformers import CrossEncoder; CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
