@@ -8,7 +8,56 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
+      - name: Install dependencies
+        run: pip install -e ".[all,dev]"
+      - name: Run tests
+        run: pytest tests/ -v
+      - name: Lint
+        run: ruff check truememory/ tests/
+
+  build-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: 'pip'
+          cache-dependency-path: pyproject.toml
+      - name: Install build tooling
+        run: pip install build twine
+      - name: Build sdist + wheel
+        run: python -m build
+      - name: Verify package metadata
+        run: twine check --strict dist/*
+
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify tag matches pyproject.toml version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "ERROR: Git tag ($TAG) does not match pyproject.toml version ($VERSION)"
+            exit 1
+          fi
+          echo "OK: tag=$TAG matches pyproject.toml version=$VERSION"
+
   publish:
+    needs: [test, build-check, version-check]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -29,7 +78,4 @@ jobs:
         run: python -m build
 
       - name: Publish to PyPI
-        # Pinned to v1.12.4 SHA — pypa/gh-action-pypi-publish publishes to PyPI,
-        # so supply-chain hardening matters here more than anywhere else.
-        # Update by: refreshing the SHA from https://github.com/pypa/gh-action-pypi-publish/releases
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
