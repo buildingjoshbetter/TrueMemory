@@ -110,7 +110,7 @@ def _run_cli(args: list[str], env: dict | None = None) -> subprocess.CompletedPr
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses chmod 000")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root bypasses chmod 000")
 def test_bug1_unreadable_file_returns_empty_not_fake_content(caplog):
     """
     A file that exists but can't be read (chmod 000) must NOT be silently
@@ -223,7 +223,7 @@ def test_bug2_sqlite_operational_error_is_caught_and_traced():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses chmod 555")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root bypasses chmod 555")
 def test_bug3_save_trace_does_not_raise_on_unwritable_dir(caplog):
     """
     ``save_trace`` should log a warning and return ``False`` when its
@@ -271,7 +271,7 @@ def test_bug3_save_trace_returns_true_on_success():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses chmod 555")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root bypasses chmod 555")
 def test_bug4_cli_exits_4_when_db_dir_not_writable(tmp_path):
     """
     When the DB parent directory isn't writable, the CLI must exit with code 4
@@ -306,7 +306,7 @@ def test_bug4_cli_exits_4_when_db_dir_not_writable(tmp_path):
         os.chmod(locked, 0o755)
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses chmod 555")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root bypasses chmod 555")
 def test_bug4_cli_exits_4_when_trace_dir_not_writable(tmp_path):
     """Same preflight but for the --trace target."""
     transcript = tmp_path / "transcript.txt"
