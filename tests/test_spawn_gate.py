@@ -299,6 +299,7 @@ def test_ramp_up_persists_across_calls(tmp_path, monkeypatch):
     assert next_cap <= 5, "Should never exceed Edge hard ceiling of 5"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="spawn gate uses macOS-only sysctl")
 def test_state_expires_after_timeout(tmp_path, monkeypatch):
     """Stale state file (e.g., after reboot) is ignored."""
     from truememory.hooks import core
@@ -333,6 +334,7 @@ def test_state_expires_after_timeout(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="spawn gate uses macOS-only sysctl")
 def test_single_warn_does_not_reduce(tmp_path, monkeypatch):
     """A single warn reading should NOT reduce the cap."""
     from truememory.hooks import core

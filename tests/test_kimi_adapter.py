@@ -6,7 +6,10 @@ config merge safety without network calls.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+
+import pytest
 
 
 
@@ -138,6 +141,7 @@ def test_install_hooks_preserves_existing_toml(tmp_path, monkeypatch):
     assert 'event = "SessionStart"' in text
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="TOML path handling differs on Windows")
 def test_install_hooks_idempotent(tmp_path, monkeypatch):
     from truememory.hooks.adapters import kimi as kimi_mod
     hook_config = tmp_path / "config.toml"

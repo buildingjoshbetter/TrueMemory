@@ -24,6 +24,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows Path.home() prepends drive letter, breaking substring assertion")
 def test_claude_desktop_path_macos(monkeypatch):
     import truememory.mcp_server as ms
     monkeypatch.setattr(ms.sys, "platform", "darwin")
@@ -31,6 +32,7 @@ def test_claude_desktop_path_macos(monkeypatch):
     assert "Library/Application Support/Claude/claude_desktop_config.json" in str(p)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows Path.home() prepends drive letter, breaking substring assertion")
 def test_claude_desktop_path_linux(monkeypatch):
     import truememory.mcp_server as ms
     monkeypatch.setattr(ms.sys, "platform", "linux")
