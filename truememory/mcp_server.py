@@ -1341,8 +1341,8 @@ def _setup_claude():
         return (
             lower.endswith("/truememory-mcp.exe")
             or lower.endswith("/truememory-mcp")
-            or "/scripts/truememory-mcp" in lower
-            or "/bin/truememory-mcp" in lower
+            or lower.endswith("/scripts/truememory-mcp.exe")
+            or lower.endswith("/bin/truememory-mcp")
         )
 
     # --- Claude Code CLI ---
@@ -1421,7 +1421,8 @@ def _setup_claude():
                 desktop_config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
                 configured.append("Claude Desktop")
             elif _is_shim_path(existing_cmd):
-                servers["truememory"] = {"command": python_path, "args": list(mcp_args)}
+                existing["command"] = python_path
+                existing["args"] = list(mcp_args)
                 desktop_config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
                 configured.append("Claude Desktop (migrated from shim to python -m form)")
             elif _path_exists(existing_cmd):

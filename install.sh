@@ -44,7 +44,7 @@ die()  { warn "error: $*"; exit 1; }
 
 # ---------- main ----------
 main() {
-  set -euo pipefail
+  set -eu
 
   TRUEMEMORY_PY="${TRUEMEMORY_PY:-3.12}"
   TRUEMEMORY_EXTRAS="${TRUEMEMORY_EXTRAS:-}"
