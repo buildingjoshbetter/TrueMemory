@@ -158,7 +158,7 @@ def _start_server() -> bool:
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=_stderr_fh,
-            start_new_session=True,
+            start_new_session=hasattr(os, 'setsid'),
             env=env,
         )
     except Exception as e:
@@ -170,7 +170,7 @@ def _start_server() -> bool:
                     [sys.executable, "-m", "truememory.model_server"],
                     stdout=subprocess.DEVNULL,
                     stderr=_stderr_fh2,
-                    start_new_session=True,
+                    start_new_session=hasattr(os, 'setsid'),
                 )
             except Exception as e2:
                 log.warning("Fallback launch also failed: %s", e2)

@@ -311,7 +311,7 @@ def _cascade_next() -> None:
                     cmd,
                     stdout=_sp.DEVNULL,
                     stderr=_sp.DEVNULL,
-                    start_new_session=True,
+                    start_new_session=hasattr(os, 'setsid'),
                 )
                 register_spawned_pid(proc.pid)
                 record_stale_processing_pid(claimed_path, proc.pid)

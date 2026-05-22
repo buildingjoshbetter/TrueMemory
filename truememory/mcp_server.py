@@ -1231,7 +1231,7 @@ def _drain_batch_from_backlog(markers: list[Path]) -> None:
                         stdout=_log_file,
                         stderr=_subprocess.STDOUT,
                         stdin=_subprocess.DEVNULL,
-                        start_new_session=True,
+                        start_new_session=hasattr(os, 'setsid'),
                     )
                 finally:
                     _log_file.close()
