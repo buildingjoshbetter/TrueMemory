@@ -512,13 +512,13 @@ def _parallel_search(queries, user_id, internal_limit, llm_fn, output_limit):
         seen_ids = set()
         for f in futures:
             try:
-                for r in f.result():
+                for r in f.result(timeout=60):
                     rid = r.get("id")
                     if rid not in seen_ids:
                         merged.append(r)
                         seen_ids.add(rid)
             except Exception:
-                pass  # Individual query failure doesn't kill the batch
+                pass  # Individual query failure or timeout doesn't kill the batch
 
     merged.sort(key=lambda x: -x.get("score", 0))
     return merged[:output_limit]
@@ -592,6 +592,8 @@ def truememory_search(
     queries = [q.strip() for q in query.split("|") if q.strip()]
     if not queries:
         return json.dumps([])
+    if len(queries) > 10:
+        queries = queries[:10]
 
     if len(queries) == 1:
         m = _get_memory()
@@ -637,6 +639,8 @@ def truememory_search_deep(
     queries = [q.strip() for q in query.split("|") if q.strip()]
     if not queries:
         return json.dumps([])
+    if len(queries) > 10:
+        queries = queries[:10]
 
     if len(queries) == 1:
         m = _get_memory()
@@ -1076,12 +1080,32 @@ _BACKLOG_LARGE_THRESHOLD = 20
 _BACKLOG_DIR = Path.home() / ".truememory" / "backlog"
 
 
+_cleanup_counter = 0
+
+
+def _cleanup_old_files() -> None:
+    """Prune extracted markers >30 days and logs >7 days."""
+    import time as _t
+    now = _t.time()
+    for subdir, max_age in [("extracted", 30 * 86400), ("logs", 7 * 86400)]:
+        d = _TRUEMEMORY_DIR / subdir
+        if not d.exists():
+            continue
+        try:
+            for f in d.iterdir():
+                if f.is_file() and (now - f.stat().st_mtime) > max_age:
+                    f.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def _backlog_drainer() -> None:
     """Background thread that drains the ingest backlog while the MCP server is alive.
 
     Fills all available spawn slots each tick instead of draining one at a time.
     Interval adapts: 30s when backlog is large (>20), 120s when small/empty.
     """
+    global _cleanup_counter
     import time as _time
     _time.sleep(10)
 
@@ -1094,6 +1118,9 @@ def _backlog_drainer() -> None:
                 backlog_count = len(markers)
                 if markers:
                     _drain_batch_from_backlog(markers)
+            _cleanup_counter += 1
+            if _cleanup_counter % 60 == 0:
+                _cleanup_old_files()
         except Exception:
             pass
         interval = _BACKLOG_DRAIN_INTERVAL_NORMAL if backlog_count > _BACKLOG_LARGE_THRESHOLD else _BACKLOG_DRAIN_INTERVAL_IDLE

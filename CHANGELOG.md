@@ -50,6 +50,7 @@
   fell back to OpenRouter. Moved to core dependencies. (#216)
 
 ### Performance
+_Note: timing claims below are estimated from development testing, not formal benchmarks._
 - **MPS device detection for reranker** — CrossEncoder now uses Apple Silicon
   GPU instead of falling back to CPU (~150-500ms saved per search). (#216)
 - **Session start 2-4x faster** — skip cross-encoder reranker for recall
