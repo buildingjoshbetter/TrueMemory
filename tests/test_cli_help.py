@@ -7,7 +7,6 @@ mcp.run(transport="stdio") which blocks on stdin forever, making
 """
 from __future__ import annotations
 
-import shutil
 import subprocess
 import sys
 
@@ -16,23 +15,8 @@ import pytest
 from truememory import __version__
 
 
-def _truememory_mcp_bin() -> str | None:
-    """Locate the installed truememory-mcp console script, or None.
-
-    Prefer the script installed by pip. Fall back to invoking via
-    `python -m truememory.mcp_server` — slower because it re-runs all
-    module-level imports, but works in any environment where truememory
-    is importable.
-    """
-    return shutil.which("truememory-mcp")
-
-
 def _run_cli(args: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
-    bin_path = _truememory_mcp_bin()
-    if bin_path:
-        cmd = [bin_path] + args
-    else:
-        cmd = [sys.executable, "-m", "truememory.mcp_server"] + args
+    cmd = [sys.executable, "-m", "truememory.mcp_server"] + args
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
