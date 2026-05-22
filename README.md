@@ -359,7 +359,7 @@ Find me on X [@Building_Josh](https://x.com/Building_Josh) · Follow us [@Sauron
   organization = {Sauron},
   year = {2026},
   url = {https://github.com/buildingjoshbetter/TrueMemory},
-  version = {0.6.0}
+  version = {0.7.0}
 }
 ```
 
