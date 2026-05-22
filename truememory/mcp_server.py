@@ -522,8 +522,8 @@ def _parallel_search(queries, user_id, internal_limit, llm_fn, output_limit):
                     if rid not in seen_ids:
                         merged.append(r)
                         seen_ids.add(rid)
-            except Exception:
-                pass  # Individual query failure or timeout doesn't kill the batch
+            except Exception as e:
+                log.debug("parallel search query failed: %s", e)
 
     merged.sort(key=lambda x: -x.get("score", 0))
     return merged[:output_limit]
@@ -1217,14 +1217,16 @@ def _drain_batch_from_backlog(markers: list[Path]) -> None:
                     _log_dir / f"{_safe_sid}.log",
                     "a", encoding="utf-8",
                 )
-                proc = _subprocess.Popen(
-                    cmd,
-                    stdout=_log_file,
-                    stderr=_subprocess.STDOUT,
-                    stdin=_subprocess.DEVNULL,
-                    start_new_session=True,
-                )
-                _log_file.close()
+                try:
+                    proc = _subprocess.Popen(
+                        cmd,
+                        stdout=_log_file,
+                        stderr=_subprocess.STDOUT,
+                        stdin=_subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+                finally:
+                    _log_file.close()
                 register_spawned_pid(proc.pid)
                 record_stale_processing_pid(claimed_path, proc.pid)
 
