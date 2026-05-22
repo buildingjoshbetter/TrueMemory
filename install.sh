@@ -44,7 +44,7 @@ die()  { warn "error: $*"; exit 1; }
 
 # ---------- main ----------
 main() {
-  set -eu
+  set -euo pipefail
 
   TRUEMEMORY_PY="${TRUEMEMORY_PY:-3.12}"
   TRUEMEMORY_EXTRAS="${TRUEMEMORY_EXTRAS:-}"
@@ -113,29 +113,30 @@ main() {
   say "adding uv's tool dir to your shell rc (reversible)..."
   uv tool update-shell >/dev/null 2>&1 || true
 
+  # Resolve tool venv python for steps 4 and 5 (avoids Windows Defender ASR shim blocks)
+  TOOL_PYTHON="$(uv tool dir)/truememory/bin/python"
+
   # ---------- step 4: auto-configure Claude ----------
   if [ "${TRUEMEMORY_SKIP_SETUP:-}" = "1" ]; then
     say "skipping Claude setup (TRUEMEMORY_SKIP_SETUP=1)"
+  elif [ ! -x "$TOOL_PYTHON" ]; then
+    warn "could not locate tool venv python at $TOOL_PYTHON — skipping Claude setup."
+    warn "Re-run manually: python -m truememory.mcp_server --setup"
   else
     say "configuring Claude Code / Claude Desktop..."
-    # truememory-mcp lives at ~/.local/bin/truememory-mcp. Its sys.executable
-    # resolves to the isolated tool venv, so Claude gets a stable absolute path.
-    truememory-mcp --setup || \
-      warn "auto-setup returned non-zero (you can re-run it with: truememory-mcp --setup)"
+    "$TOOL_PYTHON" -m truememory.mcp_server --setup || \
+      warn "auto-setup returned non-zero (re-run: python -m truememory.mcp_server --setup)"
 
     say "installing hooks and CLAUDE.md instructions..."
-    truememory-ingest install || \
-      warn "hook install returned non-zero (you can re-run it with: truememory-ingest install)"
+    "$TOOL_PYTHON" -m truememory.ingest.cli install || \
+      warn "hook install returned non-zero (re-run: python -m truememory.ingest.cli install)"
   fi
 
   # ---------- step 5: pre-download models for all tiers ----------
   say "pre-downloading models for all tiers (Edge + Base + Pro)..."
   say "  this takes 2-5 min but means tier switching just works afterward."
   say "  you'll see download progress bars below."
-  # Use the tool's Python to run the download inside the uv venv.
-  # stderr is NOT suppressed — HuggingFace's tqdm progress bars show
-  # download percentage, speed, and ETA, which is better UX than silence.
-  TOOL_PYTHON="$(uv tool dir)/truememory/bin/python"
+  # Use the tool's Python (resolved in step 4) to run downloads inside the uv venv.
   if [ -x "$TOOL_PYTHON" ]; then
     # Edge: Model2Vec embedder (usually bundled) + MiniLM reranker
     say "  [1/3] Edge reranker (MiniLM-L-6-v2, ~22MB)..."

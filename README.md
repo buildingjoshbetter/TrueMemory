@@ -59,7 +59,7 @@ irm https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install
 
 &nbsp;
 
-**<ins>Step 4.</ins>** Quit Claude completely and reopen it (Mac: `Cmd+Q`, Windows: close all Claude windows).
+**<ins>Step 4.</ins>** Quit Claude completely and reopen it (Mac: `Cmd+Q`, Windows: right-click the Claude tray icon → **Quit**).
 
 &nbsp;
 
