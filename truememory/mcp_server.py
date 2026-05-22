@@ -767,8 +767,8 @@ def truememory_configure(
     if tier not in ("edge", "base", "pro"):
         return json.dumps({"error": "tier must be 'edge', 'base', or 'pro'"})
 
-    if api_key and len(api_key) > 256:
-        return json.dumps({"error": "api_key exceeds maximum length of 256 characters"})
+    if api_key and len(api_key) > 4096:
+        return json.dumps({"error": "api_key exceeds maximum length of 4096 characters"})
 
     # Validate API key + provider pairing
     if api_key and not api_provider:

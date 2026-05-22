@@ -169,14 +169,11 @@ def test_add_skip_marker_preserves_user_id():
 
 
 def test_add_skip_marker_on_none_like_input():
-    """None content is a programmer error but shouldn't crash."""
+    """None content is a programmer error — raises TypeError."""
     m = Memory(":memory:")
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            # `not None` is True, so the branch fires without even calling .strip()
-            result = m.add(None)  # type: ignore[arg-type]
-        assert result["id"] is None
+        with pytest.raises(TypeError, match="content must be a string"):
+            m.add(None)  # type: ignore[arg-type]
     finally:
         m.close()
 
