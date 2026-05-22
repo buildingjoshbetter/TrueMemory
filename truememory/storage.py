@@ -233,11 +233,43 @@ _EXPECTED_COLUMNS = {
 }
 
 
+def _backup_database(db_path: Path) -> Path | None:
+    """Create a complete backup of the database including WAL/SHM files.
+
+    Returns the backup path on success, None on failure.
+    """
+    import os
+    import shutil
+    import uuid
+
+    suffix = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    backup = Path(f"{db_path}.backup-pre-migration-{suffix}")
+
+    if backup.exists():
+        return None
+
+    try:
+        shutil.copy2(str(db_path), str(backup))
+        for ext in ("-wal", "-shm"):
+            wal_path = Path(f"{db_path}{ext}")
+            if wal_path.exists():
+                shutil.copy2(str(wal_path), str(backup) + ext)
+        log.info("Legacy DB backup created: %s", backup)
+        return backup
+    except Exception as e:
+        log.warning("Could not back up database before migration: %s", e)
+        return None
+
+
 def _migrate_messages_schema(conn: sqlite3.Connection, db_path: str | Path) -> None:
     """Add missing columns to an existing messages table (legacy DB upgrade).
 
-    Creates a backup of the database file before making any changes.
-    Only runs if the messages table already exists and is missing expected columns.
+    Safety measures:
+    - Creates a complete backup (DB + WAL + SHM) before any changes
+    - If backup fails, migration is skipped entirely
+    - All ALTER TABLE statements run inside a single transaction
+    - If any ALTER fails, the entire transaction is rolled back
+    - Only runs if the messages table already exists and is missing columns
     """
     try:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
@@ -251,21 +283,23 @@ def _migrate_messages_schema(conn: sqlite3.Connection, db_path: str | Path) -> N
         return
 
     if str(db_path) != ":memory:":
-        import shutil
-        backup = Path(str(db_path) + f".backup-pre-migration-{int(time.time())}")
-        try:
-            shutil.copy2(str(db_path), str(backup))
-            log.info("Legacy DB backup created: %s", backup)
-        except Exception as e:
-            log.warning("Could not back up database before migration: %s", e)
+        backup = _backup_database(Path(str(db_path)))
+        if backup is None:
+            log.warning("Skipping legacy migration — backup failed")
             return
 
-    for col, typedef in missing.items():
-        try:
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for col, typedef in missing.items():
             conn.execute(f"ALTER TABLE messages ADD COLUMN {col} {typedef}")
             log.info("Migrated legacy DB: added column messages.%s", col)
-        except Exception as e:
-            log.warning("Failed to add column messages.%s: %s", col, e)
+        conn.execute("COMMIT")
+    except Exception as e:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        log.warning("Legacy migration failed and was rolled back: %s", e)
 
 
 def create_db(db_path: str | Path) -> sqlite3.Connection:
