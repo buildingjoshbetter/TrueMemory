@@ -67,3 +67,4 @@ truememory-ingest status
 - **Plugins not loading**: Check that `cli-config.yaml` is valid YAML (no tab characters).
 - **MCP not connecting**: Verify the Python path in `config.yaml`.
 - **Gateway users**: For Telegram/Discord/etc., a separate `handler.py` gateway hook is needed (see architecture docs).
+- **Windows Defender ASR**: If commands are blocked, use `python -m` form instead. See [debugging guide](guides/debugging.md#windows-defender-asr-blocks-truememory-mcpexe).

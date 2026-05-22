@@ -71,3 +71,4 @@ truememory-ingest status
 - **MCP not connecting**: Verify the Python path in `config.toml` points to the environment with TrueMemory installed.
 - **Existing config**: TrueMemory uses additive merges — your existing Codex config is preserved.
 - **Hooks not firing**: Check that the hook script paths are absolute and the Python executable is correct.
+- **Windows Defender ASR**: If commands are blocked, use `python -m` form instead. See [debugging guide](guides/debugging.md#windows-defender-asr-blocks-truememory-mcpexe).

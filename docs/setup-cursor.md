@@ -93,3 +93,4 @@ truememory-ingest status
 - **Hooks not firing**: Check that event names are camelCase (`sessionStart`, `stop`, `preCompact`). PascalCase will silently fail.
 - **Two config files**: MCP lives in `~/.cursor/mcp.json`, hooks live in `~/.cursor/hooks.json`. They are separate files.
 - **Version key**: `hooks.json` requires `"version": 1` at the top level.
+- **Windows Defender ASR**: If commands are blocked, use `python -m` form instead. See [debugging guide](guides/debugging.md#windows-defender-asr-blocks-truememory-mcpexe).

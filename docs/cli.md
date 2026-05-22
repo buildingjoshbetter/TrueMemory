@@ -2,6 +2,8 @@
 
 TrueMemory provides two CLI tools: `truememory-mcp` (MCP server) and `truememory-ingest` (ingestion and management).
 
+> **Windows Defender ASR**: If commands are blocked, use `python -m truememory.mcp_server` / `python -m truememory.ingest.cli` instead. See [debugging guide](guides/debugging.md#windows-defender-asr-blocks-truememory-mcpexe).
+
 ---
 
 ## truememory-mcp

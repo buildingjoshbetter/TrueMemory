@@ -44,6 +44,19 @@ You're running the command from a shell that doesn't have the uv tool directory 
 - Mac/Linux: `export PATH="$HOME/.local/bin:$PATH"`
 - Windows PowerShell: close and reopen PowerShell, or run `$env:Path = [System.Environment]::GetEnvironmentVariable("Path", "User") + ";" + $env:Path`
 
+### Windows: Defender ASR blocks truememory-mcp.exe
+
+If Microsoft Defender's ASR rule `01443614` is in **Block** mode, the `truememory-mcp.exe` and `truememory-ingest.exe` shims are silently killed at launch. Use the module form instead:
+
+```powershell
+python -m truememory.mcp_server --setup
+python -m truememory.ingest.cli install
+python -m truememory.ingest.cli status
+python -m truememory.ingest.cli logs
+```
+
+The `--setup` command auto-migrates existing Claude configs from shim to module form.
+
 ### Memories not being stored
 
 1. Check that the session had at least 5 user messages (configurable via `TRUEMEMORY_MIN_MESSAGES`)

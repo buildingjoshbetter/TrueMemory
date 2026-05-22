@@ -72,3 +72,4 @@ truememory-ingest status
 - **Hooks not firing**: Kimi hooks are in beta. Check `kimi --version` for compatibility.
 - **MCP not connecting**: Verify the Python path in `mcp.json` points to the environment with TrueMemory installed.
 - **Existing config**: TrueMemory uses additive merges — your existing Kimi config is preserved.
+- **Windows Defender ASR**: If commands are blocked, use `python -m` form instead. See [debugging guide](guides/debugging.md#windows-defender-asr-blocks-truememory-mcpexe).
