@@ -16,6 +16,11 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
 log = logging.getLogger(__name__)
 
 MEMORY_LIMIT = int(os.environ.get("TRUEMEMORY_RECALL_LIMIT", "25"))
@@ -298,24 +303,20 @@ except ImportError:
 
 
 def _pid_is_alive(pid: int) -> bool:
-    """Check if a PID is a live (non-zombie) truememory ingest process."""
+    """Check if a PID is a live (non-zombie) process."""
     if pid <= 0:
         return False
-    try:
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "state="],
-            capture_output=True, text=True, timeout=2,
-        )
-        state = (result.stdout or "").strip()
-        if not state or state.startswith("Z"):
-            return False
-        return True
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    if psutil is not None:
         try:
-            os.kill(pid, 0)
-            return True
-        except (OSError, ProcessLookupError):
+            proc = psutil.Process(pid)
+            return proc.status() != psutil.STATUS_ZOMBIE
+        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
             return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
 
 
 def _read_live_pids() -> list[int]:
@@ -589,14 +590,30 @@ def _sanitize_session_id(session_id: str) -> str:
 
 def _count_active_ingest_processes() -> int:
     """Count running truememory ingest processes."""
+    if psutil is None:
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "truememory.ingest.cli.*ingest"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return len([ln for ln in (result.stdout or "").splitlines() if ln.strip()])
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return 0
+    count = 0
     try:
-        result = subprocess.run(
-            ["pgrep", "-f", "truememory.ingest.cli.*ingest"],
-            capture_output=True, text=True, timeout=5,
-        )
-        return len([ln for ln in (result.stdout or "").splitlines() if ln.strip()])
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        return 0
+        for proc in psutil.process_iter(["cmdline", "status"]):
+            try:
+                if proc.info["status"] == psutil.STATUS_ZOMBIE:
+                    continue
+                cmdline = proc.info.get("cmdline") or []
+                cmd_str = " ".join(cmdline)
+                if "truememory.ingest.cli" in cmd_str and "ingest" in cmd_str:
+                    count += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except Exception:
+        pass
+    return count
 
 
 def run_background_ingestion(

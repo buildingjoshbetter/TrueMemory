@@ -353,6 +353,8 @@ def main():
 
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, _handle_signal)
 
     if PID_PATH.exists():
         try:
