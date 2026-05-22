@@ -26,7 +26,8 @@ def _set_mps_memory_cap():
         return
     if psutil is not None:
         total_gb = psutil.virtual_memory().total / (1024**3)
-        ratio = str(min(0.08, 2.5 / total_gb)) if total_gb >= 16 else "0.19"
+        ratio = min(0.08, 2.5 / total_gb) if total_gb >= 16 else 0.19
+        ratio = str(max(ratio, 1.5 / total_gb))
     else:
         ratio = "0.19"
     os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = ratio
