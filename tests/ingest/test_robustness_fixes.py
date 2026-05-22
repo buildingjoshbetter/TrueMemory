@@ -110,6 +110,7 @@ def _run_cli(args: list[str], env: dict | None = None) -> subprocess.CompletedPr
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod not enforced on Windows")
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root bypasses chmod 000")
 def test_bug1_unreadable_file_returns_empty_not_fake_content(caplog):
     """
@@ -223,6 +224,7 @@ def test_bug2_sqlite_operational_error_is_caught_and_traced():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod not enforced on Windows")
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root bypasses chmod 555")
 def test_bug3_save_trace_does_not_raise_on_unwritable_dir(caplog):
     """
@@ -271,6 +273,7 @@ def test_bug3_save_trace_returns_true_on_success():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod not enforced on Windows")
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root bypasses chmod 555")
 def test_bug4_cli_exits_4_when_db_dir_not_writable(tmp_path):
     """
@@ -306,6 +309,7 @@ def test_bug4_cli_exits_4_when_db_dir_not_writable(tmp_path):
         os.chmod(locked, 0o755)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod not enforced on Windows")
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root bypasses chmod 555")
 def test_bug4_cli_exits_4_when_trace_dir_not_writable(tmp_path):
     """Same preflight but for the --trace target."""

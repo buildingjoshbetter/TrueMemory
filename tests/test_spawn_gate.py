@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from contextlib import contextmanager
 
 import pytest
@@ -39,6 +40,7 @@ def test_spawn_gate_yields_true_under_cap(tmp_path, monkeypatch):
         assert allowed is True
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="spawn gate uses macOS-only sysctl")
 def test_spawn_gate_yields_false_at_cap(tmp_path, monkeypatch):
     """When at or above the dynamic cap, gate yields False."""
     from truememory.hooks import core
@@ -82,6 +84,7 @@ def test_spawn_cap_env_var_override(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="spawn gate uses macOS-only sysctl")
 def test_edge_ceiling_by_cpu_cores(tmp_path, monkeypatch):
     """Edge ceiling = physical_cores - 1, capped at 8."""
     from truememory.hooks import core
@@ -116,6 +119,7 @@ def test_edge_ceiling_by_cpu_cores(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="spawn gate uses macOS-only sysctl")
 def test_base_ceiling_by_unified_memory(tmp_path, monkeypatch):
     """Base ceiling = (unified_memory - 2GB) / 1.0GB, capped at 6."""
     from truememory.hooks import core
@@ -164,6 +168,7 @@ def test_memory_free_pct_classification():
     assert _classify_memory_pressure(0) == "critical"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="spawn gate uses macOS-only sysctl")
 def test_warn_halves_cap_after_hysteresis(tmp_path, monkeypatch):
     """Sustained warn (2+ consecutive) halves the cap."""
     from truememory.hooks import core
@@ -262,6 +267,7 @@ def test_stable_swap_does_not_trigger(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="spawn gate uses macOS-only sysctl")
 def test_ramp_up_persists_across_calls(tmp_path, monkeypatch):
     """Cap state persists to disk so cascade processes inherit it."""
     from truememory.hooks import core

@@ -18,6 +18,12 @@ import sqlite3
 
 import pytest
 
+# CI Python builds may lack sqlite3.Connection.enable_load_extension when
+# compiled without SQLITE_ENABLE_LOAD_EXTENSION.
+_conn = sqlite3.connect(":memory:")
+_HAS_LOAD_EXTENSION = hasattr(_conn, "enable_load_extension")
+_conn.close()
+
 from truememory import vector_search
 from truememory.storage import create_db
 from truememory.vector_search import (
@@ -49,6 +55,7 @@ def _load_sqlite_vec(conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(not _HAS_LOAD_EXTENSION, reason="sqlite3 missing extension loading support")
 def test_dim_mismatch_raises_migration_error(tmp_path, monkeypatch):
     """Simulates a v0.3.0 Pro (1024d) DB being opened on v0.4.0 (256d)."""
     conn = _fresh_conn(tmp_path)
@@ -71,6 +78,7 @@ def test_dim_mismatch_raises_migration_error(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(not _HAS_LOAD_EXTENSION, reason="sqlite3 missing extension loading support")
 def test_metadata_written_on_build_vectors(tmp_path):
     """`build_vectors` must persist (embed_model, embed_dim) so later opens
     can detect drift."""
@@ -89,6 +97,7 @@ def test_metadata_written_on_build_vectors(tmp_path):
     assert dim is not None and dim > 0
 
 
+@pytest.mark.skipif(not _HAS_LOAD_EXTENSION, reason="sqlite3 missing extension loading support")
 def test_model_change_raises_migration_error_at_matching_dim(
     tmp_path, monkeypatch
 ):
@@ -114,6 +123,7 @@ def test_model_change_raises_migration_error_at_matching_dim(
     assert "truememory_configure" in msg
 
 
+@pytest.mark.skipif(not _HAS_LOAD_EXTENSION, reason="sqlite3 missing extension loading support")
 def test_legacy_v030_db_warns_without_raising(tmp_path, caplog):
     """v0.3.0 DBs have `vec_messages` but no metadata row. At matching dim,
     we must warn (not raise) — letting the user keep working until they
@@ -145,6 +155,7 @@ def test_legacy_v030_db_warns_without_raising(tmp_path, caplog):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(not _HAS_LOAD_EXTENSION, reason="sqlite3 missing extension loading support")
 def test_fresh_db_init_vec_table_no_error(tmp_path):
     """A brand-new DB has no vec table and no metadata — init must succeed."""
     conn = _fresh_conn(tmp_path)
@@ -153,6 +164,7 @@ def test_fresh_db_init_vec_table_no_error(tmp_path):
     init_vec_table(conn)
 
 
+@pytest.mark.skipif(not _HAS_LOAD_EXTENSION, reason="sqlite3 missing extension loading support")
 def test_same_model_no_raise(tmp_path):
     """Re-opening with the same model must not raise."""
     conn = _fresh_conn(tmp_path)

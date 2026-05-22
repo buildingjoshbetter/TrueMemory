@@ -14,8 +14,17 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 
 import pytest
+
+# CI Python builds (especially on GitHub Actions) may lack
+# sqlite3.Connection.enable_load_extension when compiled without
+# SQLITE_ENABLE_LOAD_EXTENSION.  Tests that construct a TrueMemoryEngine
+# (which calls enable_load_extension) must be skipped on those builds.
+_conn = sqlite3.connect(":memory:")
+_HAS_LOAD_EXTENSION = hasattr(_conn, "enable_load_extension")
+_conn.close()
 
 
 @pytest.fixture
@@ -135,6 +144,7 @@ def test_health_does_not_leak_api_keys(server):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(not _HAS_LOAD_EXTENSION, reason="sqlite3 missing extension loading support")
 def test_sqlite_vec_load_failure_logged_at_warning_and_stored(caplog, tmp_path, monkeypatch):
     """Simulate a platform where `sqlite_vec.load(...)` raises."""
     from truememory.engine import TrueMemoryEngine
@@ -179,6 +189,7 @@ def test_sqlite_vec_load_failure_logged_at_warning_and_stored(caplog, tmp_path, 
     )
 
 
+@pytest.mark.skipif(not _HAS_LOAD_EXTENSION, reason="sqlite3 missing extension loading support")
 def test_sqlite_vec_load_success_clears_error(server, tmp_path):
     """A successful open() must clear any prior _vectors_load_error so
     later stats calls report ok."""

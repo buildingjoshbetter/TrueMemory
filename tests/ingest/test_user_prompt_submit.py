@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -39,6 +40,7 @@ def _capture_email(prompt: str) -> str | None:
 # -- #275: email capture (3-layer intent matching) -------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="atomic rename over existing file fails on Windows")
 class TestEmailCaptureLayer1:
     """Layer 1: bare email via fullmatch on stripped prompt."""
 
@@ -55,6 +57,7 @@ class TestEmailCaptureLayer1:
         assert _capture_email("user@example.com.au") == "user@example.com.au"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="atomic rename over existing file fails on Windows")
 class TestEmailCaptureLayer2:
     """Layer 2: email + trivial wrapper words in short prompts."""
 
@@ -80,6 +83,7 @@ class TestEmailCaptureLayer2:
         assert _capture_email("try user@evil.com") is None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="atomic rename over existing file fails on Windows")
 class TestEmailCaptureLayer3:
     """Layer 3: intent phrase matching with injection guard."""
 

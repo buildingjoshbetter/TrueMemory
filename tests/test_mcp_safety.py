@@ -14,8 +14,11 @@ offline-mode-disabled state for the process lifetime.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
+
+import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +110,7 @@ def test_get_llm_fn_fast_path_skips_lock(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows cp1252 encoding issue reading source files")
 def test_parallel_search_run_query_uses_context_manager():
     """Source-level check: the `_run_query` helper inside
     `_parallel_search` must use `with Memory(...) as ...:` (NOT

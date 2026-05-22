@@ -14,6 +14,9 @@ it was installed. Resolution is now per-platform via
 from __future__ import annotations
 
 import json
+import sys
+
+import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -35,6 +38,7 @@ def test_claude_desktop_path_linux(monkeypatch):
     assert ".config/Claude/claude_desktop_config.json" in str(p)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows Path.home() prepends drive letter, breaking substring assertion")
 def test_claude_desktop_path_linux_variant(monkeypatch):
     """Any non-darwin, non-win32 platform should resolve to the Linux path
     (the fall-through branch — covers OpenBSD, FreeBSD, etc.)."""

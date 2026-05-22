@@ -209,6 +209,7 @@ def test_stop_hook_exits_cleanly_with_argv_when_transcript_missing(monkeypatch):
 # Blocker 3 — busy_timeout set on Memory construction
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows file locking prevents temp DB cleanup")
 def test_pipeline_sets_busy_timeout_on_memory():
     """Constructing an IngestionPipeline should call PRAGMA busy_timeout
     on the underlying sqlite connection so concurrent Stop hooks don't
