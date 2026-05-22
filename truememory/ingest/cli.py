@@ -971,7 +971,13 @@ def _run_install(args):
             if not already_present:
                 existing["hooks"][event].append(hook)
 
-    settings_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    settings_tmp = settings_path.with_suffix(".json.tmp")
+    settings_tmp.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    try:
+        settings_tmp.replace(settings_path)
+    except OSError:
+        settings_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        settings_tmp.unlink(missing_ok=True)
     print(f"Hooks installed in {settings_path}")
     print(f"Events configured: {', '.join(settings['hooks'].keys())}")
 
@@ -1037,7 +1043,8 @@ def _merge_claude_md(template_path: Path, target_path: Path) -> None:
 
     # Back up the existing file before mutating it
     if existing and target_path.exists():
-        backup_path = target_path.with_suffix(".md.bak")
+        import time as _time
+        backup_path = target_path.with_name(f"CLAUDE.md.bak.{int(_time.time())}")
         try:
             backup_path.write_text(existing, encoding="utf-8")
         except OSError:
