@@ -571,6 +571,7 @@ def truememory_search(
     query: str,
     user_id: str = "",
     limit: int = 10,
+    queries: list[str] | None = None,
 ) -> str:
     """Search memories using the full agentic retrieval pipeline (HyDE query
     expansion, cross-encoder reranking, multi-round retrieval).
@@ -583,31 +584,34 @@ def truememory_search(
         query: Natural language search query. Use | to separate multiple queries.
         user_id: Filter results to this user (optional).
         limit: Maximum number of results to return.
+        queries: Optional list of queries (preferred over pipe-separated string).
     """
-    if not query or not query.strip():
+    MAX_QUERY_LENGTH = 2000
+    if queries:
+        query_list = [str(q).strip()[:MAX_QUERY_LENGTH] for q in queries if isinstance(q, str) and q.strip()]
+    elif query and query.strip():
+        query = query[:MAX_QUERY_LENGTH]
+        query_list = [q.strip() for q in query.split("|") if q.strip()]
+    else:
         return json.dumps([])
     _touch_search_time()
     limit = max(1, min(limit, 200))
-    MAX_QUERY_LENGTH = 2000
-    if len(query) > MAX_QUERY_LENGTH:
-        query = query[:MAX_QUERY_LENGTH]
     _set_reranker(_current_reranker())
     llm_fn = _get_llm_fn()
     uid = user_id or None
-    queries = [q.strip() for q in query.split("|") if q.strip()]
-    if not queries:
+    if not query_list:
         return json.dumps([])
-    if len(queries) > 10:
-        queries = queries[:10]
+    if len(query_list) > 10:
+        query_list = query_list[:10]
 
-    if len(queries) == 1:
+    if len(query_list) == 1:
         m = _get_memory()
         results = m.search_deep(
-            queries[0], user_id=uid, limit=_SEARCH_INTERNAL_LIMIT, llm_fn=llm_fn,
+            query_list[0], user_id=uid, limit=_SEARCH_INTERNAL_LIMIT, llm_fn=llm_fn,
         )
         return json.dumps(results[:limit], indent=2)
 
-    results = _parallel_search(queries, uid, _SEARCH_INTERNAL_LIMIT, llm_fn, limit)
+    results = _parallel_search(query_list, uid, _SEARCH_INTERNAL_LIMIT, llm_fn, limit)
     return json.dumps(results, indent=2)
 
 
@@ -617,6 +621,7 @@ def truememory_search_deep(
     query: str,
     user_id: str = "",
     limit: int = 10,
+    queries: list[str] | None = None,
 ) -> str:
     """Maximum-depth memory search (top_k=500, multi-round, full reranking).
     Uses a heavier cross-encoder (BAAI/bge-reranker-v2-m3, 568M params) than
@@ -630,31 +635,34 @@ def truememory_search_deep(
         query: Natural language search query. Use | to separate multiple queries.
         user_id: Filter results to this user (optional).
         limit: Maximum number of results to return.
+        queries: Optional list of queries (preferred over pipe-separated string).
     """
-    if not query or not query.strip():
+    MAX_QUERY_LENGTH = 2000
+    if queries:
+        query_list = [str(q).strip()[:MAX_QUERY_LENGTH] for q in queries if isinstance(q, str) and q.strip()]
+    elif query and query.strip():
+        query = query[:MAX_QUERY_LENGTH]
+        query_list = [q.strip() for q in query.split("|") if q.strip()]
+    else:
         return json.dumps([])
     _touch_search_time()
     limit = max(1, min(limit, 200))
-    MAX_QUERY_LENGTH = 2000
-    if len(query) > MAX_QUERY_LENGTH:
-        query = query[:MAX_QUERY_LENGTH]
     _set_reranker(_DEEP_RERANKER)
     llm_fn = _get_llm_fn()
     uid = user_id or None
-    queries = [q.strip() for q in query.split("|") if q.strip()]
-    if not queries:
+    if not query_list:
         return json.dumps([])
-    if len(queries) > 10:
-        queries = queries[:10]
+    if len(query_list) > 10:
+        query_list = query_list[:10]
 
-    if len(queries) == 1:
+    if len(query_list) == 1:
         m = _get_memory()
         results = m.search_deep(
-            queries[0], user_id=uid, limit=_DEEP_INTERNAL_LIMIT, llm_fn=llm_fn,
+            query_list[0], user_id=uid, limit=_DEEP_INTERNAL_LIMIT, llm_fn=llm_fn,
         )
         return json.dumps(results[:limit], indent=2)
 
-    results = _parallel_search(queries, uid, _DEEP_INTERNAL_LIMIT, llm_fn, limit)
+    results = _parallel_search(query_list, uid, _DEEP_INTERNAL_LIMIT, llm_fn, limit)
     return json.dumps(results, indent=2)
 
 
