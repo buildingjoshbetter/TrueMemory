@@ -20,18 +20,33 @@ shared server.
 
 ## MPS Watermark
 
-The PyTorch MPS memory watermark is clamped to prevent over-allocation:
+The PyTorch MPS memory watermark prevents over-allocation. The actual code
+in `model_server.py`:
 
-```
-ceiling = max(1.5 GB, min(ram * 0.08, 2.5 GB))
+```python
+ratio = str(min(0.08, 2.5 / total_gb)) if total_gb >= 16 else "0.19"
 ```
 
-| Machine RAM | MPS Ceiling |
-|-------------|------------|
-| 8 GB | 1.5 GB |
-| 16 GB | 1.3 GB |
-| 24 GB | 1.9 GB |
-| 32+ GB | 2.5 GB |
+Machines with 16+ GB RAM use ratio 0.08 (or lower to cap at 2.5 GB).
+Machines under 16 GB use ratio 0.19 as a floor — without this, an 8 GB
+machine would get a 0.64 GB ceiling which crashes PyTorch (minimum ~1.0 GB
+needed for the reranker model + workspace).
+
+| Machine RAM | Ratio | MPS Ceiling | Note |
+|-------------|-------|------------|------|
+| 8 GB | 0.19 | 1.5 GB | Floor ratio — 0.08 would crash |
+| 12 GB | 0.19 | 2.3 GB | Floor ratio — 0.08 would be 0.96 GB (too tight) |
+| 16 GB | 0.08 | 1.3 GB | Standard ratio starts here |
+| 18 GB | 0.08 | 1.4 GB | |
+| 24 GB | 0.08 | 1.9 GB | |
+| 32 GB | 0.078 | 2.5 GB | Capped at 2.5 GB |
+| 48 GB | 0.052 | 2.5 GB | Capped at 2.5 GB |
+| 64 GB | 0.039 | 2.5 GB | Capped at 2.5 GB |
+| 96+ GB | <0.03 | 2.5 GB | Capped at 2.5 GB |
+
+The 8/12 GB ceilings are higher than 16 GB because they need a higher ratio
+to stay above the ~1.0 GB crash floor. This is intentional — the alternative
+is PyTorch OOM on small machines.
 
 Users can override via `PYTORCH_MPS_HIGH_WATERMARK_RATIO` environment variable.
 
