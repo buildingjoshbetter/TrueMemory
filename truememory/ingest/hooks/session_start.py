@@ -228,7 +228,7 @@ def _drain_backlog() -> None:
                     stdout=_log_file,
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL,
-                    start_new_session=True,
+                    start_new_session=hasattr(os, 'setsid'),
                 )
                 _log_file.close()
                 register_spawned_pid(proc.pid)
