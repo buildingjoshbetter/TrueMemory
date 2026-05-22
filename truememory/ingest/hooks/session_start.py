@@ -21,12 +21,17 @@ Output (stdout JSON):
 """
 
 import argparse
-import fcntl
 import json
 import logging
 import os
 import sys
 from pathlib import Path
+
+try:
+    import fcntl
+    _HAS_FCNTL = True
+except ImportError:
+    _HAS_FCNTL = False
 
 log = logging.getLogger(__name__)
 
@@ -284,7 +289,8 @@ def _scan_stale_sessions() -> None:
     _SCAN_MARKER.parent.mkdir(parents=True, exist_ok=True)
     try:
         scan_fd = os.open(str(_SCAN_MARKER), os.O_RDWR | os.O_CREAT)
-        fcntl.flock(scan_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if _HAS_FCNTL:
+            fcntl.flock(scan_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except (BlockingIOError, OSError):
         return
 

@@ -1,11 +1,16 @@
 """Shared utilities for TrueMemory hooks."""
 
 from pathlib import Path
-import fcntl
 import json
 import logging
 import os
 import time
+
+try:
+    import fcntl
+    _HAS_FCNTL = True
+except ImportError:
+    _HAS_FCNTL = False
 
 log = logging.getLogger(__name__)
 
@@ -95,7 +100,8 @@ def check_extraction_budget() -> bool:
     try:
         _BUDGET_FILE.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(_BUDGET_FILE), os.O_RDWR | os.O_CREAT)
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        if _HAS_FCNTL:
+            fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             raw = os.read(fd, 4096).decode("utf-8", errors="replace").strip()
             data = json.loads(raw) if raw else {}
