@@ -40,10 +40,6 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from truememory import __version__
-from truememory.client import Memory
-from truememory.telemetry import tracked as _tracked
-
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -118,10 +114,17 @@ def _save_config(config: dict) -> None:
         )
 
 
-# Apply saved tier on startup (before any model loading)
+# Apply saved tier BEFORE importing truememory submodules — vector_search.py
+# reads TRUEMEMORY_EMBED_MODEL at import time to set its module-level
+# EMBEDDING_MODEL. If we import truememory.client first, the env var isn't
+# set yet and it defaults to "edge"/model2vec regardless of configured tier.
 _startup_config = _load_config()
 if "tier" in _startup_config:
     os.environ["TRUEMEMORY_EMBED_MODEL"] = _startup_config["tier"]
+
+from truememory import __version__  # noqa: E402
+from truememory.client import Memory  # noqa: E402
+from truememory.telemetry import tracked as _tracked  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Server setup
