@@ -85,6 +85,7 @@ try:
         build_separation_vectors,
         TrueMemoryMigrationError,
         _check_rebuild_allowed,
+        resolve_tier,
     )
     _HAS_VECTOR = True
 except (ImportError, ModuleNotFoundError):
@@ -367,7 +368,7 @@ class TrueMemoryEngine:
             import sys as _sys
             if _sys.platform == "darwin" and self._has_vectors:
                 try:
-                    _embed_model = os.environ.get("TRUEMEMORY_EMBED_MODEL", "edge")
+                    _embed_model = resolve_tier()
                     if _embed_model in ("base", "pro", "qwen3_256"):
                         _tables = {r[0] for r in self.conn.execute(
                             "SELECT name FROM sqlite_master WHERE type='table'"
@@ -889,7 +890,7 @@ class TrueMemoryEngine:
                 logger.warning(
                     "vec_messages table missing; attempting rebuild with "
                     "current model=%s",
-                    os.environ.get("TRUEMEMORY_EMBED_MODEL", "edge"),
+                    resolve_tier(),
                 )
                 if rebuild_vectors:
                     _check_rebuild_allowed(self.conn)  # raises on model drift
@@ -900,7 +901,7 @@ class TrueMemoryEngine:
                         logger.info(
                             "vec_messages rebuilt with %d vectors (model=%s)",
                             n,
-                            os.environ.get("TRUEMEMORY_EMBED_MODEL", "edge"),
+                            resolve_tier(),
                         )
                     except TrueMemoryMigrationError:
                         raise

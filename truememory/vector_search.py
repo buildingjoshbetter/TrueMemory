@@ -103,19 +103,30 @@ def _resolve_model_name(name: str) -> str:
     return _TIER_ALIASES.get(lowered, name)
 
 
-def _default_tier() -> str:
-    """Read tier from config.json when env var is unset."""
+def resolve_tier() -> str:
+    """Resolve the active tier: env var → config.json → ``'edge'``.
+
+    Canonical tier resolver for the entire codebase.  Every call site
+    that formerly did ``os.environ.get("TRUEMEMORY_EMBED_MODEL", "edge")``
+    should call this instead so that ``~/.truememory/config.json`` is
+    honoured when the env var is absent.
+    """
+    env = os.environ.get("TRUEMEMORY_EMBED_MODEL", "").strip().lower()
+    if env:
+        return env
     try:
         import json
         from pathlib import Path
         _cfg = Path.home() / ".truememory" / "config.json"
         if _cfg.exists():
-            return json.loads(_cfg.read_text(encoding="utf-8")).get("tier", "edge")
+            tier = json.loads(_cfg.read_text(encoding="utf-8")).get("tier", "")
+            if tier:
+                return tier.strip().lower()
     except Exception:
         pass
     return "edge"
 
-_raw_env = os.environ.get("TRUEMEMORY_EMBED_MODEL") or _default_tier()
+_raw_env = resolve_tier()
 EMBEDDING_MODEL = _resolve_model_name(_raw_env)
 
 _model = None
