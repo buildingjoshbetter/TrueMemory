@@ -87,7 +87,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # ---------- step 3: install truememory as a uv tool ----------
 Say "installing $PKG_SPEC (~3-5 min on first run, downloads all tier models)..."
-& uv tool uninstall truememory 2>$null *> $null
+& uv tool uninstall truememory *> $null
 if ($LASTEXITCODE -gt 1) {
     Warn "uv tool uninstall returned $LASTEXITCODE — proceeding, but result may be partial"
 }
