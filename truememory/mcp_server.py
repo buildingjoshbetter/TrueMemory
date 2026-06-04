@@ -1131,9 +1131,9 @@ def _backlog_drainer() -> None:
     _time.sleep(10)
 
     while True:
+        backlog_count = 0
         try:
             _reap_children()
-            backlog_count = 0
             if _BACKLOG_DIR.exists():
                 markers = sorted(_BACKLOG_DIR.glob("*.json"))
                 backlog_count = len(markers)
@@ -1143,7 +1143,7 @@ def _backlog_drainer() -> None:
             if _cleanup_counter % 60 == 0:
                 _cleanup_old_files()
         except Exception:
-            pass
+            log.debug("backlog-drainer tick failed", exc_info=True)
         interval = _BACKLOG_DRAIN_INTERVAL_NORMAL if backlog_count > _BACKLOG_LARGE_THRESHOLD else _BACKLOG_DRAIN_INTERVAL_IDLE
         _time.sleep(interval)
 
@@ -1154,7 +1154,13 @@ def _reap_children() -> None:
     Without this, Popen'd ingest processes become <defunct> zombies after
     they finish, and os.kill(pid, 0) / ps still sees them as alive —
     permanently blocking spawn gate slots.
+
+    POSIX-only: os.waitpid / os.WNOHANG do not exist on Windows.  There,
+    finished child processes are reaped by the OS automatically (no zombie
+    state), so this is a safe no-op.
     """
+    if not hasattr(os, "WNOHANG"):
+        return
     try:
         while True:
             pid, _ = os.waitpid(-1, os.WNOHANG)
