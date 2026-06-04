@@ -107,7 +107,8 @@ def _resolve_model_name(name: str) -> str:
         try:
             return _cfg_get_embed_model("custom")
         except ValueError:
-            return name
+            logger.warning("Custom tier resolution failed; falling back to model2vec.")
+            return "model2vec"
     return _TIER_ALIASES.get(lowered, name)
 
 
@@ -191,6 +192,9 @@ def set_embedding_model(name: str) -> None:
 
 def get_embedding_dim(name: str | None = None) -> int:
     """Return the embedding dimension for a given model name."""
+    if name and name.lower().strip() == "custom":
+        from truememory.tier_config import get_embed_dim
+        return get_embed_dim("custom")
     name = _resolve_model_name(name) if name else EMBEDDING_MODEL
     return _cfg_get_embed_dim_for_model(name)
 
@@ -258,7 +262,7 @@ def get_model():
             # Custom tier: load arbitrary SentenceTransformer model.
             # Requires TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 (enforced by
             # tier_config.resolve_custom_tier at config time).
-            if not os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD"):
+            if os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "").strip() != "1":
                 logger.warning(
                     "Custom model %r requested without "
                     "TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 -- "
@@ -272,11 +276,12 @@ def get_model():
                 _embedding_dim = 256
             else:
                 from sentence_transformers import SentenceTransformer
-                custom_dim = int(os.environ.get(
-                    "TRUEMEMORY_CUSTOM_EMBED_DIM", "256"
-                ))
+                from truememory.tier_config import resolve_custom_tier
+                cfg = resolve_custom_tier()
+                custom_dim = cfg["embed_dim"]
                 _model = SentenceTransformer(
                     resolved, truncate_dim=custom_dim,
+                    trust_remote_code=False,
                 )
                 _embedding_dim = custom_dim
         else:

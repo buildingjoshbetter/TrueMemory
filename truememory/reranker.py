@@ -78,7 +78,8 @@ def get_reranker_name_for_tier(tier: str) -> str:
     if t == "custom":
         try:
             return _cfg_get_reranker("custom")
-        except ValueError:
+        except ValueError as e:
+            log.warning("Custom tier reranker resolution failed (%s); using edge default.", e)
             return _TIER_RERANKERS["edge"]
     return _TIER_RERANKERS.get(t, _TIER_RERANKERS["edge"])
 
