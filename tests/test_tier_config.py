@@ -120,15 +120,26 @@ class TestValidGroups:
 
 class TestCustomTier:
     def test_custom_tier_requires_opt_in(self):
-        """Custom tier raises ValueError without TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD."""
-        env = {
-            "TRUEMEMORY_CUSTOM_EMBED_MODEL": "org/my-model",
-            "TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD": "",
-        }
+        """Custom tier raises ValueError without TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1."""
         with pytest.MonkeyPatch.context() as mp:
-            for k, v in env.items():
-                mp.setenv(k, v)
+            mp.setenv("TRUEMEMORY_CUSTOM_EMBED_MODEL", "org/my-model")
             mp.delenv("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", raising=False)
+            with pytest.raises(ValueError, match="TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD"):
+                resolve_custom_tier()
+
+    def test_custom_tier_rejects_false_opt_in(self):
+        """TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=0 must be rejected."""
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("TRUEMEMORY_CUSTOM_EMBED_MODEL", "org/my-model")
+            mp.setenv("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "0")
+            with pytest.raises(ValueError, match="TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD"):
+                resolve_custom_tier()
+
+    def test_custom_tier_rejects_false_string_opt_in(self):
+        """TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=false must be rejected."""
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("TRUEMEMORY_CUSTOM_EMBED_MODEL", "org/my-model")
+            mp.setenv("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "false")
             with pytest.raises(ValueError, match="TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD"):
                 resolve_custom_tier()
 
@@ -175,3 +186,25 @@ class TestCustomTier:
             mp.setenv("TRUEMEMORY_CUSTOM_EMBED_DIM", "99999")
             with pytest.raises(ValueError, match="1-4096"):
                 resolve_custom_tier()
+
+    def test_custom_tier_dim_non_integer(self):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "1")
+            mp.setenv("TRUEMEMORY_CUSTOM_EMBED_MODEL", "org/model")
+            mp.setenv("TRUEMEMORY_CUSTOM_EMBED_DIM", "abc")
+            with pytest.raises(ValueError, match="must be an integer"):
+                resolve_custom_tier()
+
+    def test_custom_tier_dim_boundaries(self):
+        """Boundary values: dim=1 and dim=4096 should be valid."""
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "1")
+            mp.setenv("TRUEMEMORY_CUSTOM_EMBED_MODEL", "org/model")
+
+            mp.setenv("TRUEMEMORY_CUSTOM_EMBED_DIM", "1")
+            cfg = resolve_custom_tier()
+            assert cfg["embed_dim"] == 1
+
+            mp.setenv("TRUEMEMORY_CUSTOM_EMBED_DIM", "4096")
+            cfg = resolve_custom_tier()
+            assert cfg["embed_dim"] == 4096

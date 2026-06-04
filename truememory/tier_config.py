@@ -80,7 +80,7 @@ def resolve_custom_tier() -> dict:
     Raises:
         ValueError: if required env vars are missing or invalid.
     """
-    if not os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", ""):
+    if os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "").strip() != "1":
         raise ValueError(
             "Custom tier requires TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 "
             "to acknowledge arbitrary model downloads."
@@ -95,7 +95,7 @@ def resolve_custom_tier() -> dict:
         )
 
     # Validate model ID format to prevent shell injection / path traversal
-    if not _HF_MODEL_ID_RE.match(embed):
+    if not _HF_MODEL_ID_RE.fullmatch(embed):
         raise ValueError(
             f"Invalid model ID format: {embed!r}. "
             f"Expected HuggingFace format like 'org/model-name' or 'model-name'."
@@ -105,15 +105,18 @@ def resolve_custom_tier() -> dict:
         "TRUEMEMORY_CUSTOM_RERANKER",
         "cross-encoder/ms-marco-MiniLM-L-6-v2",
     ).strip()
-    if reranker and not _HF_MODEL_ID_RE.match(reranker):
+    if reranker and not _HF_MODEL_ID_RE.fullmatch(reranker):
         raise ValueError(
             f"Invalid reranker model ID format: {reranker!r}."
         )
 
+    raw_dim = os.environ.get("TRUEMEMORY_CUSTOM_EMBED_DIM", "256").strip()
     try:
-        dim = int(os.environ.get("TRUEMEMORY_CUSTOM_EMBED_DIM", "256"))
+        dim = int(raw_dim)
     except (ValueError, TypeError):
-        dim = 256
+        raise ValueError(
+            f"TRUEMEMORY_CUSTOM_EMBED_DIM must be an integer, got {raw_dim!r}"
+        )
 
     if dim < 1 or dim > 4096:
         raise ValueError(
@@ -169,8 +172,22 @@ def get_embed_dim(tier: str) -> int:
 
 
 def get_embed_dim_for_model(model_name: str) -> int:
-    """Return the embedding dimension for an internal model name."""
-    return MODEL_DIMS.get(model_name, 256)
+    """Return the embedding dimension for an internal model name.
+
+    For known built-in models, returns from MODEL_DIMS.
+    For unknown models (custom tier), attempts to resolve the custom
+    tier config and returns the configured dimension if the model matches.
+    """
+    if model_name in MODEL_DIMS:
+        return MODEL_DIMS[model_name]
+    # Check if this is a custom tier model
+    try:
+        cfg = resolve_custom_tier()
+        if model_name == cfg["embed_model"]:
+            return cfg["embed_dim"]
+    except ValueError:
+        pass
+    return 256
 
 
 def get_tier_group(tier: str) -> str:
