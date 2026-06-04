@@ -1829,6 +1829,16 @@ def main():
     except Exception:
         pass
 
+    # Install opt-in instrumentation (TRUEMEMORY_INSTRUMENTATION=1).
+    # Must run early — before any tool handler fires — so the monkey-patches
+    # are in place for the first request.  Swallows all errors; a broken
+    # telemetry overlay must never prevent the server from starting.
+    try:
+        from truememory.instrumentation import install as _install_instrumentation
+        _install_instrumentation()
+    except Exception:
+        pass
+
     # Start shared model server (loads models once for all processes).
     # Falls back to per-process loading if server can't start.
     from truememory.model_client import ensure_server_running
