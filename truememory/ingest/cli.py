@@ -797,7 +797,7 @@ def _run_install(args):
     Hooks installed:
     - SessionStart: injects relevant memories as additionalContext
     - UserPromptSubmit: buffers user messages (kept for future use)
-    - Stop: triggers background fact extraction after each session
+    - SessionEnd: triggers background fact extraction after each session
     - PreCompact: saves context snapshot before Claude compresses conversation
 
     Note: the event is named ``PreCompact`` in Claude Code's settings.json
@@ -815,7 +815,7 @@ def _run_install(args):
     hook_files = {
         "SessionStart": hooks_dir / "session_start.py",
         "UserPromptSubmit": hooks_dir / "user_prompt_submit.py",
-        "Stop": hooks_dir / "stop.py",
+        "SessionEnd": hooks_dir / "stop.py",
         "PreCompact": hooks_dir / "compact.py",
     }
     missing = [name for name, path in hook_files.items() if not path.exists()]
@@ -917,6 +917,30 @@ def _run_install(args):
             print(
                 "Migrated legacy 'compact' hook entry to 'PreCompact' "
                 "(earlier versions registered the wrong event name)."
+            )
+
+    # Migration: earlier versions wired the transcript extraction hook to
+    # Claude Code's "Stop" event, but "Stop" fires after every assistant
+    # response (per-turn), not once at session end. The correct event is
+    # "SessionEnd". Strip stale "Stop" entries that point at our hook file
+    # so upgrading users don't get double-fires.
+    _legacy_stop = existing["hooks"].get("Stop")
+    if isinstance(_legacy_stop, list):
+        _cleaned = [
+            h for h in _legacy_stop
+            if not (
+                isinstance(h, dict)
+                and "truememory" in str(h.get("command", "")).lower()
+            )
+        ]
+        if _cleaned:
+            existing["hooks"]["Stop"] = _cleaned
+        else:
+            del existing["hooks"]["Stop"]
+        if len(_cleaned) != len(_legacy_stop):
+            print(
+                "Migrated truememory extraction hook from 'Stop' (per-turn) "
+                "to 'SessionEnd' (per-session)."
             )
 
     # Migration: earlier versions wrote hooks in the flat format
@@ -1096,7 +1120,7 @@ def _run_status(args):
         try:
             settings = json.loads(settings_path.read_text(encoding="utf-8"))
             hooks = settings.get("hooks", {})
-            expected = ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact"]
+            expected = ["SessionStart", "UserPromptSubmit", "SessionEnd", "PreCompact"]
             installed = []
             missing = []
             for event in expected:
@@ -1312,7 +1336,7 @@ def _run_logs(args):
     """Tail recent hook log output from ~/.truememory/logs/."""
     if not _LOG_DIR.exists():
         print(f"No logs directory at {_LOG_DIR}")
-        print("(Logs are created when the Stop hook fires in Claude Code.)")
+        print("(Logs are created when the SessionEnd hook fires in Claude Code.)")
         return
 
     if args.list:

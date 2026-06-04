@@ -33,7 +33,7 @@ MEMORY.md may contain personal facts that were cached from earlier sessions. **D
 
 ## Background Processing
 - Memories are also extracted automatically from conversations via background processing.
-- The Stop hook captures the full transcript and runs deep extraction after sessions end.
+- The SessionEnd hook captures the full transcript and runs deep extraction after sessions end.
 - You do NOT need to store everything manually — focus on in-conversation corrections and explicit preferences.
 - The background extractor handles: personal facts, preferences, decisions, temporal facts, and technical context.
 

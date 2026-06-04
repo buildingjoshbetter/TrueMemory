@@ -33,7 +33,7 @@ TrueMemory integrates with multiple AI CLI tools. Each CLI has different config 
 | Event | Claude Code | Codex CLI | Cursor | Gemini CLI | Kimi CLI | Hermes Agent | OpenClaw |
 |-------|------------|-----------|--------|------------|----------|-------------|----------|
 | Session start | `SessionStart` | `SessionStart` | `sessionStart` | `SessionStart` | `SessionStart` | `on_session_start` | `before_agent_run` |
-| Session end | `Stop` | `Stop` | `stop` | `SessionEnd` | `Stop` | `on_session_end` | `agent_end` |
+| Session end | `SessionEnd` | `Stop` | `stop` | `SessionEnd` | `Stop` | `on_session_end` | `agent_end` |
 | Pre-compact | `PreCompact` | — | `preCompact` | `PreCompress` | `PreCompact` | — | — |
 | User message | `UserPromptSubmit` | `UserPromptSubmit` | — | — | — | — | — |
 
