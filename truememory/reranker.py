@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    pass
+    from collections.abc import Callable
 
 # ---------------------------------------------------------------------------
 # Singleton model loader
@@ -140,11 +140,28 @@ def get_current_reranker_name() -> str:
     return get_reranker_name_for_tier(_active_tier)
 
 
-def unload_reranker() -> None:
-    """Release the reranker model from memory."""
+def unload_reranker(
+    should_unload: "Callable[[], bool] | None" = None,
+) -> bool:
+    """Release the reranker model from memory.
+
+    Args:
+        should_unload: Optional predicate evaluated inside ``_lock`` before
+            clearing the model. When provided and it returns ``False``, the
+            unload is skipped (a concurrent search arrived while we were
+            waiting on the lock). Pass ``None`` for unconditional unload.
+
+    Returns:
+        ``True`` if the model was actually unloaded, ``False`` if skipped.
+    """
     global _model
     with _lock:
+        if should_unload is not None and not should_unload():
+            return False
+        if _model is None:
+            return False
         _model = None
+        return True
 
 
 def get_reranker(model_name: str | None = None, device: str | None = None):
@@ -183,7 +200,7 @@ def get_reranker(model_name: str | None = None, device: str | None = None):
                 proxy = get_reranker_proxy(model_name=name)
                 _model = proxy
                 _model_name = name
-                return _model
+                return proxy
             except Exception:
                 log.warning(
                     "Model server available but reranker proxy failed — "
@@ -207,7 +224,8 @@ def get_reranker(model_name: str | None = None, device: str | None = None):
 
         _model = CrossEncoder(name, device=device)
         _model_name = name
-        return _model
+        result = _model
+        return result
 
 
 # ---------------------------------------------------------------------------
