@@ -44,35 +44,43 @@ _lock = threading.Lock()
 _inference_lock = threading.Lock()  # Protects concurrent model.predict() calls
 
 # ---------------------------------------------------------------------------
-# Tier-aware reranker resolution (v0.4.0 paper §2.0)
+# Tier-aware reranker resolution (v0.4.0 paper S2.0)
 # ---------------------------------------------------------------------------
 #
 # Edge uses the lightweight MiniLM cross-encoder (22M params, CPU-friendly).
-# Base and Pro use gte-reranker-modernbert-base (149M, GPU recommended) —
+# Base and Pro use gte-reranker-modernbert-base (149M, GPU recommended) --
 # required to reach the 92.0% / 93.0% LoCoMo targets for those tiers.
 #
 # The active tier is cached in _active_tier. It's seeded lazily on first
 # get_current_reranker_name() call (from TRUEMEMORY_EMBED_MODEL env var or
 # ~/.truememory/config.json), and can be updated at runtime via
-# set_active_tier() — the MCP server calls this on truememory_configure.
-_TIER_RERANKERS = {
-    "edge": "cross-encoder/ms-marco-MiniLM-L-6-v2",
-    "base": "Alibaba-NLP/gte-reranker-modernbert-base",
-    "pro": "Alibaba-NLP/gte-reranker-modernbert-base",
-}
+# set_active_tier() -- the MCP server calls this on truememory_configure.
+#
+# The canonical mapping lives in tier_config.TIERS; this dict is a
+# backward-compat delegate for callers that access _TIER_RERANKERS directly.
+from truememory.tier_config import TIERS as _TIERS, get_reranker as _cfg_get_reranker
+
+_TIER_RERANKERS = {t: cfg["reranker"] for t, cfg in _TIERS.items()}
 
 _active_tier: str | None = None  # None = not yet resolved; resolved lazily
 
 
 def get_reranker_name_for_tier(tier: str) -> str:
-    """Pure mapping from tier name ("edge" / "base" / "pro") to reranker HF ID.
+    """Pure mapping from tier name ("edge" / "base" / "pro" / "custom") to reranker HF ID.
 
     Case-insensitive. Unknown or empty tier names fall back to the Edge
-    default (MiniLM). Does not load any model — use ``get_reranker`` for that.
+    default (MiniLM). Does not load any model -- use ``get_reranker`` for that.
+    Supports the "custom" tier via tier_config.get_reranker().
     """
     if not tier:
         return _TIER_RERANKERS["edge"]
-    return _TIER_RERANKERS.get(tier.lower(), _TIER_RERANKERS["edge"])
+    t = tier.lower()
+    if t == "custom":
+        try:
+            return _cfg_get_reranker("custom")
+        except ValueError:
+            return _TIER_RERANKERS["edge"]
+    return _TIER_RERANKERS.get(t, _TIER_RERANKERS["edge"])
 
 
 def _resolve_tier_from_env_and_config() -> str:
@@ -84,8 +92,9 @@ def _resolve_tier_from_env_and_config() -> str:
     set_active_tier() is called explicitly.
     """
     import os
+    _KNOWN_TIERS = {"edge", "base", "pro", "custom"}
     env = os.environ.get("TRUEMEMORY_EMBED_MODEL", "").strip().lower()
-    if env in ("edge", "base", "pro"):
+    if env in _KNOWN_TIERS:
         return env
     try:
         from pathlib import Path
@@ -94,7 +103,7 @@ def _resolve_tier_from_env_and_config() -> str:
         if cfg_path.exists():
             data = json.loads(cfg_path.read_text(encoding="utf-8"))
             tier = (data.get("tier") or "").strip().lower()
-            if tier in ("edge", "base", "pro"):
+            if tier in _KNOWN_TIERS:
                 return tier
     except (json.JSONDecodeError, OSError) as e:
         # Previously a bare `except Exception: pass`
@@ -124,7 +133,7 @@ def set_active_tier(tier: str) -> None:
         _active_tier = "edge"
         return
     t = tier.strip().lower()
-    _active_tier = t if t in ("edge", "base", "pro") else "edge"
+    _active_tier = t if t in ("edge", "base", "pro", "custom") else "edge"
 
 
 def get_current_reranker_name() -> str:
