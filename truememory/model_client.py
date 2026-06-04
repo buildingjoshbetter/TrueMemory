@@ -2,7 +2,9 @@
 
 Provides drop-in replacements for get_model() and get_reranker() that
 route inference to the shared model_server process over a Unix domain
-socket. Auto-starts the server on first request if not running.
+socket (POSIX) or HMAC-authenticated TCP loopback (Windows).
+
+Auto-starts the server on first request if not running.
 
 Falls back to local model loading if the server cannot be reached.
 Set TRUEMEMORY_NO_MODEL_SERVER=1 to force local loading.
@@ -23,11 +25,20 @@ from pathlib import Path
 
 import numpy as np
 
+from truememory._platform import (
+    _LOOPBACK_HOST,
+    _USE_UNIX,
+    pid_is_alive,
+    spawn_kwargs,
+)
+
 log = logging.getLogger(__name__)
 
 _TRUEMEMORY_DIR = Path.home() / ".truememory"
 SOCK_PATH = _TRUEMEMORY_DIR / "model.sock"
 PID_PATH = _TRUEMEMORY_DIR / "model_server.pid"
+PORT_PATH = _TRUEMEMORY_DIR / "model_server.port"
+TOKEN_PATH = _TRUEMEMORY_DIR / "model_server.token"
 
 _HEADER_FMT = ">I"
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
@@ -123,10 +134,36 @@ def _server_is_alive() -> bool:
         return False
     try:
         pid = int(PID_PATH.read_text().strip())
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, ValueError, OSError):
+        return pid_is_alive(pid)
+    except (ValueError, OSError):
         return False
+
+
+def _read_port() -> int | None:
+    """Read the TCP port written by the model server (Windows transport)."""
+    try:
+        return int(PORT_PATH.read_text().strip())
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+
+
+def _read_token() -> bytes | None:
+    """Read the HMAC token written by the model server (Windows transport)."""
+    try:
+        return bytes.fromhex(TOKEN_PATH.read_text().strip())
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+
+
+def _server_ready() -> bool:
+    """Return True when the transport endpoint exists.
+
+    On POSIX this checks for the Unix socket file; on Windows it checks
+    for the port file that the server writes after binding.
+    """
+    if _USE_UNIX:
+        return SOCK_PATH.exists()
+    return PORT_PATH.exists() and TOKEN_PATH.exists()
 
 
 def _start_server() -> bool:
@@ -137,11 +174,18 @@ def _start_server() -> bool:
         SOCK_PATH.unlink(missing_ok=True)
     if PID_PATH.exists() and not _server_is_alive():
         PID_PATH.unlink(missing_ok=True)
+    # Clean up stale TCP artefacts.
+    if not _server_is_alive():
+        for p in (PORT_PATH, TOKEN_PATH):
+            p.unlink(missing_ok=True)
 
     if _server_is_alive():
         return True
 
     log.info("Starting model server...")
+
+    popen_extra = spawn_kwargs()
+
     app_exe = _ensure_app_bundle()
     if app_exe:
         cmd = [app_exe, "-m", "truememory.model_server"]
@@ -158,8 +202,8 @@ def _start_server() -> bool:
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=_stderr_fh,
-            start_new_session=hasattr(os, 'setsid'),
             env=env,
+            **popen_extra,
         )
     except Exception as e:
         log.warning("Failed to start model server: %s", e)
@@ -170,7 +214,7 @@ def _start_server() -> bool:
                     [sys.executable, "-m", "truememory.model_server"],
                     stdout=subprocess.DEVNULL,
                     stderr=_stderr_fh2,
-                    start_new_session=hasattr(os, 'setsid'),
+                    **popen_extra,
                 )
             except Exception as e2:
                 log.warning("Fallback launch also failed: %s", e2)
@@ -180,7 +224,7 @@ def _start_server() -> bool:
 
     deadline = time.time() + _SERVER_START_TIMEOUT
     while time.time() < deadline:
-        if SOCK_PATH.exists():
+        if _server_ready():
             time.sleep(0.2)
             return True
         time.sleep(0.1)
@@ -189,12 +233,42 @@ def _start_server() -> bool:
     return False
 
 
-def _send_request(request: dict) -> dict:
-    """Send a request to the model server and return the response."""
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+def _connect() -> socket.socket:
+    """Open a connection to the model server (Unix or TCP)."""
+    if _USE_UNIX:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(_REQUEST_TIMEOUT)
+        try:
+            sock.connect(str(SOCK_PATH))
+        except OSError:
+            sock.close()
+            raise
+        return sock
+
+    # --- TCP loopback (Windows) ---
+    port = _read_port()
+    if port is None:
+        raise ConnectionError("Model server port file not found")
+    token = _read_token()
+    if token is None:
+        raise ConnectionError("Model server token file not found")
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(_REQUEST_TIMEOUT)
     try:
-        sock.connect(str(SOCK_PATH))
+        sock.connect((_LOOPBACK_HOST, port))
+        # Authenticate before sending any pickle data.
+        sock.sendall(token)
+    except OSError:
+        sock.close()
+        raise
+    return sock
+
+
+def _send_request(request: dict) -> dict:
+    """Send a request to the model server and return the response."""
+    sock = _connect()
+    try:
         data = pickle.dumps(request, protocol=pickle.HIGHEST_PROTOCOL)
         header = struct.pack(_HEADER_FMT, len(data))
         sock.sendall(header + data)
@@ -275,14 +349,14 @@ def use_model_server() -> bool:
 
     Returns True only if:
     1. TRUEMEMORY_NO_MODEL_SERVER is not set
-    2. The server socket exists (server is running)
+    2. The server endpoint exists (server is running)
 
     Processes that want to ensure the server is running should call
     ensure_server_running() first (e.g., during MCP server startup).
     """
     if os.environ.get("TRUEMEMORY_NO_MODEL_SERVER", "") == "1":
         return False
-    return SOCK_PATH.exists() and _server_is_alive()
+    return _server_ready() and _server_is_alive()
 
 
 def ensure_server_running() -> bool:
@@ -293,7 +367,7 @@ def ensure_server_running() -> bool:
     """
     if os.environ.get("TRUEMEMORY_NO_MODEL_SERVER", "") == "1":
         return False
-    if _server_is_alive() and SOCK_PATH.exists():
+    if _server_is_alive() and _server_ready():
         return True
     return _start_server()
 
