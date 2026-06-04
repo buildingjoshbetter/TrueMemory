@@ -232,7 +232,7 @@ def main():
         try:
             from truememory.ingest.hooks._shared import should_extract_session, mark_session_extracted
             if should_extract_session(session_id, transcript_path):
-                from truememory.ingest.hooks.stop import (
+                from truememory.ingest.hooks.session_end import (
                     _has_enough_messages, _run_background_ingestion,
                     TRACE_DIR, LOG_DIR,
                 )

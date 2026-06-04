@@ -49,7 +49,7 @@ def test_hooks_live_inside_package_namespace():
     """
     hooks_dir = PKG_ROOT / "hooks"
     assert hooks_dir.is_dir(), f"Expected package hooks dir at {hooks_dir}"
-    for name in ("stop.py", "session_start.py", "user_prompt_submit.py", "compact.py"):
+    for name in ("session_end.py", "session_start.py", "user_prompt_submit.py", "compact.py"):
         assert (hooks_dir / name).exists(), f"Missing {name}"
     assert (hooks_dir / "__init__.py").exists(), "hooks package __init__ is missing"
 
@@ -61,7 +61,7 @@ def test_hooks_live_inside_package_namespace():
 
 def test_hooks_modules_are_importable():
     """All four hook modules import cleanly as truememory.ingest.hooks.*."""
-    for name in ("stop", "session_start", "user_prompt_submit", "compact"):
+    for name in ("session_end", "session_start", "user_prompt_submit", "compact"):
         mod = importlib.import_module(f"truememory.ingest.hooks.{name}")
         assert hasattr(mod, "main"), f"{name} missing main()"
         assert hasattr(mod, "_parse_args"), f"{name} missing _parse_args()"
@@ -100,7 +100,7 @@ def test_prebuilt_wheel_layout_if_present():
     with zipfile.ZipFile(wheel) as zf:
         names = set(zf.namelist())
 
-    assert "truememory.ingest/hooks/stop.py" in names
+    assert "truememory.ingest.hooks.session_end.py" in names
     assert "truememory.ingest/hooks/session_start.py" in names
     assert "truememory.ingest/hooks/user_prompt_submit.py" in names
     assert "truememory.ingest/hooks/compact.py" in names
@@ -115,7 +115,7 @@ def test_prebuilt_wheel_layout_if_present():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("module", [
-    "truememory.ingest.hooks.stop",
+    "truememory.ingest.hooks.session_end",
     "truememory.ingest.hooks.session_start",
     "truememory.ingest.hooks.user_prompt_submit",
     "truememory.ingest.hooks.compact",
@@ -133,7 +133,7 @@ def test_hook_parses_user_and_db_from_argv(module, monkeypatch):
 
 
 @pytest.mark.parametrize("module", [
-    "truememory.ingest.hooks.stop",
+    "truememory.ingest.hooks.session_end",
     "truememory.ingest.hooks.session_start",
     "truememory.ingest.hooks.user_prompt_submit",
     "truememory.ingest.hooks.compact",
@@ -150,7 +150,7 @@ def test_hook_argv_overrides_env(module, monkeypatch):
 
 
 @pytest.mark.parametrize("module", [
-    "truememory.ingest.hooks.stop",
+    "truememory.ingest.hooks.session_end",
     "truememory.ingest.hooks.session_start",
     "truememory.ingest.hooks.user_prompt_submit",
     "truememory.ingest.hooks.compact",
@@ -167,7 +167,7 @@ def test_hook_falls_back_to_env(module, monkeypatch):
 
 
 @pytest.mark.parametrize("module", [
-    "truememory.ingest.hooks.stop",
+    "truememory.ingest.hooks.session_end",
     "truememory.ingest.hooks.session_start",
     "truememory.ingest.hooks.user_prompt_submit",
     "truememory.ingest.hooks.compact",
@@ -195,7 +195,7 @@ def test_stop_hook_exits_cleanly_with_argv_when_transcript_missing(monkeypatch):
         "hook_event_name": "SessionEnd",
     })
     result = subprocess.run(
-        [sys.executable, "-m", "truememory.ingest.hooks.stop",
+        [sys.executable, "-m", "truememory.ingest.hooks.session_end",
          "--user", "alice", "--db", "/tmp/x-regression.db"],
         input=payload,
         text=True,

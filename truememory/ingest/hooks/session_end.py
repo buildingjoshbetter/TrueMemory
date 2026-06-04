@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """
-Stop Hook — Trigger Background Extraction
-===========================================
+SessionEnd Hook — Trigger Background Extraction
+=================================================
 
-Fires when a Claude Code session ends. Reads the conversation transcript
-and launches the ingestion pipeline to extract and store memories.
+Fires when a Claude Code session ends (the ``SessionEnd`` event). Reads the
+conversation transcript and launches the ingestion pipeline to extract and
+store memories.
 
-This is the "sleep consolidation" trigger — the conversation is over,
+This is the "sleep consolidation" trigger -- the conversation is over,
 now process it for long-term storage. The pipeline runs in a background
 subprocess so it doesn't block Claude Code's shutdown.
 
+NOTE: Earlier versions registered this hook under the ``Stop`` event, but
+``Stop`` fires after *every* assistant response (per-turn), not once per
+session. ``SessionEnd`` fires exactly once when the session closes, which
+is the correct trigger for transcript extraction.
+
 Input (stdin JSON):
-    {"session_id": "...", "transcript_path": "...", "stop_reason": "..."}
+    {"session_id": "...", "transcript_path": "...", "reason": "..."}
 
 Output: None (processing happens in background)
 """
@@ -67,7 +73,7 @@ BACKLOG_DIR = Path(os.environ.get(
 # cap concurrent ingest processes. N parallel SessionEnd hooks
 # (multi-session close, session-restart loop) would otherwise load N
 # embedding models at once — ~600MB RSS each on Pro, easy OOM on laptops.
-# Unified env var across stop.py and hooks/core.py.
+# Unified env var across session_end.py and hooks/core.py.
 SPAWN_CAP = int(os.environ.get(
     "TRUEMEMORY_SPAWN_CAP",
     os.environ.get("TRUEMEMORY_INGEST_SPAWN_CAP", "2"),
@@ -122,7 +128,7 @@ def main():
             try:
                 mark_session_extracted(session_id, transcript_path)
             except Exception as exc:
-                log.debug("stop hook: failed to mark extraction session %s: %s", session_id, exc)
+                log.debug("session_end hook: failed to mark extraction session %s: %s", session_id, exc)
         return
 
     args = _parse_args()
@@ -151,7 +157,7 @@ def main():
 
     from truememory.ingest.hooks._shared import should_extract_session, mark_session_extracted
     if not should_extract_session(session_id, transcript_path):
-        log.info("stop hook: session %s already extracted at this size, skipping", session_id)
+        log.info("session_end hook: session %s already extracted at this size, skipping", session_id)
         return
 
     spawned_pid = _run_background_ingestion(transcript_path, session_id, args.user, args.db)
@@ -175,7 +181,7 @@ def _writable_dirs_ok() -> bool:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         LOG_DIR.chmod(0o700)
     except OSError as e:
-        print(f"truememory-ingest stop hook: cannot create ~/.truememory dirs: {e}",
+        print(f"truememory session_end hook: cannot create ~/.truememory dirs: {e}",
               file=sys.stderr)
         return False
 
@@ -187,7 +193,7 @@ def _writable_dirs_ok() -> bool:
     try:
         stats = shutil.disk_usage(LOG_DIR)
         if stats.free < 10 * 1024 * 1024:
-            print(f"truememory-ingest stop hook: disk full (free={stats.free} bytes)",
+            print(f"truememory session_end hook: disk full (free={stats.free} bytes)",
                   file=sys.stderr)
             return False
     except OSError:
@@ -198,7 +204,7 @@ def _writable_dirs_ok() -> bool:
         health_file = LOG_DIR / ".health"
         health_file.write_text("ok", encoding="utf-8")
     except OSError as e:
-        print(f"truememory-ingest stop hook: logs dir not writable: {e}",
+        print(f"truememory session_end hook: logs dir not writable: {e}",
               file=sys.stderr)
         return False
 
@@ -310,7 +316,7 @@ def _queue_to_backlog(
     except Exception as e:
         # Best-effort: if we can't write the backlog marker, the session's
         # memories are lost — log and move on. Must not raise.
-        log.error("stop hook: failed to queue backlog marker: %s", e)
+        log.error("session_end hook: failed to queue backlog marker: %s", e)
 
 
 def _run_background_ingestion(
@@ -326,7 +332,7 @@ def _run_background_ingestion(
     subprocess detachment.
 
     bounds concurrent spawns via ``SPAWN_CAP`` so a burst of
-    SessionEnd hooks doesn't load N embedding models at once.
+    SessionEnd hooks don't load N embedding models at once.
     on Popen failure, queue the ingestion to ``BACKLOG_DIR``
     for a later session to re-attempt — NEVER fall back to synchronous
     inline ingestion (that blocks Claude Code's shutdown).
@@ -335,7 +341,7 @@ def _run_background_ingestion(
     # multiple profiles and need to confirm which user/db the hook actually
     # saw after the arg-parse + env-var resolution.
     log.info(
-        "stop hook: launching ingestion user=%r db=%r session=%r",
+        "session_end hook: launching ingestion user=%r db=%r session=%r",
         user_id, db_path, session_id,
     )
 
@@ -374,7 +380,7 @@ def _run_background_ingestion(
 
     from truememory.ingest.hooks._shared import check_extraction_budget
     if not check_extraction_budget():
-        log.warning("stop hook: extraction budget exhausted (20/hr); queueing session %r", session_id)
+        log.warning("session_end hook: extraction budget exhausted (20/hr); queueing session %r", session_id)
         _queue_to_backlog(
             transcript_path, session_id, user_id, db_path,
             reason="extraction_budget_exhausted",
@@ -390,7 +396,7 @@ def _run_background_ingestion(
     with spawn_gate() as allowed:
         if not allowed:
             log.warning(
-                "stop hook: at spawn cap (cap %d); queueing session "
+                "session_end hook: at spawn cap (cap %d); queueing session "
                 "%r to backlog for later",
                 effective_cap, session_id,
             )
@@ -415,7 +421,7 @@ def _run_background_ingestion(
             return proc.pid
         except Exception as e:
             log.warning(
-                "stop hook: background launch failed (%s); queueing session "
+                "session_end hook: background launch failed (%s); queueing session "
                 "%r to backlog for later",
                 e, session_id,
             )

@@ -1,7 +1,7 @@
-"""Regression locks for Hunter F21 + F33 — stop-hook safety.
+"""Regression locks for Hunter F21 + F33 — session-end-hook safety.
 
 F21: `_run_background_ingestion` now refuses to Popen when `SPAWN_CAP`
-concurrent ingest processes are already live — pre-fix, N parallel Stop
+concurrent ingest processes are already live — pre-fix, N parallel SessionEnd
 hooks loaded N embedding models (~600MB each on Pro) and OOM-killed on
 laptops.
 
@@ -25,7 +25,7 @@ def test_spawn_cap_blocks_when_at_cap(monkeypatch, tmp_path):
     """When spawn_gate reports at-cap, `_run_background_ingestion` must NOT
     call Popen and must write a backlog marker explaining why."""
     from contextlib import contextmanager
-    from truememory.ingest.hooks import stop as stop_mod
+    from truememory.ingest.hooks import session_end as stop_mod
     from truememory.hooks import core as core_mod
 
     @contextmanager
@@ -65,7 +65,7 @@ def test_spawn_cap_blocks_when_at_cap(monkeypatch, tmp_path):
 def test_spawn_cap_allows_spawn_under_cap(monkeypatch, tmp_path):
     """Under the cap, Popen must be called and no backlog marker written."""
     from contextlib import contextmanager
-    from truememory.ingest.hooks import stop as stop_mod
+    from truememory.ingest.hooks import session_end as stop_mod
     from truememory.hooks import core as core_mod
 
     @contextmanager
@@ -105,7 +105,7 @@ def test_spawn_cap_allows_spawn_under_cap(monkeypatch, tmp_path):
 def test_count_active_ingest_processes_windows_noop(monkeypatch):
     """On Windows, `_count_active_ingest_processes` returns 0 so the cap
     check doesn't become a hard fence (pgrep is POSIX-only)."""
-    from truememory.ingest.hooks import stop as stop_mod
+    from truememory.ingest.hooks import session_end as stop_mod
     import sys as _sys
 
     monkeypatch.setattr(_sys, "platform", "win32")
@@ -116,7 +116,7 @@ def test_count_active_ingest_processes_windows_noop(monkeypatch):
 def test_count_active_ingest_processes_pgrep_missing(monkeypatch):
     """If pgrep isn't on PATH (sandboxed runtime), return 0 rather than
     crash the hook."""
-    from truememory.ingest.hooks import stop as stop_mod
+    from truememory.ingest.hooks import session_end as stop_mod
     import sys as _sys
 
     monkeypatch.setattr(_sys, "platform", "linux")
@@ -138,7 +138,7 @@ def test_popen_failure_queues_backlog_not_inline(monkeypatch, tmp_path):
     the hook must write a backlog marker and NOT fall back to inline
     ingestion — that path blocks Claude Code's shutdown."""
     from contextlib import contextmanager
-    from truememory.ingest.hooks import stop as stop_mod
+    from truememory.ingest.hooks import session_end as stop_mod
     from truememory.hooks import core as core_mod
 
     @contextmanager
@@ -193,7 +193,7 @@ def test_backlog_write_failure_is_swallowed(monkeypatch, tmp_path):
     full, chmod 000), the hook logs an error but must NOT raise — the
     session's memories are just lost, and the primary contract (don't
     block Claude Code) is preserved."""
-    from truememory.ingest.hooks import stop as stop_mod
+    from truememory.ingest.hooks import session_end as stop_mod
 
     # Point BACKLOG_DIR at a path that will fail on mkdir (nested inside
     # a file, not a dir)
@@ -214,7 +214,7 @@ def test_backlog_write_failure_is_swallowed(monkeypatch, tmp_path):
 def test_backlog_marker_schema(monkeypatch, tmp_path):
     """Document the backlog marker schema — a later session_start drain
     path will rely on these keys."""
-    from truememory.ingest.hooks import stop as stop_mod
+    from truememory.ingest.hooks import session_end as stop_mod
 
     monkeypatch.setattr(stop_mod, "BACKLOG_DIR", tmp_path / "backlog")
     stop_mod._queue_to_backlog(
@@ -242,7 +242,7 @@ def test_backlog_marker_schema(monkeypatch, tmp_path):
 def test_empty_session_id_still_queues(monkeypatch, tmp_path):
     """If session_id is missing, still write a marker (under 'unknown.json')
     so we don't silently drop the memories."""
-    from truememory.ingest.hooks import stop as stop_mod
+    from truememory.ingest.hooks import session_end as stop_mod
 
     monkeypatch.setattr(stop_mod, "BACKLOG_DIR", tmp_path / "backlog")
     stop_mod._queue_to_backlog(
@@ -259,7 +259,7 @@ def test_spawn_cap_env_var_override(monkeypatch):
     """`TRUEMEMORY_INGEST_SPAWN_CAP` env var must control the cap."""
     monkeypatch.setenv("TRUEMEMORY_INGEST_SPAWN_CAP", "5")
     import importlib
-    from truememory.ingest.hooks import stop as stop_mod
+    from truememory.ingest.hooks import session_end as stop_mod
     importlib.reload(stop_mod)
     assert stop_mod.SPAWN_CAP == 5
 
@@ -273,6 +273,6 @@ def test_backlog_dir_env_var_override(monkeypatch, tmp_path):
     override = tmp_path / "custom_backlog"
     monkeypatch.setenv("TRUEMEMORY_BACKLOG_DIR", str(override))
     import importlib
-    from truememory.ingest.hooks import stop as stop_mod
+    from truememory.ingest.hooks import session_end as stop_mod
     importlib.reload(stop_mod)
     assert Path(str(stop_mod.BACKLOG_DIR)) == override

@@ -42,7 +42,7 @@ Both MCP and hooks live in `~/.gemini/settings.json`. Add the following:
     ],
     "SessionEnd": [
       {
-        "command": "/path/to/python /path/to/truememory/ingest/hooks/stop.py",
+        "command": "/path/to/python /path/to/truememory/ingest/hooks/session_end.py",
         "timeout": 5000
       }
     ],

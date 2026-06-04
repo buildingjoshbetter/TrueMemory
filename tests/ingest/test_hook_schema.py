@@ -86,7 +86,7 @@ def test_migration_upgrades_old_format():
                 }],
                 "SessionEnd": [{
                     "type": "command",
-                    "command": "/usr/bin/python3 /some/path/stop.py",
+                    "command": "/usr/bin/python3 /some/path/session_end.py",
                 }],
             }
         }
@@ -125,7 +125,7 @@ def test_new_format_not_double_wrapped():
         "matcher": "",
         "hooks": [{
             "type": "command",
-            "command": "/usr/bin/python3 /some/path/stop.py",
+            "command": "/usr/bin/python3 /some/path/session_end.py",
         }],
     }
 
@@ -138,3 +138,144 @@ def test_new_format_not_double_wrapped():
 
     assert result == correct_entry, "Correct-format entry was incorrectly modified"
     assert len(result["hooks"]) == 1, "Should still have exactly one inner hook"
+
+
+
+# ---------------------------------------------------------------------------
+# Stop -> SessionEnd migration tests (concern #1, #2, #5, #7 from review)
+# ---------------------------------------------------------------------------
+
+def _run_migration_on(existing_settings: dict) -> dict:
+    """Run the Stop->SessionEnd migration logic from cli.py on a settings dict."""
+    existing = existing_settings
+    existing.setdefault("hooks", {})
+    if not isinstance(existing["hooks"], dict):
+        existing["hooks"] = {}
+
+    _legacy_stop = existing["hooks"].get("Stop")
+    if _legacy_stop is not None:
+        if isinstance(_legacy_stop, dict):
+            _legacy_stop = [_legacy_stop]
+        if isinstance(_legacy_stop, list):
+            _cleaned_stop = []
+            _removed_count = 0
+            for h in _legacy_stop:
+                if not isinstance(h, dict):
+                    _cleaned_stop.append(h)
+                    continue
+                inner_hooks = h.get("hooks", [])
+                if isinstance(inner_hooks, list) and inner_hooks:
+                    kept_inner = []
+                    for ih in inner_hooks:
+                        cmd = (ih.get("command") or "") if isinstance(ih, dict) else ""
+                        if "truememory" in cmd.lower() and ("hooks" in cmd.lower() or "ingest" in cmd.lower()):
+                            _removed_count += 1
+                        else:
+                            kept_inner.append(ih)
+                    if kept_inner:
+                        h_copy = dict(h)
+                        h_copy["hooks"] = kept_inner
+                        _cleaned_stop.append(h_copy)
+                    continue
+                cmd_flat = (h.get("command") or "")
+                if "truememory" in cmd_flat.lower() and ("hooks" in cmd_flat.lower() or "ingest" in cmd_flat.lower()):
+                    _removed_count += 1
+                else:
+                    _cleaned_stop.append(h)
+            if _cleaned_stop:
+                existing["hooks"]["Stop"] = _cleaned_stop
+            else:
+                existing["hooks"].pop("Stop", None)
+
+    _existing_session_end = existing["hooks"].get("SessionEnd")
+    if isinstance(_existing_session_end, list):
+        _deduped = []
+        for h in _existing_session_end:
+            if not isinstance(h, dict):
+                _deduped.append(h)
+                continue
+            inner = h.get("hooks", [])
+            if isinstance(inner, list):
+                has_ours = any(
+                    isinstance(ih, dict)
+                    and "truememory" in (ih.get("command") or "").lower()
+                    for ih in inner
+                )
+                if has_ours:
+                    continue
+            cmd_flat = (h.get("command") or "")
+            if "truememory" in cmd_flat.lower():
+                continue
+            _deduped.append(h)
+        if _deduped:
+            existing["hooks"]["SessionEnd"] = _deduped
+        else:
+            existing["hooks"].pop("SessionEnd", None)
+
+    return existing
+
+
+def test_migration_removes_truememory_stop_entries():
+    """Legacy TrueMemory Stop hooks are stripped during migration."""
+    settings = {"hooks": {"Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "/usr/bin/python3 -m truememory.ingest.hooks.stop"}]}]}}
+    result = _run_migration_on(settings)
+    assert "Stop" not in result["hooks"]
+
+
+def test_migration_preserves_non_truememory_stop_hooks():
+    """User custom Stop hooks must survive migration untouched."""
+    custom = {"matcher": "", "hooks": [{"type": "command", "command": "/usr/local/bin/my-hook.sh"}]}
+    settings = {"hooks": {"Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "/usr/bin/python3 -m truememory.ingest.hooks.stop"}]}, custom]}}
+    result = _run_migration_on(settings)
+    assert "Stop" in result["hooks"]
+    assert len(result["hooks"]["Stop"]) == 1
+    assert result["hooks"]["Stop"][0] == custom
+
+
+def test_migration_filters_inner_hooks_not_entire_block():
+    """Mixed matcher block: only TrueMemory hooks removed (concern #1)."""
+    settings = {"hooks": {"Stop": [{"matcher": "", "hooks": [
+        {"type": "command", "command": "/usr/bin/python3 -m truememory.ingest.hooks.stop"},
+        {"type": "command", "command": "/usr/local/bin/my-logger.sh"},
+    ]}]}}
+    result = _run_migration_on(settings)
+    assert "Stop" in result["hooks"]
+    inner = result["hooks"]["Stop"][0]["hooks"]
+    assert len(inner) == 1
+    assert "my-logger" in inner[0]["command"]
+
+
+def test_migration_handles_dict_format_stop():
+    """Bare dict Stop value is handled (concern #7)."""
+    settings = {"hooks": {"Stop": {"type": "command", "command": "/usr/bin/python3 -m truememory.ingest.hooks.stop"}}}
+    result = _run_migration_on(settings)
+    assert "Stop" not in result["hooks"]
+
+
+def test_migration_handles_flat_format_stop():
+    """Old flat {type, command} entries are handled."""
+    settings = {"hooks": {"Stop": [{"type": "command", "command": "/usr/bin/python3 -m truememory.ingest.hooks.stop"}]}}
+    result = _run_migration_on(settings)
+    assert "Stop" not in result["hooks"]
+
+
+def test_migration_idempotent_on_rerun():
+    """Running migration twice produces same result."""
+    settings = {"hooks": {"Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "/usr/bin/python3 -m truememory.ingest.hooks.stop"}]}]}}
+    r1 = _run_migration_on(settings)
+    r2 = _run_migration_on(r1)
+    assert r1 == r2
+
+
+def test_migration_deduplicates_existing_session_end():
+    """Existing SessionEnd TrueMemory entries stripped to prevent doubles (concern #5)."""
+    settings = {"hooks": {"SessionEnd": [{"matcher": "", "hooks": [{"type": "command", "command": "/usr/bin/python3 -m truememory.ingest.hooks.session_end"}]}]}}
+    result = _run_migration_on(settings)
+    assert "SessionEnd" not in result["hooks"]
+
+
+def test_migration_handles_none_command():
+    """command=None must not crash (concern #9)."""
+    settings = {"hooks": {"Stop": [{"matcher": "", "hooks": [{"type": "command", "command": None}]}]}}
+    result = _run_migration_on(settings)
+    assert "Stop" in result["hooks"]

@@ -28,7 +28,7 @@ _HOOK_EVENTS = {
         "timeout": 10000,
     },
     "Stop": {
-        "script": "stop.py",
+        "script": "session_end.py",
         "timeout": 5000,
     },
     "UserPromptSubmit": {

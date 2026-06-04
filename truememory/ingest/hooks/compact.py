@@ -33,7 +33,7 @@ def _parse_args() -> argparse.Namespace:
     """Parse command-line overrides for user_id and db_path.
 
     Resolution order: command-line arg > env var > empty default. See
-    stop.py for the rationale.
+    session_end.py for the rationale.
     """
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--user", default=os.environ.get("TRUEMEMORY_USER_ID", ""))
@@ -73,7 +73,7 @@ def main():
     try:
         from truememory.ingest.hooks._shared import should_extract_session, mark_session_extracted
         if should_extract_session(session_id, transcript_path):
-            from truememory.ingest.hooks.stop import (
+            from truememory.ingest.hooks.session_end import (
                 _has_enough_messages, _run_background_ingestion,
                 TRACE_DIR, LOG_DIR,
             )

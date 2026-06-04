@@ -310,7 +310,7 @@ def _scan_stale_sessions() -> None:
             return
 
         from truememory.ingest.hooks._shared import EXTRACTED_DIR, _safe_session_id, mark_session_extracted
-        from truememory.ingest.hooks.stop import _queue_to_backlog
+        from truememory.ingest.hooks.session_end import _queue_to_backlog
 
         uuid_re = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
         cutoff = time.time() - 86400

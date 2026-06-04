@@ -60,7 +60,7 @@ module.exports = {
           session_id: ctx.sessionId || "openclaw",
           transcript_path: ctx.transcriptPath || "",
         });
-        const child = spawn(PYTHON_PATH, [path.join(hooksDir, "stop.py")], {
+        const child = spawn(PYTHON_PATH, [path.join(hooksDir, "session_end.py")], {
           stdio: ["pipe", "ignore", "ignore"],
           detached: true,
         });

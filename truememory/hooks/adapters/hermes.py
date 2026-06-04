@@ -30,7 +30,7 @@ _PLUGIN_HOOKS = {
     },
     "on_session_end": {
         "name": "truememory-session-end",
-        "script": "stop.py",
+        "script": "session_end.py",
     },
     "on_user_prompt": {
         "name": "truememory-user-prompt",

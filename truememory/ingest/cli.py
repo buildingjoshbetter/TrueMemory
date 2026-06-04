@@ -815,7 +815,7 @@ def _run_install(args):
     hook_files = {
         "SessionStart": hooks_dir / "session_start.py",
         "UserPromptSubmit": hooks_dir / "user_prompt_submit.py",
-        "SessionEnd": hooks_dir / "stop.py",
+        "SessionEnd": hooks_dir / "session_end.py",
         "PreCompact": hooks_dir / "compact.py",
     }
     missing = [name for name, path in hook_files.items() if not path.exists()]
@@ -835,7 +835,7 @@ def _run_install(args):
     _HOOK_MODULES = {
         "session_start.py": "truememory.ingest.hooks.session_start",
         "user_prompt_submit.py": "truememory.ingest.hooks.user_prompt_submit",
-        "stop.py": "truememory.ingest.hooks.stop",
+        "session_end.py": "truememory.ingest.hooks.session_end",
         "compact.py": "truememory.ingest.hooks.compact",
     }
 
@@ -924,35 +924,80 @@ def _run_install(args):
     # response), not per-session.  The correct event is "SessionEnd".
     # Strip stale TrueMemory "Stop" entries so upgrading users don't get
     # double-fires (the installer will add a fresh "SessionEnd" entry below).
+    #
+    # IMPORTANT: we filter *individual* inner hooks, not entire matcher
+    # blocks -- a single Stop entry may contain both a TrueMemory hook and
+    # a user's custom hook in the same "hooks" array.
     _legacy_stop = existing["hooks"].get("Stop")
-    if isinstance(_legacy_stop, list):
-        _cleaned_stop = []
-        for h in _legacy_stop:
+    if _legacy_stop is not None:
+        # Normalise to list if it's a bare dict (older installers)
+        if isinstance(_legacy_stop, dict):
+            _legacy_stop = [_legacy_stop]
+        if isinstance(_legacy_stop, list):
+            _cleaned_stop = []
+            _removed_count = 0
+            for h in _legacy_stop:
+                if not isinstance(h, dict):
+                    _cleaned_stop.append(h)
+                    continue
+                # --- new schema: {matcher, hooks: [{type, command}]} ---
+                inner_hooks = h.get("hooks", [])
+                if isinstance(inner_hooks, list) and inner_hooks:
+                    kept_inner = []
+                    for ih in inner_hooks:
+                        cmd = (ih.get("command") or "") if isinstance(ih, dict) else ""
+                        if "truememory" in cmd.lower() and ("hooks" in cmd.lower() or "ingest" in cmd.lower()):
+                            _removed_count += 1
+                        else:
+                            kept_inner.append(ih)
+                    if kept_inner:
+                        h_copy = dict(h)
+                        h_copy["hooks"] = kept_inner
+                        _cleaned_stop.append(h_copy)
+                    # else: all inner hooks were ours, drop the whole entry
+                    continue
+                # --- old flat schema: {type, command} ---
+                cmd_flat = (h.get("command") or "")
+                if "truememory" in cmd_flat.lower() and ("hooks" in cmd_flat.lower() or "ingest" in cmd_flat.lower()):
+                    _removed_count += 1
+                else:
+                    _cleaned_stop.append(h)
+            if _cleaned_stop:
+                existing["hooks"]["Stop"] = _cleaned_stop
+            else:
+                existing["hooks"].pop("Stop", None)
+            if _removed_count > 0:
+                print(
+                    "Migrated truememory extraction hook from 'Stop' (per-turn) "
+                    "to 'SessionEnd' (per-session)."
+                )
+
+    # Also strip any stale TrueMemory entries already under "SessionEnd" to
+    # prevent duplicates if the installer is re-run after a partial upgrade.
+    _existing_session_end = existing["hooks"].get("SessionEnd")
+    if isinstance(_existing_session_end, list):
+        _deduped = []
+        for h in _existing_session_end:
             if not isinstance(h, dict):
-                _cleaned_stop.append(h)
+                _deduped.append(h)
                 continue
-            # Check new schema: {matcher, hooks: [{type, command}]}
-            is_ours = False
-            inner_hooks = h.get("hooks", [])
-            if isinstance(inner_hooks, list):
-                for ih in inner_hooks:
-                    if isinstance(ih, dict) and "truememory" in ih.get("command", "").lower():
-                        is_ours = True
-                        break
-            # Check old schema: {type, command}
-            if "truememory" in h.get("command", "").lower():
-                is_ours = True
-            if not is_ours:
-                _cleaned_stop.append(h)
-        if _cleaned_stop:
-            existing["hooks"]["Stop"] = _cleaned_stop
+            inner = h.get("hooks", [])
+            if isinstance(inner, list):
+                has_ours = any(
+                    isinstance(ih, dict)
+                    and "truememory" in (ih.get("command") or "").lower()
+                    for ih in inner
+                )
+                if has_ours:
+                    continue
+            cmd_flat = (h.get("command") or "")
+            if "truememory" in cmd_flat.lower():
+                continue
+            _deduped.append(h)
+        if _deduped:
+            existing["hooks"]["SessionEnd"] = _deduped
         else:
-            existing["hooks"].pop("Stop", None)
-        if len(_cleaned_stop) != len(_legacy_stop):
-            print(
-                "Migrated truememory extraction hook from 'Stop' (per-turn) "
-                "to 'SessionEnd' (per-session)."
-            )
+            existing["hooks"].pop("SessionEnd", None)
 
     # Migration: earlier versions wrote hooks in the flat format
     # {type, command} instead of the required {matcher, hooks: [{type, command}]}.
@@ -984,7 +1029,7 @@ def _run_install(args):
         existing["hooks"].setdefault(event, [])
         if not isinstance(existing["hooks"][event], list):
             existing["hooks"][event] = []
-        # Don't add duplicates (match on stop.py / session_start.py etc.)
+        # Don't add duplicates (match on session_end.py / session_start.py etc.)
         for hook in hooks:
             hook_file = str(hook_files[event])
             already_present = False

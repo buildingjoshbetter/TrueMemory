@@ -37,7 +37,7 @@ timeout = 10000
 
 [[hooks]]
 event = "Stop"
-command = "/path/to/python /path/to/truememory/ingest/hooks/stop.py"
+command = "/path/to/python /path/to/truememory/ingest/hooks/session_end.py"
 timeout = 5000
 
 [[hooks]]

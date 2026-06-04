@@ -52,7 +52,7 @@ Add to `~/.cursor/hooks.json`:
     ],
     "stop": [
       {
-        "command": "/path/to/python /path/to/truememory/ingest/hooks/stop.py",
+        "command": "/path/to/python /path/to/truememory/ingest/hooks/session_end.py",
         "timeout": 5000
       }
     ],

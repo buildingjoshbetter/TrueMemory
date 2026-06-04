@@ -45,7 +45,7 @@ plugins:
     command: /path/to/python /path/to/truememory/ingest/hooks/session_start.py
   - name: truememory-session-end
     event: on_session_end
-    command: /path/to/python /path/to/truememory/ingest/hooks/stop.py
+    command: /path/to/python /path/to/truememory/ingest/hooks/session_end.py
 ```
 
 ## Hermes Learning Loop
