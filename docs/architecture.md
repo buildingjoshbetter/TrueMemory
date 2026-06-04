@@ -40,7 +40,7 @@
 
 3. **Snapshot** (pre-compact): The PreCompact hook (Claude Code, Kimi) saves a lightweight snapshot of the conversation before context compression.
 
-4. **Extract** (session end): The Stop hook launches a background ingestion process that parses the transcript, runs the encoding gate on each fact, and stores high-quality memories.
+4. **Extract** (session end): The SessionEnd hook launches a background ingestion process that parses the transcript, runs the encoding gate on each fact, and stores high-quality memories.
 
 ## Package Structure
 

@@ -84,7 +84,7 @@ def test_migration_upgrades_old_format():
                     "type": "command",
                     "command": "/usr/bin/python3 /some/path/session_start.py",
                 }],
-                "Stop": [{
+                "SessionEnd": [{
                     "type": "command",
                     "command": "/usr/bin/python3 /some/path/stop.py",
                 }],

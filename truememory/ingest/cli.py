@@ -797,7 +797,7 @@ def _run_install(args):
     Hooks installed:
     - SessionStart: injects relevant memories as additionalContext
     - UserPromptSubmit: buffers user messages (kept for future use)
-    - Stop: triggers background fact extraction after each session
+    - SessionEnd: triggers background fact extraction after each session
     - PreCompact: saves context snapshot before Claude compresses conversation
 
     Note: the event is named ``PreCompact`` in Claude Code's settings.json
@@ -815,7 +815,7 @@ def _run_install(args):
     hook_files = {
         "SessionStart": hooks_dir / "session_start.py",
         "UserPromptSubmit": hooks_dir / "user_prompt_submit.py",
-        "Stop": hooks_dir / "stop.py",
+        "SessionEnd": hooks_dir / "stop.py",
         "PreCompact": hooks_dir / "compact.py",
     }
     missing = [name for name, path in hook_files.items() if not path.exists()]
@@ -917,6 +917,41 @@ def _run_install(args):
             print(
                 "Migrated legacy 'compact' hook entry to 'PreCompact' "
                 "(earlier versions registered the wrong event name)."
+            )
+
+    # Migration: earlier versions wired the extraction hook to the "Stop"
+    # event, but Claude Code's "Stop" fires per-turn (after every assistant
+    # response), not per-session.  The correct event is "SessionEnd".
+    # Strip stale TrueMemory "Stop" entries so upgrading users don't get
+    # double-fires (the installer will add a fresh "SessionEnd" entry below).
+    _legacy_stop = existing["hooks"].get("Stop")
+    if isinstance(_legacy_stop, list):
+        _cleaned_stop = []
+        for h in _legacy_stop:
+            if not isinstance(h, dict):
+                _cleaned_stop.append(h)
+                continue
+            # Check new schema: {matcher, hooks: [{type, command}]}
+            is_ours = False
+            inner_hooks = h.get("hooks", [])
+            if isinstance(inner_hooks, list):
+                for ih in inner_hooks:
+                    if isinstance(ih, dict) and "truememory" in ih.get("command", "").lower():
+                        is_ours = True
+                        break
+            # Check old schema: {type, command}
+            if "truememory" in h.get("command", "").lower():
+                is_ours = True
+            if not is_ours:
+                _cleaned_stop.append(h)
+        if _cleaned_stop:
+            existing["hooks"]["Stop"] = _cleaned_stop
+        else:
+            existing["hooks"].pop("Stop", None)
+        if len(_cleaned_stop) != len(_legacy_stop):
+            print(
+                "Migrated truememory extraction hook from 'Stop' (per-turn) "
+                "to 'SessionEnd' (per-session)."
             )
 
     # Migration: earlier versions wrote hooks in the flat format
@@ -1096,7 +1131,7 @@ def _run_status(args):
         try:
             settings = json.loads(settings_path.read_text(encoding="utf-8"))
             hooks = settings.get("hooks", {})
-            expected = ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact"]
+            expected = ["SessionStart", "UserPromptSubmit", "SessionEnd", "PreCompact"]
             installed = []
             missing = []
             for event in expected:
