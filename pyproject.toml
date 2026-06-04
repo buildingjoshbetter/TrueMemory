@@ -47,7 +47,7 @@ agentic = []
 dashboard = [
     "fastapi>=0.100,<1.0",
     "uvicorn[standard]>=0.20,<1.0",
-    "pywebview>=5.0,<6.0",
+    "pywebview>=5.0,<7.0",
 ]
 dev = ["pytest>=7.0,<10.0", "ruff>=0.4,<1.0", "build>=1.2,<2.0", "twine>=5.0,<7.0"]
 all = ["truememory[agentic]"]
