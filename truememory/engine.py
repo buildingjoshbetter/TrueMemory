@@ -883,13 +883,16 @@ class TrueMemoryEngine:
         # rebuild; route the user through truememory_configure() instead.
         self._has_vectors = False
         if _HAS_VECTOR:
+            from truememory.vector_search import _active_vec_table
+            vec_tbl = _active_vec_table(self.conn)
             try:
-                self.conn.execute("SELECT COUNT(*) FROM vec_messages").fetchone()
+                self.conn.execute(f"SELECT 1 FROM {vec_tbl} LIMIT 1").fetchone()
                 self._has_vectors = True
             except Exception:
                 logger.warning(
-                    "vec_messages table missing; attempting rebuild with "
-                    "current model=%s",
+                    "Vector table %r missing or unreadable; attempting rebuild "
+                    "with current model=%s",
+                    vec_tbl,
                     resolve_tier(),
                 )
                 if rebuild_vectors:
@@ -899,9 +902,8 @@ class TrueMemoryEngine:
                         n = build_vectors(self.conn)
                         self._has_vectors = n > 0
                         logger.info(
-                            "vec_messages rebuilt with %d vectors (model=%s)",
-                            n,
-                            resolve_tier(),
+                            "Vector table %r rebuilt with %d vectors (model=%s)",
+                            vec_tbl, n, resolve_tier(),
                         )
                     except TrueMemoryMigrationError:
                         raise
