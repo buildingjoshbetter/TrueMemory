@@ -251,14 +251,26 @@ class ModelServer:
             pass
         gc.collect()
 
+    _CLIENT_TIMEOUT = 30.0  # seconds; caps how long any single client can block
+
     def handle_client(self, conn: socket.socket):
         try:
+            conn.settimeout(self._CLIENT_TIMEOUT)
+
             # --- HMAC authentication for TCP transport ---
-            if not _USE_UNIX and self._token is not None:
+            if not _USE_UNIX:
+                if self._token is None:
+                    # Fail closed: TCP transport must always have a token.
+                    log.warning("TCP client rejected: no HMAC token configured")
+                    conn.close()
+                    return
                 token_bytes = self._recv_exact(conn, _HMAC_TOKEN_BYTES)
-                if token_bytes is None or not hmac.compare_digest(
-                    token_bytes, self._token
-                ):
+                if token_bytes is None:
+                    # Connection closed before sending token (e.g. idle-timeout
+                    # dummy connection).  Drop silently -- not a real auth failure.
+                    conn.close()
+                    return
+                if not hmac.compare_digest(token_bytes, self._token):
                     log.warning("TCP client failed HMAC authentication")
                     conn.close()
                     return
@@ -336,10 +348,22 @@ class ModelServer:
                 break
 
     @staticmethod
-    def _atomic_write_text(path: Path, text: str) -> None:
-        """Write *text* to *path* atomically via a temp file + rename."""
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(text)
+    def _atomic_write_text(path: Path, text: str, mode: int = 0o644) -> None:
+        """Write *text* to *path* atomically via a temp file + rename.
+
+        *mode* is applied to the temp file **before** the rename so the
+        target is never visible with default permissions (eliminates the
+        TOCTOU window for sensitive files like the HMAC token).
+        """
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        # Create with restricted permissions from the start.
+        fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, mode)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
         try:
             os.replace(str(tmp), str(path))
         except OSError:
@@ -367,20 +391,13 @@ class ModelServer:
             srv.bind((_LOOPBACK_HOST, 0))  # ephemeral port
             self._bound_port = srv.getsockname()[1]
 
-            # Write port file so the client can discover us.
-            self._atomic_write_text(PORT_PATH, str(self._bound_port))
-            try:
-                os.chmod(PORT_PATH, 0o600)
-            except OSError:
-                pass  # chmod may not be meaningful on all Windows builds
-
-            # Generate and persist HMAC auth token.
+            # Generate HMAC auth token first (so token is ready before
+            # PORT_PATH signals readiness to clients).
             self._token = secrets.token_bytes(_HMAC_TOKEN_BYTES)
-            self._atomic_write_text(TOKEN_PATH, self._token.hex())
-            try:
-                os.chmod(TOKEN_PATH, 0o600)
-            except OSError:
-                pass
+            self._atomic_write_text(TOKEN_PATH, self._token.hex(), mode=0o600)
+
+            # Write port file last -- its presence is the readiness marker.
+            self._atomic_write_text(PORT_PATH, str(self._bound_port), mode=0o600)
 
             transport_desc = f"tcp={_LOOPBACK_HOST}:{self._bound_port}"
 
@@ -415,6 +432,9 @@ class ModelServer:
             self._cleanup()
 
     def _cleanup(self):
+        if getattr(self, "_cleaned_up", False):
+            return
+        self._cleaned_up = True
         for p in (SOCK_PATH, PID_PATH, PORT_PATH, TOKEN_PATH):
             try:
                 p.unlink(missing_ok=True)

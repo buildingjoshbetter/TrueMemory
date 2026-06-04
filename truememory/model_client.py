@@ -142,7 +142,10 @@ def _server_is_alive() -> bool:
 def _read_port() -> int | None:
     """Read the TCP port written by the model server (Windows transport)."""
     try:
-        return int(PORT_PATH.read_text().strip())
+        port = int(PORT_PATH.read_text().strip())
+        if not (1 <= port <= 65535):
+            return None
+        return port
     except (FileNotFoundError, ValueError, OSError):
         return None
 
@@ -150,7 +153,10 @@ def _read_port() -> int | None:
 def _read_token() -> bytes | None:
     """Read the HMAC token written by the model server (Windows transport)."""
     try:
-        return bytes.fromhex(TOKEN_PATH.read_text().strip())
+        token = bytes.fromhex(TOKEN_PATH.read_text().strip())
+        if len(token) != 32:
+            return None
+        return token
     except (FileNotFoundError, ValueError, OSError):
         return None
 
@@ -170,16 +176,12 @@ def _start_server() -> bool:
     """Start the model server as a detached subprocess."""
     _TRUEMEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
-    if SOCK_PATH.exists() and not _server_is_alive():
-        SOCK_PATH.unlink(missing_ok=True)
-    if PID_PATH.exists() and not _server_is_alive():
-        PID_PATH.unlink(missing_ok=True)
-    # Clean up stale TCP artefacts.
-    if not _server_is_alive():
-        for p in (PORT_PATH, TOKEN_PATH):
+    alive = _server_is_alive()
+    if not alive:
+        # Clean up all stale artefacts in one pass.
+        for p in (SOCK_PATH, PID_PATH, PORT_PATH, TOKEN_PATH):
             p.unlink(missing_ok=True)
-
-    if _server_is_alive():
+    else:
         return True
 
     log.info("Starting model server...")
