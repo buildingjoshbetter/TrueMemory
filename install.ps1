@@ -98,7 +98,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # Add uv tool bin dir to PATH for future sessions
 Say "adding uv's tool dir to your PATH (reversible)..."
-& uv tool update-shell *> $null
+& uv tool update-shell > $null
 
 # Refresh PATH and add tool Scripts dir for this session
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "User") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "Machine")
