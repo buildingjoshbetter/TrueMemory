@@ -117,8 +117,18 @@ class ModelServer:
             set_embedding_model(tier)
 
         resolved = EMBEDDING_MODEL if not tier else tier
+        # Resolve tier -> internal model ID via centralized tier_config.
+        # _TIER_ALIASES is still exported by vector_search for compat.
         from truememory.vector_search import _TIER_ALIASES
         model_id = _TIER_ALIASES.get(resolved, resolved)
+
+        # Custom tier: resolve via tier_config
+        if resolved == "custom":
+            try:
+                from truememory.tier_config import get_embed_model
+                model_id = get_embed_model("custom")
+            except (ValueError, ImportError):
+                pass
 
         if model_id == "model2vec":
             from model2vec import StaticModel
@@ -135,6 +145,27 @@ class ModelServer:
                 truncate_dim=256,
                 model_kwargs=mkwargs or None,
             )
+        elif model_id not in ("model2vec", "minilm", "bge-small", "qwen3_256"):
+            # Custom model: require explicit opt-in for arbitrary downloads
+            if not os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD"):
+                log.warning(
+                    "Custom model %r requested without "
+                    "TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 -- "
+                    "falling back to model2vec.",
+                    model_id,
+                )
+                from model2vec import StaticModel
+                self._embed_model = StaticModel.from_pretrained(
+                    "minishlab/potion-base-8M", force_download=False
+                )
+            else:
+                from sentence_transformers import SentenceTransformer
+                custom_dim = int(os.environ.get(
+                    "TRUEMEMORY_CUSTOM_EMBED_DIM", "256"
+                ))
+                self._embed_model = SentenceTransformer(
+                    model_id, truncate_dim=custom_dim,
+                )
         else:
             from model2vec import StaticModel
             self._embed_model = StaticModel.from_pretrained(

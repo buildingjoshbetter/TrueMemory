@@ -69,19 +69,21 @@ class TrueMemoryMigrationError(Exception):
 # Singleton model loader
 # ---------------------------------------------------------------------------
 
-# Public tier names → internal model identifiers (v0.4.0 paper-aligned Edge/Base/Pro)
-_TIER_ALIASES = {
-    "edge": "model2vec",
-    "base": "qwen3_256",
-    "pro": "qwen3_256",
-}
+# Centralized tier config -- single source of truth lives in tier_config.py.
+# Legacy symbols (_TIER_ALIASES, _MODEL_DIMS, _MODEL_TO_GROUP) are kept as
+# thin delegates so that existing callers (model_server.py etc.) don't break.
+from truememory.tier_config import (
+    TIERS as _TIERS,
+    MODEL_DIMS as _MODEL_DIMS,
+    MODEL_TO_GROUP as _MODEL_TO_GROUP,
+    VALID_TIER_GROUPS as _VALID_GROUPS,
+    get_embed_model as _cfg_get_embed_model,
+    get_embed_dim_for_model as _cfg_get_embed_dim_for_model,
+    get_model_group as _cfg_get_model_group,
+)
 
-_MODEL_DIMS = {
-    "model2vec": 256,
-    "minilm": 384,
-    "bge-small": 384,
-    "qwen3_256": 256,
-}
+# Backward-compat alias -- model_server.py imports this symbol.
+_TIER_ALIASES = {t: cfg["embed_model"] for t, cfg in _TIERS.items()}
 
 # v0.4.0 breaking change: the old internal name "qwen3" (1024d native) is gone.
 # Callers must migrate to "pro" (tier alias) or "qwen3_256" (internal name).
@@ -89,7 +91,7 @@ _REMOVED_MODELS = {"qwen3"}
 
 
 def _resolve_model_name(name: str) -> str:
-    """Resolve a public tier name (edge/base/pro) or internal model name.
+    """Resolve a public tier name (edge/base/pro/custom) or internal model name.
 
     Raises:
         ValueError: if *name* refers to a model removed in v0.4.0.
@@ -98,14 +100,19 @@ def _resolve_model_name(name: str) -> str:
     if lowered in _REMOVED_MODELS:
         raise ValueError(
             f"Embedding model {name!r} was removed in TrueMemory v0.4.0. "
-            f"Migrate to 'pro' (tier alias) or 'qwen3_256' (internal name) — "
+            f"Migrate to 'pro' (tier alias) or 'qwen3_256' (internal name) -- "
             f"the paper-aligned Qwen3-Embedding-0.6B @ 256d Matryoshka config."
         )
+    if lowered == "custom":
+        try:
+            return _cfg_get_embed_model("custom")
+        except ValueError:
+            return name
     return _TIER_ALIASES.get(lowered, name)
 
 
 def resolve_tier() -> str:
-    """Resolve the active tier: env var → config.json → ``'edge'``.
+    """Resolve the active tier: env var -> config.json -> ``'edge'``.
 
     Canonical tier resolver for the entire codebase.  Every call site
     that formerly did ``os.environ.get("TRUEMEMORY_EMBED_MODEL", "edge")``
@@ -134,18 +141,10 @@ _model = None
 _embedding_dim: int = _MODEL_DIMS.get(EMBEDDING_MODEL, 256)
 _lock = threading.Lock()
 
-_MODEL_TO_GROUP = {
-    "model2vec": "edge",
-    "qwen3_256": "basepro",
-    "minilm": "basepro",
-    "bge-small": "basepro",
-}
-_VALID_GROUPS = frozenset({"edge", "basepro"})
-
 
 def _active_tier_group() -> str:
     """Map the current embedding model to its tier group."""
-    return _MODEL_TO_GROUP.get(EMBEDDING_MODEL, "basepro")
+    return _cfg_get_model_group(EMBEDDING_MODEL)
 
 
 def _active_vec_table(conn: sqlite3.Connection) -> str:
@@ -193,7 +192,7 @@ def set_embedding_model(name: str) -> None:
 def get_embedding_dim(name: str | None = None) -> int:
     """Return the embedding dimension for a given model name."""
     name = _resolve_model_name(name) if name else EMBEDDING_MODEL
-    return _MODEL_DIMS.get(name, 256)
+    return _cfg_get_embed_dim_for_model(name)
 
 
 def unload_model() -> None:
@@ -255,6 +254,31 @@ def get_model():
                 model_kwargs=_mkwargs or None,
             )
             _embedding_dim = 256
+        elif resolved not in _MODEL_DIMS:
+            # Custom tier: load arbitrary SentenceTransformer model.
+            # Requires TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 (enforced by
+            # tier_config.resolve_custom_tier at config time).
+            if not os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD"):
+                logger.warning(
+                    "Custom model %r requested without "
+                    "TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 -- "
+                    "falling back to model2vec.",
+                    resolved,
+                )
+                from model2vec import StaticModel
+                _model = StaticModel.from_pretrained(
+                    "minishlab/potion-base-8M", force_download=False
+                )
+                _embedding_dim = 256
+            else:
+                from sentence_transformers import SentenceTransformer
+                custom_dim = int(os.environ.get(
+                    "TRUEMEMORY_CUSTOM_EMBED_DIM", "256"
+                ))
+                _model = SentenceTransformer(
+                    resolved, truncate_dim=custom_dim,
+                )
+                _embedding_dim = custom_dim
         else:
             from model2vec import StaticModel
             _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
@@ -462,7 +486,10 @@ def init_vec_table(
 
     if tier_group:
         if tier_group not in _VALID_GROUPS:
-            raise ValueError(f"Invalid tier_group: {tier_group!r}")
+            raise ValueError(
+                f"Invalid tier_group: {tier_group!r}. "
+                f"Valid: {sorted(_VALID_GROUPS)}"
+            )
         vec_name = f"vec_messages_{tier_group}"
         sep_name = f"vec_messages_sep_{tier_group}"
     else:
