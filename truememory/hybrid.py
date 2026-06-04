@@ -160,10 +160,11 @@ def search_hybrid(
     # Try to import separation search
     _has_sep = False
     try:
-        from truememory.vector_search import search_vector_separation
+        from truememory.vector_search import search_vector_separation, _active_sep_table
         # Check if the table exists and has data
         try:
-            conn.execute("SELECT COUNT(*) FROM vec_messages_sep").fetchone()
+            sep_tbl = _active_sep_table(conn)
+            conn.execute(f"SELECT rowid FROM {sep_tbl} LIMIT 1").fetchone()
             _has_sep = True
         except Exception:
             pass

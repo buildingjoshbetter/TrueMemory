@@ -66,14 +66,16 @@ def _init_cluster_tables(conn: sqlite3.Connection):
 
 def _get_all_embeddings(conn: sqlite3.Connection) -> tuple[list[int], np.ndarray]:
     """
-    Extract all message embeddings from vec_messages.
+    Extract all message embeddings from the active vec_messages table.
 
     Returns:
         Tuple of (message_ids, embeddings_array) where embeddings_array
         is shape (n_messages, dim).
     """
+    from truememory.vector_search import _active_vec_table
+    vec_table = _active_vec_table(conn)
     rows = conn.execute(
-        "SELECT rowid, embedding FROM vec_messages ORDER BY rowid"
+        f"SELECT rowid, embedding FROM {vec_table} ORDER BY rowid"
     ).fetchall()
 
     if not rows:
@@ -279,6 +281,10 @@ def search_clustered(
     if not messages:
         return []
 
+    # Resolve vec table once outside the loop (not per-message)
+    from truememory.vector_search import _active_vec_table
+    _vec_tbl = _active_vec_table(conn)
+
     # Score each message by vector similarity to query
     results = []
     for msg in messages:
@@ -286,7 +292,7 @@ def search_clustered(
         # Get embedding
         try:
             emb_row = conn.execute(
-                "SELECT embedding FROM vec_messages WHERE rowid = ?", (msg_id,)
+                f"SELECT embedding FROM {_vec_tbl} WHERE rowid = ?", (msg_id,)
             ).fetchone()
             if emb_row:
                 dim = len(emb_row[0]) // 4
