@@ -1297,6 +1297,77 @@ def _start_backlog_drainer() -> None:
     log.info("Backlog drainer started (interval=%ds)", _BACKLOG_DRAIN_INTERVAL_NORMAL)
 
 
+def _is_orphaned(initial_ppid: int | None = None) -> bool:
+    """True if this process has been orphaned (its launching parent died).
+
+    Orphaning is detected as a *transition*: a POSIX process whose parent dies
+    is reparented to init (pid 1 — ``init`` on Linux, ``launchd`` on macOS). We
+    therefore report orphaned only when the parent pid has CHANGED to 1 from a
+    non-1 ``initial_ppid``.
+
+    A process that was launched *directly* by init (``initial_ppid == 1`` — e.g.
+    systemd/launchd units or a container entrypoint) can never be detected as
+    orphaned this way, so callers should not start the watcher in that case.
+    Passing ``initial_ppid=None`` falls back to a bare ``ppid == 1`` check
+    (used only where no baseline is available). Windows has no equivalent
+    reparent signal, so we never report orphaned there.
+    """
+    if sys.platform == "win32" or not hasattr(os, "getppid"):
+        return False
+    try:
+        current = os.getppid()
+    except Exception:
+        return False
+    if initial_ppid is not None:
+        return initial_ppid != 1 and current == 1
+    return current == 1
+
+
+def _start_parent_death_watcher(poll_interval: float = 30.0) -> None:
+    """Self-terminate this MCP server if its launching parent dies.
+
+    The server normally exits when its stdio client disconnects (``mcp.run``
+    returns on EOF; see the finally block in ``main``). But if the parent dies
+    abruptly without closing stdin (e.g. a crash), the server can linger
+    holding a ``memories.db`` connection and contributing to write-lock
+    contention (#401). This watcher records the launching parent pid and exits
+    ONLY the current process once it is reparented to init. It never inspects
+    or signals sibling processes, so it cannot kill a live concurrent session's
+    MCP server. POSIX-only; a no-op on Windows.
+
+    If the server was launched directly by init (``ppid == 1`` at startup —
+    systemd/launchd/container entrypoint), reparent-based orphan detection is
+    impossible, so the watcher is not started (avoids a false-positive
+    self-exit of a perfectly live server).
+    """
+    if os.environ.get("TRUEMEMORY_EXTRACTION"):
+        return
+    if sys.platform == "win32" or not hasattr(os, "getppid"):
+        return
+    try:
+        initial_ppid = os.getppid()
+    except Exception:
+        return
+    if initial_ppid == 1:
+        log.info("Parent-death watcher disabled: launched as a child of init (ppid==1)")
+        return
+
+    def _watch() -> None:
+        while True:
+            if _is_orphaned(initial_ppid):
+                # os._exit(0) without touching the shared DB connection: the
+                # connection may be in use by the main thread, and SQLite WAL
+                # tolerates an abrupt exit. (Matches the os._exit rationale in
+                # main()'s shutdown path.)
+                log.info("MCP server orphaned (parent died); exiting to release the DB connection")
+                os._exit(0)
+            time.sleep(poll_interval)
+
+    t = threading.Thread(target=_watch, daemon=True, name="parent-death-watcher")
+    t.start()
+    log.info("Parent-death watcher started (poll=%.0fs)", poll_interval)
+
+
 # ---------------------------------------------------------------------------
 # Auto-setup for Claude Code and Claude Desktop
 # ---------------------------------------------------------------------------
@@ -1625,6 +1696,11 @@ def main():
     # transcripts every 60s while the MCP server is alive, respecting
     # the spawn cap. Dies automatically when the server exits.
     _start_backlog_drainer()
+
+    # Self-terminate if orphaned (parent died without closing stdin) so we do
+    # not linger holding a memories.db connection. Self-only: never signals
+    # sibling MCP servers, so concurrent live sessions are unaffected (#401).
+    _start_parent_death_watcher()
 
     # Force-exit after mcp.run() to avoid PyTorch teardown deadlocks.
     # PyTorch's C++ threads (OpenMP pools, autograd engine) deadlock against
