@@ -16,8 +16,6 @@ from __future__ import annotations
 import io
 import json
 
-import pytest
-
 
 def _make_transcript(tmp_path, n=6):
     p = tmp_path / "transcript.jsonl"
