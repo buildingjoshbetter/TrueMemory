@@ -140,11 +140,29 @@ def get_current_reranker_name() -> str:
     return get_reranker_name_for_tier(_active_tier)
 
 
-def unload_reranker() -> None:
-    """Release the reranker model from memory."""
+def unload_reranker(
+    should_unload: "Callable[[], bool] | None" = None,
+) -> bool:
+    """Release the reranker model from memory.
+
+    Args:
+        should_unload: Optional predicate evaluated inside ``_lock`` before
+            clearing the model. When provided and it returns ``False``, the
+            unload is skipped (a concurrent search arrived while we were
+            waiting on the lock). Pass ``None`` (the default) for
+            unconditional unload -- used by ``set_active_tier()`` and tests.
+
+    Returns:
+        ``True`` if the model was actually unloaded, ``False`` if skipped.
+    """
     global _model
     with _lock:
+        if should_unload is not None and not should_unload():
+            return False
+        if _model is None:
+            return False
         _model = None
+        return True
 
 
 def get_reranker(model_name: str | None = None, device: str | None = None):

@@ -1004,6 +1004,19 @@ _idle_timer: threading.Timer | None = None
 _idle_timer_lock = threading.Lock()
 
 
+def _is_still_idle() -> bool:
+    """Check whether models are still idle (no search since timeout expired).
+
+    Used as a predicate passed into unload functions and evaluated inside
+    their model locks -- this closes the TOCTOU window between the timer
+    callback's staleness check and the actual model teardown.
+    """
+    return (
+        _last_search_time > 0
+        and (time.monotonic() - _last_search_time) >= _MODEL_IDLE_TIMEOUT_SEC
+    )
+
+
 def _get_rss_mb() -> float:
     if _resource_mod is None:
         return 0.0
@@ -1014,31 +1027,51 @@ def _get_rss_mb() -> float:
 
 
 def _unload_models() -> None:
-    try:
-        from truememory.vector_search import unload_model
-        unload_model()
-    except Exception:
-        pass
-    try:
-        from truememory.reranker import unload_reranker
-        unload_reranker()
-    except Exception:
-        pass
-    try:
-        import torch
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            torch.mps.empty_cache()
-            torch.mps.synchronize()
-    except Exception:
-        pass
-    gc.collect()
-    log.info("Models unloaded (idle timeout). RSS=%.0f MB", _get_rss_mb())
+    """Unload ML models after idle timeout.
+
+    Re-checks ``_is_still_idle()`` before each unload call (fast-path
+    optimization) and passes the predicate into each unload function so
+    it can be re-evaluated inside the model lock -- closing the TOCTOU
+    window where a search arrives while the unload thread blocks on a
+    concurrent cold load.
+    """
+    unloaded_any = False
+
+    # --- Embedding model ---
+    if _is_still_idle():
+        try:
+            from truememory.vector_search import unload_model
+            if unload_model(should_unload=_is_still_idle):
+                unloaded_any = True
+        except Exception:
+            pass
+
+    # Re-check: a search may have arrived during embedding unload
+    if _is_still_idle():
+        try:
+            from truememory.reranker import unload_reranker
+            if unload_reranker(should_unload=_is_still_idle):
+                unloaded_any = True
+        except Exception:
+            pass
+
+    if unloaded_any:
+        try:
+            import torch
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+                torch.mps.synchronize()
+        except Exception:
+            pass
+        gc.collect()
+        log.info("Models unloaded (idle timeout). RSS=%.0f MB", _get_rss_mb())
+    else:
+        log.debug("Idle unload skipped — search activity detected during unload window")
 
 
 def _check_idle_unload() -> None:
     global _idle_timer
-    elapsed = time.monotonic() - _last_search_time
-    if _last_search_time > 0 and elapsed >= _MODEL_IDLE_TIMEOUT_SEC:
+    if _is_still_idle():
         _unload_models()
     with _idle_timer_lock:
         _idle_timer = None

@@ -195,11 +195,29 @@ def get_embedding_dim(name: str | None = None) -> int:
     return _MODEL_DIMS.get(name, 256)
 
 
-def unload_model() -> None:
-    """Release the embedding model from memory."""
+def unload_model(
+    should_unload: "Callable[[], bool] | None" = None,
+) -> bool:
+    """Release the embedding model from memory.
+
+    Args:
+        should_unload: Optional predicate evaluated inside ``_lock`` before
+            clearing the model. When provided and it returns ``False``, the
+            unload is skipped (a concurrent search arrived while we were
+            waiting on the lock). Pass ``None`` (the default) for
+            unconditional unload -- used by ``set_embedding_model()`` and tests.
+
+    Returns:
+        ``True`` if the model was actually unloaded, ``False`` if skipped.
+    """
     global _model
     with _lock:
+        if should_unload is not None and not should_unload():
+            return False
+        if _model is None:
+            return False
         _model = None
+        return True
 
 
 def get_model():
@@ -208,10 +226,15 @@ def get_model():
     When the shared model server is enabled (default), returns a proxy
     that routes inference to the server process. Falls back to local
     loading if the server is unavailable.
+
+    The return value is captured in a local variable inside ``_lock`` so
+    that a concurrent ``unload_model()`` cannot null ``_model`` between
+    lock release and the caller receiving the reference.
     """
     global _model, _embedding_dim
-    if _model is not None:
-        return _model  # Fast path, no lock needed
+    cached = _model
+    if cached is not None:
+        return cached  # Fast path, no lock needed
     with _lock:
         if _model is not None:
             return _model  # Another thread loaded it
@@ -258,7 +281,9 @@ def get_model():
             from model2vec import StaticModel
             _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
             _embedding_dim = 256
-    return _model
+        # Capture under lock so concurrent unload cannot null before return
+        result = _model
+    return result
 
 
 # ---------------------------------------------------------------------------
