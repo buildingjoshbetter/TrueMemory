@@ -281,14 +281,16 @@ def search_clustered(
     if not messages:
         return []
 
+    # Resolve vec table once outside the loop (not per-message)
+    from truememory.vector_search import _active_vec_table
+    _vec_tbl = _active_vec_table(conn)
+
     # Score each message by vector similarity to query
     results = []
     for msg in messages:
         msg_id = msg[0]
         # Get embedding
         try:
-            from truememory.vector_search import _active_vec_table
-            _vec_tbl = _active_vec_table(conn)
             emb_row = conn.execute(
                 f"SELECT embedding FROM {_vec_tbl} WHERE rowid = ?", (msg_id,)
             ).fetchone()

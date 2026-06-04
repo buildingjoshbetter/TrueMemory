@@ -75,8 +75,16 @@ def _resolve_vec_tables(conn: sqlite3.Connection) -> tuple[str, str]:
     exist post-migration, so hardcoding it left vectors orphaned on
     delete/update.
 
-    Falls back to ``("vec_messages", "vec_messages_sep")`` when the
+    Delegates to ``_active_vec_table`` / ``_active_sep_table`` which
+    return ``"vec_messages"`` / ``"vec_messages_sep"`` when the
     ``vector_cache_registry`` table does not exist (pre-migration DBs).
+
+    Raises:
+        ValueError: If the resolved table name is not in ``_ALLOWED_TABLES``.
+        Any exception propagated from the underlying SQL lookups.
+
+    Callers should catch exceptions and fall back to the legacy table
+    names if this function fails unexpectedly.
 
     Returns:
         Tuple of ``(vec_table_name, sep_table_name)``.
@@ -88,6 +96,15 @@ def _resolve_vec_tables(conn: sqlite3.Connection) -> tuple[str, str]:
         if name not in _ALLOWED_TABLES:
             raise ValueError(f"Resolved vector table name {name!r} is not in _ALLOWED_TABLES")
     return vec, sep
+
+
+# All known tier-group vector table names. Used by delete_all full-wipe
+# to ensure ALL tiers are cleared, not just the currently active one.
+_ALL_VEC_TABLES = (
+    "vec_messages", "vec_messages_sep",
+    "vec_messages_edge", "vec_messages_sep_edge",
+    "vec_messages_basepro", "vec_messages_sep_basepro",
+)
 
 
 def _delete_in_chunks(conn, table: str, col: str, ids: list[int], chunk_size: int = _SQLITE_IN_CHUNK) -> None:
@@ -627,7 +644,9 @@ class TrueMemoryEngine:
                     try:
                         vec_tbl, sep_tbl = _resolve_vec_tables(self.conn)
                     except Exception:
+                        logger.warning("_resolve_vec_tables failed in delete_all(user_id=%s); falling back to legacy table names", user_id, exc_info=True)
                         vec_tbl, sep_tbl = "vec_messages", "vec_messages_sep"
+                    # dict.fromkeys deduplicates in case vec_tbl == sep_tbl (shouldn't happen, but defensive)
                     for vec_table in dict.fromkeys((vec_tbl, sep_tbl)):
                         try:
                             _delete_in_chunks(self.conn, vec_table, "rowid", msg_ids)
@@ -656,16 +675,16 @@ class TrueMemoryEngine:
                     except Exception:
                         logger.warning("Failed to clear table %s during delete_all", table, exc_info=True)
 
-                # Clear vector tables
-                try:
-                    vec_tbl, sep_tbl = _resolve_vec_tables(self.conn)
-                except Exception:
-                    vec_tbl, sep_tbl = "vec_messages", "vec_messages_sep"
-                for vec_table in dict.fromkeys((vec_tbl, sep_tbl)):
+                # Clear ALL known vector tables across all tiers.
+                # A full wipe must not leave orphaned vectors in an
+                # inactive tier (important for GDPR/privacy full-delete).
+                for vec_table in _ALL_VEC_TABLES:
                     try:
                         self.conn.execute(f"DELETE FROM {vec_table}")
                     except Exception:
-                        logger.warning("Failed to clear %s during delete_all", vec_table, exc_info=True)
+                        # Table may not exist (e.g. pre-migration DB only has
+                        # vec_messages); that's fine, log at debug level.
+                        logger.debug("Failed to clear %s during delete_all (table may not exist)", vec_table, exc_info=True)
 
             # Rebuild FTS index
             try:
@@ -707,6 +726,7 @@ class TrueMemoryEngine:
                     try:
                         _vec_tbl, _sep_tbl = _resolve_vec_tables(self.conn)
                     except Exception:
+                        logger.warning("_resolve_vec_tables failed in update(memory_id=%d); falling back to legacy table names", memory_id, exc_info=True)
                         _vec_tbl, _sep_tbl = "vec_messages", "vec_messages_sep"
                     try:
                         self.conn.execute(f"DELETE FROM {_vec_tbl} WHERE rowid = ?", (memory_id,))
