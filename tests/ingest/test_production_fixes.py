@@ -192,7 +192,7 @@ def test_stop_hook_exits_cleanly_with_argv_when_transcript_missing(monkeypatch):
         "transcript_path": "/tmp/truememory-nonexistent-xyz.jsonl",
         "cwd": "/tmp",
         "permission_mode": "default",
-        "hook_event_name": "Stop",
+        "hook_event_name": "SessionEnd",
     })
     result = subprocess.run(
         [sys.executable, "-m", "truememory.ingest.hooks.stop",

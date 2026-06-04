@@ -64,7 +64,7 @@ BACKLOG_DIR = Path(os.environ.get(
     "TRUEMEMORY_BACKLOG_DIR",
     str(Path.home() / ".truememory" / "backlog"),
 ))
-# cap concurrent ingest processes. N parallel Stop hooks
+# cap concurrent ingest processes. N parallel SessionEnd hooks
 # (multi-session close, session-restart loop) would otherwise load N
 # embedding models at once — ~600MB RSS each on Pro, easy OOM on laptops.
 # Unified env var across stop.py and hooks/core.py.
@@ -326,7 +326,7 @@ def _run_background_ingestion(
     subprocess detachment.
 
     bounds concurrent spawns via ``SPAWN_CAP`` so a burst of
-    Stop hooks doesn't load N embedding models at once.
+    SessionEnd hooks doesn't load N embedding models at once.
     on Popen failure, queue the ingestion to ``BACKLOG_DIR``
     for a later session to re-attempt — NEVER fall back to synchronous
     inline ingestion (that blocks Claude Code's shutdown).
