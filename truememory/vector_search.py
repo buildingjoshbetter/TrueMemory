@@ -49,7 +49,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 if TYPE_CHECKING:
-    pass
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 

@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    pass
+    from collections.abc import Callable
 
 # ---------------------------------------------------------------------------
 # Singleton model loader
@@ -201,7 +201,7 @@ def get_reranker(model_name: str | None = None, device: str | None = None):
                 proxy = get_reranker_proxy(model_name=name)
                 _model = proxy
                 _model_name = name
-                return _model
+                return proxy
             except Exception:
                 log.warning(
                     "Model server available but reranker proxy failed — "
@@ -225,7 +225,9 @@ def get_reranker(model_name: str | None = None, device: str | None = None):
 
         _model = CrossEncoder(name, device=device)
         _model_name = name
-        return _model
+        # Capture under lock so concurrent unload cannot null before return
+        result = _model
+        return result
 
 
 # ---------------------------------------------------------------------------

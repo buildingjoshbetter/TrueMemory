@@ -1078,6 +1078,15 @@ def _check_idle_unload() -> None:
 
 
 def _touch_search_time() -> None:
+    """Update the last-search timestamp and (re)schedule the idle timer.
+
+    IMPORTANT: ``_last_search_time`` MUST be updated BEFORE the search
+    path acquires the model lock (i.e. before ``get_model()`` /
+    ``get_reranker()``).  The idle-unload predicate ``_is_still_idle()``
+    reads this timestamp inside the model lock -- if the write happened
+    *after* the search, a concurrent unload could still see stale time
+    and tear down the model mid-use.
+    """
     global _last_search_time, _idle_timer
     _last_search_time = time.monotonic()
     if _MODEL_IDLE_TIMEOUT_SEC <= 0:
