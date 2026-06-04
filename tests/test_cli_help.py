@@ -69,6 +69,17 @@ def test_version_short_flag_prints_current_version():
 
 
 @pytest.mark.skipif(not shutil.which("truememory-mcp"), reason="console script not on PATH")
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "Windows ASR rule 01443614 ('Block executable files from running unless "
+        "they meet a prevalence, age, or trusted list criteria') blocks "
+        "fresh-hashed .exe trampoline shims on launch. Run-via-shim coverage on "
+        "Windows is exercised by the `python -m truememory.mcp_server` path in "
+        "the other tests in this file, which uses the signed python.exe and is "
+        "ASR-safe. Skip only the direct-shim launch."
+    ),
+)
 def test_help_via_console_script_does_not_hang():
     """Explicit end-to-end test via the installed console script.
 
@@ -113,6 +124,16 @@ def test_unknown_flag_exits_nonzero_not_hang():
 # --- truememory-ingest --version parity with truememory-mcp ---
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "Windows ASR rule 01443614 blocks fresh-hashed .exe trampoline shims "
+        "on launch (same as test_help_via_console_script_does_not_hang above). "
+        "The `python -m truememory.ingest.cli --version` equivalent runs via "
+        "signed python.exe and is ASR-safe; that path is what production hooks "
+        "actually use. Direct-shim launch is not on a critical path."
+    ),
+)
 def test_ingest_version_flag_exits_cleanly():
     """`truememory-ingest --version` must exit 0 with the version string,
     matching `truememory-mcp --version` behavior. Before this patch the
