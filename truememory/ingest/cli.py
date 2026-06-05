@@ -793,14 +793,6 @@ def _run_migrate_memory(args):
 
 def _run_install(args):
     """Install TrueMemory hooks and MCP servers for all detected CLIs."""
-    from truememory.hooks.registry import detect_installed
-    from truememory.hooks.cli import install_cli
-
-    installed = detect_installed()
-    if not installed:
-        print("No supported CLIs detected on this system.")
-        return
-
     py = sys.executable
 
     if args.dry_run:
@@ -849,20 +841,32 @@ def _run_install(args):
         print(json.dumps(settings, indent=2))
         return
 
+    from truememory.hooks.registry import detect_installed
+    from truememory.hooks.cli import install_cli
+
+    installed = detect_installed()
+    if not installed:
+        print("No supported CLIs detected on this system.")
+        return
+
+    any_success = False
     for adapter in installed:
         print(f"Installing TrueMemory for {adapter.name}...")
-        
-        success = install_cli(
-            adapter.cli_id,
-            python_path=py,
-            user_id=args.user,
-            db_path=args.db
-        )
-        
+        try:
+            success = install_cli(
+                adapter.cli_id,
+                python_path=py,
+                user_id=args.user,
+                db_path=args.db or ""
+            )
+        except Exception as e:
+            print(f"  ✗ {adapter.name} — setup failed: {e}")
+            continue
+
         if success:
-            print(f"  ✓ {adapter.name} — configured")
-            
-            # Merge System Prompt Instructions if supported
+            any_success = True
+            print(f"  ✓ {adapter.name} — hooks configured")
+
             prompt_path = adapter.get_system_prompt_path()
             if prompt_path:
                 prompt_content = adapter.get_system_prompt_content()
@@ -871,8 +875,12 @@ def _run_install(args):
                     _merge_system_prompt(prompt_path, prompt_content)
         else:
             print(f"  ✗ {adapter.name} — setup failed")
-            
-    print("\nTo verify: truememory-ingest status")
+
+    if any_success:
+        print("\nTo verify: truememory-ingest status")
+    else:
+        print("\nAll integrations failed. Run with --dry-run to preview config.")
+        sys.exit(1)
 
 
 _CLAUDE_MD_MARKER_START = "<!-- BEGIN truememory-ingest managed section -->"

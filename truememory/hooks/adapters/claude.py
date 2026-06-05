@@ -163,6 +163,11 @@ class ClaudeAdapter(CLIAdapter):
                 existing["hooks"]["compact"] = _cleaned
             else:
                 del existing["hooks"]["compact"]
+            if len(_cleaned) != len(_legacy_compact):
+                print(
+                    "  Migrated legacy 'compact' hook entry to 'PreCompact' "
+                    "(earlier versions registered the wrong event name)."
+                )
 
         # Migration: earlier versions wired the transcript extraction hook to
         # Claude Code's "Stop" event, but "Stop" fires after every assistant
@@ -182,6 +187,11 @@ class ClaudeAdapter(CLIAdapter):
                 existing["hooks"]["Stop"] = _cleaned
             else:
                 del existing["hooks"]["Stop"]
+            if len(_cleaned) != len(_legacy_stop):
+                print(
+                    "  Migrated truememory extraction hook from 'Stop' (per-turn) "
+                    "to 'SessionEnd' (per-session)."
+                )
 
         # Migration: earlier versions wrote hooks in the flat format
         # {type, command} instead of the required {matcher, hooks: [{type, command}]}.
@@ -207,6 +217,7 @@ class ClaudeAdapter(CLIAdapter):
                     migrated.append(h)
             if did_migrate:
                 existing["hooks"][event] = migrated
+                print(f"  Migrated '{event}' hook entries from old format to new {{matcher, hooks}} schema.")
 
         for event, hooks in settings["hooks"].items():
             existing["hooks"].setdefault(event, [])
