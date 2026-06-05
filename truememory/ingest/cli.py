@@ -756,6 +756,19 @@ def _run_migrate_memory(args):
     """Migrate MEMORY.md facts into TrueMemory."""
     from truememory.ingest.migrate_memory_md import migrate, auto_detect_memory_md
 
+    if args.path:
+        memory_md_path = Path(args.path)
+    else:
+        memory_md_path = auto_detect_memory_md()
+        if memory_md_path is None:
+            print("ERROR: Could not auto-detect MEMORY.md path.", file=sys.stderr)
+            print("Specify --path explicitly.", file=sys.stderr)
+            sys.exit(1)
+
+    if not memory_md_path.exists():
+        print(f"ERROR: MEMORY.md not found at {memory_md_path}", file=sys.stderr)
+        sys.exit(1)
+
     print(f"Migrating facts from: {memory_md_path}")
 
     result = migrate(

@@ -240,6 +240,58 @@ class ClaudeAdapter(CLIAdapter):
             settings_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
             settings_tmp.unlink(missing_ok=True)
 
+    def uninstall(self) -> None:
+        try:
+            import subprocess
+            subprocess.run(
+                ["claude", "mcp", "remove", "truememory"],
+                check=False,
+                capture_output=True,
+            )
+        except FileNotFoundError:
+            pass
+        if not self.config_path.exists():
+            return
+        try:
+            settings = json.loads(self.config_path.read_text(encoding="utf-8"))
+            hooks = settings.get("hooks", {})
+            for event in list(hooks.keys()):
+                entries = hooks[event]
+                if not isinstance(entries, list):
+                    continue
+                cleaned = []
+                for h in entries:
+                    if not isinstance(h, dict):
+                        cleaned.append(h)
+                        continue
+                    inner_hooks = h.get("hooks", [])
+                    if isinstance(inner_hooks, list):
+                        has_tm = any(
+                            isinstance(ih, dict) and "truememory" in ih.get("command", "").lower()
+                            for ih in inner_hooks
+                        )
+                        if has_tm:
+                            continue
+                    if "truememory" in h.get("command", "").lower():
+                        continue
+                    cleaned.append(h)
+                if cleaned:
+                    hooks[event] = cleaned
+                else:
+                    del hooks[event]
+            settings["hooks"] = hooks
+
+            # Also remove the MCP server entry (JSON-level fallback for when
+            # `claude mcp remove` fails or the CLI is not on PATH)
+            mcp_servers = settings.get("mcpServers", {})
+            if "truememory" in mcp_servers:
+                del mcp_servers["truememory"]
+                settings["mcpServers"] = mcp_servers
+
+            self.config_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        except (json.JSONDecodeError, OSError):
+            pass
+
     def verify(self) -> bool:
         if not self.config_path.exists():
             return False
