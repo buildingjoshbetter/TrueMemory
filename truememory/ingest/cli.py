@@ -801,6 +801,16 @@ def _run_install(args):
         print("No supported CLIs detected on this system.")
         return
 
+    if args.dry_run:
+        print("Dry run requested. The following CLIs would be configured:\n")
+        for adapter in installed:
+            print(f"  - {adapter.name} (id: {adapter.cli_id})")
+            print(f"    Config path: {adapter.config_path}")
+            prompt_path = adapter.get_system_prompt_path()
+            if prompt_path:
+                print(f"    System prompt: {prompt_path}")
+        return
+
     py = sys.executable
 
     for adapter in installed:
