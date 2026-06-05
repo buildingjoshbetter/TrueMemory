@@ -860,7 +860,15 @@ def truememory_configure(
                 rebuild_action = action
 
                 if action == "config_only":
-                    pass  # Base↔Pro: same embeddings, nothing to rebuild
+                    # Base↔Pro share the same embedding space (qwen3_256), so
+                    # there is nothing to re-embed. The tier selection must
+                    # still be persisted here: unlike the delta_or_full path
+                    # (where RebuildManager writes the tier only once the new
+                    # vectors exist), config_only has no rebuild step, so
+                    # without this write the tier change is lost on restart and
+                    # the runtime/config tiers diverge.
+                    config["tier"] = tier
+                    _save_config(config)
 
                 elif action == "delta_or_full":
                     from truememory.tier_switch.manager import RebuildManager
