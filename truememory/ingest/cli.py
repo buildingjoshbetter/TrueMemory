@@ -792,264 +792,114 @@ def _run_migrate_memory(args):
 
 
 def _run_install(args):
-    """Install all 4 Claude Code hooks for full lifecycle coverage.
-
-    Hooks installed:
-    - SessionStart: injects relevant memories as additionalContext
-    - UserPromptSubmit: buffers user messages (kept for future use)
-    - SessionEnd: triggers background fact extraction after each session
-    - PreCompact: saves context snapshot before Claude compresses conversation
-
-    Note: the event is named ``PreCompact`` in Claude Code's settings.json
-    schema — earlier versions of this installer registered ``compact`` which
-    was silently ignored by Claude Code (the hook never fired). See
-    https://code.claude.com/docs/en/hooks for the canonical event names.
-    """
-    # Hooks now live inside the package namespace so the wheel ships them
-    # cleanly and ``import hooks`` doesn't collide with unrelated user code.
-    hooks_dir = Path(__file__).parent / "hooks"
-
-    # Verify all hook files exist before writing anything.
-    # Event names (keys) MUST match Claude Code's canonical hook event names
-    # exactly — any other value is silently ignored by the runtime.
-    hook_files = {
-        "SessionStart": hooks_dir / "session_start.py",
-        "UserPromptSubmit": hooks_dir / "user_prompt_submit.py",
-        "SessionEnd": hooks_dir / "stop.py",
-        "PreCompact": hooks_dir / "compact.py",
-    }
-    missing = [name for name, path in hook_files.items() if not path.exists()]
-    if missing:
-        print(f"ERROR: Missing hook files: {', '.join(missing)}", file=sys.stderr)
-        print(f"Looked in: {hooks_dir}", file=sys.stderr)
-        sys.exit(1)
-
-    # Build the hook command list with proper shell quoting so paths
-    # containing spaces (e.g. ``/Users/Jane Doe/.venv/bin/python``) survive
-    # being embedded into a shell command string. Each hook script accepts
-    # ``--user`` and ``--db`` flags via argparse so these args are not dead
-    # code — they override the env var fallbacks.
-    import shlex
+    """Install TrueMemory hooks and MCP servers for all detected CLIs."""
     py = sys.executable
 
-    _HOOK_MODULES = {
-        "session_start.py": "truememory.ingest.hooks.session_start",
-        "user_prompt_submit.py": "truememory.ingest.hooks.user_prompt_submit",
-        "stop.py": "truememory.ingest.hooks.stop",
-        "compact.py": "truememory.ingest.hooks.compact",
-    }
-
-    def _build_command(hook_path: Path) -> str:
-        module = _HOOK_MODULES.get(hook_path.name)
-        if module:
-            parts: list[str] = [py, "-m", module]
-        else:
-            parts = [py, str(hook_path)]
-        if args.user:
-            parts.extend(["--user", args.user])
-        if args.db:
-            parts.extend(["--db", args.db])
-        if sys.platform == "win32":
-            import subprocess as _sp
-            return _sp.list2cmdline(parts)
-        return " ".join(shlex.quote(p) for p in parts)
-
-    settings = {
-        "hooks": {
-            event: [{
-                "matcher": "",
-                "hooks": [{
-                    "type": "command",
-                    "command": _build_command(path),
-                }],
-            }]
-            for event, path in hook_files.items()
-        }
-    }
-
-    settings_json = json.dumps(settings, indent=2)
-
     if args.dry_run:
+        hooks_dir = Path(__file__).parent / "hooks"
+        hook_files = {
+            "SessionStart": hooks_dir / "session_start.py",
+            "UserPromptSubmit": hooks_dir / "user_prompt_submit.py",
+            "SessionEnd": hooks_dir / "stop.py",
+            "PreCompact": hooks_dir / "compact.py",
+        }
+        import shlex
+        _HOOK_MODULES = {
+            "session_start.py": "truememory.ingest.hooks.session_start",
+            "user_prompt_submit.py": "truememory.ingest.hooks.user_prompt_submit",
+            "stop.py": "truememory.ingest.hooks.stop",
+            "compact.py": "truememory.ingest.hooks.compact",
+        }
+        def _build_command(hook_path: Path) -> str:
+            module = _HOOK_MODULES.get(hook_path.name)
+            if module:
+                parts: list[str] = [py, "-m", module]
+            else:
+                parts = [py, str(hook_path)]
+            if args.user:
+                parts.extend(["--user", args.user])
+            if args.db:
+                parts.extend(["--db", args.db])
+            if sys.platform == "win32":
+                import subprocess as _sp
+                return _sp.list2cmdline(parts)
+            return " ".join(shlex.quote(p) for p in parts)
+
+        settings = {
+            "hooks": {
+                event: [{
+                    "matcher": "",
+                    "hooks": [{
+                        "type": "command",
+                        "command": _build_command(path),
+                    }],
+                }]
+                for event, path in hook_files.items()
+            }
+        }
         print("Add the following to your Claude Code settings.json:\n")
-        print(settings_json)
+        print(json.dumps(settings, indent=2))
         return
 
-    # Merge into existing settings (preserves other config)
-    settings_path = Path.home() / ".claude" / "settings.json"
-    if settings_path.exists():
+    from truememory.hooks.registry import detect_installed
+    from truememory.hooks.cli import install_cli
+
+    installed = detect_installed()
+    if not installed:
+        print("No supported CLIs detected on this system.")
+        return
+
+    any_success = False
+    for adapter in installed:
+        print(f"Installing TrueMemory for {adapter.name}...")
         try:
-            existing = json.loads(settings_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as e:
-            print(f"ERROR: Existing settings.json is invalid JSON: {e}", file=sys.stderr)
-            print(f"Fix or move {settings_path} and retry.", file=sys.stderr)
-            sys.exit(1)
-    else:
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-        existing = {}
-
-    if not isinstance(existing, dict):
-        existing = {}
-
-    existing.setdefault("hooks", {})
-    if not isinstance(existing["hooks"], dict):
-        existing["hooks"] = {}
-
-    # Migration: earlier versions of this installer registered the compact
-    # hook under the event name "compact", but Claude Code's canonical event
-    # name is "PreCompact". Any hook registered under "compact" is silently
-    # ignored by the runtime. Strip stale "compact" entries that point at
-    # our hook file so users upgrading from 0.1.0 don't end up with dead
-    # config alongside the correct PreCompact entry.
-    _legacy_compact = existing["hooks"].get("compact")
-    if isinstance(_legacy_compact, list):
-        _cleaned = [
-            h for h in _legacy_compact
-            if not (
-                isinstance(h, dict)
-                and "truememory" in str(h.get("command", "")).lower()
+            success = install_cli(
+                adapter.cli_id,
+                python_path=py,
+                user_id=args.user,
+                db_path=args.db or ""
             )
-        ]
-        if _cleaned:
-            existing["hooks"]["compact"] = _cleaned
-        else:
-            del existing["hooks"]["compact"]
-        if len(_cleaned) != len(_legacy_compact):
-            print(
-                "Migrated legacy 'compact' hook entry to 'PreCompact' "
-                "(earlier versions registered the wrong event name)."
-            )
-
-    # Migration: earlier versions wired the transcript extraction hook to
-    # Claude Code's "Stop" event, but "Stop" fires after every assistant
-    # response (per-turn), not once at session end. The correct event is
-    # "SessionEnd". Strip stale "Stop" entries that point at our hook file
-    # so upgrading users don't get double-fires.
-    _legacy_stop = existing["hooks"].get("Stop")
-    if isinstance(_legacy_stop, list):
-        _cleaned = [
-            h for h in _legacy_stop
-            if not (
-                isinstance(h, dict)
-                and "truememory" in str(h.get("command", "")).lower()
-            )
-        ]
-        if _cleaned:
-            existing["hooks"]["Stop"] = _cleaned
-        else:
-            del existing["hooks"]["Stop"]
-        if len(_cleaned) != len(_legacy_stop):
-            print(
-                "Migrated truememory extraction hook from 'Stop' (per-turn) "
-                "to 'SessionEnd' (per-session)."
-            )
-
-    # Migration: earlier versions wrote hooks in the flat format
-    # {type, command} instead of the required {matcher, hooks: [{type, command}]}.
-    # Claude Code rejects the entire settings.json when any hook uses the
-    # old format. Upgrade in-place before merging new entries.
-    for event in list(existing["hooks"].keys()):
-        entries = existing["hooks"][event]
-        if not isinstance(entries, list):
+        except Exception as e:
+            print(f"  ✗ {adapter.name} — setup failed: {e}")
             continue
-        migrated = []
-        did_migrate = False
-        for h in entries:
-            if not isinstance(h, dict):
-                migrated.append(h)
-                continue
-            if "type" in h and "command" in h and "hooks" not in h:
-                migrated.append({
-                    "matcher": "",
-                    "hooks": [h],
-                })
-                did_migrate = True
-            else:
-                migrated.append(h)
-        if did_migrate:
-            existing["hooks"][event] = migrated
-            print(f"Migrated '{event}' hook entries from old format to new {{matcher, hooks}} schema.")
 
-    for event, hooks in settings["hooks"].items():
-        existing["hooks"].setdefault(event, [])
-        if not isinstance(existing["hooks"][event], list):
-            existing["hooks"][event] = []
-        # Don't add duplicates (match on stop.py / session_start.py etc.)
-        for hook in hooks:
-            hook_file = str(hook_files[event])
-            already_present = False
-            for h in existing["hooks"][event]:
-                if not isinstance(h, dict):
-                    continue
-                # Check new schema: {matcher, hooks: [{type, command}]}
-                inner_hooks = h.get("hooks", [])
-                if isinstance(inner_hooks, list):
-                    for ih in inner_hooks:
-                        if isinstance(ih, dict) and hook_file in ih.get("command", ""):
-                            already_present = True
-                            break
-                # Check old schema: {type, command} (for migration)
-                if hook_file in h.get("command", ""):
-                    already_present = True
-                if already_present:
-                    break
-            if not already_present:
-                existing["hooks"][event].append(hook)
+        if success:
+            any_success = True
+            print(f"  ✓ {adapter.name} — hooks configured")
 
-    settings_tmp = settings_path.with_suffix(".json.tmp")
-    settings_tmp.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-    try:
-        settings_tmp.replace(settings_path)
-    except OSError:
-        settings_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-        settings_tmp.unlink(missing_ok=True)
-    print(f"Hooks installed in {settings_path}")
-    print(f"Events configured: {', '.join(settings['hooks'].keys())}")
+            prompt_path = adapter.get_system_prompt_path()
+            if prompt_path:
+                prompt_content = adapter.get_system_prompt_content()
+                if prompt_content:
+                    print(f"  Writing instructions to {prompt_path}...")
+                    _merge_system_prompt(prompt_path, prompt_content)
+        else:
+            print(f"  ✗ {adapter.name} — setup failed")
 
-    # Merge CLAUDE_TEMPLATE.md into the user's CLAUDE.md so Claude knows
-    # how to use truememory's MCP tools during conversations.
-    #
-    # The template file is force-included inside the package at wheel-build
-    # time (see pyproject.toml [tool.hatch.build.targets.wheel.force-include])
-    # so it lives next to this module after installation. In editable/dev
-    # installs we fall back to the repo-root copy so ``pip install -e .``
-    # still finds it.
-    template_path = Path(__file__).parent / "CLAUDE_TEMPLATE.md"
-    if not template_path.exists():
-        template_path = Path(__file__).parent.parent / "CLAUDE_TEMPLATE.md"
-    claude_md_path = Path.home() / ".claude" / "CLAUDE.md"
-    _merge_claude_md(template_path, claude_md_path)
-
-    print("\nTo verify: truememory-ingest status")
+    if any_success:
+        print("\nTo verify: truememory-ingest status")
+    else:
+        print("\nAll integrations failed. Run with --dry-run to preview config.")
+        sys.exit(1)
 
 
 _CLAUDE_MD_MARKER_START = "<!-- BEGIN truememory-ingest managed section -->"
 _CLAUDE_MD_MARKER_END = "<!-- END truememory-ingest managed section -->"
 
 
-def _merge_claude_md(template_path: Path, target_path: Path) -> None:
-    """Merge the CLAUDE_TEMPLATE.md content into the user's CLAUDE.md.
+def _merge_system_prompt(target_path: Path, prompt_content: str) -> None:
+    """Merge the system prompt content into the user's project settings or markdown file.
 
     Uses marker comments to delimit the managed section so it can be
     safely updated or removed later. The user's existing content outside
     the markers is preserved untouched.
     """
-    if not template_path.exists():
-        print(f"  [WARN] Template not found at {template_path}, skipping CLAUDE.md merge")
-        return
-
-    try:
-        template_content = template_path.read_text(encoding="utf-8").strip()
-    except OSError as e:
-        print(f"  [WARN] Cannot read template: {e}")
-        return
-
     managed_block = (
         f"\n{_CLAUDE_MD_MARKER_START}\n"
-        f"{template_content}\n"
+        f"{prompt_content.strip()}\n"
         f"{_CLAUDE_MD_MARKER_END}\n"
     )
 
-    # Create ~/.claude/ if needed
     try:
         target_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -1062,7 +912,7 @@ def _merge_claude_md(template_path: Path, target_path: Path) -> None:
         try:
             existing = target_path.read_text(encoding="utf-8")
         except OSError as e:
-            print(f"  [WARN] Cannot read existing CLAUDE.md: {e}")
+            print(f"  [WARN] Cannot read existing prompt file: {e}")
             return
 
     # Back up the existing file before mutating it
