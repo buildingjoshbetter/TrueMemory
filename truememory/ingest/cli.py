@@ -801,17 +801,53 @@ def _run_install(args):
         print("No supported CLIs detected on this system.")
         return
 
-    if args.dry_run:
-        print("Dry run requested. The following CLIs would be configured:\n")
-        for adapter in installed:
-            print(f"  - {adapter.name} (id: {adapter.cli_id})")
-            print(f"    Config path: {adapter.config_path}")
-            prompt_path = adapter.get_system_prompt_path()
-            if prompt_path:
-                print(f"    System prompt: {prompt_path}")
-        return
-
     py = sys.executable
+
+    if args.dry_run:
+        hooks_dir = Path(__file__).parent / "hooks"
+        hook_files = {
+            "SessionStart": hooks_dir / "session_start.py",
+            "UserPromptSubmit": hooks_dir / "user_prompt_submit.py",
+            "SessionEnd": hooks_dir / "stop.py",
+            "PreCompact": hooks_dir / "compact.py",
+        }
+        import shlex
+        _HOOK_MODULES = {
+            "session_start.py": "truememory.ingest.hooks.session_start",
+            "user_prompt_submit.py": "truememory.ingest.hooks.user_prompt_submit",
+            "stop.py": "truememory.ingest.hooks.stop",
+            "compact.py": "truememory.ingest.hooks.compact",
+        }
+        def _build_command(hook_path: Path) -> str:
+            module = _HOOK_MODULES.get(hook_path.name)
+            if module:
+                parts: list[str] = [py, "-m", module]
+            else:
+                parts = [py, str(hook_path)]
+            if args.user:
+                parts.extend(["--user", args.user])
+            if args.db:
+                parts.extend(["--db", args.db])
+            if sys.platform == "win32":
+                import subprocess as _sp
+                return _sp.list2cmdline(parts)
+            return " ".join(shlex.quote(p) for p in parts)
+
+        settings = {
+            "hooks": {
+                event: [{
+                    "matcher": "",
+                    "hooks": [{
+                        "type": "command",
+                        "command": _build_command(path),
+                    }],
+                }]
+                for event, path in hook_files.items()
+            }
+        }
+        print("Add the following to your Claude Code settings.json:\n")
+        print(json.dumps(settings, indent=2))
+        return
 
     for adapter in installed:
         print(f"Installing TrueMemory for {adapter.name}...")
