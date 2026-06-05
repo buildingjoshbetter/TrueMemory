@@ -156,10 +156,17 @@ def main():
 
     spawned_pid = _run_background_ingestion(transcript_path, session_id, args.user, args.db)
 
-    try:
-        mark_session_extracted(session_id, transcript_path, spawned_pid=spawned_pid)
-    except Exception:
-        pass
+    # Only mark the session extracted when a real ingest process was spawned.
+    # _run_background_ingestion returns 0 when the spawn cap denied it or Popen
+    # failed — in those cases it has already queued the session to the backlog.
+    # Marking it here would make should_extract_session() treat it as processed
+    # (until the transcript grows >1KB), silently dropping the session if the
+    # backlog drain never completes. The CLI marks it on successful completion.
+    if spawned_pid > 0:
+        try:
+            mark_session_extracted(session_id, transcript_path, spawned_pid=spawned_pid)
+        except Exception:
+            pass
 
 
 def _writable_dirs_ok() -> bool:
