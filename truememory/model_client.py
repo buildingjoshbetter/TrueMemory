@@ -8,9 +8,10 @@ Falls back to local model loading if the server cannot be reached.
 Set TRUEMEMORY_NO_MODEL_SERVER=1 to force local loading.
 """
 
+import base64
+import json
 import logging
 import os
-import pickle
 import platform
 import plistlib
 import shutil
@@ -31,9 +32,18 @@ PID_PATH = _TRUEMEMORY_DIR / "model_server.pid"
 
 _HEADER_FMT = ">I"
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
+_MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 _SERVER_START_TIMEOUT = 30.0
 _REQUEST_TIMEOUT = 120.0
+
+
+def _json_object_hook(obj):
+    """Decode base64-encoded numpy arrays from JSON."""
+    if "__ndarray__" in obj:
+        data = base64.b64decode(obj["__ndarray__"])
+        return np.frombuffer(data, dtype=np.dtype(obj["dtype"])).reshape(obj["shape"])
+    return obj
 
 _APP_BUNDLE_PATH = _TRUEMEMORY_DIR / "TrueMemory.app"
 _APP_EXECUTABLE = _APP_BUNDLE_PATH / "Contents" / "MacOS" / "TrueMemory"
@@ -195,7 +205,7 @@ def _send_request(request: dict) -> dict:
     sock.settimeout(_REQUEST_TIMEOUT)
     try:
         sock.connect(str(SOCK_PATH))
-        data = pickle.dumps(request, protocol=pickle.HIGHEST_PROTOCOL)
+        data = json.dumps(request).encode("utf-8")
         header = struct.pack(_HEADER_FMT, len(data))
         sock.sendall(header + data)
 
@@ -203,10 +213,12 @@ def _send_request(request: dict) -> dict:
         if not resp_header:
             raise ConnectionError("Server closed connection")
         resp_len = struct.unpack(_HEADER_FMT, resp_header)[0]
+        if resp_len > _MAX_MESSAGE_SIZE:
+            raise ConnectionError(f"Response too large: {resp_len} bytes")
         resp_data = _recv_exact(sock, resp_len)
         if not resp_data:
             raise ConnectionError("Incomplete response")
-        return pickle.loads(resp_data)
+        return json.loads(resp_data, object_hook=_json_object_hook)
     finally:
         sock.close()
 

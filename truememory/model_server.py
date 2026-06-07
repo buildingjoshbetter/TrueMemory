@@ -36,11 +36,13 @@ def _set_mps_memory_cap():
 
 _set_mps_memory_cap()
 
+import base64  # noqa: E402
 import gc  # noqa: E402
+import json  # noqa: E402
 import logging  # noqa: E402
-import pickle  # noqa: E402
 import signal  # noqa: E402
 import socket  # noqa: E402
+import stat  # noqa: E402
 import struct  # noqa: E402
 import sys  # noqa: E402
 import threading  # noqa: E402
@@ -58,6 +60,27 @@ IDLE_TIMEOUT = int(os.environ.get("TRUEMEMORY_MODEL_SERVER_IDLE", "300"))
 
 _HEADER_FMT = ">I"
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
+_MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
+
+
+def _json_default(obj):
+    """Encode numpy arrays as base64 for safe JSON serialization."""
+    if isinstance(obj, np.ndarray):
+        arr = np.ascontiguousarray(obj, dtype=np.float32)
+        return {
+            "__ndarray__": base64.b64encode(arr.tobytes()).decode("ascii"),
+            "dtype": "float32",
+            "shape": list(arr.shape),
+        }
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _json_object_hook(obj):
+    """Decode base64-encoded numpy arrays from JSON."""
+    if "__ndarray__" in obj:
+        data = base64.b64decode(obj["__ndarray__"])
+        return np.frombuffer(data, dtype=np.dtype(obj["dtype"])).reshape(obj["shape"])
+    return obj
 
 
 class ModelServer:
@@ -237,11 +260,14 @@ class ModelServer:
             if not header:
                 return
             length = struct.unpack(_HEADER_FMT, header)[0]
+            if length > _MAX_MESSAGE_SIZE:
+                conn.close()
+                return
             data = self._recv_exact(conn, length)
             if not data:
                 return
 
-            request = pickle.loads(data)
+            request = json.loads(data, object_hook=_json_object_hook)
             response = self.handle_request(request)
             self._send_response(conn, response)
         except Exception as e:
@@ -262,7 +288,7 @@ class ModelServer:
         return bytes(buf)
 
     def _send_response(self, conn: socket.socket, response: dict):
-        data = pickle.dumps(response, protocol=pickle.HIGHEST_PROTOCOL)
+        data = json.dumps(response, default=_json_default).encode("utf-8")
         header = struct.pack(_HEADER_FMT, len(data))
         conn.sendall(header + data)
 
@@ -295,6 +321,7 @@ class ModelServer:
 
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         srv.bind(str(SOCK_PATH))
+        os.chmod(str(SOCK_PATH), stat.S_IRUSR | stat.S_IWUSR)
         srv.listen(16)
         srv.settimeout(2.0)
 
