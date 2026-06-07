@@ -770,6 +770,113 @@ class TrueMemoryEngine:
             self.conn.commit()
             return deleted
 
+    def consolidate(self) -> dict[str, str]:
+        """Run all consolidation layers (L2-L5) under the write lock.
+
+        Returns timing stats for each step.
+        """
+        import time as _time
+
+        self._ensure_connection()
+        stats: dict[str, str] = {}
+
+        try:
+            from truememory.consolidation import (
+                build_summaries,
+                detect_contradictions,
+                build_structured_facts,
+            )
+        except (ImportError, ModuleNotFoundError):
+            stats["consolidation"] = "SKIPPED (module not available)"
+            return stats
+
+        try:
+            from truememory.predictive import build_surprise_index
+        except (ImportError, ModuleNotFoundError):
+            build_surprise_index = None
+
+        try:
+            from truememory.temporal import detect_episodes, detect_landmark_events
+        except (ImportError, ModuleNotFoundError):
+            detect_episodes = None
+            detect_landmark_events = None
+
+        try:
+            from truememory.personality import build_dunbar_hierarchy
+        except (ImportError, ModuleNotFoundError):
+            build_dunbar_hierarchy = None
+
+        with self._write_lock:
+            try:
+                t0 = _time.time()
+                build_summaries(self.conn)
+                stats["build_summaries"] = f"{_time.time() - t0:.3f}s"
+            except Exception as exc:
+                stats["build_summaries"] = f"ERROR: {exc}"
+
+            try:
+                t0 = _time.time()
+                detect_contradictions(self.conn)
+                stats["detect_contradictions"] = f"{_time.time() - t0:.3f}s"
+            except Exception as exc:
+                stats["detect_contradictions"] = f"ERROR: {exc}"
+
+            try:
+                t0 = _time.time()
+                n = build_structured_facts(self.conn)
+                stats["structured_facts"] = f"{n} facts in {_time.time() - t0:.3f}s"
+            except Exception as exc:
+                stats["structured_facts"] = f"ERROR: {exc}"
+
+            if build_surprise_index:
+                try:
+                    t0 = _time.time()
+                    build_surprise_index(self.conn)
+                    stats["build_surprise_index"] = f"{_time.time() - t0:.3f}s"
+                except Exception as exc:
+                    stats["build_surprise_index"] = f"ERROR: {exc}"
+
+            if detect_episodes:
+                try:
+                    t0 = _time.time()
+                    ep = detect_episodes(self.conn)
+                    stats["detect_episodes"] = f"{ep} episodes in {_time.time() - t0:.3f}s"
+                except Exception as exc:
+                    stats["detect_episodes"] = f"ERROR: {exc}"
+
+            if detect_landmark_events:
+                try:
+                    t0 = _time.time()
+                    lm = detect_landmark_events(self.conn)
+                    stats["detect_landmarks"] = f"{lm} events in {_time.time() - t0:.3f}s"
+                except Exception as exc:
+                    stats["detect_landmarks"] = f"ERROR: {exc}"
+
+            if build_dunbar_hierarchy:
+                try:
+                    t0 = _time.time()
+                    primary = None
+                    try:
+                        row = self.conn.execute(
+                            "SELECT sender, COUNT(*) as cnt FROM messages "
+                            "WHERE sender != '' AND sender IS NOT NULL "
+                            "GROUP BY sender ORDER BY cnt DESC LIMIT 1"
+                        ).fetchone()
+                        if row and row[0] and row[0].strip():
+                            primary = row[0]
+                    except Exception:
+                        pass
+                    result = build_dunbar_hierarchy(self.conn, primary_entity=primary)
+                    n_rel = len(result) if isinstance(result, dict) else result
+                    stats["dunbar_hierarchy"] = f"{n_rel} relationships in {_time.time() - t0:.3f}s"
+                except Exception as exc:
+                    stats["dunbar_hierarchy"] = f"ERROR: {exc}"
+
+            self.conn.commit()
+
+        self._has_consolidation = True
+        return stats
+
     def update(self, memory_id: int, content: str | None = None, **fields) -> dict | None:
         """Update a memory.
 
