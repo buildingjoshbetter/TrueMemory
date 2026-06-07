@@ -92,8 +92,8 @@ export default {
           detached: true,
         });
         child.on("error", () => {});
-        child.stdin.on("error", () => {});
         if (child.stdin && !child.stdin.destroyed) {
+          child.stdin.on("error", () => {});
           child.stdin.write(input);
           child.stdin.end();
         }
