@@ -541,6 +541,14 @@ class TrueMemoryEngine:
             except Exception:
                 logger.debug("Failed to pre-compute embedding during add()", exc_info=True)
 
+        pre_style_vec = None
+        if self._has_style_vec and sender:
+            try:
+                from truememory.personality_style_vec import compute_style_vector
+                pre_style_vec = compute_style_vector(content)
+            except Exception:
+                logger.debug("Failed to pre-compute style vector during add()", exc_info=True)
+
         with self._write_lock:
             msg = {
                 "content": content,
@@ -572,12 +580,6 @@ class TrueMemoryEngine:
                     _write_embedder_metadata(self.conn)
                 except Exception:
                     logger.debug("Failed to store embedding for message %s during add()", new_id, exc_info=True)
-            elif self._has_vectors:
-                try:
-                    from truememory.vector_search import embed_single
-                    embed_single(self.conn, new_id, content)
-                except Exception:
-                    logger.debug("Failed to embed message %s during add()", new_id, exc_info=True)
 
             # Incrementally update entity profile
             if self._has_personality and sender:
@@ -587,14 +589,13 @@ class TrueMemoryEngine:
                 except Exception:
                     logger.debug("Failed to update entity profile for %s during add()", sender, exc_info=True)
 
-            # Incrementally update style vector (L0 char-n-gram)
-            if self._has_style_vec and sender:
+            # Store pre-computed style vector (DB write only, computation happened outside lock)
+            if pre_style_vec is not None:
                 try:
-                    _update_style_vec(self.conn, sender, content)
+                    _update_style_vec(self.conn, sender, content, _pre_computed_vec=pre_style_vec)
                 except Exception:
                     logger.debug("Failed to update style vector for %s during add()", sender, exc_info=True)
 
-            # Persist vector embedding and any profile updates
             self.conn.commit()
 
         return {

@@ -164,6 +164,7 @@ def build_entity_style_vectors(conn: sqlite3.Connection) -> dict[str, list[float
 
 def update_entity_style_vector_incremental(
     conn: sqlite3.Connection, entity: str, new_message: str,
+    *, _pre_computed_vec: list[float] | None = None,
 ) -> None:
     """Incrementally update an entity's style vector with a new message.
 
@@ -178,6 +179,7 @@ def update_entity_style_vector_incremental(
         conn:        Open database connection.
         entity:      Entity name (sender).
         new_message: The new message text.
+        _pre_computed_vec: If provided, skip compute_style_vector() call.
     """
     if not entity or not new_message:
         return
@@ -194,7 +196,7 @@ def update_entity_style_vector_incremental(
         )"""
     )
 
-    new_vec = compute_style_vector(new_message)
+    new_vec = _pre_computed_vec if _pre_computed_vec is not None else compute_style_vector(new_message)
     now = datetime.now(timezone.utc).isoformat()
 
     row = conn.execute(
@@ -229,8 +231,6 @@ def update_entity_style_vector_incremental(
                VALUES (?, ?, ?, ?)""",
             (entity, json.dumps(merged), new_count, now),
         )
-
-    conn.commit()
 
 
 def get_entity_style_vector(
