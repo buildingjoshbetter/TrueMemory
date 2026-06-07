@@ -12,7 +12,7 @@
  *   api.on("before_tool_call", handler) — before each tool invocation
  *   api.on("before_compaction", handler) — before context compaction
  */
-import { execSync, spawn } from "child_process";
+import { spawnSync, spawn } from "child_process";
 import { join } from "path";
 
 const PYTHON_PATH = process.env.TRUEMEMORY_PYTHON || "python3";
@@ -21,11 +21,25 @@ const HOOKS_DIR = process.env.TRUEMEMORY_HOOKS_DIR || "";
 function getHooksDir() {
   if (HOOKS_DIR) return HOOKS_DIR;
   try {
-    const out = execSync(
-      `${PYTHON_PATH} -c "from pathlib import Path; import truememory; print(Path(truememory.__file__).parent / 'ingest' / 'hooks')"`,
+    const result = spawnSync(
+      PYTHON_PATH,
+      ["-c", "from pathlib import Path; import truememory; print(Path(truememory.__file__).parent / 'ingest' / 'hooks')"],
       { encoding: "utf-8", timeout: 10000 }
-    ).trim();
-    return out;
+    );
+    return (result.stdout || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function runHookSync(hooksDir, script, input, timeoutMs) {
+  try {
+    const result = spawnSync(
+      PYTHON_PATH,
+      [join(hooksDir, script)],
+      { input, encoding: "utf-8", timeout: timeoutMs }
+    );
+    return (result.stdout || "").trim();
   } catch {
     return "";
   }
@@ -43,24 +57,19 @@ export default {
       return;
     }
 
-    // Track the last user prompt we processed to avoid running
-    // user_prompt_submit.py multiple times for the same prompt.
-    // OpenClaw fires before_tool_call on every tool invocation, but
-    // user_prompt_submit.py is designed for once-per-user-message semantics.
     let lastProcessedPrompt = null;
+    let toolCallsSinceLastPrompt = 0;
 
     api.on("session_start", async (event) => {
       lastProcessedPrompt = null;
+      toolCallsSinceLastPrompt = 0;
       try {
         const input = JSON.stringify({
           session_id: event.sessionId || "openclaw",
           cwd: process.cwd(),
           transcript_path: event.transcriptPath || "",
         });
-        const result = execSync(
-          `echo '${input.replace(/'/g, "\\'")}' | ${PYTHON_PATH} ${join(hooksDir, "session_start.py")}`,
-          { encoding: "utf-8", timeout: 10000 }
-        ).trim();
+        const result = runHookSync(hooksDir, "session_start.py", input, 10000);
         if (result) {
           const parsed = JSON.parse(result);
           if (parsed.additionalContext) {
@@ -91,31 +100,25 @@ export default {
     });
 
     api.on("before_tool_call", async (event) => {
-      // Deduplicate: only run user_prompt_submit.py once per unique user
-      // prompt. before_tool_call fires on every tool invocation, but the
-      // hook buffers messages and triggers recall — both should happen
-      // once per user message, not once per tool call.
-      //
-      // If event.lastUserPrompt is not available on this event type,
-      // fall back to running on every call rather than silently skipping.
       const prompt = event.lastUserPrompt ?? event.userPrompt ?? null;
-      if (prompt === null) {
-        // Field not present — run unconditionally rather than becoming a no-op
-      } else if (!prompt || prompt === lastProcessedPrompt) {
-        return;
+
+      if (prompt !== null) {
+        if (!prompt || prompt === lastProcessedPrompt) return;
+        lastProcessedPrompt = prompt;
+      } else {
+        // Field not present on this event type — use a counter to run
+        // only on the first tool call after each prompt (heuristic).
+        toolCallsSinceLastPrompt++;
+        if (toolCallsSinceLastPrompt > 1) return;
       }
-      if (prompt) lastProcessedPrompt = prompt;
 
       try {
         const input = JSON.stringify({
           session_id: event.sessionId || "openclaw",
           cwd: process.cwd(),
-          user_prompt: prompt,
+          user_prompt: prompt || "",
         });
-        execSync(
-          `echo '${input.replace(/'/g, "\\'")}' | ${PYTHON_PATH} ${join(hooksDir, "user_prompt_submit.py")}`,
-          { encoding: "utf-8", timeout: 5000 }
-        );
+        runHookSync(hooksDir, "user_prompt_submit.py", input, 5000);
       } catch (err) {
         // Never block tool call processing
       }
@@ -127,10 +130,7 @@ export default {
           session_id: event.sessionId || "openclaw",
           transcript_path: event.transcriptPath || "",
         });
-        execSync(
-          `echo '${input.replace(/'/g, "\\'")}' | ${PYTHON_PATH} ${join(hooksDir, "compact.py")}`,
-          { encoding: "utf-8", timeout: 5000 }
-        );
+        runHookSync(hooksDir, "compact.py", input, 5000);
       } catch (err) {
         // Never block compression
       }
