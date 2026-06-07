@@ -471,6 +471,15 @@ def extract_facts_simple(transcript: str) -> list[ExtractedFact]:
     - "I prefer/like/hate [X]" patterns (preferences)
     - "My [X] is [Y]" patterns (personal facts)
     - Statements with proper nouns and verbs (decisions, events)
+
+    SECURITY: This is the no-LLM extraction entrypoint, but the facts it
+    produces are interpolated verbatim into downstream LLM prompts (e.g. the
+    dedup prompt in :mod:`truememory.ingest.dedup`). A crafted transcript can
+    therefore embed a literal ``</untrusted_transcript>`` (or any fence
+    delimiter token) which, once captured into a fact, would break out of a
+    downstream fence. We run captured content through
+    :func:`_neutralize_delimiters` for the same reason the LLM extractor does:
+    untrusted content must never be able to forge a trust-boundary delimiter.
     """
     facts = []
 
@@ -483,7 +492,7 @@ def extract_facts_simple(transcript: str) -> list[ExtractedFact]:
     ]:
         for match in re.finditer(pattern, transcript):
             facts.append(ExtractedFact(
-                content=match.group(0).strip().rstrip(".,!"),
+                content=_neutralize_delimiters(match.group(0).strip().rstrip(".,!")),
                 category=category,
                 confidence="medium",
                 source_role="user",
@@ -497,7 +506,7 @@ def extract_facts_simple(transcript: str) -> list[ExtractedFact]:
     ]:
         for match in re.finditer(pattern, transcript):
             facts.append(ExtractedFact(
-                content=match.group(0).strip().rstrip(".,!"),
+                content=_neutralize_delimiters(match.group(0).strip().rstrip(".,!")),
                 category="preference",
                 confidence="low",
                 source_role="user",
