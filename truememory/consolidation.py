@@ -680,7 +680,7 @@ def build_summaries(conn: sqlite3.Connection) -> int:
     by_entity: dict[str, list[dict]] = defaultdict(list)
     for msg in all_msgs:
         if msg["sender"]:
-            by_entity[msg["sender"]].append(msg)
+            by_entity[msg["sender"].lower()].append(msg)
 
     for entity, messages in by_entity.items():
         if len(messages) < 10:

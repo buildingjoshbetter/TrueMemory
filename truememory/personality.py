@@ -1006,7 +1006,8 @@ def update_entity_profile_incremental(
 
     # ── Relationships ─────────────────────────────────────────────────
     if recipient:
-        rel = old_rels.get(recipient, {"message_count": 0, "primary_topic": "general"})
+        recipient_key = recipient.lower()
+        rel = old_rels.get(recipient_key, {"message_count": 0, "primary_topic": "general"})
         rel["message_count"] = rel.get("message_count", 0) + 1
         lower = message.lower()
         if any(w in lower for w in ("code", "deploy", "api", "database", "bug", "server")):
@@ -1017,7 +1018,7 @@ def update_entity_profile_incremental(
             rel["primary_topic"] = "social"
         elif any(w in lower for w in ("revenue", "investor", "pricing", "customer")):
             rel["primary_topic"] = "business"
-        old_rels[recipient] = rel
+        old_rels[recipient_key] = rel
 
     # ── Store ─────────────────────────────────────────────────────────
     now = datetime.now(timezone.utc).isoformat()
@@ -1233,14 +1234,16 @@ def build_dunbar_hierarchy(conn, primary_entity=None):
     if primary_entity is None:
         return {}
 
+    primary_entity = primary_entity.lower()
+
     # Count messages per contact
     rows = conn.execute(
         """
-        SELECT name, COUNT(*) as cnt, MAX(ts) as last_ts FROM (
-            SELECT recipient as name, timestamp as ts FROM messages WHERE LOWER(sender) = LOWER(?) AND recipient != ''
+        SELECT LOWER(name) as name, COUNT(*) as cnt, MAX(ts) as last_ts FROM (
+            SELECT recipient as name, timestamp as ts FROM messages WHERE LOWER(sender) = ? AND recipient != ''
             UNION ALL
-            SELECT sender as name, timestamp as ts FROM messages WHERE LOWER(recipient) = LOWER(?) AND sender != ''
-        ) GROUP BY name ORDER BY cnt DESC
+            SELECT sender as name, timestamp as ts FROM messages WHERE LOWER(recipient) = ? AND sender != ''
+        ) GROUP BY LOWER(name) ORDER BY cnt DESC
         """,
         (primary_entity, primary_entity)
     ).fetchall()
@@ -1250,7 +1253,7 @@ def build_dunbar_hierarchy(conn, primary_entity=None):
 
     # Clear existing relationships for this entity
     conn.execute(
-        "DELETE FROM entity_relationships WHERE LOWER(entity_a) = LOWER(?)",
+        "DELETE FROM entity_relationships WHERE entity_a = ?",
         (primary_entity,)
     )
 
