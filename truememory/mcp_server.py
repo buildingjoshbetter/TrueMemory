@@ -613,7 +613,7 @@ def truememory_search(
     _touch_search_time()
     limit = max(1, min(limit, 200))
     _set_reranker(_current_reranker())
-    llm_fn = _get_llm_fn()
+    llm_fn = _get_llm_fn() if _load_config().get("tier", "edge") == "pro" else None
     uid = user_id or None
     if not query_list:
         return json.dumps([])
@@ -664,7 +664,7 @@ def truememory_search_deep(
     _touch_search_time()
     limit = max(1, min(limit, 200))
     _set_reranker(_DEEP_RERANKER)
-    llm_fn = _get_llm_fn()
+    llm_fn = _get_llm_fn() if _load_config().get("tier", "edge") == "pro" else None
     uid = user_id or None
     if not query_list:
         return json.dumps([])
