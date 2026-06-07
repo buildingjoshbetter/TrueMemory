@@ -5,8 +5,8 @@
  * and trigger extraction after each run. Uses the TrueMemory MCP server
  * for memory operations.
  *
- * OpenClaw plugin API (from openclaw/plugin-sdk/plugin-entry):
- *   definePluginEntry({ id, name, register(api) })
+ * OpenClaw plugin API:
+ *   export default { id, name, register(api) }
  *   api.on("session_start", handler)    — before agent starts processing
  *   api.on("session_end", handler)      — after agent finishes
  *   api.on("before_tool_call", handler) — before each tool invocation
@@ -42,6 +42,12 @@ export default {
       console.error("[truememory] Could not locate hook scripts");
       return;
     }
+
+    // Track the last user prompt we processed to avoid running
+    // user_prompt_submit.py multiple times for the same prompt.
+    // OpenClaw fires before_tool_call on every tool invocation, but
+    // user_prompt_submit.py is designed for once-per-user-message semantics.
+    let lastProcessedPrompt = null;
 
     api.on("session_start", async (event) => {
       try {
@@ -84,11 +90,21 @@ export default {
     });
 
     api.on("before_tool_call", async (event) => {
+      // Deduplicate: only run user_prompt_submit.py once per unique user
+      // prompt. before_tool_call fires on every tool invocation, but the
+      // hook buffers messages and triggers recall — both should happen
+      // once per user message, not once per tool call.
+      const prompt = event.lastUserPrompt || "";
+      if (!prompt || prompt === lastProcessedPrompt) {
+        return;
+      }
+      lastProcessedPrompt = prompt;
+
       try {
         const input = JSON.stringify({
           session_id: event.sessionId || "openclaw",
           cwd: process.cwd(),
-          user_prompt: event.lastUserPrompt || "",
+          user_prompt: prompt,
         });
         execSync(
           `echo '${input.replace(/'/g, "\\'")}' | ${PYTHON_PATH} ${join(hooksDir, "user_prompt_submit.py")}`,

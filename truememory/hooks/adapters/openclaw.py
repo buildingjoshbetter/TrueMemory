@@ -7,7 +7,8 @@ OpenClaw uses:
   write-back functions (setConfiguredMcpServer, etc.) write to
   ``next.mcp = { ...next.mcp, servers }``.
 - ~/.openclaw/plugins/<name>/ for plugins (openclaw.plugin.json + index.js)
-  using ``definePluginEntry()`` from ``openclaw/plugin-sdk/plugin-entry``
+  using ``export default { id, name, register(api) }`` — the plugin loader
+  calls the ``register(api)`` function at startup.
 - Plugin lifecycle hooks: session_start, session_end, before_tool_call,
   before_compaction (registered via ``api.on("event", handler)`` inside
   ``register(api)`` callback)
@@ -209,9 +210,17 @@ class OpenClawAdapter(CLIAdapter):
             if isinstance(servers, dict) and _PLUGIN_NAME in servers:
                 return True
         # Also check legacy top-level mcpServers for detection
-        # (written by earlier buggy versions of this adapter)
+        # (written by earlier buggy versions of this adapter).
+        # Return True so is_configured() reports the adapter as present,
+        # but log a warning since the legacy path is not loaded by the
+        # current OpenClaw runtime. install_mcp() migrates to mcp.servers.
         servers = data.get("mcpServers", {})
         if isinstance(servers, dict) and _PLUGIN_NAME in servers:
+            log.warning(
+                "TrueMemory found under legacy mcpServers key in %s — "
+                "run install_mcp() to migrate to mcp.servers",
+                _CONFIG_PATH,
+            )
             return True
         return False
 

@@ -38,6 +38,17 @@ _CONFIG = _HERMES_DIR / "config.yaml"
 
 # Map TrueMemory hook scripts to Hermes hook events.
 # Hermes uses a single config.yaml for both mcp_servers and hooks.
+#
+# NOTE on pre_llm_call -> user_prompt_submit.py:
+#   Hermes fires pre_llm_call on every LLM API call, including continuation
+#   and retry calls — not just on new user prompts.  user_prompt_submit.py is
+#   designed to be idempotent (buffers are append-only, recall is read-only,
+#   extraction is guarded by should_extract_session), so repeated invocations
+#   are harmless but wasteful.  Hermes does not expose a dedicated
+#   "user_prompt_submitted" event; pre_llm_call is the closest approximation.
+#   The script exits early if stdin provides no prompt or a prompt < 3 chars,
+#   which naturally filters most continuation/retry calls where the prompt
+#   field is empty.
 _HOOK_ENTRIES = {
     "on_session_start": {
         "script": "session_start.py",
