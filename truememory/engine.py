@@ -485,6 +485,20 @@ class TrueMemoryEngine:
 
         self._ensure_connection()
 
+        pre_embedding = None
+        pre_sep_embedding = None
+        if self._has_vectors:
+            try:
+                from truememory.vector_search import (
+                    get_model, _encode_with_mps_fallback, _build_sep_text,
+                )
+                model = get_model()
+                pre_embedding = _encode_with_mps_fallback(model, [content])[0]
+                sep_text = _build_sep_text(sender, recipient, timestamp, content)
+                pre_sep_embedding = _encode_with_mps_fallback(model, [sep_text])[0]
+            except Exception:
+                logger.debug("Failed to pre-compute embedding during add()", exc_info=True)
+
         with self._write_lock:
             msg = {
                 "content": content,
@@ -496,8 +510,27 @@ class TrueMemoryEngine:
             }
             new_id = insert_message(self.conn, msg)
 
-            # Embed the message for vector search
-            if self._has_vectors:
+            if pre_embedding is not None:
+                try:
+                    from truememory.vector_search import (
+                        serialize_f32, _active_vec_table, _active_sep_table,
+                        _write_embedder_metadata,
+                    )
+                    vec_tbl = _active_vec_table(self.conn)
+                    self.conn.execute(
+                        f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
+                        (new_id, serialize_f32(pre_embedding)),
+                    )
+                    if pre_sep_embedding is not None:
+                        sep_tbl = _active_sep_table(self.conn)
+                        self.conn.execute(
+                            f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
+                            (new_id, serialize_f32(pre_sep_embedding)),
+                        )
+                    _write_embedder_metadata(self.conn)
+                except Exception:
+                    logger.debug("Failed to store embedding for message %s during add()", new_id, exc_info=True)
+            elif self._has_vectors:
                 try:
                     from truememory.vector_search import embed_single
                     embed_single(self.conn, new_id, content)
