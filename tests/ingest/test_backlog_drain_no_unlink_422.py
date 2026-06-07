@@ -25,8 +25,6 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-import pytest
-
 
 @contextmanager
 def _gate_allows():
@@ -160,3 +158,96 @@ def _find_dead_pid() -> int:
         except OSError:
             return candidate
     return 999999
+
+
+def test_pid_alive_treats_eperm_as_alive_esrch_as_dead(monkeypatch):
+    """The liveness check must not treat a live-but-EPERM process as dead.
+
+    cleanup_stale_processing relies on _pid_is_alive to decide whether a
+    crashed worker's claim can be reclaimed. os.kill(pid, 0) raises
+    PermissionError (EPERM) for a process owned by another user that is very
+    much alive — that must read as alive. Only ProcessLookupError / ESRCH
+    means the process is genuinely gone.
+    """
+    import errno as _errno
+
+    from truememory.ingest.hooks import _shared as shared_mod
+
+    def _raise_eperm(pid, sig):
+        raise PermissionError(_errno.EPERM, "Operation not permitted")
+
+    def _raise_esrch(pid, sig):
+        raise ProcessLookupError(_errno.ESRCH, "No such process")
+
+    def _raise_bare_eperm_oserror(pid, sig):
+        raise OSError(_errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(shared_mod.os, "kill", _raise_eperm)
+    assert shared_mod._pid_is_alive(4242) is True, "EPERM process must be alive"
+
+    monkeypatch.setattr(shared_mod.os, "kill", _raise_esrch)
+    assert shared_mod._pid_is_alive(4242) is False, "ESRCH process must be dead"
+
+    monkeypatch.setattr(shared_mod.os, "kill", _raise_bare_eperm_oserror)
+    assert shared_mod._pid_is_alive(4242) is True, "bare OSError(EPERM) must be alive"
+
+
+def test_sanitized_session_id_claim_filename_roundtrips(monkeypatch, tmp_path):
+    """A session_id that requires sanitization (contains '/' and ':') must
+    round-trip: the ``.processing`` claim filename the drainer writes (derived
+    from the ``.json`` marker stem produced by stop._queue_to_backlog) must be
+    exactly the filename clear_backlog_processing reconstructs from the raw
+    session_id. Otherwise the CLI's success cleanup would target the wrong path
+    and the claim would never be removed.
+    """
+    from truememory.ingest.hooks import session_start as ss
+    from truememory.ingest.hooks import _shared as shared_mod
+    from truememory.ingest.hooks import stop as stop_mod
+    from truememory.hooks import core as core_mod
+
+    raw_session_id = "proj/foo:bar baz-1"  # has '/', ':', and a space
+    safe_id = shared_mod._safe_session_id(raw_session_id)
+    # Sanitization actually changes the id (so this is a meaningful case).
+    assert safe_id != raw_session_id
+    assert "/" not in safe_id and ":" not in safe_id
+
+    backlog = tmp_path / "backlog"
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("x" * 100, encoding="utf-8")
+
+    # The drainer/stop and the CLI cleanup must agree on the backlog dir.
+    monkeypatch.setattr(ss, "BACKLOG_DIR", backlog)
+    monkeypatch.setattr(shared_mod, "BACKLOG_DIR", backlog)
+    monkeypatch.setattr(stop_mod, "BACKLOG_DIR", backlog)
+
+    # Queue exactly the way the real Stop hook does, so the .json marker stem is
+    # produced by the production naming path (stop._sanitize_session_id).
+    stop_mod._queue_to_backlog(
+        str(transcript), raw_session_id, "", "", reason="test",
+    )
+    json_marker = backlog / f"{safe_id}.json"
+    assert json_marker.exists(), "queue_to_backlog must name the marker by sanitized id"
+
+    # Allow exactly one spawn with an alive PID so the claim is left in place.
+    monkeypatch.setattr(shared_mod, "check_extraction_budget", lambda: True)
+    monkeypatch.setattr(core_mod, "spawn_gate", _gate_allows)
+    monkeypatch.setattr(core_mod, "register_spawned_pid", lambda pid: None)
+
+    class _DummyProc:
+        pid = os.getpid()
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: _DummyProc())
+
+    ss._drain_backlog()
+
+    # The drainer renamed .json -> .processing using the SAME sanitized stem.
+    claim = backlog / f"{safe_id}.processing"
+    assert claim.exists(), "drainer must write claim named by sanitized session id"
+
+    # The CLI reconstructs the claim path purely from the raw session_id. It
+    # must resolve to exactly the file the drainer wrote.
+    assert shared_mod.clear_backlog_processing(raw_session_id, backlog) is True
+    assert not claim.exists(), (
+        "clear_backlog_processing must remove the claim the drainer wrote "
+        "for a session_id that required sanitization"
+    )

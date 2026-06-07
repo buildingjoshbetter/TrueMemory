@@ -1,6 +1,7 @@
 """Shared utilities for TrueMemory hooks."""
 
 from pathlib import Path
+import errno
 import json
 import logging
 import os
@@ -80,14 +81,30 @@ def should_extract_session(session_id: str, transcript_path: str) -> bool:
 
 
 def _pid_is_alive(pid: int) -> bool:
-    """Check if a PID is still running."""
+    """Check if a PID is still running.
+
+    Distinguishes "no such process" (dead) from "permission denied" (alive
+    but owned by another user). ``os.kill(pid, 0)`` raises ``ProcessLookupError``
+    (errno ESRCH) only when the process genuinely does not exist; an
+    ``EPERM`` error means the process *is* alive but we lack permission to
+    signal it, so it must be treated as alive — otherwise a live-but-EPERM
+    worker's claim would be wrongly reclaimed/re-queued.
+    """
     if pid <= 0:
         return False
     try:
         os.kill(pid, 0)
         return True
-    except (OSError, ProcessLookupError):
+    except ProcessLookupError:
+        # errno.ESRCH — no such process: genuinely dead.
         return False
+    except PermissionError:
+        # errno.EPERM — process exists but is not signalable by us: alive.
+        return True
+    except OSError as e:
+        # ESRCH may surface as a bare OSError on some platforms; treat only
+        # that as dead, anything else (e.g. EPERM) as alive to be safe.
+        return e.errno != errno.ESRCH
 
 
 def check_extraction_budget() -> bool:
