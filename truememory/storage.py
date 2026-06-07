@@ -649,6 +649,7 @@ def delete_message(conn: sqlite3.Connection, msg_id: int) -> bool:
             ("fact_timeline", "source_message_id"),
             ("landmark_events", "source_message_id"),
             ("surprise_scores", "message_id"),
+            ("message_clusters", "message_id"),
         ):
             try:
                 conn.execute(f"DELETE FROM {tbl} WHERE {col} = ?", (msg_id,))

@@ -61,7 +61,7 @@ _ALLOWED_TABLES = frozenset({
 })
 
 _ALLOWED_COLUMNS = frozenset({
-    "source_message_id", "cause_msg_id", "effect_msg_id",
+    "source_message_id", "cause_msg_id", "effect_msg_id", "message_id",
 })
 
 _SQLITE_IN_CHUNK = 500
@@ -691,6 +691,7 @@ class TrueMemoryEngine:
         Handles deletion from ALL tables in the schema: messages,
         messages_fts, entity_profiles, fact_timeline, summaries,
         episodes, landmark_events, causal_edges, entity_relationships,
+        surprise_scores, message_clusters, cluster_centroids,
         and vector tables (vec_messages, vec_messages_sep).
 
         Args:
@@ -735,6 +736,8 @@ class TrueMemoryEngine:
                         ("landmark_events", "source_message_id"),
                         ("causal_edges", "cause_msg_id"),
                         ("causal_edges", "effect_msg_id"),
+                        ("surprise_scores", "message_id"),
+                        ("message_clusters", "message_id"),
                     ]:
                         if table not in _ALLOWED_TABLES:
                             raise ValueError(f"Invalid table name: {table}")
@@ -798,6 +801,16 @@ class TrueMemoryEngine:
                         except Exception:
                             logger.warning("Failed to clean %s for user %s", vec_table, user_id, exc_info=True)
 
+                # Remove orphaned cluster_centroids (clusters with no
+                # remaining message_clusters rows after user deletion).
+                try:
+                    self.conn.execute(
+                        "DELETE FROM cluster_centroids WHERE cluster_id NOT IN "
+                        "(SELECT DISTINCT cluster_id FROM message_clusters)"
+                    )
+                except Exception:
+                    logger.warning("Failed to clean cluster_centroids for user %s", user_id, exc_info=True)
+
             else:
                 # Full wipe of all tables
                 cursor = self.conn.execute("DELETE FROM messages")
@@ -812,6 +825,9 @@ class TrueMemoryEngine:
                     "landmark_events",
                     "causal_edges",
                     "entity_relationships",
+                    "surprise_scores",
+                    "message_clusters",
+                    "cluster_centroids",
                 ):
                     if table not in _ALLOWED_TABLES:
                         raise ValueError(f"Invalid table name: {table}")
