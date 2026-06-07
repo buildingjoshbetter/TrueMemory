@@ -3,7 +3,8 @@
 Codex CLI uses:
 - ~/.codex/config.toml for BOTH MCP server registration AND hook registration
 - MCP under [mcp_servers.name] sections
-- Hooks as [[hooks]] entries
+- Hooks as [[hooks.EventName]] matcher groups with nested [[hooks.EventName.hooks]]
+  entries (see codex-rs/config/src/hook_config.rs for the canonical schema)
 - Same JSON stdin/stdout hook protocol as Claude Code
 """
 from __future__ import annotations
@@ -25,19 +26,19 @@ _CONFIG_PATH = _CODEX_DIR / "config.toml"
 _HOOK_EVENTS = {
     "SessionStart": {
         "script": "session_start.py",
-        "timeout": 10000,
+        "timeout": 10,
     },
     "Stop": {
         "script": "stop.py",
-        "timeout": 5000,
+        "timeout": 5,
     },
     "UserPromptSubmit": {
         "script": "user_prompt_submit.py",
-        "timeout": 5000,
+        "timeout": 5,
     },
     "PreCompact": {
         "script": "compact.py",
-        "timeout": 5000,
+        "timeout": 5,
     },
 }
 
@@ -78,6 +79,11 @@ in-conversation corrections and explicit preferences.
 """
 
 
+def _toml_escape(value: str) -> str:
+    """Escape backslashes and double quotes for safe TOML string interpolation."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
 class CodexAdapter(CLIAdapter):
     """Adapter for OpenAI Codex CLI."""
 
@@ -115,7 +121,7 @@ class CodexAdapter(CLIAdapter):
 
         section = (
             "\n[mcp_servers.truememory]\n"
-            f'command = "{py}"\n'
+            f'command = "{_toml_escape(py)}"\n'
             'args = ["-m", "truememory.mcp_server"]\n'
         )
 
@@ -140,6 +146,9 @@ class CodexAdapter(CLIAdapter):
             except OSError:
                 existing_text = ""
 
+        # Migrate any legacy [[hooks]] blocks before appending new ones
+        existing_text = self._remove_legacy_hook_blocks(existing_text)
+
         existing_hooks = self._parse_existing_hooks(existing_text)
 
         lines_to_append: list[str] = []
@@ -151,14 +160,19 @@ class CodexAdapter(CLIAdapter):
             cmd = self._build_command(py, script_path, user_id, db_path)
 
             lines_to_append.append("")
-            lines_to_append.append("[[hooks]]")
-            lines_to_append.append(f'event = "{event}"')
-            lines_to_append.append(f'command = "{cmd}"')
+            lines_to_append.append(f"[[hooks.{event}]]")
+            lines_to_append.append("")
+            lines_to_append.append(f"[[hooks.{event}.hooks]]")
+            lines_to_append.append('type = "command"')
+            lines_to_append.append(f'command = "{_toml_escape(cmd)}"')
             lines_to_append.append(f'timeout = {info["timeout"]}')
 
         if lines_to_append:
             new_text = existing_text.rstrip() + "\n" + "\n".join(lines_to_append) + "\n"
             _CONFIG_PATH.write_text(new_text, encoding="utf-8")
+        elif existing_text != (_CONFIG_PATH.read_text(encoding="utf-8") if _CONFIG_PATH.exists() else ""):
+            # Legacy blocks were removed; write updated text even if nothing new appended
+            _CONFIG_PATH.write_text(existing_text, encoding="utf-8")
 
     def uninstall(self) -> None:
         if not _CONFIG_PATH.exists():
@@ -170,6 +184,7 @@ class CodexAdapter(CLIAdapter):
 
         text = self._remove_mcp_section(text)
         text = self._remove_hook_blocks(text)
+        text = self._remove_legacy_hook_blocks(text)
         _CONFIG_PATH.write_text(text, encoding="utf-8")
 
     def verify(self) -> bool:
@@ -210,44 +225,88 @@ class CodexAdapter(CLIAdapter):
         return " ".join(shlex.quote(p) for p in parts)
 
     @staticmethod
-    def _parse_existing_hooks(toml_text: str) -> list[dict]:
+    def _parse_existing_hooks(toml_text: str) -> dict:
+        """Parse hooks from TOML text, returning ``{event: [matcher_groups]}``."""
         if not toml_text.strip():
-            return []
+            return {}
         try:
             import tomllib
-            data = tomllib.loads(toml_text)
-            return data.get("hooks", [])
         except ModuleNotFoundError:
-            hooks: list[dict] = []
-            for block in re.split(r'(?=^\[\[hooks\]\])', toml_text, flags=re.MULTILINE):
-                if not block.strip().startswith("[[hooks]]"):
-                    continue
-                entry: dict[str, str] = {}
-                for line in block.splitlines()[1:]:
-                    line = line.strip()
-                    if not line or line.startswith("["):
-                        break
-                    m = re.match(r'(\w+)\s*=\s*"([^"]*)"', line)
-                    if m:
-                        entry[m.group(1)] = m.group(2)
-                    else:
-                        m = re.match(r'(\w+)\s*=\s*(\d+)', line)
-                        if m:
-                            entry[m.group(1)] = m.group(2)
-                if entry:
-                    hooks.append(entry)
-            return hooks
-        except Exception:
-            return []
+            try:
+                import tomli as tomllib  # type: ignore[no-redef]
+            except ModuleNotFoundError:
+                tomllib = None  # type: ignore[assignment]
+
+        if tomllib is not None:
+            try:
+                data = tomllib.loads(toml_text)
+                return data.get("hooks", {})
+            except Exception:
+                pass
+
+        # Regex fallback for [[hooks.EventName]] + [[hooks.EventName.hooks]]
+        hooks: dict = {}
+        current_event: str | None = None
+        current_group: dict | None = None
+        current_hook: dict | None = None
+
+        for line in toml_text.splitlines():
+            stripped = line.strip()
+
+            # [[hooks.EventName.hooks]] — nested hook entry
+            m = re.match(r'^\[\[hooks\.(\w+)\.hooks\]\]$', stripped)
+            if m:
+                ev = m.group(1)
+                current_hook = {}
+                if current_group is not None:
+                    current_group.setdefault("hooks", []).append(current_hook)
+                current_event = ev
+                continue
+
+            # [[hooks.EventName]] — matcher group
+            m = re.match(r'^\[\[hooks\.(\w+)\]\]$', stripped)
+            if m:
+                ev = m.group(1)
+                current_event = ev
+                current_group = {}
+                current_hook = None
+                hooks.setdefault(ev, []).append(current_group)
+                continue
+
+            # Any other section header — stop current block
+            if stripped.startswith("["):
+                current_event = None
+                current_group = None
+                current_hook = None
+                continue
+
+            if not stripped or current_event is None:
+                continue
+
+            # key = value
+            kv = re.match(r'(\w+)\s*=\s*"([^"]*)"', stripped)
+            if kv:
+                target = current_hook if current_hook is not None else current_group
+                if target is not None:
+                    target[kv.group(1)] = kv.group(2)
+                continue
+            kv = re.match(r'(\w+)\s*=\s*(\d+)', stripped)
+            if kv:
+                target = current_hook if current_hook is not None else current_group
+                if target is not None:
+                    target[kv.group(1)] = int(kv.group(2))
+
+        return hooks
 
     @staticmethod
-    def _event_already_registered(hooks: list[dict], event: str) -> bool:
-        for h in hooks:
-            if (
-                h.get("event") == event
-                and _TRUEMEMORY_MARKER in h.get("command", "").lower()
-            ):
-                return True
+    def _event_already_registered(hooks: dict, event: str) -> bool:
+        matcher_groups = hooks.get(event, [])
+        for mg in matcher_groups:
+            for hook_entry in mg.get("hooks", []):
+                handler = hook_entry if isinstance(hook_entry, dict) else {}
+                cmd = handler.get("command", "")
+                if _TRUEMEMORY_MARKER in cmd.lower():
+                    return True
         return False
 
     @staticmethod
@@ -265,10 +324,15 @@ class CodexAdapter(CLIAdapter):
 
     def _has_hook_entries_in_text(self, text: str) -> bool:
         hooks = self._parse_existing_hooks(text)
-        return any(
-            _TRUEMEMORY_MARKER in h.get("command", "").lower()
-            for h in hooks
-        )
+        for event, matcher_groups in hooks.items():
+            if event == "state":
+                continue
+            for mg in matcher_groups:
+                for hook_entry in mg.get("hooks", []):
+                    handler = hook_entry if isinstance(hook_entry, dict) else {}
+                    if _TRUEMEMORY_MARKER in handler.get("command", "").lower():
+                        return True
+        return False
 
     def _has_hook_entries(self) -> bool:
         if not _CONFIG_PATH.exists():
@@ -306,6 +370,49 @@ class CodexAdapter(CLIAdapter):
 
     @staticmethod
     def _remove_hook_blocks(text: str) -> str:
+        """Remove ``[[hooks.EventName]]`` blocks that contain the truememory marker."""
+        lines = text.splitlines(keepends=True)
+        cleaned: list[str] = []
+
+        i = 0
+        while i < len(lines):
+            stripped = lines[i].strip()
+
+            # Match [[hooks.EventName]]
+            m = re.match(r'^\[\[hooks\.(\w+)\]\]$', stripped)
+            if m:
+                event = m.group(1)
+                block_lines = [lines[i]]
+                i += 1
+
+                # Collect everything belonging to this block: key=value lines,
+                # blank lines, and nested [[hooks.EventName.hooks]] sub-sections.
+                while i < len(lines):
+                    s = lines[i].strip()
+                    # Nested sub-section for same event
+                    if s == f"[[hooks.{event}.hooks]]":
+                        block_lines.append(lines[i])
+                        i += 1
+                        continue
+                    # Another top-level section header — stop
+                    if s.startswith("["):
+                        break
+                    block_lines.append(lines[i])
+                    i += 1
+
+                block_text = "".join(block_lines)
+                if _TRUEMEMORY_MARKER not in block_text.lower():
+                    cleaned.extend(block_lines)
+                continue
+
+            cleaned.append(lines[i])
+            i += 1
+
+        return "".join(cleaned)
+
+    @staticmethod
+    def _remove_legacy_hook_blocks(text: str) -> str:
+        """Remove old-format ``[[hooks]]`` blocks (with ``event =`` keys) written by the buggy adapter."""
         lines = text.splitlines(keepends=True)
         cleaned: list[str] = []
 
@@ -316,12 +423,11 @@ class CodexAdapter(CLIAdapter):
             if stripped == "[[hooks]]":
                 block_lines = [lines[i]]
                 i += 1
-                while (
-                    i < len(lines)
-                    and lines[i].strip()
-                    and not lines[i].strip().startswith("[[")
-                    and not lines[i].strip().startswith("[")
-                ):
+                # Collect all lines in this block, including blank lines
+                while i < len(lines):
+                    s = lines[i].strip()
+                    if s.startswith("[") or s.startswith("[["):
+                        break
                     block_lines.append(lines[i])
                     i += 1
 
