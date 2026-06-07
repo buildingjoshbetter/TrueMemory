@@ -50,6 +50,7 @@ export default {
     let lastProcessedPrompt = null;
 
     api.on("session_start", async (event) => {
+      lastProcessedPrompt = null;
       try {
         const input = JSON.stringify({
           session_id: event.sessionId || "openclaw",
@@ -94,11 +95,16 @@ export default {
       // prompt. before_tool_call fires on every tool invocation, but the
       // hook buffers messages and triggers recall — both should happen
       // once per user message, not once per tool call.
-      const prompt = event.lastUserPrompt || "";
-      if (!prompt || prompt === lastProcessedPrompt) {
+      //
+      // If event.lastUserPrompt is not available on this event type,
+      // fall back to running on every call rather than silently skipping.
+      const prompt = event.lastUserPrompt ?? event.userPrompt ?? null;
+      if (prompt === null) {
+        // Field not present — run unconditionally rather than becoming a no-op
+      } else if (!prompt || prompt === lastProcessedPrompt) {
         return;
       }
-      lastProcessedPrompt = prompt;
+      if (prompt) lastProcessedPrompt = prompt;
 
       try {
         const input = JSON.stringify({
