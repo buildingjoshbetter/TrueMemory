@@ -1426,13 +1426,13 @@ class TrueMemoryEngine:
                     # Cross-source feedback (A1): if temporal found a date
                     # window, re-scope vector search to that window for
                     # additional candidates.
-                    if self._has_hybrid and intent.get("start_date") and intent.get("end_date"):
+                    if self._has_hybrid and intent.get("after") and intent.get("before"):
                         try:
                             from truememory.fts_search import search_fts_in_range
                             range_results = search_fts_in_range(
                                 self.conn, query,
-                                after=intent["start_date"],
-                                before=intent["end_date"],
+                                after=intent["after"],
+                                before=intent["before"],
                                 limit=limit,
                             )
                             if range_results:
