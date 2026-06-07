@@ -553,6 +553,12 @@ def truememory_store(
         metadata: Optional JSON string of metadata.
     """
     _touch_search_time()
+    # Reject empty / whitespace-only content with an explicit error instead of
+    # silently returning a skip-marker record (id=null). The lower-level
+    # Memory.add() returns {"id": None, ...} for empty content, which looks
+    # success-shaped to a calling agent and hides the no-op (issue #425).
+    if not content or not content.strip():
+        return json.dumps({"error": "Content is empty or whitespace-only; nothing stored."})
     MAX_CONTENT_LENGTH = 50_000
     if len(content) > MAX_CONTENT_LENGTH:
         return json.dumps({"error": f"Content too large ({len(content)} chars). Maximum is {MAX_CONTENT_LENGTH}."})
