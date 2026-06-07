@@ -485,6 +485,39 @@ def test_install_updates_stale_millisecond_timeouts(tmp_path, monkeypatch):
     assert hooks["preCompact"][0]["timeout"] == 5
 
 
+def test_install_preserves_user_customised_timeouts(tmp_path, monkeypatch):
+    """If a user manually changes a TrueMemory hook timeout to a sane value
+    (e.g. 30s), re-install must NOT overwrite it.  Only ms-scale values
+    (>= 1000) are migrated."""
+    from truememory.hooks.adapters import cursor as cursor_mod
+    hook_path = tmp_path / "hooks.json"
+    monkeypatch.setattr(cursor_mod, "_HOOK_CONFIG", hook_path)
+
+    customised_config = {
+        "version": 1,
+        "hooks": {
+            "sessionStart": [
+                {"command": "/usr/bin/python3 /path/to/truememory/session_start.py", "timeout": 30}
+            ],
+            "stop": [
+                {"command": "/usr/bin/python3 /path/to/truememory/stop.py", "timeout": 15}
+            ],
+        },
+    }
+    hook_path.write_text(__import__("json").dumps(customised_config), encoding="utf-8")
+
+    from truememory.hooks.adapters.cursor import CursorAdapter
+    adapter = CursorAdapter()
+    adapter.install_hooks(python_path="/usr/bin/python3")
+
+    data = __import__("json").loads(hook_path.read_text(encoding="utf-8"))
+    hooks = data["hooks"]
+
+    # User's custom timeout values should be preserved, not reset
+    assert hooks["sessionStart"][0]["timeout"] == 30
+    assert hooks["stop"][0]["timeout"] == 15
+
+
 def test_install_preserves_non_truememory_hooks(tmp_path, monkeypatch):
     """Migration must not remove hooks that belong to other tools."""
     from truememory.hooks.adapters import cursor as cursor_mod

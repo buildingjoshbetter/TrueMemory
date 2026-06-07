@@ -173,7 +173,10 @@ class CursorAdapter(CLIAdapter):
             else:
                 hooks.pop(stale, None)
 
-        # --- Migration: update existing TrueMemory hook timeouts ---
+        # --- Migration: fix ms-valued timeouts from prior buggy versions ---
+        # Only correct values that are clearly wrong (>= 1000 means the old
+        # code wrote milliseconds instead of seconds).  User-customised
+        # timeouts in a sensible range (1-999) are left alone.
         for event, info in _HOOK_EVENTS.items():
             event_list = hooks.get(event)
             if not isinstance(event_list, list):
@@ -182,7 +185,8 @@ class CursorAdapter(CLIAdapter):
                 if (
                     isinstance(entry, dict)
                     and _TRUEMEMORY_MARKER in entry.get("command", "").lower()
-                    and entry.get("timeout") != info["timeout"]
+                    and isinstance(entry.get("timeout"), (int, float))
+                    and entry["timeout"] >= 1000
                 ):
                     entry["timeout"] = info["timeout"]
 
