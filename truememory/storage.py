@@ -620,6 +620,21 @@ def delete_message(conn: sqlite3.Connection, msg_id: int) -> bool:
             except sqlite3.OperationalError:
                 pass
 
+        for tbl, col in (
+            ("fact_timeline", "source_message_id"),
+            ("landmark_events", "source_message_id"),
+            ("surprise_scores", "message_id"),
+        ):
+            try:
+                conn.execute(f"DELETE FROM {tbl} WHERE {col} = ?", (msg_id,))
+            except sqlite3.OperationalError:
+                pass
+        for col in ("cause_msg_id", "effect_msg_id"):
+            try:
+                conn.execute(f"DELETE FROM causal_edges WHERE {col} = ?", (msg_id,))
+            except sqlite3.OperationalError:
+                pass
+
     conn.commit()
     return deleted
 
