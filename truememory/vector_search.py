@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import math
 import os
 import re
 import struct
@@ -415,9 +416,16 @@ def serialize_f32(vector) -> bytes:
 
     Accepts any array-like (list, tuple, numpy array).  Returns a
     ``struct``-packed blob of 32-bit floats.
+
+    Raises ValueError if any element is NaN or Inf.
     """
     if isinstance(vector, np.ndarray):
+        if not np.all(np.isfinite(vector)):
+            raise ValueError("Embedding contains NaN or Inf values")
         vector = vector.tolist()
+    else:
+        if any(math.isnan(v) or math.isinf(v) for v in vector):
+            raise ValueError("Embedding contains NaN or Inf values")
     return struct.pack(f"{len(vector)}f", *vector)
 
 
