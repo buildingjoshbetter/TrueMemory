@@ -25,19 +25,19 @@ _HOOK_CONFIG = _KIMI_DIR / "config.toml"
 _HOOK_EVENTS = {
     "SessionStart": {
         "script": "session_start.py",
-        "timeout": 10000,
+        "timeout": 10,  # seconds (Kimi CLI convention)
     },
     "Stop": {
         "script": "stop.py",
-        "timeout": 5000,
+        "timeout": 5,  # seconds
     },
     "UserPromptSubmit": {
         "script": "user_prompt_submit.py",
-        "timeout": 5000,
+        "timeout": 5,  # seconds
     },
     "PreCompact": {
         "script": "compact.py",
-        "timeout": 5000,
+        "timeout": 5,  # seconds
     },
 }
 
@@ -264,7 +264,7 @@ class KimiAdapter(CLIAdapter):
             if stripped == "[[hooks]]":
                 block_lines = [line]
                 i += 1
-                while i < len(lines) and lines[i].strip() and not lines[i].strip().startswith("[["):
+                while i < len(lines) and not lines[i].strip().startswith("[["):
                     block_lines.append(lines[i])
                     i += 1
 
