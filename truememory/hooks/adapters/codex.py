@@ -80,8 +80,13 @@ in-conversation corrections and explicit preferences.
 
 
 def _toml_escape(value: str) -> str:
-    """Escape backslashes and double quotes for safe TOML string interpolation."""
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+    """Escape backslashes, double quotes, and control chars for safe TOML string interpolation."""
+    value = value.replace("\\", "\\\\")
+    value = value.replace('"', '\\"')
+    value = value.replace("\n", "\\n")
+    value = value.replace("\r", "\\r")
+    value = value.replace("\t", "\\t")
+    return value
 
 
 class CodexAdapter(CLIAdapter):
@@ -240,7 +245,13 @@ class CodexAdapter(CLIAdapter):
         if tomllib is not None:
             try:
                 data = tomllib.loads(toml_text)
-                return data.get("hooks", {})
+                hooks = data.get("hooks", {})
+                # Guard: if legacy [[hooks]] entries made `hooks` an
+                # array-of-tables (list), return empty so callers that
+                # call .get()/.items() on the result don't crash.
+                if not isinstance(hooks, dict):
+                    return {}
+                return hooks
             except Exception:
                 pass
 
@@ -326,6 +337,8 @@ class CodexAdapter(CLIAdapter):
         hooks = self._parse_existing_hooks(text)
         for event, matcher_groups in hooks.items():
             if event == "state":
+                # Codex config may have a [hooks.state] table for internal
+                # state tracking; skip it when scanning for hook commands.
                 continue
             for mg in matcher_groups:
                 for hook_entry in mg.get("hooks", []):
@@ -412,7 +425,15 @@ class CodexAdapter(CLIAdapter):
 
     @staticmethod
     def _remove_legacy_hook_blocks(text: str) -> str:
-        """Remove old-format ``[[hooks]]`` blocks (with ``event =`` keys) written by the buggy adapter."""
+        """Remove ALL old-format ``[[hooks]]`` flat array-of-tables blocks.
+
+        Every ``[[hooks]]`` block is removed regardless of whether it belongs
+        to TrueMemory, because any surviving ``[[hooks]]`` entry makes
+        ``hooks`` an array-of-tables in TOML, which conflicts with the nested
+        ``[[hooks.EventName]]`` format (requires ``hooks`` to be a table).
+        Leaving even one ``[[hooks]]`` block produces invalid TOML when
+        combined with ``[[hooks.EventName]]``.
+        """
         lines = text.splitlines(keepends=True)
         cleaned: list[str] = []
 
@@ -421,19 +442,13 @@ class CodexAdapter(CLIAdapter):
             stripped = lines[i].strip()
 
             if stripped == "[[hooks]]":
-                block_lines = [lines[i]]
+                # Skip entire block -- incompatible flat format.
                 i += 1
-                # Collect all lines in this block, including blank lines
                 while i < len(lines):
                     s = lines[i].strip()
                     if s.startswith("[") or s.startswith("[["):
                         break
-                    block_lines.append(lines[i])
                     i += 1
-
-                block_text = "".join(block_lines)
-                if _TRUEMEMORY_MARKER not in block_text.lower():
-                    cleaned.extend(block_lines)
                 continue
 
             cleaned.append(lines[i])

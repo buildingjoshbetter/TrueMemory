@@ -394,8 +394,8 @@ def test_remove_hook_blocks_correct_format():
 
 # -- Legacy hook block removal --
 
-def test_remove_legacy_hook_blocks_with_blank_lines():
-    """Old adapter had a bug where blank lines within a block would terminate collection."""
+def test_remove_legacy_hook_blocks_removes_all():
+    """ALL [[hooks]] blocks must be removed to prevent TOML type conflict with [[hooks.EventName]]."""
     from truememory.hooks.adapters.codex import CodexAdapter
     text = (
         '[[hooks]]\n'
@@ -408,9 +408,10 @@ def test_remove_legacy_hook_blocks_with_blank_lines():
         'command = "my-cmd"\n'
     )
     result = CodexAdapter._remove_legacy_hook_blocks(text)
-    assert "truememory" not in result.lower()
-    assert 'event = "MyCustomHook"' in result
-    assert 'command = "my-cmd"' in result
+    # ALL [[hooks]] blocks removed -- even non-truememory ones --
+    # because they conflict with [[hooks.EventName]] TOML structure.
+    assert "[[hooks]]" not in result
+    assert result.strip() == ""
 
 
 # -- TOML escape helper --
@@ -552,3 +553,83 @@ def test_build_command_with_user_and_db():
     assert "--user" in cmd
     assert "alice" in cmd
     assert "--db" in cmd
+
+
+# -- _parse_existing_hooks with legacy list data --
+
+def test_parse_existing_hooks_returns_empty_for_list():
+    """If hooks is an array-of-tables (list), return empty dict instead of crashing."""
+    from truememory.hooks.adapters.codex import CodexAdapter
+    text = (
+        '[[hooks]]\n'
+        'event = "SessionStart"\n'
+        'command = "some-cmd"\n'
+        'timeout = 10\n'
+    )
+    result = CodexAdapter._parse_existing_hooks(text)
+    # Legacy [[hooks]] makes hooks a list in TOML; parser must return {}
+    assert isinstance(result, dict)
+
+
+# -- _toml_escape control characters --
+
+def test_toml_escape_control_chars():
+    from truememory.hooks.adapters.codex import _toml_escape
+    assert _toml_escape("line1\nline2") == "line1\\nline2"
+    assert _toml_escape("col1\tcol2") == "col1\\tcol2"
+    assert _toml_escape("cr\rhere") == "cr\\rhere"
+
+
+# -- Legacy migration removes all [[hooks]] blocks --
+
+def test_install_hooks_migrates_all_legacy_blocks(tmp_path, monkeypatch):
+    """Even non-TrueMemory [[hooks]] blocks must be removed to avoid TOML type conflict."""
+    from truememory.hooks.adapters import codex as codex_mod
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[general]\ntheme = "dark"\n\n'
+        '[[hooks]]\n'
+        'event = "MyCustomHook"\n'
+        'command = "my-custom-cmd"\n'
+        'timeout = 5\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(codex_mod, "_CONFIG_PATH", config_path)
+    from truememory.hooks.adapters.codex import CodexAdapter
+    adapter = CodexAdapter()
+    adapter.install_hooks(python_path="/usr/bin/python3")
+
+    text = config_path.read_text(encoding="utf-8")
+    # No [[hooks]] blocks should survive
+    assert "[[hooks]]" not in text
+    # Correct nested format must be present
+    assert "[[hooks.SessionStart]]" in text
+    assert 'theme = "dark"' in text
+
+
+def test_uninstall_cleans_mixed_legacy_and_nested(tmp_path, monkeypatch):
+    """Uninstall handles configs that have both legacy [[hooks]] and nested [[hooks.X]] blocks."""
+    from truememory.hooks.adapters import codex as codex_mod
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[general]\ntheme = "dark"\n\n'
+        '[[hooks]]\n'
+        'event = "SessionStart"\n'
+        'command = "/usr/bin/python3 /path/to/truememory/session_start.py"\n'
+        'timeout = 10000\n\n'
+        '[[hooks.Stop]]\n\n'
+        '[[hooks.Stop.hooks]]\n'
+        'type = "command"\n'
+        'command = "/usr/bin/python3 /path/to/truememory/stop.py"\n'
+        'timeout = 5\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(codex_mod, "_CONFIG_PATH", config_path)
+    from truememory.hooks.adapters.codex import CodexAdapter
+    adapter = CodexAdapter()
+    adapter.uninstall()
+
+    text = config_path.read_text(encoding="utf-8")
+    assert 'theme = "dark"' in text
+    assert "truememory" not in text.lower()
+    assert "[[hooks]]" not in text
