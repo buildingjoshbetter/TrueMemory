@@ -230,6 +230,24 @@ def _run_ingest(args):
     except Exception:
         pass
 
+    # issue #422: this point is only reached on a confirmed-successful ingest
+    # (all error paths above sys.exit before here). Remove the backlog
+    # .processing claim now that the work is done. Crashed workers never reach
+    # this line, so their claim is left for the stale watcher to re-queue.
+    try:
+        from truememory.ingest.hooks._shared import clear_backlog_processing
+        clear_backlog_processing(args.session)
+    except Exception as e:
+        # Non-fatal: the ingest already succeeded. But if we can't drop the
+        # claim, the stale watcher will (eventually) restore the .processing
+        # marker to .json and re-queue this already-done session, wasting an
+        # extraction. Log it so that wasted re-runs are diagnosable instead of
+        # silently swallowed.
+        logging.getLogger(__name__).warning(
+            "failed to clear backlog .processing claim for session %r: %s",
+            args.session, e,
+        )
+
     _cascade_next()
 
 
@@ -316,7 +334,11 @@ def _cascade_next() -> None:
                 register_spawned_pid(proc.pid)
                 record_stale_processing_pid(claimed_path, proc.pid)
 
-            claimed_path.unlink(missing_ok=True)
+            # NOTE (issue #422): do NOT unlink the .processing claim on spawn.
+            # The claim stays until the spawned worker confirms success (the
+            # CLI calls clear_backlog_processing) or the stale watcher restores
+            # it after a dead-worker timeout. Unlinking here would silently drop
+            # the session if the spawned worker exits non-zero.
             logging.getLogger(__name__).info(
                 "Cascade: spawned next ingest for session %s (PID %d)",
                 data.get("session_id", "?"), proc.pid,

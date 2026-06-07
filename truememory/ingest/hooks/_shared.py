@@ -1,6 +1,7 @@
 """Shared utilities for TrueMemory hooks."""
 
 from pathlib import Path
+import errno
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ except ImportError:
 log = logging.getLogger(__name__)
 
 EXTRACTED_DIR = Path.home() / ".truememory" / "extracted"
+BACKLOG_DIR = Path.home() / ".truememory" / "backlog"
 
 _BUDGET_FILE = Path.home() / ".truememory" / ".extraction_budget"
 _MAX_EXTRACTIONS_PER_HOUR = int(os.environ.get("TRUEMEMORY_MAX_EXTRACTIONS_PER_HOUR", "20"))
@@ -79,14 +81,30 @@ def should_extract_session(session_id: str, transcript_path: str) -> bool:
 
 
 def _pid_is_alive(pid: int) -> bool:
-    """Check if a PID is still running."""
+    """Check if a PID is still running.
+
+    Distinguishes "no such process" (dead) from "permission denied" (alive
+    but owned by another user). ``os.kill(pid, 0)`` raises ``ProcessLookupError``
+    (errno ESRCH) only when the process genuinely does not exist; an
+    ``EPERM`` error means the process *is* alive but we lack permission to
+    signal it, so it must be treated as alive — otherwise a live-but-EPERM
+    worker's claim would be wrongly reclaimed/re-queued.
+    """
     if pid <= 0:
         return False
     try:
         os.kill(pid, 0)
         return True
-    except (OSError, ProcessLookupError):
+    except ProcessLookupError:
+        # errno.ESRCH — no such process: genuinely dead.
         return False
+    except PermissionError:
+        # errno.EPERM — process exists but is not signalable by us: alive.
+        return True
+    except OSError as e:
+        # ESRCH may surface as a bare OSError on some platforms; treat only
+        # that as dead, anything else (e.g. EPERM) as alive to be safe.
+        return e.errno != errno.ESRCH
 
 
 def check_extraction_budget() -> bool:
@@ -131,6 +149,40 @@ def record_stale_processing_pid(processing_path: Path, pid: int) -> None:
         processing_path.write_text(json.dumps(data), encoding="utf-8")
     except (OSError, json.JSONDecodeError):
         pass
+
+
+def clear_backlog_processing(session_id: str, backlog_dir: Path | None = None) -> bool:
+    """Remove a backlog ``.processing`` claim marker on confirmed success.
+
+    Called by the ingest CLI once a session has been ingested successfully so
+    that the claim marker for that session is deleted. If the worker instead
+    crashes / exits non-zero, this is NOT called, the ``.processing`` marker is
+    left in place, and ``cleanup_stale_processing`` later restores it to
+    ``.json`` (once the claiming PID is dead and the 30-minute threshold has
+    elapsed) so the session is re-queued rather than silently lost.
+
+    The drainers (``session_start._drain_backlog`` and ``cli._cascade_next``)
+    name claim markers ``{sanitized_session_id}.processing``, mirroring how
+    ``stop._queue_to_backlog`` names ``{sanitized_session_id}.json``. We
+    reconstruct that path from ``session_id`` here.
+
+    Returns True if a marker was removed, False otherwise (including when no
+    marker existed, which is the common case for non-backlog ingests spawned
+    directly by the Stop hook).
+    """
+    if not session_id or session_id == "unknown":
+        return False
+    safe_id = _safe_session_id(session_id)
+    if not safe_id:
+        return False
+    target = (backlog_dir or BACKLOG_DIR) / f"{safe_id}.processing"
+    try:
+        target.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
 
 
 def cleanup_stale_processing(backlog_dir: Path) -> None:
