@@ -37,10 +37,11 @@ def server(monkeypatch, tmp_path):
     monkeypatch.setattr(ms, "_memory", None)
 
 
-@pytest.mark.parametrize("bad_content", ["", "   ", "\t", "\n", "  \t\n  "])
+@pytest.mark.parametrize("bad_content", [None, "", "   ", "\t", "\n", "  \t\n  "])
 def test_store_empty_returns_error_object(server, bad_content):
-    """Empty / whitespace-only content must return an {"error": ...} object,
-    never a success-shaped record with id:null (issue #425)."""
+    """None / empty / whitespace-only content must return an {"error": ...}
+    object, never a success-shaped record with id:null and never an
+    AttributeError from calling .strip() on None (issue #425)."""
     result = json.loads(server.truememory_store(bad_content))
     assert "error" in result, (
         f"#425 regression: content={bad_content!r} did not return an error object; got {result!r}"
@@ -49,6 +50,16 @@ def test_store_empty_returns_error_object(server, bad_content):
     assert "id" not in result, (
         f"#425 regression: content={bad_content!r} returned a record-shaped payload: {result!r}"
     )
+
+
+def test_store_none_content_returns_error_not_attributeerror(server):
+    """content=None must be rejected up front with an {"error": ...} object.
+    The declared type is `str`, but an MCP client / agent can pass null; the
+    guard must check `content is None` BEFORE any .strip() call so this never
+    raises AttributeError (issue #425)."""
+    result = json.loads(server.truememory_store(None))
+    assert "error" in result, f"#425 regression: content=None did not error; got {result!r}"
+    assert "id" not in result, f"#425 regression: content=None returned record-shaped payload: {result!r}"
 
 
 def test_store_empty_does_not_insert_a_row(server):
