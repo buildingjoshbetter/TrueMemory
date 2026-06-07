@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import sys
 
 import pytest
 
@@ -34,6 +35,27 @@ from truememory.vector_search import (
 _conn = sqlite3.connect(":memory:")
 _HAS_LOAD_EXTENSION = hasattr(_conn, "enable_load_extension")
 _conn.close()
+
+
+@pytest.fixture(autouse=True)
+def _pin_embedder_identity(monkeypatch):
+    """Pin ``EMBEDDING_MODEL`` to the edge baseline for every test here.
+
+    Issue #426: these tests assume the default ``model2vec`` (edge) identity,
+    but ``vector_search.EMBEDDING_MODEL`` is resolved at import time from the
+    ambient ``TRUEMEMORY_EMBED_MODEL`` env var / ``~/.truememory/config.json``.
+    On a developer machine configured for Base/Pro the global is already
+    ``qwen3_256``, so the drift tests that monkeypatch it to ``qwen3_256``
+    become no-ops and silently fail to raise. Pinning here makes the file
+    hermetic regardless of local config.
+    """
+    monkeypatch.setattr(vector_search, "EMBEDDING_MODEL", "model2vec")
+    monkeypatch.setattr(vector_search, "_embedding_dim", 256)
+    # The module also imported EMBEDDING_MODEL by name at top of file; keep that
+    # binding in sync so assertions comparing against it match the pinned global.
+    monkeypatch.setattr(
+        sys.modules[__name__], "EMBEDDING_MODEL", "model2vec", raising=False
+    )
 
 
 def _fresh_conn(tmp_path) -> sqlite3.Connection:
@@ -76,10 +98,16 @@ def test_dim_mismatch_raises_migration_error(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.network
 @pytest.mark.skipif(not _HAS_LOAD_EXTENSION, reason="sqlite3 missing extension loading support")
 def test_metadata_written_on_build_vectors(tmp_path):
     """`build_vectors` must persist (embed_model, embed_dim) so later opens
-    can detect drift."""
+    can detect drift.
+
+    Marked ``network``: ``build_vectors`` loads the model2vec embedder via
+    ``StaticModel.from_pretrained(...)`` which downloads from HuggingFace on a
+    cold cache. Excluded from the CI gate (``-m "not network"``) to keep the
+    gate deterministic; still run in the dedicated non-gating network job."""
     conn = _fresh_conn(tmp_path)
     init_vec_table(conn)
 
@@ -162,9 +190,13 @@ def test_fresh_db_init_vec_table_no_error(tmp_path):
     init_vec_table(conn)
 
 
+@pytest.mark.network
 @pytest.mark.skipif(not _HAS_LOAD_EXTENSION, reason="sqlite3 missing extension loading support")
 def test_same_model_no_raise(tmp_path):
-    """Re-opening with the same model must not raise."""
+    """Re-opening with the same model must not raise.
+
+    Marked ``network``: calls ``build_vectors`` (HuggingFace model download on
+    cold cache). Excluded from the CI gate; runs in the network job."""
     conn = _fresh_conn(tmp_path)
     init_vec_table(conn)
     conn.execute("INSERT INTO messages(content) VALUES ('x')")
