@@ -1,7 +1,0 @@
-{
-  "name": "truememory",
-  "version": "1.0.0",
-  "description": "TrueMemory persistent memory integration for OpenClaw",
-  "main": "index.js",
-  "activationEvents": ["onSessionStart", "onSessionEnd", "onToolCall", "onCompress"]
-}

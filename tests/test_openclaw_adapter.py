@@ -1,6 +1,6 @@
 """Tests for the OpenClaw adapter (#184).
 
-Validates JSON config merge for MCP (mcpServers key), JS plugin installation,
+Validates JSON config merge for MCP (mcp.servers key), JS plugin installation,
 detection, and config safety without network calls.
 """
 from __future__ import annotations
@@ -73,17 +73,18 @@ def test_install_mcp_creates_config(tmp_path, monkeypatch):
     OpenClawAdapter().install_mcp(python_path="/usr/bin/python3")
 
     data = json.loads(config_path.read_text(encoding="utf-8"))
-    # Should use top-level mcpServers, not nested mcp.servers
-    assert "mcpServers" in data
-    assert "truememory" in data["mcpServers"]
-    assert data["mcpServers"]["truememory"]["command"] == "/usr/bin/python3"
+    # Should use nested mcp.servers, not top-level mcpServers
+    assert "mcp" in data
+    assert "servers" in data["mcp"]
+    assert "truememory" in data["mcp"]["servers"]
+    assert data["mcp"]["servers"]["truememory"]["command"] == "/usr/bin/python3"
 
 
 def test_install_mcp_preserves_existing(tmp_path, monkeypatch):
     from truememory.hooks.adapters import openclaw as oc_mod
     config_path = tmp_path / "openclaw.json"
     config_path.write_text(json.dumps({
-        "mcpServers": {"other": {"command": "x"}},
+        "mcp": {"servers": {"other": {"command": "x"}}},
         "settings": {"debug": True},
     }), encoding="utf-8")
     monkeypatch.setattr(oc_mod, "_CONFIG_PATH", config_path)
@@ -91,8 +92,8 @@ def test_install_mcp_preserves_existing(tmp_path, monkeypatch):
     OpenClawAdapter().install_mcp(python_path="/usr/bin/python3")
 
     data = json.loads(config_path.read_text(encoding="utf-8"))
-    assert "truememory" in data["mcpServers"]
-    assert "other" in data["mcpServers"]
+    assert "truememory" in data["mcp"]["servers"]
+    assert "other" in data["mcp"]["servers"]
     assert data["settings"]["debug"] is True
 
 
@@ -100,7 +101,7 @@ def test_install_mcp_handles_json5_comments(tmp_path, monkeypatch):
     from truememory.hooks.adapters import openclaw as oc_mod
     config_path = tmp_path / "openclaw.json"
     config_path.write_text(
-        '// OpenClaw config\n{\n  "mcpServers": {}\n}\n',
+        '// OpenClaw config\n{\n  "mcp": {"servers": {}}\n}\n',
         encoding="utf-8",
     )
     monkeypatch.setattr(oc_mod, "_CONFIG_PATH", config_path)
@@ -108,33 +109,45 @@ def test_install_mcp_handles_json5_comments(tmp_path, monkeypatch):
     OpenClawAdapter().install_mcp(python_path="/usr/bin/python3")
 
     data = json.loads(config_path.read_text(encoding="utf-8"))
-    assert "truememory" in data["mcpServers"]
+    assert "truememory" in data["mcp"]["servers"]
 
 
-def test_install_mcp_migrates_legacy_nested_path(tmp_path, monkeypatch):
-    """If old mcp.servers entry exists, it should be cleaned up."""
+def test_install_mcp_migrates_legacy_top_level(tmp_path, monkeypatch):
+    """If old top-level mcpServers entry exists, it should be cleaned up."""
     from truememory.hooks.adapters import openclaw as oc_mod
     config_path = tmp_path / "openclaw.json"
     config_path.write_text(json.dumps({
-        "mcp": {"servers": {"truememory": {"command": "old"}}},
+        "mcpServers": {"truememory": {"command": "old"}},
     }), encoding="utf-8")
     monkeypatch.setattr(oc_mod, "_CONFIG_PATH", config_path)
     from truememory.hooks.adapters.openclaw import OpenClawAdapter
     OpenClawAdapter().install_mcp(python_path="/usr/bin/python3")
 
     data = json.loads(config_path.read_text(encoding="utf-8"))
-    # New location should exist
-    assert "truememory" in data["mcpServers"]
-    # Old nested location should be cleaned up
-    assert "mcp" not in data or "truememory" not in data.get("mcp", {}).get("servers", {})
+    # New correct location should exist
+    assert "truememory" in data["mcp"]["servers"]
+    # Old top-level mcpServers should be cleaned up
+    assert "mcpServers" not in data or "truememory" not in data.get("mcpServers", {})
 
 
-def test_has_mcp_detects_legacy_path(tmp_path, monkeypatch):
-    """Detection should find entries at the old mcp.servers path too."""
+def test_has_mcp_detects_legacy_top_level(tmp_path, monkeypatch):
+    """Detection should find entries at the old top-level mcpServers path too."""
     from truememory.hooks.adapters import openclaw as oc_mod
     config_path = tmp_path / "openclaw.json"
     config_path.write_text(json.dumps({
-        "mcp": {"servers": {"truememory": {"command": "old"}}},
+        "mcpServers": {"truememory": {"command": "old"}},
+    }), encoding="utf-8")
+    monkeypatch.setattr(oc_mod, "_CONFIG_PATH", config_path)
+    from truememory.hooks.adapters.openclaw import OpenClawAdapter
+    assert OpenClawAdapter()._has_mcp_entry()
+
+
+def test_has_mcp_detects_correct_path(tmp_path, monkeypatch):
+    """Detection should find entries at the correct mcp.servers path."""
+    from truememory.hooks.adapters import openclaw as oc_mod
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text(json.dumps({
+        "mcp": {"servers": {"truememory": {"command": "python3"}}},
     }), encoding="utf-8")
     monkeypatch.setattr(oc_mod, "_CONFIG_PATH", config_path)
     from truememory.hooks.adapters.openclaw import OpenClawAdapter
@@ -152,18 +165,24 @@ def test_install_hooks_creates_plugin(tmp_path, monkeypatch):
 
     plugin_dir = plugins_dir / "truememory"
     assert plugin_dir.is_dir()
-    assert (plugin_dir / "plugin.json").exists()
+    assert (plugin_dir / "openclaw.plugin.json").exists()
+    assert (plugin_dir / "package.json").exists()
     assert (plugin_dir / "index.js").exists()
 
-    manifest = json.loads((plugin_dir / "plugin.json").read_text(encoding="utf-8"))
-    assert manifest["name"] == "truememory"
-    # Uses activationEvents (not events)
-    assert "onSessionStart" in manifest["activationEvents"]
-    assert "onSessionEnd" in manifest["activationEvents"]
+    manifest = json.loads((plugin_dir / "openclaw.plugin.json").read_text(encoding="utf-8"))
+    assert manifest["id"] == "truememory"
+    assert manifest["name"] == "TrueMemory"
+    # Uses activation.onStartup (not activationEvents)
+    assert manifest["activation"]["onStartup"] is True
+    # Must have configSchema (required by OpenClaw)
+    assert "configSchema" in manifest
+    # Should NOT have fabricated fields
+    assert "activationEvents" not in manifest
+    assert "main" not in manifest
 
 
-def test_install_hooks_uses_activate_api(tmp_path, monkeypatch):
-    """index.js should use module.exports.activate(ctx), not register(api)."""
+def test_install_hooks_uses_register_api(tmp_path, monkeypatch):
+    """index.js should use register(api) with api.on(), not activate(ctx)."""
     from truememory.hooks.adapters import openclaw as oc_mod
     plugins_dir = tmp_path / "plugins"
     monkeypatch.setattr(oc_mod, "_PLUGINS_DIR", plugins_dir)
@@ -171,12 +190,33 @@ def test_install_hooks_uses_activate_api(tmp_path, monkeypatch):
     OpenClawAdapter().install_hooks(python_path="/usr/bin/python3")
 
     js_content = (plugins_dir / "truememory" / "index.js").read_text(encoding="utf-8")
-    assert "activate(ctx)" in js_content
-    assert "ctx.onSessionStart" in js_content
-    assert "ctx.onSessionEnd" in js_content
-    # Should NOT use old api.on("before_agent_run", ...) pattern
-    assert "before_agent_run" not in js_content
-    assert "agent_end" not in js_content
+    # Should use register(api) pattern
+    assert "register(api)" in js_content
+    assert 'api.on("session_start"' in js_content
+    assert 'api.on("session_end"' in js_content
+    assert 'api.on("before_tool_call"' in js_content
+    assert 'api.on("before_compaction"' in js_content
+    # Should NOT use old fabricated activate(ctx) pattern
+    assert "activate(ctx)" not in js_content
+    assert "ctx.onSessionStart" not in js_content
+    assert "ctx.onSessionEnd" not in js_content
+    # Should use ESM imports, not CommonJS require
+    assert "require(" not in js_content
+    assert "module.exports" not in js_content
+
+
+def test_install_hooks_package_json_esm(tmp_path, monkeypatch):
+    """package.json should declare ESM module type and openclaw extensions."""
+    from truememory.hooks.adapters import openclaw as oc_mod
+    plugins_dir = tmp_path / "plugins"
+    monkeypatch.setattr(oc_mod, "_PLUGINS_DIR", plugins_dir)
+    from truememory.hooks.adapters.openclaw import OpenClawAdapter
+    OpenClawAdapter().install_hooks(python_path="/usr/bin/python3")
+
+    pkg = json.loads((plugins_dir / "truememory" / "package.json").read_text(encoding="utf-8"))
+    assert pkg["type"] == "module"
+    assert "openclaw" in pkg
+    assert "./index.js" in pkg["openclaw"]["extensions"]
 
 
 def test_install_hooks_idempotent(tmp_path, monkeypatch):
@@ -209,8 +249,26 @@ def test_uninstall_removes_entries(tmp_path, monkeypatch):
 
     adapter.uninstall()
     data = json.loads(config_path.read_text(encoding="utf-8"))
-    assert "truememory" not in data.get("mcpServers", {})
+    assert "truememory" not in data.get("mcp", {}).get("servers", {})
     assert not (plugins_dir / "truememory").exists()
+
+
+def test_uninstall_cleans_legacy_top_level(tmp_path, monkeypatch):
+    """Uninstall should also remove entries from legacy top-level mcpServers."""
+    from truememory.hooks.adapters import openclaw as oc_mod
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text(json.dumps({
+        "mcpServers": {"truememory": {"command": "old"}},
+        "mcp": {"servers": {"truememory": {"command": "new"}}},
+    }), encoding="utf-8")
+    monkeypatch.setattr(oc_mod, "_CONFIG_PATH", config_path)
+    monkeypatch.setattr(oc_mod, "_PLUGINS_DIR", tmp_path / "plugins")
+    from truememory.hooks.adapters.openclaw import OpenClawAdapter
+    OpenClawAdapter().uninstall()
+
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "truememory" not in data.get("mcpServers", {})
+    assert "truememory" not in data.get("mcp", {}).get("servers", {})
 
 
 # -- is_configured --

@@ -1,0 +1,19 @@
+{
+  "id": "truememory",
+  "name": "TrueMemory",
+  "version": "1.0.0",
+  "description": "TrueMemory persistent memory integration for OpenClaw",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "pythonPath": {
+        "type": "string",
+        "description": "Path to the Python interpreter with truememory installed"
+      }
+    },
+    "additionalProperties": false
+  },
+  "activation": {
+    "onStartup": true
+  }
+}
