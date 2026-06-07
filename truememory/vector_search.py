@@ -495,49 +495,20 @@ def _get_batch_size() -> int:
 
 def _flush_mps_cache() -> None:
     """Release MPS GPU memory after each batch to prevent accumulation."""
-    try:
-        import torch
-        if torch.backends.mps.is_available():
-            torch.mps.empty_cache()
-            torch.mps.synchronize()
-    except Exception:
-        pass
-    import gc
-    gc.collect()
+    from truememory.mps_utils import flush_mps_cache
+    flush_mps_cache()
 
 
 def _is_mps_oom(exc: Exception) -> bool:
     """Return True if the exception is an MPS out-of-memory error."""
-    msg = str(exc)
-    return "MPS" in msg and "out of memory" in msg.lower()
+    from truememory.mps_utils import is_mps_oom
+    return is_mps_oom(exc)
 
 
 def _encode_with_mps_fallback(model, texts, **kwargs):
-    """Encode texts, falling back to CPU if MPS runs out of memory.
-
-    On MPS OOM: flushes the GPU cache, moves the model to CPU, retries
-    the encode, then moves the model back to MPS for future calls.
-    """
-    try:
-        return model.encode(texts, **kwargs)
-    except RuntimeError as exc:
-        if not _is_mps_oom(exc):
-            raise
-        logger.warning("MPS OOM during encoding — flushing cache and retrying on CPU")
-        _flush_mps_cache()
-        if hasattr(model, "to"):
-            model.to("cpu")
-            try:
-                result = model.encode(texts, **kwargs)
-            finally:
-                try:
-                    import torch
-                    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                        model.to("mps")
-                except Exception:
-                    pass
-            return result
-        return model.encode(texts, **kwargs)
+    """Encode texts with MPS OOM fallback. Thread-safe device transitions."""
+    from truememory.mps_utils import encode_with_mps_fallback
+    return encode_with_mps_fallback(model, texts, **kwargs)
 
 
 def build_vectors(
@@ -654,7 +625,7 @@ def search_vector(
 
     if _query_blob is None:
         model = get_model()
-        query_embedding = model.encode([query])[0]
+        query_embedding = _encode_with_mps_fallback(model, [query])[0]
         _query_blob = serialize_f32(query_embedding)
 
     query_blob = _query_blob
@@ -710,7 +681,7 @@ def search_vector_raw(
     gate where the paper equation (1) requires ``n_t = 1 - cos_sim``.
     """
     model = get_model()
-    query_embedding = model.encode([query])[0]
+    query_embedding = _encode_with_mps_fallback(model, [query])[0]
     query_blob = serialize_f32(query_embedding)
 
     tbl = _active_vec_table(conn)
@@ -921,13 +892,13 @@ def search_vector_separation(
     if sender:
         model = get_model()
         query_text = f"{sender}: {query}"
-        query_embedding = model.encode([query_text])[0]
+        query_embedding = _encode_with_mps_fallback(model, [query_text])[0]
         query_blob = serialize_f32(query_embedding)
     elif _query_blob is not None:
         query_blob = _query_blob
     else:
         model = get_model()
-        query_embedding = model.encode([query])[0]
+        query_embedding = _encode_with_mps_fallback(model, [query])[0]
         query_blob = serialize_f32(query_embedding)
 
     sep_tbl = _active_sep_table(conn)

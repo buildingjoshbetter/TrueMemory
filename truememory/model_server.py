@@ -193,13 +193,20 @@ class ModelServer:
                 try:
                     vectors = model.encode(texts, show_progress_bar=False)
                 except RuntimeError as exc:
-                    if "MPS" not in str(exc) or "out of memory" not in str(exc).lower():
+                    from truememory.mps_utils import is_mps_oom, flush_mps_cache
+                    if not is_mps_oom(exc):
                         raise
                     log.warning("MPS OOM during encoding — flushing cache and retrying on CPU")
-                    self._flush_mps_cache()
+                    flush_mps_cache()
                     if hasattr(model, "to"):
                         model.to("cpu")
                     vectors = model.encode(texts, show_progress_bar=False)
+                    try:
+                        import torch
+                        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                            model.to("mps")
+                    except Exception:
+                        pass
             encode_time = time.time() - encode_start
 
             if self._throttler_active and self._throttler:
