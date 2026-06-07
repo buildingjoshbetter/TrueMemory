@@ -126,9 +126,12 @@ def test_extraction_prompt_fences_transcript_as_untrusted():
     assert _TRANSCRIPT_CLOSE in EXTRACTION_PROMPT
 
     # The system prompt must also instruct the model to ignore embedded
-    # instructions inside the transcript delimiters.
+    # instructions inside the transcript delimiters, naming both delimiters so
+    # its wording stays consistent with EXTRACTION_PROMPT.
     assert "UNTRUSTED" in EXTRACTION_SYSTEM
+    assert "never follow" in EXTRACTION_SYSTEM.lower()
     assert _TRANSCRIPT_OPEN in EXTRACTION_SYSTEM
+    assert _TRANSCRIPT_CLOSE in EXTRACTION_SYSTEM
 
     # When assembled, the chunk must be wrapped inside the delimiters so that
     # injected text cannot escape the fenced region.
