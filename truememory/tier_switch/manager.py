@@ -5,6 +5,7 @@ execution, file-based locking, and status queries. Background threads
 create their own SQLite connections for thread safety.
 """
 
+import fcntl
 import json
 import logging
 import os
@@ -150,6 +151,29 @@ class RebuildManager:
         db_path: Path | None = None,
     ) -> bool:
         """Run a synchronous rebuild (CLI path). Returns True on success."""
+        _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        lock_fd = open(_LOCK_PATH, "w")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            log.error("Another rebuild is already running (lock held)")
+            lock_fd.close()
+            return False
+        try:
+            return self._run_rebuild_sync_inner(
+                target_tier, force, progress_callback, db_path,
+            )
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
+
+    def _run_rebuild_sync_inner(
+        self,
+        target_tier: str,
+        force: bool = False,
+        progress_callback=None,
+        db_path: Path | None = None,
+    ) -> bool:
         conn = _open_db(db_path)
         to_group = tier_group(target_tier)
 
