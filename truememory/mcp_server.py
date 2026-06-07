@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -1377,6 +1378,161 @@ def _start_parent_death_watcher(poll_interval: float = 30.0) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Startup sibling reaper (#423) — CONSERVATIVE, guarded.
+#
+# The self-only #401 watcher exits the *current* process when its parent dies,
+# but it never reaps OTHER ("sibling") MCP servers left behind by prior shell
+# sessions. Those orphans keep a memories.db connection open and recreate the
+# `database is locked` contention. On launch, this reaper terminates ONLY the
+# sibling servers that are provably abandoned:
+#
+#   1. they are a *different* truememory MCP process (never self), AND
+#   2. they are bound to the *same* memories.db (same DB => same lock domain), AND
+#   3. their parent is dead — they have been reparented to init (ppid == 1).
+#
+# A sibling whose parent is still alive is a LIVE concurrent session and is
+# never touched. Condition (3) is the liveness guard. POSIX-only and disabled
+# by default; opt in with TRUEMEMORY_REAP_SIBLINGS=1.
+# ---------------------------------------------------------------------------
+
+# Substring that identifies a TrueMemory MCP server process. Matches the
+# setproctitle() value set in main() and the `-m truememory.mcp_server`
+# / `truememory-mcp` launch forms.
+_MCP_PROC_MARKERS = ("TrueMemory MCP", "truememory.mcp_server", "truememory-mcp")
+
+
+def _proc_is_truememory_mcp(name: str, cmdline: list[str] | None) -> bool:
+    """True if a process name/cmdline looks like a TrueMemory MCP server.
+
+    Pure predicate over already-collected fields (no psutil access) so it is
+    trivially unit-testable. ``cmdline`` is the argv list (may be ``None`` or
+    empty for zombies / permission-denied processes)."""
+    haystack = " ".join([name or "", *(cmdline or [])])
+    return any(marker in haystack for marker in _MCP_PROC_MARKERS)
+
+
+def _select_orphaned_siblings(
+    procs: list[dict],
+    *,
+    self_pid: int,
+    self_db: str,
+) -> list[int]:
+    """Pure selection predicate: pick ONLY orphaned sibling MCP servers to reap.
+
+    ``procs`` is a list of plain dicts (decoupled from psutil for testability),
+    each with keys: ``pid`` (int), ``ppid`` (int), ``name`` (str), ``cmdline``
+    (list[str]), ``db`` (str — the memories.db this process holds open, or "").
+
+    Returns the pids that are ALL of:
+      * not ``self_pid``                  (never reap ourselves)
+      * a TrueMemory MCP server           (name/cmdline match)
+      * bound to ``self_db``              (same lock domain; resolved paths)
+      * orphaned: ``ppid == 1``           (parent dead — the liveness guard)
+
+    A sibling with a living parent (``ppid != 1``) is a live concurrent session
+    and is deliberately excluded. This function has NO side effects — it never
+    signals a process — so it is safe to exercise directly in tests.
+    """
+    try:
+        self_db_real = os.path.realpath(self_db) if self_db else ""
+    except OSError:
+        self_db_real = self_db or ""
+    selected: list[int] = []
+    for p in procs:
+        pid = p.get("pid")
+        if pid is None or pid == self_pid:
+            continue
+        if not _proc_is_truememory_mcp(p.get("name", ""), p.get("cmdline")):
+            continue
+        # Liveness guard: only reparented-to-init (parent dead) qualifies.
+        if p.get("ppid") != 1:
+            continue
+        db = p.get("db", "") or ""
+        try:
+            db_real = os.path.realpath(db) if db else ""
+        except OSError:
+            db_real = db
+        if not db_real or db_real != self_db_real:
+            continue
+        selected.append(pid)
+    return selected
+
+
+def _collect_mcp_procs() -> list[dict]:
+    """Enumerate candidate MCP processes via psutil into plain dicts.
+
+    Best-effort: processes that vanish or deny access mid-scan are skipped. The
+    ``db`` field is the resolved path of any open file under the process whose
+    basename matches a memories.db (``*.db``/``*.db-wal``/``*.db-shm``); empty
+    when it can't be determined (then the process is simply not selected)."""
+    import psutil  # declared dependency; imported lazily to keep import cheap
+
+    out: list[dict] = []
+    for proc in psutil.process_iter(["pid", "ppid", "name", "cmdline"]):
+        try:
+            info = proc.info
+            if not _proc_is_truememory_mcp(info.get("name", ""), info.get("cmdline")):
+                continue
+            db = ""
+            try:
+                for f in proc.open_files():
+                    base = os.path.basename(f.path)
+                    if base.startswith("memories.db") or base == "memories.db":
+                        db = f.path.split("-wal")[0].split("-shm")[0]
+                        break
+            except (psutil.AccessDenied, psutil.NoSuchProcess, NotImplementedError):
+                db = ""
+            out.append({
+                "pid": info.get("pid"),
+                "ppid": info.get("ppid"),
+                "name": info.get("name", ""),
+                "cmdline": info.get("cmdline") or [],
+                "db": db,
+            })
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return out
+
+
+def _reap_orphaned_siblings(db_path: str = _DB_PATH) -> list[int]:
+    """Terminate ONLY orphaned sibling MCP servers bound to the same DB (#423).
+
+    Guarded and opt-in: returns ``[]`` immediately unless
+    ``TRUEMEMORY_REAP_SIBLINGS`` is truthy, on Windows, or under extraction.
+    Selection is delegated to the pure ``_select_orphaned_siblings`` predicate;
+    only the returned pids (different process, same memories.db, parent dead)
+    are sent SIGTERM. Never signals a live sibling. Returns the pids reaped."""
+    if os.environ.get("TRUEMEMORY_EXTRACTION"):
+        return []
+    if not os.environ.get("TRUEMEMORY_REAP_SIBLINGS"):
+        return []
+    if sys.platform == "win32" or not hasattr(os, "getppid"):
+        return []
+    try:
+        procs = _collect_mcp_procs()
+    except Exception:
+        log.debug("sibling reaper: process enumeration failed", exc_info=True)
+        return []
+    targets = _select_orphaned_siblings(
+        procs, self_pid=os.getpid(), self_db=db_path
+    )
+    reaped: list[int] = []
+    for pid in targets:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            reaped.append(pid)
+            log.warning(
+                "Reaped orphaned sibling MCP server pid=%d (parent dead, "
+                "same memories.db) to release the DB lock (#423)", pid
+            )
+        except ProcessLookupError:
+            continue  # already gone — fine
+        except PermissionError:
+            log.debug("sibling reaper: not permitted to signal pid=%d", pid)
+    return reaped
+
+
+# ---------------------------------------------------------------------------
 # Auto-setup for Claude Code and Claude Desktop
 # ---------------------------------------------------------------------------
 
@@ -1709,6 +1865,16 @@ def main():
     # not linger holding a memories.db connection. Self-only: never signals
     # sibling MCP servers, so concurrent live sessions are unaffected (#401).
     _start_parent_death_watcher()
+
+    # Reap orphaned SIBLING MCP servers left by prior sessions that still hold
+    # the same memories.db and contribute to write-lock contention (#423).
+    # CONSERVATIVE + opt-in (TRUEMEMORY_REAP_SIBLINGS=1): only processes whose
+    # parent is dead (reparented to init) are terminated; live concurrent
+    # sessions are never touched. No-op otherwise.
+    try:
+        _reap_orphaned_siblings()
+    except Exception:
+        log.debug("startup sibling reaper failed", exc_info=True)
 
     # Force-exit after mcp.run() to avoid PyTorch teardown deadlocks.
     # PyTorch's C++ threads (OpenMP pools, autograd engine) deadlock against
