@@ -1000,6 +1000,12 @@ def migrate_legacy_vec_tables(conn: sqlite3.Connection) -> bool:
 
     count = conn.execute("SELECT COUNT(*) FROM vec_messages").fetchone()[0]
     if count == 0:
+        has_tiered = conn.execute(
+            "SELECT name FROM sqlite_master WHERE name=? AND type='table'",
+            (new_vec,),
+        ).fetchone()
+        if not has_tiered:
+            return False
         conn.execute("DROP TABLE IF EXISTS vec_messages")
         conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
         conn.commit()
