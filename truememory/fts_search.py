@@ -231,11 +231,15 @@ def search_fts_in_range(
 
     results = _rows_to_results(rows)
 
-    # Apply timestamp bounds
+    # Apply timestamp bounds (inclusive on both ends).
+    # Date-only bounds ("YYYY-MM-DD") must include the full day, so we
+    # append "T23:59:59" to 'before' to cover timestamps with a time
+    # component (e.g. "2025-07-01T10:00:00" must match before="2025-07-01").
     if after is not None:
         results = [r for r in results if r["timestamp"] >= after]
     if before is not None:
-        results = [r for r in results if r["timestamp"] <= before]
+        before_cmp = before + "T23:59:59" if len(before) == 10 else before
+        results = [r for r in results if r["timestamp"] <= before_cmp]
 
     # Trim to requested limit, then normalize scores across the final set
     results = results[:limit]
