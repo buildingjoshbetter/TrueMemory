@@ -91,6 +91,8 @@ export default {
           stdio: ["pipe", "ignore", "ignore"],
           detached: true,
         });
+        child.on("error", () => {});
+        child.stdin.on("error", () => {});
         child.stdin.write(input);
         child.stdin.end();
         child.unref();
@@ -105,9 +107,11 @@ export default {
       if (prompt !== null) {
         if (!prompt || prompt === lastProcessedPrompt) return;
         lastProcessedPrompt = prompt;
+        toolCallsSinceLastPrompt = 0;
       } else {
         // Field not present on this event type — use a counter to run
-        // only on the first tool call after each prompt (heuristic).
+        // only on the first tool call after each new prompt. Resets when
+        // the prompt-present branch fires, so it tracks turns indirectly.
         toolCallsSinceLastPrompt++;
         if (toolCallsSinceLastPrompt > 1) return;
       }
