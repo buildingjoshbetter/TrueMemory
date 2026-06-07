@@ -454,11 +454,11 @@ def build_entity_profiles(conn: sqlite3.Connection) -> dict:
     """
     all_msgs = _get_all_messages(conn)
 
-    # Group messages by sender
+    # Group messages by sender (normalized to lowercase for case-insensitive matching)
     by_sender: dict[str, list[dict]] = defaultdict(list)
     for msg in all_msgs:
         if msg["sender"]:
-            by_sender[msg["sender"]].append(msg)
+            by_sender[msg["sender"].lower()].append(msg)
 
     profiles: dict[str, dict] = {}
 
@@ -908,6 +908,9 @@ def update_entity_profile_incremental(
     """
     if not sender or not message:
         return
+
+    # Normalize entity name to lowercase for case-insensitive matching (#467)
+    sender = sender.lower()
 
     # ── Read existing profile (if any) ────────────────────────────────
     existing = get_entity_profile(conn, sender)

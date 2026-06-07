@@ -600,27 +600,27 @@ class TrueMemoryEngine:
                         except Exception:
                             logger.warning("Failed to clean %s for user %s", table, user_id, exc_info=True)
 
-                # Clean entity profile for this user
+                # Clean entity profile for this user (normalize to lowercase #467)
                 try:
                     self.conn.execute(
-                        "DELETE FROM entity_profiles WHERE entity = ?", (user_id,)
+                        "DELETE FROM entity_profiles WHERE entity = ?", (user_id.lower(),)
                     )
                 except Exception:
                     logger.warning("Failed to clean entity_profiles for user %s", user_id, exc_info=True)
 
-                # Clean entity style vectors for this user
+                # Clean entity style vectors for this user (normalize to lowercase #467)
                 try:
                     self.conn.execute(
-                        "DELETE FROM entity_style_vectors WHERE entity = ?", (user_id,)
+                        "DELETE FROM entity_style_vectors WHERE entity = ?", (user_id.lower(),)
                     )
                 except Exception:
                     logger.warning("Failed to clean entity_style_vectors for user %s", user_id, exc_info=True)
 
-                # Clean entity relationships involving this user
+                # Clean entity relationships involving this user (normalize to lowercase #467)
                 try:
                     self.conn.execute(
                         "DELETE FROM entity_relationships WHERE entity_a = ? OR entity_b = ?",
-                        (user_id, user_id),
+                        (user_id.lower(), user_id.lower()),
                     )
                 except Exception:
                     logger.warning("Failed to clean entity_relationships for user %s", user_id, exc_info=True)

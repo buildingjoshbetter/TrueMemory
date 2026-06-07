@@ -141,7 +141,7 @@ def build_entity_style_vectors(conn: sqlite3.Connection) -> dict[str, list[float
     from collections import defaultdict
     by_sender: dict[str, list[str]] = defaultdict(list)
     for sender, content in rows:
-        by_sender[sender].append(content)
+        by_sender[sender.lower()].append(content)
 
     result: dict[str, list[float]] = {}
     now = datetime.now(timezone.utc).isoformat()
@@ -181,6 +181,9 @@ def update_entity_style_vector_incremental(
     """
     if not entity or not new_message:
         return
+
+    # Normalize entity name to lowercase for case-insensitive matching (#467)
+    entity = entity.lower()
 
     conn.execute(
         """CREATE TABLE IF NOT EXISTS entity_style_vectors (
@@ -237,11 +240,13 @@ def get_entity_style_vector(
 
     Args:
         conn:   Open database connection.
-        entity: Entity name (case-sensitive match).
+        entity: Entity name (case-insensitive match).
 
     Returns:
         256-element float list, or ``None`` if no vector is stored.
     """
+    # Normalize entity name to lowercase for case-insensitive matching (#467)
+    entity = entity.lower()
     try:
         row = conn.execute(
             "SELECT vector FROM entity_style_vectors WHERE entity = ?",
