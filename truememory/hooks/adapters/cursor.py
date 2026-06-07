@@ -3,7 +3,7 @@
 Cursor uses TWO separate config files:
 - ~/.cursor/mcp.json for MCP server registration
 - ~/.cursor/hooks.json for hook registration (with "version": 1 top-level key)
-- camelCase event names: sessionStart, stop, preCompact
+- camelCase event names: sessionStart, stop, beforeSubmitPrompt, preCompact
 """
 from __future__ import annotations
 
@@ -22,21 +22,24 @@ _HOOK_CONFIG = _CURSOR_DIR / "hooks.json"
 _HOOK_EVENTS = {
     "sessionStart": {
         "script": "session_start.py",
-        "timeout": 10000,
+        "timeout": 10,
     },
     "stop": {
         "script": "stop.py",
-        "timeout": 5000,
+        "timeout": 5,
     },
-    "userPromptSubmit": {
+    "beforeSubmitPrompt": {
         "script": "user_prompt_submit.py",
-        "timeout": 5000,
+        "timeout": 5,
     },
     "preCompact": {
         "script": "compact.py",
-        "timeout": 5000,
+        "timeout": 5,
     },
 }
+
+# Legacy event names from prior buggy versions that must be cleaned up.
+_STALE_EVENTS = ("userPromptSubmit",)
 
 _TRUEMEMORY_MARKER = "truememory"
 
@@ -152,6 +155,36 @@ class CursorAdapter(CLIAdapter):
         if not isinstance(hooks, dict):
             hooks = {}
             existing["hooks"] = hooks
+
+        # --- Migration: remove stale event names from prior versions ---
+        for stale in _STALE_EVENTS:
+            stale_list = hooks.get(stale)
+            if not isinstance(stale_list, list):
+                continue
+            cleaned = [
+                h for h in stale_list
+                if not (
+                    isinstance(h, dict)
+                    and _TRUEMEMORY_MARKER in h.get("command", "").lower()
+                )
+            ]
+            if cleaned:
+                hooks[stale] = cleaned
+            else:
+                hooks.pop(stale, None)
+
+        # --- Migration: update existing TrueMemory hook timeouts ---
+        for event, info in _HOOK_EVENTS.items():
+            event_list = hooks.get(event)
+            if not isinstance(event_list, list):
+                continue
+            for entry in event_list:
+                if (
+                    isinstance(entry, dict)
+                    and _TRUEMEMORY_MARKER in entry.get("command", "").lower()
+                    and entry.get("timeout") != info["timeout"]
+                ):
+                    entry["timeout"] = info["timeout"]
 
         for event, info in _HOOK_EVENTS.items():
             event_list = hooks.setdefault(event, [])
