@@ -233,7 +233,14 @@ def _drain_backlog() -> None:
                 _log_file.close()
                 register_spawned_pid(proc.pid)
                 record_stale_processing_pid(claimed_path, proc.pid)
-            claimed_path.unlink(missing_ok=True)
+            # NOTE (issue #422): do NOT unlink the .processing claim here.
+            # Removing it on spawn (before the worker finishes) means a worker
+            # that exits non-zero — crash, OOM, embed-model error — leaves no
+            # claim for cleanup_stale_processing to recover, silently dropping
+            # the session. We now leave the claim in place: the ingest CLI
+            # deletes it on confirmed success (clear_backlog_processing), and a
+            # dead worker leaves it so the 30-minute stale watcher restores it
+            # to .json and re-queues the session.
             log.info("Drained backlog session: %s", data.get("session_id", "?"))
         except Exception as e:
             try:

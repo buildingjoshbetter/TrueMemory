@@ -1284,8 +1284,12 @@ def _drain_batch_from_backlog(markers: list[Path]) -> None:
                 register_spawned_pid(proc.pid)
                 record_stale_processing_pid(claimed_path, proc.pid)
 
-            claimed_path.unlink(missing_ok=True)
-            log.info("Backlog drainer: processed session %s", data.get("session_id", "?"))
+            # NOTE (issue #422): do NOT unlink the .processing claim on spawn.
+            # The spawned ingest CLI removes it on confirmed success
+            # (clear_backlog_processing); a worker that exits non-zero leaves it
+            # so cleanup_stale_processing restores it to .json and re-queues the
+            # session instead of dropping it silently.
+            log.info("Backlog drainer: spawned session %s", data.get("session_id", "?"))
         except Exception:
             try:
                 claimed_path.rename(marker_path)
