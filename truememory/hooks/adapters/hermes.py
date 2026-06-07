@@ -8,14 +8,17 @@ OpenHermes), not a CLI agent framework. The config schema (YAML with
 appears to have been derived from Claude Code's hook system with cosmetic
 renaming.
 
-Removed in June 2026 after 7-model cross-lab verification (Anthropic, OpenAI,
-DeepSeek, Alibaba/Qwen, Google) unanimously confirmed the product is
-non-existent.
+Removed in June 2026 after cross-lab verification confirmed no such product
+exists in NousResearch's public releases or documentation.
 
 If NousResearch or another party ships a real Hermes Agent CLI in the future,
 a new adapter can be written from scratch against the actual config format.
 """
 from __future__ import annotations
+
+from pathlib import Path
+
+from truememory.hooks.adapters.base import CLIAdapter
 
 _REMOVED_REASON = (
     "The Hermes Agent adapter was removed because the target product does not exist. "
@@ -23,12 +26,13 @@ _REMOVED_REASON = (
 )
 
 
-class HermesAdapter:
+class HermesAdapter(CLIAdapter):
     """Stub for the removed Hermes adapter.
 
-    Raises ``NotImplementedError`` on any method call to prevent silent
-    misconfiguration. Kept as a stub so that existing code importing
-    ``HermesAdapter`` gets a clear error rather than an ``ImportError``.
+    Kept as a subclass of ``CLIAdapter`` for type-compatibility.
+    Read-only / detection methods return safe defaults (``False`` / ``None``).
+    Installation and uninstallation methods raise ``NotImplementedError``
+    to prevent silent misconfiguration.
     """
 
     @property
@@ -39,6 +43,10 @@ class HermesAdapter:
     def cli_id(self) -> str:
         return "hermes"
 
+    @property
+    def config_path(self) -> Path:
+        return Path.home() / ".hermes" / "config.yaml"
+
     def detect(self) -> bool:
         return False
 
@@ -48,7 +56,12 @@ class HermesAdapter:
     def install_mcp(self, python_path: str | None = None) -> None:
         raise NotImplementedError(_REMOVED_REASON)
 
-    def install_hooks(self, **kwargs) -> None:  # type: ignore[override]
+    def install_hooks(
+        self,
+        python_path: str | None = None,
+        user_id: str = "",
+        db_path: str = "",
+    ) -> None:
         raise NotImplementedError(_REMOVED_REASON)
 
     def uninstall(self) -> None:
@@ -57,7 +70,7 @@ class HermesAdapter:
     def verify(self) -> bool:
         return False
 
-    def get_system_prompt_path(self):  # type: ignore[return]
+    def get_system_prompt_path(self) -> Path | None:
         return None
 
     def get_system_prompt_content(self) -> str:

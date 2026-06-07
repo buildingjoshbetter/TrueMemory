@@ -56,10 +56,19 @@ def test_hermes_uninstall_raises():
         HermesAdapter().uninstall()
 
 
+def test_hermes_is_cli_adapter_subclass():
+    """Stub must remain a CLIAdapter subclass for isinstance checks."""
+    from truememory.hooks.adapters.base import CLIAdapter
+    from truememory.hooks.adapters.hermes import HermesAdapter
+    adapter = HermesAdapter()
+    assert isinstance(adapter, CLIAdapter)
+
+
 def test_hermes_stub_properties():
     from truememory.hooks.adapters.hermes import HermesAdapter
     adapter = HermesAdapter()
     assert adapter.cli_id == "hermes"
     assert "REMOVED" in adapter.name
+    assert adapter.config_path.name == "config.yaml"
     assert adapter.get_system_prompt_path() is None
     assert adapter.get_system_prompt_content() == ""

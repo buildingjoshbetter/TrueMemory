@@ -59,11 +59,20 @@ def test_openclaw_uninstall_raises():
         OpenClawAdapter().uninstall()
 
 
+def test_openclaw_is_cli_adapter_subclass():
+    """Stub must remain a CLIAdapter subclass for isinstance checks."""
+    from truememory.hooks.adapters.base import CLIAdapter
+    from truememory.hooks.adapters.openclaw import OpenClawAdapter
+    adapter = OpenClawAdapter()
+    assert isinstance(adapter, CLIAdapter)
+
+
 def test_openclaw_stub_properties():
     from truememory.hooks.adapters.openclaw import OpenClawAdapter
     adapter = OpenClawAdapter()
     assert adapter.cli_id == "openclaw"
     assert "REMOVED" in adapter.name
+    assert adapter.config_path.name == "openclaw.json"
     assert adapter.get_system_prompt_path() is None
     assert adapter.get_system_prompt_content() == ""
 
