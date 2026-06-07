@@ -93,8 +93,10 @@ export default {
         });
         child.on("error", () => {});
         child.stdin.on("error", () => {});
-        child.stdin.write(input);
-        child.stdin.end();
+        if (child.stdin && !child.stdin.destroyed) {
+          child.stdin.write(input);
+          child.stdin.end();
+        }
         child.unref();
       } catch (err) {
         // Never block agent shutdown
@@ -109,9 +111,13 @@ export default {
         lastProcessedPrompt = prompt;
         toolCallsSinceLastPrompt = 0;
       } else {
-        // Field not present on this event type — use a counter to run
-        // only on the first tool call after each new prompt. Resets when
-        // the prompt-present branch fires, so it tracks turns indirectly.
+        // Field not present — fall back to counter-based dedup. If the
+        // prompt field is never provided by this OpenClaw version, the
+        // hook fires once per session (known limitation — no turn-boundary
+        // event available to reset the counter).
+        if (toolCallsSinceLastPrompt === 0) {
+          console.debug("[truememory] before_tool_call has no prompt field; using counter-based dedup");
+        }
         toolCallsSinceLastPrompt++;
         if (toolCallsSinceLastPrompt > 1) return;
       }
