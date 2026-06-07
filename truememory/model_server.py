@@ -190,7 +190,16 @@ class ModelServer:
             encode_start = time.time()
             with self._lock:
                 model = self._get_embed_model(tier)
-                vectors = model.encode(texts, show_progress_bar=False)
+                try:
+                    vectors = model.encode(texts, show_progress_bar=False)
+                except RuntimeError as exc:
+                    if "MPS" not in str(exc) or "out of memory" not in str(exc).lower():
+                        raise
+                    log.warning("MPS OOM during encoding — flushing cache and retrying on CPU")
+                    self._flush_mps_cache()
+                    if hasattr(model, "to"):
+                        model.to("cpu")
+                    vectors = model.encode(texts, show_progress_bar=False)
             encode_time = time.time() - encode_start
 
             if self._throttler_active and self._throttler:
