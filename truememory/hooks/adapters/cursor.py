@@ -3,7 +3,7 @@
 Cursor uses TWO separate config files:
 - ~/.cursor/mcp.json for MCP server registration
 - ~/.cursor/hooks.json for hook registration (with "version": 1 top-level key)
-- camelCase event names: sessionStart, stop, preCompact
+- camelCase event names: sessionStart, stop, beforeSubmitPrompt, preCompact
 """
 from __future__ import annotations
 
@@ -22,19 +22,19 @@ _HOOK_CONFIG = _CURSOR_DIR / "hooks.json"
 _HOOK_EVENTS = {
     "sessionStart": {
         "script": "session_start.py",
-        "timeout": 10000,
+        "timeout": 10,
     },
     "stop": {
         "script": "stop.py",
-        "timeout": 5000,
+        "timeout": 5,
     },
-    "userPromptSubmit": {
+    "beforeSubmitPrompt": {
         "script": "user_prompt_submit.py",
-        "timeout": 5000,
+        "timeout": 5,
     },
     "preCompact": {
         "script": "compact.py",
-        "timeout": 5000,
+        "timeout": 5,
     },
 }
 
