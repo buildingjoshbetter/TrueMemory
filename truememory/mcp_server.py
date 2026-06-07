@@ -49,19 +49,56 @@ log = logging.getLogger(__name__)
 _TRUEMEMORY_DIR = Path.home() / ".truememory"
 _CONFIG_PATH = _TRUEMEMORY_DIR / "config.json"
 
+# M5 (#502) — Config cache: avoid re-reading disk on every _load_config() call.
+# The cache is invalidated after _CONFIG_CACHE_TTL seconds OR when the file's
+# mtime changes (whichever comes first).
+_CONFIG_CACHE_TTL = 5.0  # seconds
+_config_cache: dict | None = None
+_config_cache_mtime: float = 0.0
+_config_cache_time: float = 0.0
+
+# M7 (#504) — Serialize config writes from concurrent MCP handlers / tier-switch.
+_config_write_lock = threading.Lock()
+
 
 def _load_config() -> dict:
     """Load persistent config from ~/.truememory/config.json.
+
+    Uses an in-memory cache with a staleness window (_CONFIG_CACHE_TTL) to
+    avoid redundant disk reads (M5 / #502). The cache is also invalidated
+    when the file's mtime changes.
 
     On JSON corruption, rename the file to ``config.json.corrupt.<unix-ts>``
     so the user can recover any API keys that were in it. On OSError, warn
     to stderr. Returns ``{}`` in both failure modes so callers never see a
     half-loaded config.
     """
+    global _config_cache, _config_cache_mtime, _config_cache_time
+
+    now = time.monotonic()
+    if _config_cache is not None and (now - _config_cache_time) < _CONFIG_CACHE_TTL:
+        # Fast path: cache is fresh — but verify mtime hasn't changed
+        try:
+            current_mtime = _CONFIG_PATH.stat().st_mtime if _CONFIG_PATH.exists() else 0.0
+        except OSError:
+            current_mtime = 0.0
+        if current_mtime == _config_cache_mtime:
+            return _config_cache.copy()
+
     if not _CONFIG_PATH.exists():
+        _config_cache = {}
+        _config_cache_mtime = 0.0
+        _config_cache_time = now
         return {}
     try:
-        return json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+        result = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+        try:
+            _config_cache_mtime = _CONFIG_PATH.stat().st_mtime
+        except OSError:
+            _config_cache_mtime = 0.0
+        _config_cache = result
+        _config_cache_time = now
+        return result.copy()
     except json.JSONDecodeError as e:
         # .with_suffix would replace ".json"; we want to APPEND to preserve
         # the origin filename in the backup so users can find it easily.
@@ -81,17 +118,29 @@ def _load_config() -> dict:
                 "backed up. Run `truememory-mcp --setup` to recreate.",
                 file=sys.stderr,
             )
+        _config_cache = {}
+        _config_cache_mtime = 0.0
+        _config_cache_time = now
         return {}
     except OSError as e:
         print(
             f"truememory: could not read config.json: {e}",
             file=sys.stderr,
         )
+        _config_cache = {}
+        _config_cache_mtime = 0.0
+        _config_cache_time = now
         return {}
 
 
 def _save_config(config: dict) -> None:
     """Save config to ~/.truememory/config.json.
+
+    Uses atomic write (M6 / #503): writes to a temp file in the same
+    directory, then calls os.replace() to atomically swap. This prevents
+    config corruption if the process crashes mid-write.
+
+    Serializes concurrent writes via _config_write_lock (M7 / #504).
 
     the POSIX `chmod` calls below are silent no-ops on Windows;
     the config file (which stores API keys in plaintext) inherits the
@@ -99,10 +148,39 @@ def _save_config(config: dict) -> None:
     storing a key on Windows we warn to stderr and suggest the env-var
     route, which is the actually-private channel.
     """
-    _TRUEMEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    _TRUEMEMORY_DIR.chmod(0o700)
-    _CONFIG_PATH.write_text(json.dumps(config, indent=2), encoding="utf-8")
-    _CONFIG_PATH.chmod(0o600)
+    global _config_cache, _config_cache_mtime, _config_cache_time
+    import tempfile
+
+    with _config_write_lock:
+        _TRUEMEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        _TRUEMEMORY_DIR.chmod(0o700)
+
+        # Atomic write: temp file + os.replace() (M6 / #503)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".config.tmp.", suffix=".json",
+            dir=str(_TRUEMEMORY_DIR),
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, str(_CONFIG_PATH))
+        except BaseException:
+            # Clean up the temp file on failure — original config survives
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+        # Invalidate cache so the next _load_config() picks up the new data
+        try:
+            _config_cache_mtime = _CONFIG_PATH.stat().st_mtime
+        except OSError:
+            _config_cache_mtime = 0.0
+        _config_cache = config.copy()
+        _config_cache_time = time.monotonic()
+
     if sys.platform == "win32" and any(k.endswith("_api_key") for k in config):
         print(
             "truememory: warning — on Windows, ~/.truememory/config.json "
@@ -931,7 +1009,8 @@ def truememory_configure(
     if api_key:
         result["api_key_saved"] = f"{api_provider} key stored"
 
-    # Check if HyDE search is available
+    # Check if HyDE search is available — HyDE is Pro-only (M8 / #505).
+    # Non-Pro tiers never use HyDE regardless of API key presence.
     has_key = bool(
         os.environ.get("ANTHROPIC_API_KEY")
         or os.environ.get("OPENROUTER_API_KEY")
@@ -940,7 +1019,12 @@ def truememory_configure(
         or config.get("openrouter_api_key")
         or config.get("openai_api_key")
     )
-    result["hyde_search"] = "enabled" if has_key else "disabled (no API key — search still works, just without query expansion)"
+    if tier != "pro":
+        result["hyde_search"] = "disabled (HyDE is Pro-only)"
+    elif has_key:
+        result["hyde_search"] = "enabled"
+    else:
+        result["hyde_search"] = "disabled (no API key — search still works, just without query expansion)"
 
     # Mark onboarding complete so the SessionStart hook stops showing
     # the setup banner on subsequent sessions.
