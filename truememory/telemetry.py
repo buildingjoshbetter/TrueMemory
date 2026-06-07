@@ -33,6 +33,15 @@ import uuid
 from functools import wraps
 from pathlib import Path
 
+try:
+    # Module-level guarded import of the semver parser. If ``packaging`` is
+    # unavailable we leave ``_version_parse`` as None and ``_is_real_upgrade``
+    # fails conservative (suppresses the nudge) rather than risk a naive string
+    # compare that could advertise a downgrade -- the #424 bug.
+    from packaging.version import parse as _version_parse
+except Exception:  # pragma: no cover - exercised via monkeypatched __import__
+    _version_parse = None
+
 _TELEMETRY_ENDPOINT = "https://telemetry-api-production-c2a3.up.railway.app/v1/events"
 _FLUSH_INTERVAL = 60  # seconds
 _HTTP_TIMEOUT = 3  # seconds
@@ -291,9 +300,15 @@ def _is_real_upgrade(latest: str | None, current: str | None) -> bool:
         or current == "unknown"
     ):
         return False
+    # Resolve the semver parser. Prefer the module-level guarded import, but
+    # re-attempt the import at call time as well so that a runtime-unavailable
+    # ``packaging`` (e.g. uninstalled after startup) still fails conservative.
+    parse = _version_parse
     try:
-        from packaging.version import parse
+        from packaging.version import parse  # noqa: F811
     except Exception:
+        parse = None
+    if parse is None:
         # packaging unavailable: we cannot reliably compare versions, so fail
         # conservative and suppress the nudge. A naive string compare could
         # advertise a downgrade (e.g. "0.7.0" != "0.7.1.3"), which is the exact
