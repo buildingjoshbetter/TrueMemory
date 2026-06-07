@@ -506,6 +506,40 @@ def _flush_mps_cache() -> None:
     gc.collect()
 
 
+def _is_mps_oom(exc: Exception) -> bool:
+    """Return True if the exception is an MPS out-of-memory error."""
+    msg = str(exc)
+    return "MPS" in msg and "out of memory" in msg.lower()
+
+
+def _encode_with_mps_fallback(model, texts, **kwargs):
+    """Encode texts, falling back to CPU if MPS runs out of memory.
+
+    On MPS OOM: flushes the GPU cache, moves the model to CPU, retries
+    the encode, then moves the model back to MPS for future calls.
+    """
+    try:
+        return model.encode(texts, **kwargs)
+    except RuntimeError as exc:
+        if not _is_mps_oom(exc):
+            raise
+        logger.warning("MPS OOM during encoding — flushing cache and retrying on CPU")
+        _flush_mps_cache()
+        if hasattr(model, "to"):
+            model.to("cpu")
+            try:
+                result = model.encode(texts, **kwargs)
+            finally:
+                try:
+                    import torch
+                    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                        model.to("mps")
+                except Exception:
+                    pass
+            return result
+        return model.encode(texts, **kwargs)
+
+
 def build_vectors(
     conn: sqlite3.Connection,
     messages: list[dict] | None = None,
@@ -562,7 +596,7 @@ def build_vectors(
             texts = [m["content"] for m in batch]
             ids = [m["id"] for m in batch]
 
-            embeddings = model.encode(texts, show_progress_bar=False)
+            embeddings = _encode_with_mps_fallback(model, texts, show_progress_bar=False)
 
             conn.executemany(
                 f"INSERT INTO {tbl}(rowid, embedding) VALUES (?, ?)",
@@ -790,7 +824,7 @@ def build_separation_vectors(
                 texts.append(sep_text)
                 ids.append(m["id"])
 
-            embeddings = model.encode(texts, show_progress_bar=False)
+            embeddings = _encode_with_mps_fallback(model, texts, show_progress_bar=False)
 
             conn.executemany(
                 f"INSERT INTO {tbl}(rowid, embedding) VALUES (?, ?)",
@@ -828,7 +862,7 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
         content:    The text to embed.
     """
     model = get_model()
-    embedding = model.encode([content])[0]  # shape (dim,)
+    embedding = _encode_with_mps_fallback(model, [content])[0]  # shape (dim,)
     vec_tbl = _active_vec_table(conn)
     conn.execute(
         f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
@@ -842,7 +876,7 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
         ).fetchone()
         if row:
             sep_text = _build_sep_text(row[0], row[1], row[2], content)
-            sep_embedding = model.encode([sep_text])[0]
+            sep_embedding = _encode_with_mps_fallback(model, [sep_text])[0]
             sep_tbl = _active_sep_table(conn)
             conn.execute(
                 f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
