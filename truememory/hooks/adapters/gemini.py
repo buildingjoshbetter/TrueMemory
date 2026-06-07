@@ -1,10 +1,14 @@
-"""Gemini CLI adapter — MCP config + JSON lifecycle hooks.
+"""Gemini CLI adapter -- MCP config + JSON lifecycle hooks.
 
 Gemini CLI uses:
 - ~/.gemini/settings.json for BOTH MCP server registration AND hook registration
 - MCP under mcpServers key (Claude Desktop-compatible format)
-- Hooks under hooks key with PascalCase event names
+- Hooks under hooks key with PascalCase event names, nested HookDefinition format
 - Same JSON stdin/stdout hook protocol as Claude Code
+
+Hook format (from google-gemini/gemini-cli TypeScript types):
+  HookDefinition: { matcher?: string, sequential?: bool, hooks: HookConfig[] }
+  CommandHookConfig: { type: "command", command: string, name?: string, timeout?: number }
 """
 from __future__ import annotations
 
@@ -28,7 +32,7 @@ _HOOK_EVENTS = {
         "script": "stop.py",
         "timeout": 5000,
     },
-    "UserPromptSubmit": {
+    "BeforeAgent": {
         "script": "user_prompt_submit.py",
         "timeout": 5000,
     },
@@ -41,7 +45,7 @@ _HOOK_EVENTS = {
 _TRUEMEMORY_MARKER = "truememory"
 
 _SYSTEM_PROMPT_TEMPLATE = """\
-# TrueMemory — Persistent Memory
+# TrueMemory -- Persistent Memory
 
 TrueMemory is the **primary long-horizon memory** for this user. \
 It persists facts, preferences, decisions, and corrections across \
@@ -54,7 +58,7 @@ When the `truememory` MCP server is connected, follow these rules:
 broad query about the user to load relevant memories before responding.
 - Before making recommendations, check TrueMemory for stored preferences.
 - When the user asks anything about past conversations or personal \
-facts — search TrueMemory first.
+facts -- search TrueMemory first.
 
 ## Auto-Store (during conversation)
 - When the user shares a personal preference, store it immediately \
@@ -70,7 +74,7 @@ debugging context.
 background processing.
 - The SessionEnd hook captures the full transcript and runs deep extraction \
 after sessions end.
-- You do NOT need to store everything manually — focus on \
+- You do NOT need to store everything manually -- focus on \
 in-conversation corrections and explicit preferences.
 """
 
@@ -139,8 +143,12 @@ class GeminiAdapter(CLIAdapter):
             script_path = hooks_dir / info["script"]
             cmd = self._build_command(py, script_path, user_id, db_path)
             event_list.append({
-                "command": cmd,
-                "timeout": info["timeout"],
+                "hooks": [{
+                    "type": "command",
+                    "command": cmd,
+                    "name": f"truememory-{event.lower()}",
+                    "timeout": info["timeout"],
+                }],
             })
 
         self._write_config(settings)
@@ -162,10 +170,7 @@ class GeminiAdapter(CLIAdapter):
                     continue
                 cleaned = [
                     h for h in entries
-                    if not (
-                        isinstance(h, dict)
-                        and _TRUEMEMORY_MARKER in h.get("command", "").lower()
-                    )
+                    if not self._definition_has_truememory(h)
                 ]
                 if cleaned:
                     hooks[event] = cleaned
@@ -249,9 +254,34 @@ class GeminiAdapter(CLIAdapter):
         return False
 
     @staticmethod
+    def _definition_has_truememory(hook_def: object) -> bool:
+        """Check if a HookDefinition contains a TrueMemory hook config.
+
+        Handles both the correct nested format:
+            {"hooks": [{"type": "command", "command": "...truememory..."}]}
+        and the legacy flat format (for migration):
+            {"command": "...truememory...", "timeout": 10000}
+        """
+        if not isinstance(hook_def, dict):
+            return False
+        # Correct nested format: check inside hooks sub-array
+        inner_hooks = hook_def.get("hooks", [])
+        if isinstance(inner_hooks, list):
+            for hc in inner_hooks:
+                if (
+                    isinstance(hc, dict)
+                    and _TRUEMEMORY_MARKER in hc.get("command", "").lower()
+                ):
+                    return True
+        # Legacy flat format fallback
+        if _TRUEMEMORY_MARKER in hook_def.get("command", "").lower():
+            return True
+        return False
+
+    @staticmethod
     def _event_has_truememory(entries: list) -> bool:
+        """Check if any HookDefinition in the event list is a TrueMemory hook."""
         return any(
-            isinstance(h, dict)
-            and _TRUEMEMORY_MARKER in h.get("command", "").lower()
+            GeminiAdapter._definition_has_truememory(h)
             for h in entries
         )

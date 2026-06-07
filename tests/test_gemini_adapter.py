@@ -128,16 +128,53 @@ def test_install_hooks_creates_entries(tmp_path, monkeypatch):
 
     data = json.loads(config_path.read_text(encoding="utf-8"))
     hooks = data["hooks"]
+    # Correct event names
     assert "SessionStart" in hooks
     assert "SessionEnd" in hooks
     assert "PreCompress" in hooks
+    assert "BeforeAgent" in hooks
+    # UserPromptSubmit should NOT be present (invalid event name)
+    assert "UserPromptSubmit" not in hooks
+    # Each event has exactly one HookDefinition
     assert len(hooks["SessionStart"]) == 1
-    assert "truememory" in hooks["SessionStart"][0]["command"].lower()
+    # Verify nested HookDefinition format
+    hook_def = hooks["SessionStart"][0]
+    assert "hooks" in hook_def, "HookDefinition must contain 'hooks' sub-array"
+    inner = hook_def["hooks"]
+    assert len(inner) == 1
+    assert inner[0]["type"] == "command"
+    assert "truememory" in inner[0]["command"].lower()
+    assert "name" in inner[0]
+    assert "timeout" in inner[0]
+
+
+def test_install_hooks_nested_format_structure(tmp_path, monkeypatch):
+    """Verify the exact nested structure matches Gemini CLI's HookDefinition type."""
+    from truememory.hooks.adapters import gemini as gemini_mod
+    config_path = tmp_path / "settings.json"
+    monkeypatch.setattr(gemini_mod, "_CONFIG_PATH", config_path)
+    from truememory.hooks.adapters.gemini import GeminiAdapter
+    adapter = GeminiAdapter()
+    adapter.install_hooks(python_path="/usr/bin/python3")
+
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    for event_name, entries in data["hooks"].items():
+        for hook_def in entries:
+            # Top level is HookDefinition with 'hooks' array
+            assert isinstance(hook_def, dict)
+            assert "hooks" in hook_def
+            assert isinstance(hook_def["hooks"], list)
+            for hc in hook_def["hooks"]:
+                # Each inner entry is a CommandHookConfig
+                assert hc["type"] == "command"
+                assert isinstance(hc["command"], str)
+                assert isinstance(hc.get("timeout", 0), int)
 
 
 def test_install_hooks_preserves_existing(tmp_path, monkeypatch):
     from truememory.hooks.adapters import gemini as gemini_mod
     config_path = tmp_path / "settings.json"
+    # Pre-existing hook in legacy flat format (user's own hook, not TrueMemory)
     config_path.write_text(json.dumps({
         "hooks": {
             "SessionStart": [
@@ -153,8 +190,15 @@ def test_install_hooks_preserves_existing(tmp_path, monkeypatch):
 
     data = json.loads(config_path.read_text(encoding="utf-8"))
     assert data["theme"] == "dark"
+    # Original hook preserved + TrueMemory hook added
     assert len(data["hooks"]["SessionStart"]) == 2
+    # First entry is the pre-existing one (flat format, preserved as-is)
     assert data["hooks"]["SessionStart"][0]["command"] == "my-custom-hook"
+    # Second entry is TrueMemory in correct nested format
+    tm_entry = data["hooks"]["SessionStart"][1]
+    assert "hooks" in tm_entry
+    assert tm_entry["hooks"][0]["type"] == "command"
+    assert "truememory" in tm_entry["hooks"][0]["command"].lower()
 
 
 def test_install_hooks_idempotent(tmp_path, monkeypatch):
@@ -187,8 +231,13 @@ def test_uninstall_removes_entries(tmp_path, monkeypatch):
     data = json.loads(config_path.read_text(encoding="utf-8"))
     assert "truememory" not in data.get("mcpServers", {})
     hooks = data.get("hooks", {})
-    for entries in hooks.values():
+    for event_name, entries in hooks.items():
         for h in entries:
+            # Check nested format
+            inner = h.get("hooks", [])
+            for hc in inner:
+                assert "truememory" not in hc.get("command", "").lower()
+            # Check flat format
             assert "truememory" not in h.get("command", "").lower()
 
 
@@ -219,6 +268,28 @@ def test_uninstall_preserves_other_entries(tmp_path, monkeypatch):
     assert data["theme"] == "dark"
     assert len(data["hooks"]["SessionStart"]) == 1
     assert data["hooks"]["SessionStart"][0]["command"] == "my-hook"
+
+
+def test_uninstall_removes_nested_format(tmp_path, monkeypatch):
+    """Verify uninstall correctly removes hooks in the nested HookDefinition format."""
+    from truememory.hooks.adapters import gemini as gemini_mod
+    config_path = tmp_path / "settings.json"
+    config_path.write_text(json.dumps({
+        "hooks": {
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": "my-hook", "timeout": 5000}]},
+                {"hooks": [{"type": "command", "command": "/path/to/truememory/session_start.py", "timeout": 10000, "name": "truememory-sessionstart"}]},
+            ]
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(gemini_mod, "_CONFIG_PATH", config_path)
+    from truememory.hooks.adapters.gemini import GeminiAdapter
+    adapter = GeminiAdapter()
+    adapter.uninstall()
+
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    assert len(data["hooks"]["SessionStart"]) == 1
+    assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "my-hook"
 
 
 # -- is_configured --
