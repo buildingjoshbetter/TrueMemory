@@ -892,6 +892,29 @@ class TrueMemoryEngine:
             Updated memory dict, or None if not found.
         """
         self._ensure_connection()
+
+        pre_embedding = None
+        pre_sep_embedding = None
+        if content is not None and self._has_vectors:
+            try:
+                from truememory.vector_search import (
+                    get_model, _encode_with_mps_fallback, _build_sep_text,
+                )
+                model = get_model()
+                pre_embedding = _encode_with_mps_fallback(model, [content])[0]
+                row = self.conn.execute(
+                    "SELECT sender, recipient, timestamp FROM messages WHERE id = ?",
+                    (memory_id,),
+                ).fetchone()
+                if row:
+                    sender_val = fields.get("sender", row[0])
+                    recipient_val = fields.get("recipient", row[1])
+                    timestamp_val = fields.get("timestamp", row[2])
+                    sep_text = _build_sep_text(sender_val, recipient_val, timestamp_val, content)
+                    pre_sep_embedding = _encode_with_mps_fallback(model, [sep_text])[0]
+            except Exception:
+                logger.debug("Failed to pre-compute embedding during update()", exc_info=True)
+
         with self._write_lock:
             if content is not None:
                 fields["content"] = content
@@ -900,29 +923,35 @@ class TrueMemoryEngine:
             if not ok:
                 return None
 
-            # Re-embed if content changed
-            if content is not None and self._has_vectors:
+            if pre_embedding is not None:
                 try:
-                    from truememory.vector_search import embed_single
-                    # Remove old embeddings from both vector tables, insert new
+                    from truememory.vector_search import (
+                        serialize_f32, _active_vec_table, _active_sep_table,
+                        _write_embedder_metadata,
+                    )
+                    vec_tbl = _active_vec_table(self.conn)
                     try:
-                        _vec_tbl, _sep_tbl = _resolve_vec_tables(self.conn)
-                    except Exception:
-                        logger.warning("_resolve_vec_tables failed in update(memory_id=%d); falling back to legacy table names", memory_id, exc_info=True)
-                        _vec_tbl, _sep_tbl = "vec_messages", "vec_messages_sep"
-                    try:
-                        self.conn.execute(f"DELETE FROM {_vec_tbl} WHERE rowid = ?", (memory_id,))
+                        self.conn.execute(f"DELETE FROM {vec_tbl} WHERE rowid = ?", (memory_id,))
                     except Exception:
                         logger.debug("Failed to delete old vector embedding for message %d", memory_id, exc_info=True)
-                    try:
-                        self.conn.execute(f"DELETE FROM {_sep_tbl} WHERE rowid = ?", (memory_id,))
-                    except Exception:
-                        logger.debug("Failed to delete old sep vector for message %d", memory_id, exc_info=True)
-                    embed_single(self.conn, memory_id, content)
+                    self.conn.execute(
+                        f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
+                        (memory_id, serialize_f32(pre_embedding)),
+                    )
+                    if pre_sep_embedding is not None:
+                        sep_tbl = _active_sep_table(self.conn)
+                        try:
+                            self.conn.execute(f"DELETE FROM {sep_tbl} WHERE rowid = ?", (memory_id,))
+                        except Exception:
+                            logger.debug("Failed to delete old sep vector for message %d", memory_id, exc_info=True)
+                        self.conn.execute(
+                            f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
+                            (memory_id, serialize_f32(pre_sep_embedding)),
+                        )
+                    _write_embedder_metadata(self.conn)
                 except Exception:
                     logger.warning("Vector embedding failed for message %d", memory_id, exc_info=True)
 
-            # Persist vector embedding and any profile updates
             self.conn.commit()
 
         return self.get(memory_id)
