@@ -724,13 +724,7 @@ class TrueMemoryEngine:
                     ).fetchall()
                 })
 
-                cursor = self.conn.execute(
-                    "DELETE FROM messages WHERE sender = ?", (user_id,)
-                )
-                deleted = cursor.rowcount > 0
-
-                # Clean up related tables scoped to this user (chunked
-                # to avoid SQLite's 999-variable limit on large datasets)
+                # Delete child rows BEFORE parent to avoid FK violations
                 if msg_ids:
                     for table, col in [
                         ("fact_timeline", "source_message_id"),
@@ -812,11 +806,14 @@ class TrueMemoryEngine:
                 except Exception:
                     logger.warning("Failed to clean cluster_centroids for user %s", user_id, exc_info=True)
 
-            else:
-                # Full wipe of all tables
-                cursor = self.conn.execute("DELETE FROM messages")
+                # Delete parent rows AFTER all child FK references are gone
+                cursor = self.conn.execute(
+                    "DELETE FROM messages WHERE sender = ?", (user_id,)
+                )
                 deleted = cursor.rowcount > 0
 
+            else:
+                # Full wipe — delete child tables BEFORE messages to avoid FK violations
                 for table in (
                     "entity_profiles",
                     "entity_style_vectors",
@@ -838,15 +835,14 @@ class TrueMemoryEngine:
                         logger.warning("Failed to clear table %s during delete_all", table, exc_info=True)
 
                 # Clear ALL known vector tables across all tiers.
-                # A full wipe must not leave orphaned vectors in an
-                # inactive tier (important for GDPR/privacy full-delete).
                 for vec_table in _ALL_VEC_TABLES:
                     try:
                         self.conn.execute(f"DELETE FROM {vec_table}")
                     except Exception:
-                        # Table may not exist (e.g. pre-migration DB only has
-                        # vec_messages); that's fine, log at debug level.
                         logger.debug("Failed to clear %s during delete_all (table may not exist)", vec_table, exc_info=True)
+
+                cursor = self.conn.execute("DELETE FROM messages")
+                deleted = cursor.rowcount > 0
 
             # Rebuild FTS index
             try:

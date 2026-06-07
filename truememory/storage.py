@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS fact_timeline (
     entity_scope TEXT DEFAULT '',
     valid_from TEXT DEFAULT '',
     valid_to TEXT DEFAULT '',
-    FOREIGN KEY (source_message_id) REFERENCES messages(id)
+    FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
 -- Consolidated summaries (L5)
@@ -127,7 +127,7 @@ CREATE TABLE IF NOT EXISTS landmark_events (
     event_type TEXT DEFAULT '',
     related_entities TEXT DEFAULT '[]',
     source_message_id INTEGER,
-    FOREIGN KEY (source_message_id) REFERENCES messages(id)
+    FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
 -- Causal edges (D2: forward chains and backward cause scanning)
@@ -137,8 +137,8 @@ CREATE TABLE IF NOT EXISTS causal_edges (
     effect_msg_id INTEGER NOT NULL,
     relationship TEXT DEFAULT '',
     confidence REAL DEFAULT 0.0,
-    FOREIGN KEY (cause_msg_id) REFERENCES messages(id),
-    FOREIGN KEY (effect_msg_id) REFERENCES messages(id)
+    FOREIGN KEY (cause_msg_id) REFERENCES messages(id) ON DELETE CASCADE,
+    FOREIGN KEY (effect_msg_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
 -- Entity relationships (E2: Dunbar hierarchy)
@@ -168,12 +168,12 @@ CREATE TABLE IF NOT EXISTS surprise_scores (
     surprise    REAL NOT NULL DEFAULT 0.0,
     fact_count  INTEGER NOT NULL DEFAULT 0,
     new_fact_count INTEGER NOT NULL DEFAULT 0,
-    FOREIGN KEY (message_id) REFERENCES messages(id)
+    FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
 -- Clustering (HDBSCAN episode clusters)
 CREATE TABLE IF NOT EXISTS message_clusters (
-    message_id   INTEGER PRIMARY KEY REFERENCES messages(id),
+    message_id   INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
     cluster_id   INTEGER NOT NULL,
     noise        INTEGER DEFAULT 0
 );
@@ -382,6 +382,13 @@ def bulk_replace_messages(conn: sqlite3.Connection, messages: list[dict]) -> int
     Returns:
         Number of messages inserted.
     """
+    # Delete child FK rows before parent to avoid constraint violations
+    for tbl in ("surprise_scores", "message_clusters", "cluster_centroids",
+                "fact_timeline", "landmark_events", "causal_edges"):
+        try:
+            conn.execute(f"DELETE FROM {tbl}")
+        except sqlite3.OperationalError:
+            pass
     conn.execute("DELETE FROM messages")
     # The DELETE trigger handles FTS cleanup row-by-row, but if the table was
     # freshly created (no rows yet) that is a no-op.  For safety, also rebuild
@@ -626,41 +633,42 @@ def delete_message(conn: sqlite3.Connection, msg_id: int) -> bool:
     Returns:
         True if a row was deleted, False if the ID was not found.
     """
+    # Delete child rows BEFORE the parent to avoid FK violations on
+    # databases created before ON DELETE CASCADE was added to the schema.
+    for tbl in (
+        "vec_messages", "vec_messages_edge", "vec_messages_basepro",
+    ):
+        try:
+            conn.execute(f"DELETE FROM {tbl} WHERE rowid = ?", (msg_id,))
+        except sqlite3.OperationalError:
+            pass
+    for tbl in (
+        "vec_messages_sep", "vec_messages_sep_edge",
+        "vec_messages_sep_basepro",
+    ):
+        try:
+            conn.execute(f"DELETE FROM {tbl} WHERE rowid = ?", (msg_id,))
+        except sqlite3.OperationalError:
+            pass
+
+    for tbl, col in (
+        ("fact_timeline", "source_message_id"),
+        ("landmark_events", "source_message_id"),
+        ("surprise_scores", "message_id"),
+        ("message_clusters", "message_id"),
+    ):
+        try:
+            conn.execute(f"DELETE FROM {tbl} WHERE {col} = ?", (msg_id,))
+        except sqlite3.OperationalError:
+            pass
+    for col in ("cause_msg_id", "effect_msg_id"):
+        try:
+            conn.execute(f"DELETE FROM causal_edges WHERE {col} = ?", (msg_id,))
+        except sqlite3.OperationalError:
+            pass
+
     cursor = conn.execute("DELETE FROM messages WHERE id = ?", (msg_id,))
     deleted = cursor.rowcount > 0
-
-    if deleted:
-        for tbl in (
-            "vec_messages", "vec_messages_edge", "vec_messages_basepro",
-        ):
-            try:
-                conn.execute(f"DELETE FROM {tbl} WHERE rowid = ?", (msg_id,))
-            except sqlite3.OperationalError:
-                pass
-        for tbl in (
-            "vec_messages_sep", "vec_messages_sep_edge",
-            "vec_messages_sep_basepro",
-        ):
-            try:
-                conn.execute(f"DELETE FROM {tbl} WHERE rowid = ?", (msg_id,))
-            except sqlite3.OperationalError:
-                pass
-
-        for tbl, col in (
-            ("fact_timeline", "source_message_id"),
-            ("landmark_events", "source_message_id"),
-            ("surprise_scores", "message_id"),
-            ("message_clusters", "message_id"),
-        ):
-            try:
-                conn.execute(f"DELETE FROM {tbl} WHERE {col} = ?", (msg_id,))
-            except sqlite3.OperationalError:
-                pass
-        for col in ("cause_msg_id", "effect_msg_id"):
-            try:
-                conn.execute(f"DELETE FROM causal_edges WHERE {col} = ?", (msg_id,))
-            except sqlite3.OperationalError:
-                pass
 
     conn.commit()
     return deleted
