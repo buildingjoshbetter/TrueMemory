@@ -237,8 +237,16 @@ def _run_ingest(args):
     try:
         from truememory.ingest.hooks._shared import clear_backlog_processing
         clear_backlog_processing(args.session)
-    except Exception:
-        pass
+    except Exception as e:
+        # Non-fatal: the ingest already succeeded. But if we can't drop the
+        # claim, the stale watcher will (eventually) restore the .processing
+        # marker to .json and re-queue this already-done session, wasting an
+        # extraction. Log it so that wasted re-runs are diagnosable instead of
+        # silently swallowed.
+        logging.getLogger(__name__).warning(
+            "failed to clear backlog .processing claim for session %r: %s",
+            args.session, e,
+        )
 
     _cascade_next()
 

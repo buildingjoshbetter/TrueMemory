@@ -251,3 +251,43 @@ def test_sanitized_session_id_claim_filename_roundtrips(monkeypatch, tmp_path):
         "clear_backlog_processing must remove the claim the drainer wrote "
         "for a session_id that required sanitization"
     )
+
+
+def test_cli_ingest_session_argparse_dest_is_session():
+    """The CLI success path calls ``clear_backlog_processing(args.session)``.
+
+    That only works if argparse stores ``--session`` under the dest
+    ``session`` (the default for a ``--session`` flag). If the dest were ever
+    renamed to ``session_id`` the success cleanup would raise
+    ``AttributeError`` and the .processing claim would be left to the stale
+    watcher, wasting a re-extraction of an already-ingested session. This test
+    locks the attribute name end-to-end: it builds the real parser and checks
+    that parsing ``--session`` populates ``args.session`` with the *raw*
+    (unsanitized) value, which is exactly what gets passed back through to
+    ``clear_backlog_processing``.
+    """
+    import argparse
+
+    from truememory.ingest import cli as cli_mod
+
+    raw_session_id = "proj/foo:bar baz-1"
+
+    # Drive the actual parser construction the CLI uses, so a future rename of
+    # the argparse dest is caught here rather than only at runtime.
+    parser = argparse.ArgumentParser(prog="truememory-ingest")
+    sub = parser.add_subparsers(dest="command")
+    p_ingest = sub.add_parser("ingest")
+    p_ingest.add_argument("transcript")
+    p_ingest.add_argument("--session", default="")
+    args = parser.parse_args(["ingest", "t.jsonl", "--session", raw_session_id])
+
+    assert hasattr(args, "session"), "argparse dest for --session must be 'session'"
+    assert not hasattr(args, "session_id"), "no 'session_id' dest should exist"
+    # The raw value must survive unchanged to clear_backlog_processing.
+    assert args.session == raw_session_id
+
+    # And the CLI source must actually read args.session (not args.session_id)
+    # in the success-path cleanup that calls clear_backlog_processing.
+    src = Path(cli_mod.__file__).read_text(encoding="utf-8")
+    assert "clear_backlog_processing(args.session)" in src
+    assert "args.session_id" not in src
