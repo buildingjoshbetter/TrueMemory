@@ -859,6 +859,7 @@ def search_contradictions(conn: sqlite3.Connection,
                 continue
 
             results.append({
+                "id": latest["source_message_id"],
                 "subject": subject,
                 "current_fact": latest["fact"],
                 "current_timestamp": latest["timestamp"],
@@ -975,6 +976,7 @@ def search_consolidated(conn: sqlite3.Connection, query: str,
         score = overlap + time_bonus
         if score > 0:
             results.append({
+                "id": f"summary_{row[0]}",
                 "content": summary_text,
                 "period": row[1],
                 "start_date": row[2],
@@ -997,6 +999,7 @@ def search_consolidated(conn: sqlite3.Connection, query: str,
         history_text = "\n".join(history_text_parts)
 
         results.append({
+            "id": cr["id"],
             "content": f"[Fact Timeline: {cr['subject']}]\n"
                        f"Current: {cr['current_fact']}\n"
                        f"History:\n{history_text}",
@@ -1017,6 +1020,7 @@ def search_consolidated(conn: sqlite3.Connection, query: str,
             fts_results = _fts_search(conn, fts_query, limit=limit)
             for r in fts_results:
                 results.append({
+                    "id": r.get("id"),
                     "content": r["content"],
                     "period": "message",
                     "start_date": r["timestamp"],
