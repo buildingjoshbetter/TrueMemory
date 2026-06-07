@@ -70,6 +70,12 @@ Changelog = "https://github.com/buildingjoshbetter/TrueMemory/blob/main/CHANGELO
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Issue #426: register custom markers and fail on typos so the gate can
+# reliably exclude network/model-download tests via `-m "not network"`.
+addopts = "--strict-markers"
+markers = [
+    "network: test performs real network I/O (e.g. HuggingFace model download). Excluded from the deterministic CI gate via `-m \"not network\"`; run in a dedicated non-gating job.",
+]
 
 [tool.ruff.lint]
 # Default ruleset is fine for the core codebase. Per-file ignores below.

@@ -1,0 +1,45 @@
+# CI constraints — issue #426 (reproducible installs)
+#
+# Purpose: bound the dependency resolution that `pip install -e ".[all,dev]"`
+# performs so CI installs are reproducible run-to-run instead of drifting to
+# whatever happens to be newest. Drift in the embedding/numeric stack
+# (numpy / torch / transformers / tokenizers / sentence-transformers /
+# model2vec) is what destabilizes numeric tests such as
+# test_encoding_gate_pe_decoupled across platform/version combinations.
+#
+# These are CONSTRAINTS, not requirements: they cap (and floor) versions but do
+# not themselves install anything. pyproject.toml remains the source of truth
+# for which packages are required. The bounds below intentionally stay inside
+# the ranges declared in pyproject so they cannot pull in an incompatible
+# major, while still allowing patch updates within a known-good minor for the
+# 3.10–3.13 / ubuntu-macos-windows matrix.
+#
+# Usage (wired into .github/workflows/ci.yml via PIP_CONSTRAINT):
+#   PIP_CONSTRAINT=constraints.txt pip install -e ".[all,dev]"
+#
+# Refresh by regenerating from a known-good `pip freeze` after a deliberate,
+# reviewed dependency bump.
+
+# --- core runtime deps (mirror pyproject ranges, tightened) ---
+model2vec>=0.8.0,<0.9
+sqlite-vec>=0.1.6,<0.2
+numpy>=1.24.0,<3.0
+mcp>=1.20.0,<2.0
+httpx>=0.27.0,<1.0
+sentence-transformers>=5.0.0,<6.0
+torch>=2.2.0,<3.0
+anthropic>=0.90.0,<1.0
+psutil>=5.9,<8.0
+setproctitle>=1.3,<2.0
+
+# --- transitive ML stack that drives numeric drift ---
+transformers>=5.0.0,<6.0
+tokenizers>=0.21,<0.23
+huggingface-hub>=0.30,<2.0
+safetensors>=0.5,<1.0
+scikit-learn>=1.5,<2.0
+scipy>=1.13,<2.0
+
+# --- dev / lint toolchain (pin lint so `ruff check` is reproducible) ---
+ruff>=0.14,<1.0
+pytest>=8.0,<10.0

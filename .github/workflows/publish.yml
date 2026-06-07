@@ -19,9 +19,17 @@ jobs:
           cache: 'pip'
           cache-dependency-path: pyproject.toml
       - name: Install dependencies
+        # Issue #426: reproducible resolution for the release gate.
+        env:
+          PIP_CONSTRAINT: constraints.txt
         run: pip install -e ".[all,dev]"
-      - name: Run tests
-        run: pytest tests/ -v
+      - name: Run tests (gate — deterministic, no network)
+        # Issue #426: a transient HuggingFace download flake must not block a
+        # release of correct code. Network-marked tests run separately in CI.
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+        run: pytest tests/ -v -m "not network"
       - name: Lint
         run: ruff check truememory/ tests/
 
