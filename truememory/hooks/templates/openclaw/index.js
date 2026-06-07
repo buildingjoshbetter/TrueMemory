@@ -4,6 +4,13 @@
  * Hooks into the agent lifecycle to recall memories before each run
  * and trigger extraction after each run. Uses the TrueMemory MCP server
  * for memory operations.
+ *
+ * OpenClaw plugin API:
+ *   module.exports.activate(ctx) — called once when the plugin loads.
+ *   ctx.onSessionStart(cb)       — before agent starts processing.
+ *   ctx.onSessionEnd(cb)         — after agent finishes.
+ *   ctx.onToolCall(cb)           — after each tool invocation.
+ *   ctx.onCompress(cb)           — before context compaction.
  */
 const { execSync, spawn } = require("child_process");
 const path = require("path");
@@ -25,19 +32,19 @@ function getHooksDir() {
 }
 
 module.exports = {
-  register(api) {
+  activate(ctx) {
     const hooksDir = getHooksDir();
     if (!hooksDir) {
       console.error("[truememory] Could not locate hook scripts");
       return;
     }
 
-    api.on("before_agent_run", async (ctx) => {
+    ctx.onSessionStart(async (session) => {
       try {
         const input = JSON.stringify({
-          session_id: ctx.sessionId || "openclaw",
+          session_id: session.id || "openclaw",
           cwd: process.cwd(),
-          transcript_path: ctx.transcriptPath || "",
+          transcript_path: session.transcriptPath || "",
         });
         const result = execSync(
           `echo '${input.replace(/'/g, "\\'")}' | ${PYTHON_PATH} ${path.join(hooksDir, "session_start.py")}`,
@@ -46,7 +53,7 @@ module.exports = {
         if (result) {
           const parsed = JSON.parse(result);
           if (parsed.additionalContext) {
-            ctx.additionalContext = (ctx.additionalContext || "") + "\n" + parsed.additionalContext;
+            session.additionalContext = (session.additionalContext || "") + "\n" + parsed.additionalContext;
           }
         }
       } catch (err) {
@@ -54,11 +61,11 @@ module.exports = {
       }
     });
 
-    api.on("agent_end", async (ctx) => {
+    ctx.onSessionEnd(async (session) => {
       try {
         const input = JSON.stringify({
-          session_id: ctx.sessionId || "openclaw",
-          transcript_path: ctx.transcriptPath || "",
+          session_id: session.id || "openclaw",
+          transcript_path: session.transcriptPath || "",
         });
         const child = spawn(PYTHON_PATH, [path.join(hooksDir, "stop.py")], {
           stdio: ["pipe", "ignore", "ignore"],
@@ -72,27 +79,27 @@ module.exports = {
       }
     });
 
-    api.on("before_user_message", async (ctx) => {
+    ctx.onToolCall(async (session) => {
       try {
         const input = JSON.stringify({
-          session_id: ctx.sessionId || "openclaw",
+          session_id: session.id || "openclaw",
           cwd: process.cwd(),
-          user_prompt: ctx.userPrompt || "",
+          user_prompt: session.lastUserPrompt || "",
         });
         execSync(
           `echo '${input.replace(/'/g, "\\'")}' | ${PYTHON_PATH} ${path.join(hooksDir, "user_prompt_submit.py")}`,
           { encoding: "utf-8", timeout: 5000 }
         );
       } catch (err) {
-        // Never block user message processing
+        // Never block tool call processing
       }
     });
 
-    api.on("before_compress", async (ctx) => {
+    ctx.onCompress(async (session) => {
       try {
         const input = JSON.stringify({
-          session_id: ctx.sessionId || "openclaw",
-          transcript_path: ctx.transcriptPath || "",
+          session_id: session.id || "openclaw",
+          transcript_path: session.transcriptPath || "",
         });
         execSync(
           `echo '${input.replace(/'/g, "\\'")}' | ${PYTHON_PATH} ${path.join(hooksDir, "compact.py")}`,

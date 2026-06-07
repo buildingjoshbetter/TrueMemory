@@ -3,5 +3,5 @@
   "version": "1.0.0",
   "description": "TrueMemory persistent memory integration for OpenClaw",
   "main": "index.js",
-  "events": ["before_agent_run", "agent_end", "before_user_message", "before_compress"]
+  "activationEvents": ["onSessionStart", "onSessionEnd", "onToolCall", "onCompress"]
 }

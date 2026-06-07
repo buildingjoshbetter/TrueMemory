@@ -2,9 +2,22 @@
 
 OpenClaw uses:
 - ~/.openclaw/openclaw.json (JSON5-compatible) for MCP server registration
-  under the nested mcp.servers key
+  under the ``mcpServers`` key (top-level, not nested under mcp.servers)
 - ~/.openclaw/plugins/<name>/ for plugins (plugin.json + index.js)
-- Plugin hooks: before_agent_run, agent_end (JS API, not shell commands)
+- Plugin events: onSessionStart, onSessionEnd, onToolCall, onCompress
+  (camelCase, registered via ``module.exports.activate(ctx)`` API)
+- Container-based skills can be enabled/disabled in the ``skills:`` section
+  of the main config
+
+Config format (from OpenClaw source):
+  {
+    "mcpServers": {
+      "name": {"command": "...", "args": [...]}
+    },
+    "skills": {
+      "name": {"enabled": true, ...}
+    }
+  }
 """
 from __future__ import annotations
 
@@ -116,20 +129,29 @@ class OpenClawAdapter(CLIAdapter):
 
         existing = _read_json_config(_CONFIG_PATH)
 
-        mcp = existing.setdefault("mcp", {})
-        if not isinstance(mcp, dict):
-            mcp = {}
-            existing["mcp"] = mcp
-
-        servers = mcp.setdefault("servers", {})
+        # OpenClaw uses top-level mcpServers (like Claude Code), not nested
+        # mcp.servers.  Earlier versions of this adapter wrote to mcp.servers
+        # which was silently ignored by the runtime.
+        servers = existing.setdefault("mcpServers", {})
         if not isinstance(servers, dict):
             servers = {}
-            mcp["servers"] = servers
+            existing["mcpServers"] = servers
 
         servers[_PLUGIN_NAME] = {
             "command": py,
             "args": ["-m", "truememory.mcp_server"],
         }
+
+        # Migration: remove stale entries from the old mcp.servers path
+        old_mcp = existing.get("mcp", {})
+        if isinstance(old_mcp, dict):
+            old_servers = old_mcp.get("servers", {})
+            if isinstance(old_servers, dict) and _PLUGIN_NAME in old_servers:
+                del old_servers[_PLUGIN_NAME]
+                if not old_servers:
+                    del old_mcp["servers"]
+                if not old_mcp:
+                    del existing["mcp"]
 
         _CONFIG_PATH.write_text(
             json.dumps(existing, indent=2),
@@ -175,13 +197,17 @@ class OpenClawAdapter(CLIAdapter):
 
     def _has_mcp_entry(self) -> bool:
         data = _read_json_config(_CONFIG_PATH)
+        # Check new top-level mcpServers key
+        servers = data.get("mcpServers", {})
+        if isinstance(servers, dict) and _PLUGIN_NAME in servers:
+            return True
+        # Also check legacy mcp.servers path for detection
         mcp = data.get("mcp", {})
-        if not isinstance(mcp, dict):
-            return False
-        servers = mcp.get("servers", {})
-        if not isinstance(servers, dict):
-            return False
-        return _PLUGIN_NAME in servers
+        if isinstance(mcp, dict):
+            servers = mcp.get("servers", {})
+            if isinstance(servers, dict) and _PLUGIN_NAME in servers:
+                return True
+        return False
 
     def _has_plugin(self) -> bool:
         plugin_dir = _PLUGINS_DIR / _PLUGIN_NAME
@@ -196,14 +222,26 @@ class OpenClawAdapter(CLIAdapter):
             return
         try:
             data = _read_json_config(_CONFIG_PATH)
+            changed = False
+
+            # Remove from new mcpServers key
+            servers = data.get("mcpServers", {})
+            if isinstance(servers, dict) and _PLUGIN_NAME in servers:
+                del servers[_PLUGIN_NAME]
+                changed = True
+
+            # Also clean up legacy mcp.servers path
             mcp = data.get("mcp", {})
             if isinstance(mcp, dict):
-                servers = mcp.get("servers", {})
-                if isinstance(servers, dict) and _PLUGIN_NAME in servers:
-                    del servers[_PLUGIN_NAME]
-                    _CONFIG_PATH.write_text(
-                        json.dumps(data, indent=2), encoding="utf-8",
-                    )
+                old_servers = mcp.get("servers", {})
+                if isinstance(old_servers, dict) and _PLUGIN_NAME in old_servers:
+                    del old_servers[_PLUGIN_NAME]
+                    changed = True
+
+            if changed:
+                _CONFIG_PATH.write_text(
+                    json.dumps(data, indent=2), encoding="utf-8",
+                )
         except OSError:
             pass
 
