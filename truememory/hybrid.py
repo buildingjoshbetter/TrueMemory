@@ -175,8 +175,9 @@ def search_hybrid(
     # 1. Retrieve candidates from all engines.
     # ------------------------------------------------------------------
     from truememory.vector_search import get_model, serialize_f32
+    from truememory.mps_utils import encode_with_mps_fallback
     _q_model = get_model()
-    _q_emb = _q_model.encode([query])[0]
+    _q_emb = encode_with_mps_fallback(_q_model, [query])[0]
     _q_blob = serialize_f32(_q_emb)
 
     fts_results = search_fts(conn, query, limit=_CANDIDATE_POOL)
