@@ -441,6 +441,7 @@ class TrueMemoryEngine:
                                             _conn = _sql.connect(str(db_path), check_same_thread=False)
                                             _conn.execute("PRAGMA journal_mode=WAL")
                                             _conn.execute("PRAGMA busy_timeout=30000")
+                                            _conn.execute("PRAGMA foreign_keys=ON")
                                             # Issue #499: load sqlite-vec on the
                                             # background thread's connection so
                                             # vec virtual tables are available.
@@ -1100,6 +1101,7 @@ class TrueMemoryEngine:
         self.conn.row_factory = None  # Use default tuple rows
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
+        self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA cache_size=-64000")
         self.conn.execute("PRAGMA mmap_size=268435456")
