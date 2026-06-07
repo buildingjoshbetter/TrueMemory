@@ -300,14 +300,9 @@ def _is_real_upgrade(latest: str | None, current: str | None) -> bool:
         or current == "unknown"
     ):
         return False
-    # Resolve the semver parser. Prefer the module-level guarded import, but
-    # re-attempt the import at call time as well so that a runtime-unavailable
-    # ``packaging`` (e.g. uninstalled after startup) still fails conservative.
+    # Resolve the semver parser from the module-level guarded import. If
+    # ``packaging`` was unavailable at import time, ``_version_parse`` is None.
     parse = _version_parse
-    try:
-        from packaging.version import parse  # noqa: F811
-    except Exception:
-        parse = None
     if parse is None:
         # packaging unavailable: we cannot reliably compare versions, so fail
         # conservative and suppress the nudge. A naive string compare could
