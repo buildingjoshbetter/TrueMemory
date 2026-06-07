@@ -359,6 +359,9 @@ class TrueMemoryEngine:
         self._has_clustering = _HAS_CLUSTERING
         self._has_style_vec = _HAS_STYLE_VEC
 
+        # Coordination flag for background NaN re-embed thread (#485).
+        self._nan_migration_in_progress = False
+
     # ──────────────────────────────────────────────────────────────────────
     # Auto-connect (production API)
     # ──────────────────────────────────────────────────────────────────────
@@ -424,12 +427,6 @@ class TrueMemoryEngine:
                                 _msg_count = self.conn.execute(
                                     "SELECT COUNT(*) FROM messages"
                                 ).fetchone()[0] if "messages" in _tables else 0
-                                self.conn.execute(
-                                    "INSERT OR REPLACE INTO metadata (key, value) "
-                                    "VALUES (?, ?)",
-                                    ("qwen3_nan_fix_applied", "1"),
-                                )
-                                self.conn.commit()
                                 if _msg_count > 0:
                                     def _bg_reembed(db_path):
                                         import sqlite3 as _sql
@@ -437,6 +434,13 @@ class TrueMemoryEngine:
                                             _conn = _sql.connect(str(db_path), check_same_thread=False)
                                             _conn.execute("PRAGMA journal_mode=WAL")
                                             _conn.execute("PRAGMA busy_timeout=30000")
+                                            # Issue #499: load sqlite-vec on the
+                                            # background thread's connection so
+                                            # vec virtual tables are available.
+                                            import sqlite_vec as _sv
+                                            _conn.enable_load_extension(True)
+                                            _sv.load(_conn)
+                                            _conn.enable_load_extension(False)
                                             from truememory.vector_search import (
                                                 build_vectors as _bv,
                                                 build_separation_vectors as _bsv,
@@ -448,6 +452,15 @@ class TrueMemoryEngine:
                                             _ivt(_conn)
                                             _bv(_conn)
                                             _bsv(_conn)
+                                            # Issue #485: only set the flag AFTER
+                                            # successful re-embed so a failed
+                                            # thread allows retry on next init.
+                                            _conn.execute(
+                                                "INSERT OR REPLACE INTO metadata "
+                                                "(key, value) VALUES (?, ?)",
+                                                ("qwen3_nan_fix_applied", "1"),
+                                            )
+                                            _conn.commit()
                                             _conn.close()
                                             logger.warning(
                                                 "Qwen3 NaN fix: re-embedded %d vectors "
@@ -455,13 +468,20 @@ class TrueMemoryEngine:
                                             )
                                         except Exception:
                                             logger.warning(
-                                                "Qwen3 NaN background migration failed",
+                                                "Qwen3 NaN background migration failed — "
+                                                "will retry on next startup",
                                                 exc_info=True,
                                             )
                                     _db = self.db_path
                                     if str(_db) != ":memory:":
+                                        self._nan_migration_in_progress = True
+                                        def _bg_wrapper(db_path):
+                                            try:
+                                                _bg_reembed(db_path)
+                                            finally:
+                                                self._nan_migration_in_progress = False
                                         _t = threading.Thread(
-                                            target=_bg_reembed, args=(_db,),
+                                            target=_bg_wrapper, args=(_db,),
                                             daemon=True,
                                         )
                                         _t.start()
@@ -481,9 +501,24 @@ class TrueMemoryEngine:
                                         _ivt(self.conn)
                                         _bv(self.conn)
                                         _bsv(self.conn)
+                                        self.conn.execute(
+                                            "INSERT OR REPLACE INTO metadata "
+                                            "(key, value) VALUES (?, ?)",
+                                            ("qwen3_nan_fix_applied", "1"),
+                                        )
+                                        self.conn.commit()
                                         logger.warning(
                                             "Qwen3 NaN fix: re-embedded all vectors",
                                         )
+                                else:
+                                    # No messages — just set the flag to skip
+                                    # future checks.
+                                    self.conn.execute(
+                                        "INSERT OR REPLACE INTO metadata "
+                                        "(key, value) VALUES (?, ?)",
+                                        ("qwen3_nan_fix_applied", "1"),
+                                    )
+                                    self.conn.commit()
                 except Exception:
                     logger.warning(
                         "Qwen3 NaN migration failed — run "
