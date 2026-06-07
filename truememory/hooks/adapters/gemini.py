@@ -26,21 +26,24 @@ _CONFIG_PATH = _GEMINI_DIR / "settings.json"
 _HOOK_EVENTS = {
     "SessionStart": {
         "script": "session_start.py",
-        "timeout": 10000,
+        "timeout": 10000,  # milliseconds (Gemini CLI convention)
     },
     "SessionEnd": {
         "script": "stop.py",
-        "timeout": 5000,
+        "timeout": 5000,  # milliseconds
     },
     "BeforeAgent": {
         "script": "user_prompt_submit.py",
-        "timeout": 5000,
+        "timeout": 5000,  # milliseconds
     },
     "PreCompress": {
         "script": "compact.py",
-        "timeout": 5000,
+        "timeout": 5000,  # milliseconds
     },
 }
+
+# Legacy event names that were renamed; cleaned during install/uninstall.
+_LEGACY_EVENT_NAMES = {"UserPromptSubmit"}
 
 _TRUEMEMORY_MARKER = "truememory"
 
@@ -131,13 +134,48 @@ class GeminiAdapter(CLIAdapter):
             hooks = {}
             settings["hooks"] = hooks
 
+        # Clean up legacy/renamed event names (e.g. UserPromptSubmit -> BeforeAgent)
+        for legacy_event in _LEGACY_EVENT_NAMES:
+            if legacy_event in hooks and isinstance(hooks[legacy_event], list):
+                cleaned = [
+                    h for h in hooks[legacy_event]
+                    if not self._definition_has_truememory(h)
+                ]
+                if cleaned:
+                    hooks[legacy_event] = cleaned
+                else:
+                    del hooks[legacy_event]
+
         for event, info in _HOOK_EVENTS.items():
             event_list = hooks.setdefault(event, [])
             if not isinstance(event_list, list):
                 event_list = []
                 hooks[event] = event_list
 
-            if self._event_has_truememory(event_list):
+            # Remove legacy flat-format TrueMemory entries so we can upgrade them
+            has_legacy = any(
+                self._definition_has_truememory(h)
+                and not isinstance(h.get("hooks"), list)
+                for h in event_list
+                if isinstance(h, dict)
+            )
+            if has_legacy:
+                event_list[:] = [
+                    h for h in event_list
+                    if not (
+                        self._definition_has_truememory(h)
+                        and not isinstance(h.get("hooks"), list)
+                    )
+                ]
+
+            # Skip if already installed in correct nested format
+            has_nested = any(
+                self._definition_has_truememory(h)
+                and isinstance(h.get("hooks"), list)
+                for h in event_list
+                if isinstance(h, dict)
+            )
+            if has_nested:
                 continue
 
             script_path = hooks_dir / info["script"]
@@ -164,7 +202,11 @@ class GeminiAdapter(CLIAdapter):
 
         hooks = settings.get("hooks", {})
         if isinstance(hooks, dict):
-            for event in list(hooks.keys()):
+            # Clean current + legacy event names
+            all_events = set(hooks.keys()) | _LEGACY_EVENT_NAMES
+            for event in list(all_events):
+                if event not in hooks:
+                    continue
                 entries = hooks[event]
                 if not isinstance(entries, list):
                     continue

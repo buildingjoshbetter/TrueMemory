@@ -214,6 +214,84 @@ def test_install_hooks_idempotent(tmp_path, monkeypatch):
     assert first == second
 
 
+def test_install_hooks_migrates_legacy_flat_format(tmp_path, monkeypatch):
+    """Re-running install must upgrade old flat TrueMemory entries to nested format."""
+    from truememory.hooks.adapters import gemini as gemini_mod
+    config_path = tmp_path / "settings.json"
+    config_path.write_text(json.dumps({
+        "hooks": {
+            "SessionStart": [
+                {"command": "/usr/bin/python3 /path/to/truememory/session_start.py", "timeout": 10000}
+            ]
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(gemini_mod, "_CONFIG_PATH", config_path)
+    from truememory.hooks.adapters.gemini import GeminiAdapter
+    adapter = GeminiAdapter()
+    adapter.install_hooks(python_path="/usr/bin/python3")
+
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    hooks = data["hooks"]
+    # Legacy flat entry must be replaced by nested format
+    assert len(hooks["SessionStart"]) == 1
+    hook_def = hooks["SessionStart"][0]
+    assert "hooks" in hook_def, "Must be nested HookDefinition, not flat"
+    assert hook_def["hooks"][0]["type"] == "command"
+    assert "truememory" in hook_def["hooks"][0]["command"].lower()
+
+
+def test_install_hooks_cleans_renamed_event(tmp_path, monkeypatch):
+    """Install must remove TrueMemory hooks under legacy event name UserPromptSubmit."""
+    from truememory.hooks.adapters import gemini as gemini_mod
+    config_path = tmp_path / "settings.json"
+    config_path.write_text(json.dumps({
+        "hooks": {
+            "UserPromptSubmit": [
+                {"command": "/usr/bin/python3 /path/to/truememory/user_prompt_submit.py", "timeout": 5000}
+            ]
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(gemini_mod, "_CONFIG_PATH", config_path)
+    from truememory.hooks.adapters.gemini import GeminiAdapter
+    adapter = GeminiAdapter()
+    adapter.install_hooks(python_path="/usr/bin/python3")
+
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    hooks = data["hooks"]
+    # Old event name must be gone
+    assert "UserPromptSubmit" not in hooks
+    # New event name must be present
+    assert "BeforeAgent" in hooks
+    assert "truememory" in hooks["BeforeAgent"][0]["hooks"][0]["command"].lower()
+
+
+def test_uninstall_cleans_legacy_event_names(tmp_path, monkeypatch):
+    """Uninstall must also clean hooks under legacy event names like UserPromptSubmit."""
+    from truememory.hooks.adapters import gemini as gemini_mod
+    config_path = tmp_path / "settings.json"
+    config_path.write_text(json.dumps({
+        "hooks": {
+            "UserPromptSubmit": [
+                {"command": "/usr/bin/python3 /path/to/truememory/user_prompt_submit.py", "timeout": 5000}
+            ],
+            "SessionStart": [
+                {"hooks": [{"type": "command", "command": "my-hook", "timeout": 5000}]}
+            ],
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(gemini_mod, "_CONFIG_PATH", config_path)
+    from truememory.hooks.adapters.gemini import GeminiAdapter
+    adapter = GeminiAdapter()
+    adapter.uninstall()
+
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    hooks = data["hooks"]
+    assert "UserPromptSubmit" not in hooks
+    # Non-TrueMemory hook under SessionStart preserved
+    assert len(hooks["SessionStart"]) == 1
+    assert hooks["SessionStart"][0]["hooks"][0]["command"] == "my-hook"
+
+
 # -- Uninstall --
 
 def test_uninstall_removes_entries(tmp_path, monkeypatch):
