@@ -264,7 +264,7 @@ class KimiAdapter(CLIAdapter):
             if stripped == "[[hooks]]":
                 block_lines = [line]
                 i += 1
-                while i < len(lines) and not lines[i].strip().startswith("[["):
+                while i < len(lines) and not lines[i].strip().startswith("["):
                     block_lines.append(lines[i])
                     i += 1
 

@@ -247,3 +247,37 @@ def test_uninstall_handles_blank_lines_in_hook_block(tmp_path, monkeypatch):
     text = hook_config.read_text(encoding="utf-8")
     assert "truememory" not in text.lower()
     assert "timeout" not in text
+
+
+# -- Uninstall preserves non-TrueMemory content (regression test) --
+
+def test_uninstall_preserves_unrelated_hooks_and_tables(tmp_path, monkeypatch):
+    """Uninstall must not delete user hooks or unrelated TOML tables."""
+    from truememory.hooks.adapters import kimi as kimi_mod
+    hook_config = tmp_path / "config.toml"
+    mcp_path = tmp_path / "mcp.json"
+    hook_config.write_text(
+        '[[hooks]]\nevent = "SessionStart"\n'
+        'command = "python truememory/ingest/hooks/session_start.py"\n\n'
+        'timeout = 10\n\n'
+        '[[hooks]]\nevent = "Stop"\n'
+        'command = "my-own-script.sh"\ntimeout = 30\n\n'
+        '[settings]\ntheme = "dark"\n',
+        encoding="utf-8",
+    )
+    mcp_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(kimi_mod, "_HOOK_CONFIG", hook_config)
+    monkeypatch.setattr(kimi_mod, "_MCP_CONFIG", mcp_path)
+    from truememory.hooks.adapters.kimi import KimiAdapter
+    adapter = KimiAdapter()
+    adapter.uninstall()
+
+    text = hook_config.read_text(encoding="utf-8")
+    # TrueMemory hook must be gone
+    assert "truememory" not in text.lower()
+    # User's own hook must survive
+    assert "my-own-script.sh" in text
+    assert 'event = "Stop"' in text
+    # Unrelated TOML table must survive
+    assert "[settings]" in text
+    assert 'theme = "dark"' in text
