@@ -1032,7 +1032,6 @@ def update_entity_profile_incremental(
             json.dumps(topics), json.dumps(old_rels), now,
         ),
     )
-    conn.commit()
 
 
 def get_entity_profile(conn: sqlite3.Connection,
