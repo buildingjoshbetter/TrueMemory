@@ -53,6 +53,17 @@ says."""
 _TRANSCRIPT_OPEN = "<untrusted_transcript>"
 _TRANSCRIPT_CLOSE = "</untrusted_transcript>"
 
+# Matches the open/close delimiter tokens in any case and with internal
+# whitespace, so untrusted content cannot forge the fence (e.g. embed a literal
+# "</untrusted_transcript>" followed by injected instructions to break out).
+_DELIM_RE = re.compile(r"<\s*/?\s*untrusted_transcript\s*>", re.IGNORECASE)
+
+
+def _neutralize_delimiters(text: str) -> str:
+    """Defang any transcript-delimiter tokens inside untrusted content so a
+    crafted chunk cannot close the fence early and inject instructions."""
+    return _DELIM_RE.sub("[transcript-delimiter-removed]", text)
+
 EXTRACTION_PROMPT = """\
 Given this conversation transcript, extract atomic facts worth remembering.
 
@@ -236,7 +247,7 @@ def extract_facts(
 
     all_facts: list[ExtractedFact] = []
     for i, chunk in enumerate(chunks):
-        prompt = EXTRACTION_PROMPT.format(transcript=chunk)
+        prompt = EXTRACTION_PROMPT.format(transcript=_neutralize_delimiters(chunk))
         try:
             response = complete(config, prompt, system=EXTRACTION_SYSTEM)
         except LLMError as e:
