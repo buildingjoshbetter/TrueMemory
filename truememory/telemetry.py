@@ -277,23 +277,33 @@ def _is_real_upgrade(latest: str | None, current: str | None) -> bool:
     older "latest"). We never want to nudge the user toward a downgrade or a
     no-op upgrade, so we re-verify the version comparison client-side.
 
-    Conservative behavior: if either version is missing or unparseable, we
-    return False (suppress the notice) rather than risk advertising a
-    downgrade. The cost of a missed-but-real upgrade nudge is low; the cost of
-    telling a user to "upgrade" to an older version is a real bug.
+    Conservative ("fail safe") behavior: if either version is missing, equal to
+    "unknown", or unparseable -- or if the ``packaging`` library is unavailable
+    so we cannot compare versions reliably -- we return False (suppress the
+    notice) rather than risk advertising a downgrade. The cost of a
+    missed-but-real upgrade nudge is low; the cost of telling a user to
+    "upgrade" to an older version is a real bug.
     """
-    if not latest or not current or current == "unknown":
+    if (
+        not latest
+        or not current
+        or latest == "unknown"
+        or current == "unknown"
+    ):
         return False
     try:
-        from packaging.version import InvalidVersion, parse
+        from packaging.version import parse
     except Exception:
-        # packaging unavailable: fall back to a safe exact-string check.
-        # Only suppress the obvious no-op (latest == current); otherwise defer
-        # to the server flag rather than silently dropping real upgrades.
-        return str(latest) != str(current)
+        # packaging unavailable: we cannot reliably compare versions, so fail
+        # conservative and suppress the nudge. A naive string compare could
+        # advertise a downgrade (e.g. "0.7.0" != "0.7.1.3"), which is the exact
+        # #424 bug we are guarding against.
+        return False
     try:
         return parse(str(latest)) > parse(str(current))
-    except InvalidVersion:
+    except Exception:
+        # Any parse failure or uncertainty -> suppress rather than risk
+        # advertising a downgrade.
         return False
 
 

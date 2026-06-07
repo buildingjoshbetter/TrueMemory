@@ -38,9 +38,35 @@ class TestIsRealUpgrade:
         assert _is_real_upgrade("0.8.0", "unknown") is False
         assert _is_real_upgrade("", "0.7.1.3") is False
 
+    def test_latest_unknown_suppressed(self):
+        # latest == "unknown" must suppress, even with a valid current version.
+        # A naive string compare ("unknown" != "0.7.1.3") would wrongly nudge.
+        assert _is_real_upgrade("unknown", "0.7.1.3") is False
+
     def test_unparseable_version_suppressed(self):
         # Conservative: garbage version -> suppress rather than risk a downgrade.
         assert _is_real_upgrade("not-a-version", "0.7.1.3") is False
+        assert _is_real_upgrade("0.8.0", "also-not-a-version") is False
+
+    def test_packaging_missing_suppressed(self, monkeypatch):
+        # When the ``packaging`` import fails, we must fail conservative and
+        # suppress the nudge -- never fall back to a naive string compare that
+        # could advertise a downgrade (e.g. "0.7.0" != "0.7.1.3" -> True).
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _fake_import(name, *args, **kwargs):
+            if name == "packaging.version" or name.startswith("packaging"):
+                raise ImportError("packaging unavailable")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _fake_import)
+        # A genuinely newer latest would normally pass, but with packaging gone
+        # we cannot trust the comparison, so suppress.
+        assert _is_real_upgrade("0.8.0", "0.7.1.3") is False
+        # And we definitely never advertise a downgrade via string compare.
+        assert _is_real_upgrade("0.7.0", "0.7.1.3") is False
 
 
 class TestFlushSyncGate:
