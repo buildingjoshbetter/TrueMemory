@@ -703,7 +703,7 @@ class TrueMemoryEngine:
                 # Clean summaries scoped to this user
                 try:
                     self.conn.execute(
-                        "DELETE FROM summaries WHERE entity = ?", (user_id,)
+                        "DELETE FROM summaries WHERE entity = ?", (user_id.lower(),)
                     )
                 except Exception:
                     logger.warning("Failed to clean summaries for user %s", user_id, exc_info=True)
