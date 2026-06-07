@@ -560,6 +560,19 @@ def get_timeline(
 # Episode boundaries (B1: 6-hour gap heuristic)
 # ---------------------------------------------------------------------------
 
+_TZ_SUFFIX_RE = re.compile(r'([+-]\d{2}:\d{2}|Z)$')
+
+
+def _parse_naive(ts: str) -> datetime:
+    """Parse an ISO timestamp to a naive (tz-unaware) datetime.
+
+    Strips any timezone suffix (Z, +HH:MM, -HH:MM) to guarantee all
+    results are naive, avoiding TypeError on mixed-tz comparisons.
+    """
+    stripped = _TZ_SUFFIX_RE.sub('', ts)
+    return datetime.fromisoformat(stripped)
+
+
 def detect_episodes(conn, gap_hours=6):
     """
     Group messages into episodes using a time-gap heuristic.
@@ -594,9 +607,8 @@ def detect_episodes(conn, gap_hours=6):
         prev_id, prev_ts = rows[i - 1]
 
         try:
-            # Parse timestamps (handle both date-only and datetime formats)
-            curr_dt = datetime.fromisoformat(ts.replace('Z', '+00:00').split('+')[0])
-            prev_dt = datetime.fromisoformat(prev_ts.replace('Z', '+00:00').split('+')[0])
+            curr_dt = _parse_naive(ts)
+            prev_dt = _parse_naive(prev_ts)
 
             if (curr_dt - prev_dt) > gap_delta:
                 # New episode
