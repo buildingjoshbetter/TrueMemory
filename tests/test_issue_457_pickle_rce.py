@@ -16,6 +16,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pytest
+
+_SKIP_NO_UNIX = pytest.mark.skipif(
+    not hasattr(socket, "AF_UNIX"),
+    reason="Unix domain sockets not available on this platform",
+)
 
 
 def _recv_exact(sock, n):
@@ -63,6 +69,7 @@ class TestIssue457PickleRCERemoved:
             "model_server.py calls pickle.dumps — potential for deserialization attacks"
         )
 
+    @_SKIP_NO_UNIX
     def test_issue_457_malicious_pickle_rejected(self):
         """A crafted pickle payload must not execute code via the server."""
         import pickle
@@ -122,6 +129,7 @@ class TestIssue457PickleRCERemoved:
                 "Exploit payload was executed! pickle.loads RCE is still present"
             )
 
+    @_SKIP_NO_UNIX
     def test_issue_457_numpy_roundtrip_via_json(self):
         """Embeddings must survive JSON-based serialization round-trip."""
         from truememory.model_server import ModelServer
@@ -185,6 +193,7 @@ class TestIssue457PickleRCERemoved:
             if response_holder[0] is not None:
                 assert response_holder[0].get("ok") is True
 
+    @_SKIP_NO_UNIX
     def test_issue_457_socket_permissions(self):
         """The model server run() should chmod the socket to 0o600."""
         import os
