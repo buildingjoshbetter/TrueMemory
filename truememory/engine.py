@@ -421,27 +421,69 @@ class TrueMemoryEngine:
                                 "SELECT value FROM metadata WHERE key = 'qwen3_nan_fix_applied'"
                             ).fetchone()
                             if _row is None:
-                                from truememory.vector_search import (
-                                    build_vectors as _bv,
-                                    build_separation_vectors as _bsv,
-                                    init_vec_table as _ivt,
-                                )
-                                self.conn.execute("DROP TABLE IF EXISTS vec_messages")
-                                self.conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
-                                self.conn.commit()
-                                _ivt(self.conn)
-                                _bv(self.conn)
-                                _bsv(self.conn)
-                                logger.warning(
-                                    "Qwen3 NaN fix: re-embedded all vectors with "
-                                    "eager attention (one-time macOS migration)"
-                                )
+                                _msg_count = self.conn.execute(
+                                    "SELECT COUNT(*) FROM messages"
+                                ).fetchone()[0] if "messages" in _tables else 0
                                 self.conn.execute(
                                     "INSERT OR REPLACE INTO metadata (key, value) "
                                     "VALUES (?, ?)",
                                     ("qwen3_nan_fix_applied", "1"),
                                 )
                                 self.conn.commit()
+                                if _msg_count > 0:
+                                    def _bg_reembed(db_path):
+                                        import sqlite3 as _sql
+                                        try:
+                                            _conn = _sql.connect(str(db_path), check_same_thread=False)
+                                            _conn.execute("PRAGMA journal_mode=WAL")
+                                            _conn.execute("PRAGMA busy_timeout=30000")
+                                            from truememory.vector_search import (
+                                                build_vectors as _bv,
+                                                build_separation_vectors as _bsv,
+                                                init_vec_table as _ivt,
+                                            )
+                                            _conn.execute("DROP TABLE IF EXISTS vec_messages")
+                                            _conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
+                                            _conn.commit()
+                                            _ivt(_conn)
+                                            _bv(_conn)
+                                            _bsv(_conn)
+                                            _conn.close()
+                                            logger.warning(
+                                                "Qwen3 NaN fix: re-embedded %d vectors "
+                                                "in background", _msg_count,
+                                            )
+                                        except Exception:
+                                            logger.warning(
+                                                "Qwen3 NaN background migration failed",
+                                                exc_info=True,
+                                            )
+                                    _db = self.db_path
+                                    if str(_db) != ":memory:":
+                                        _t = threading.Thread(
+                                            target=_bg_reembed, args=(_db,),
+                                            daemon=True,
+                                        )
+                                        _t.start()
+                                        logger.info(
+                                            "Qwen3 NaN fix: re-embedding %d vectors "
+                                            "in background thread", _msg_count,
+                                        )
+                                    else:
+                                        from truememory.vector_search import (
+                                            build_vectors as _bv,
+                                            build_separation_vectors as _bsv,
+                                            init_vec_table as _ivt,
+                                        )
+                                        self.conn.execute("DROP TABLE IF EXISTS vec_messages")
+                                        self.conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
+                                        self.conn.commit()
+                                        _ivt(self.conn)
+                                        _bv(self.conn)
+                                        _bsv(self.conn)
+                                        logger.warning(
+                                            "Qwen3 NaN fix: re-embedded all vectors",
+                                        )
                 except Exception:
                     logger.warning(
                         "Qwen3 NaN migration failed — run "
