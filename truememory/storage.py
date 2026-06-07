@@ -162,7 +162,32 @@ CREATE TABLE IF NOT EXISTS metadata (
     updated_at TEXT
 );
 
+-- Surprise scores for L5 predictive layer (MEMORIST)
+CREATE TABLE IF NOT EXISTS surprise_scores (
+    message_id INTEGER PRIMARY KEY,
+    surprise    REAL NOT NULL DEFAULT 0.0,
+    fact_count  INTEGER NOT NULL DEFAULT 0,
+    new_fact_count INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (message_id) REFERENCES messages(id)
+);
+
+-- Clustering (HDBSCAN episode clusters)
+CREATE TABLE IF NOT EXISTS message_clusters (
+    message_id   INTEGER PRIMARY KEY REFERENCES messages(id),
+    cluster_id   INTEGER NOT NULL,
+    noise        INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS cluster_centroids (
+    cluster_id   INTEGER PRIMARY KEY,
+    centroid     BLOB NOT NULL,
+    message_count INTEGER DEFAULT 0,
+    session_range TEXT DEFAULT '',
+    summary      TEXT DEFAULT ''
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender);
+CREATE INDEX IF NOT EXISTS idx_cluster_id ON message_clusters(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp);
 CREATE INDEX IF NOT EXISTS idx_messages_episode_id ON messages(episode_id);
 CREATE INDEX IF NOT EXISTS idx_messages_category ON messages(category);
