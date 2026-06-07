@@ -362,6 +362,13 @@ class TrueMemoryEngine:
         # Coordination flag for background NaN re-embed thread (#485).
         self._nan_migration_in_progress = False
 
+        # Auto-consolidation: run L5 consolidation every N adds (#498)
+        self._adds_since_consolidation = 0
+        self._auto_consolidate_threshold = int(
+            os.environ.get("TRUEMEMORY_AUTO_CONSOLIDATE_EVERY", "100")
+        )
+        self._consolidation_thread: threading.Thread | None = None
+
     # ──────────────────────────────────────────────────────────────────────
     # Auto-connect (production API)
     # ──────────────────────────────────────────────────────────────────────
@@ -633,6 +640,8 @@ class TrueMemoryEngine:
 
             self.conn.commit()
 
+        self._maybe_auto_consolidate()
+
         return {
             "id": new_id,
             "content": content,
@@ -641,6 +650,31 @@ class TrueMemoryEngine:
             "timestamp": timestamp,
             "category": category,
         }
+
+    def _maybe_auto_consolidate(self) -> None:
+        """Trigger background consolidation after threshold adds."""
+        self._adds_since_consolidation += 1
+        if self._adds_since_consolidation < self._auto_consolidate_threshold:
+            return
+        if not self._has_consolidation:
+            return
+        if (self._consolidation_thread is not None
+                and self._consolidation_thread.is_alive()):
+            return
+        self._adds_since_consolidation = 0
+        self._consolidation_thread = threading.Thread(
+            target=self._bg_consolidate,
+            daemon=True,
+            name="auto-consolidate",
+        )
+        self._consolidation_thread.start()
+
+    def _bg_consolidate(self) -> None:
+        """Run consolidation in a background thread with its own connection."""
+        try:
+            self.consolidate()
+        except Exception:
+            logger.debug("Auto-consolidation failed", exc_info=True)
 
     def delete(self, memory_id: int) -> bool:
         """Delete a memory by ID.
