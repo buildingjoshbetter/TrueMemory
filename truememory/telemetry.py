@@ -260,11 +260,41 @@ def _flush_sync() -> dict | None:
             timeout=_HTTP_TIMEOUT,
         )
         data = resp.json()
-        if data.get("update_available"):
+        if data.get("update_available") and _is_real_upgrade(
+            data.get("latest_version"), _get_version()
+        ):
             return data
     except Exception:
         pass
     return None
+
+
+def _is_real_upgrade(latest: str | None, current: str | None) -> bool:
+    """Return True only if ``latest`` is a strictly newer version than ``current``.
+
+    The telemetry server's ``update_available`` flag is advisory and can be
+    stale or wrong (e.g. during a rollback the server may still advertise an
+    older "latest"). We never want to nudge the user toward a downgrade or a
+    no-op upgrade, so we re-verify the version comparison client-side.
+
+    Conservative behavior: if either version is missing or unparseable, we
+    return False (suppress the notice) rather than risk advertising a
+    downgrade. The cost of a missed-but-real upgrade nudge is low; the cost of
+    telling a user to "upgrade" to an older version is a real bug.
+    """
+    if not latest or not current or current == "unknown":
+        return False
+    try:
+        from packaging.version import InvalidVersion, parse
+    except Exception:
+        # packaging unavailable: fall back to a safe exact-string check.
+        # Only suppress the obvious no-op (latest == current); otherwise defer
+        # to the server flag rather than silently dropping real upgrades.
+        return str(latest) != str(current)
+    try:
+        return parse(str(latest)) > parse(str(current))
+    except InvalidVersion:
+        return False
 
 
 def _save_user_id(config: dict) -> None:
