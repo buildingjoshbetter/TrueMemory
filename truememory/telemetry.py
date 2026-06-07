@@ -33,6 +33,15 @@ import uuid
 from functools import wraps
 from pathlib import Path
 
+try:
+    # Module-level guarded import of the semver parser. If ``packaging`` is
+    # unavailable we leave ``_version_parse`` as None and ``_is_real_upgrade``
+    # fails conservative (suppresses the nudge) rather than risk a naive string
+    # compare that could advertise a downgrade -- the #424 bug.
+    from packaging.version import parse as _version_parse
+except Exception:  # pragma: no cover - exercised via monkeypatched __import__
+    _version_parse = None
+
 _TELEMETRY_ENDPOINT = "https://telemetry-api-production-c2a3.up.railway.app/v1/events"
 _FLUSH_INTERVAL = 60  # seconds
 _HTTP_TIMEOUT = 3  # seconds
@@ -260,11 +269,52 @@ def _flush_sync() -> dict | None:
             timeout=_HTTP_TIMEOUT,
         )
         data = resp.json()
-        if data.get("update_available"):
+        if data.get("update_available") and _is_real_upgrade(
+            data.get("latest_version"), _get_version()
+        ):
             return data
     except Exception:
         pass
     return None
+
+
+def _is_real_upgrade(latest: str | None, current: str | None) -> bool:
+    """Return True only if ``latest`` is a strictly newer version than ``current``.
+
+    The telemetry server's ``update_available`` flag is advisory and can be
+    stale or wrong (e.g. during a rollback the server may still advertise an
+    older "latest"). We never want to nudge the user toward a downgrade or a
+    no-op upgrade, so we re-verify the version comparison client-side.
+
+    Conservative ("fail safe") behavior: if either version is missing, equal to
+    "unknown", or unparseable -- or if the ``packaging`` library is unavailable
+    so we cannot compare versions reliably -- we return False (suppress the
+    notice) rather than risk advertising a downgrade. The cost of a
+    missed-but-real upgrade nudge is low; the cost of telling a user to
+    "upgrade" to an older version is a real bug.
+    """
+    if (
+        not latest
+        or not current
+        or latest == "unknown"
+        or current == "unknown"
+    ):
+        return False
+    # Resolve the semver parser from the module-level guarded import. If
+    # ``packaging`` was unavailable at import time, ``_version_parse`` is None.
+    parse = _version_parse
+    if parse is None:
+        # packaging unavailable: we cannot reliably compare versions, so fail
+        # conservative and suppress the nudge. A naive string compare could
+        # advertise a downgrade (e.g. "0.7.0" != "0.7.1.3"), which is the exact
+        # #424 bug we are guarding against.
+        return False
+    try:
+        return parse(str(latest)) > parse(str(current))
+    except Exception:
+        # Any parse failure or uncertainty -> suppress rather than risk
+        # advertising a downgrade.
+        return False
 
 
 def _save_user_id(config: dict) -> None:
