@@ -1,207 +1,65 @@
-"""Tests for the Hermes Agent adapter (#185).
+"""Tests for the removed Hermes Agent adapter.
 
-Validates YAML MCP config, plugin hook registration, detection,
-and config merge safety without network calls.
+The Hermes adapter was removed in June 2026 because the target product
+(NousResearch/hermes-agent) does not exist. These tests verify that:
+1. The stub module is importable (no ImportError for existing code)
+2. The adapter is NOT in the active registry
+3. Install methods raise NotImplementedError
+4. detect() and is_configured() return False
 """
 from __future__ import annotations
 
-from pathlib import Path
+import pytest
 
-import yaml
-
-
-# -- Import tests --
 
 def test_import_hermes_adapter():
+    """Stub module should still be importable."""
     from truememory.hooks.adapters.hermes import HermesAdapter  # noqa: F401
 
 
-def test_hermes_in_registry():
+def test_hermes_not_in_registry():
+    """Removed adapters must not appear in the active registry."""
     from truememory.hooks.registry import get_adapter
-    adapter = get_adapter("hermes")
-    assert adapter is not None
-    assert adapter.cli_id == "hermes"
+    assert get_adapter("hermes") is None
 
 
-# -- Instantiation --
-
-def test_hermes_adapter_properties():
+def test_hermes_detect_returns_false():
     from truememory.hooks.adapters.hermes import HermesAdapter
-    adapter = HermesAdapter()
-    assert adapter.name == "Hermes Agent"
-    assert adapter.cli_id == "hermes"
-    assert isinstance(adapter.config_path, Path)
-    assert adapter.config_path.name == "config.yaml"
+    assert not HermesAdapter().detect()
 
 
-def test_hermes_implements_all_abstract_methods():
-    from truememory.hooks.adapters.base import CLIAdapter
-    from truememory.hooks.adapters.hermes import HermesAdapter
-    import inspect
-    abstract_methods = {
-        name for name, _ in inspect.getmembers(CLIAdapter)
-        if getattr(getattr(CLIAdapter, name, None), "__isabstractmethod__", False)
-    }
-    adapter = HermesAdapter()
-    for method_name in abstract_methods:
-        assert hasattr(adapter, method_name), f"Missing: {method_name}"
-
-
-# -- Detection --
-
-def test_detect_false_no_dir(tmp_path, monkeypatch):
-    from truememory.hooks.adapters import hermes as hermes_mod
-    monkeypatch.setattr(hermes_mod, "_HERMES_DIR", tmp_path / "nonexistent")
-    from truememory.hooks.adapters.hermes import HermesAdapter
-    adapter = HermesAdapter()
-    monkeypatch.setattr("shutil.which", lambda x: None)
-    assert not adapter.detect()
-
-
-def test_detect_true_with_dir(tmp_path, monkeypatch):
-    from truememory.hooks.adapters import hermes as hermes_mod
-    hermes_dir = tmp_path / ".hermes"
-    hermes_dir.mkdir()
-    monkeypatch.setattr(hermes_mod, "_HERMES_DIR", hermes_dir)
-    from truememory.hooks.adapters.hermes import HermesAdapter
-    assert HermesAdapter().detect()
-
-
-# -- MCP config --
-
-def test_install_mcp_creates_yaml(tmp_path, monkeypatch):
-    from truememory.hooks.adapters import hermes as hermes_mod
-    mcp_path = tmp_path / "config.yaml"
-    monkeypatch.setattr(hermes_mod, "_MCP_CONFIG", mcp_path)
-    from truememory.hooks.adapters.hermes import HermesAdapter
-    HermesAdapter().install_mcp(python_path="/usr/bin/python3")
-
-    data = yaml.safe_load(mcp_path.read_text(encoding="utf-8"))
-    assert "truememory" in data["mcp_servers"]
-    assert data["mcp_servers"]["truememory"]["command"] == "/usr/bin/python3"
-    assert data["mcp_servers"]["truememory"]["args"] == ["-m", "truememory.mcp_server"]
-
-
-def test_install_mcp_preserves_existing(tmp_path, monkeypatch):
-    from truememory.hooks.adapters import hermes as hermes_mod
-    mcp_path = tmp_path / "config.yaml"
-    mcp_path.write_text(yaml.safe_dump({
-        "mcp_servers": {"other-server": {"command": "other"}},
-        "general": {"theme": "dark"},
-    }), encoding="utf-8")
-    monkeypatch.setattr(hermes_mod, "_MCP_CONFIG", mcp_path)
-    from truememory.hooks.adapters.hermes import HermesAdapter
-    HermesAdapter().install_mcp(python_path="/usr/bin/python3")
-
-    data = yaml.safe_load(mcp_path.read_text(encoding="utf-8"))
-    assert "truememory" in data["mcp_servers"]
-    assert "other-server" in data["mcp_servers"]
-    assert data["general"]["theme"] == "dark"
-
-
-# -- Plugin hooks --
-
-def test_install_hooks_creates_cli_config(tmp_path, monkeypatch):
-    from truememory.hooks.adapters import hermes as hermes_mod
-    cli_config = tmp_path / "cli-config.yaml"
-    monkeypatch.setattr(hermes_mod, "_CLI_CONFIG", cli_config)
-    from truememory.hooks.adapters.hermes import HermesAdapter
-    HermesAdapter().install_hooks(python_path="/usr/bin/python3")
-
-    data = yaml.safe_load(cli_config.read_text(encoding="utf-8"))
-    plugins = data["plugins"]
-    assert len(plugins) == 4
-
-    names = {p["name"] for p in plugins}
-    assert "truememory-session-start" in names
-    assert "truememory-session-end" in names
-    assert "truememory-user-prompt" in names
-    assert "truememory-pre-compact" in names
-
-    events = {p["event"] for p in plugins}
-    assert "on_session_start" in events
-    assert "on_session_end" in events
-    assert "on_user_prompt" in events
-    assert "on_pre_compact" in events
-
-
-def test_install_hooks_preserves_existing(tmp_path, monkeypatch):
-    from truememory.hooks.adapters import hermes as hermes_mod
-    cli_config = tmp_path / "cli-config.yaml"
-    cli_config.write_text(yaml.safe_dump({
-        "plugins": [{"name": "my-plugin", "event": "custom", "command": "my-cmd"}],
-    }), encoding="utf-8")
-    monkeypatch.setattr(hermes_mod, "_CLI_CONFIG", cli_config)
-    from truememory.hooks.adapters.hermes import HermesAdapter
-    HermesAdapter().install_hooks(python_path="/usr/bin/python3")
-
-    data = yaml.safe_load(cli_config.read_text(encoding="utf-8"))
-    names = {p["name"] for p in data["plugins"]}
-    assert "my-plugin" in names
-    assert "truememory-session-start" in names
-
-
-def test_install_hooks_idempotent(tmp_path, monkeypatch):
-    from truememory.hooks.adapters import hermes as hermes_mod
-    cli_config = tmp_path / "cli-config.yaml"
-    monkeypatch.setattr(hermes_mod, "_CLI_CONFIG", cli_config)
-    from truememory.hooks.adapters.hermes import HermesAdapter
-    adapter = HermesAdapter()
-    adapter.install_hooks(python_path="/usr/bin/python3")
-    first = cli_config.read_text(encoding="utf-8")
-    adapter.install_hooks(python_path="/usr/bin/python3")
-    second = cli_config.read_text(encoding="utf-8")
-    assert first == second
-
-
-# -- Uninstall --
-
-def test_uninstall_removes_entries(tmp_path, monkeypatch):
-    from truememory.hooks.adapters import hermes as hermes_mod
-    mcp_path = tmp_path / "config.yaml"
-    cli_config = tmp_path / "cli-config.yaml"
-    monkeypatch.setattr(hermes_mod, "_MCP_CONFIG", mcp_path)
-    monkeypatch.setattr(hermes_mod, "_CLI_CONFIG", cli_config)
-    from truememory.hooks.adapters.hermes import HermesAdapter
-    adapter = HermesAdapter()
-
-    adapter.install_mcp(python_path="/usr/bin/python3")
-    adapter.install_hooks(python_path="/usr/bin/python3")
-    assert adapter.is_configured()
-
-    adapter.uninstall()
-    mcp_data = yaml.safe_load(mcp_path.read_text(encoding="utf-8"))
-    assert "truememory" not in mcp_data.get("mcp_servers", {})
-
-    cli_data = yaml.safe_load(cli_config.read_text(encoding="utf-8"))
-    tm_plugins = [
-        p for p in cli_data.get("plugins", [])
-        if "truememory" in p.get("name", "").lower()
-    ]
-    assert len(tm_plugins) == 0
-
-
-# -- is_configured --
-
-def test_is_configured_false_clean(tmp_path, monkeypatch):
-    from truememory.hooks.adapters import hermes as hermes_mod
-    monkeypatch.setattr(hermes_mod, "_MCP_CONFIG", tmp_path / "config.yaml")
-    monkeypatch.setattr(hermes_mod, "_CLI_CONFIG", tmp_path / "cli-config.yaml")
+def test_hermes_is_configured_returns_false():
     from truememory.hooks.adapters.hermes import HermesAdapter
     assert not HermesAdapter().is_configured()
 
 
-# -- Build command --
-
-def test_build_command_with_args():
+def test_hermes_verify_returns_false():
     from truememory.hooks.adapters.hermes import HermesAdapter
-    cmd = HermesAdapter._build_command(
-        "/usr/bin/python3",
-        Path("/path/to/session_start.py"),
-        user_id="bob",
-        db_path="/data/mem.db",
-    )
-    assert "/usr/bin/python3" in cmd
-    assert "session_start.py" in cmd
-    assert "--user" in cmd
-    assert "bob" in cmd
+    assert not HermesAdapter().verify()
+
+
+def test_hermes_install_mcp_raises():
+    from truememory.hooks.adapters.hermes import HermesAdapter
+    with pytest.raises(NotImplementedError, match="does not exist"):
+        HermesAdapter().install_mcp()
+
+
+def test_hermes_install_hooks_raises():
+    from truememory.hooks.adapters.hermes import HermesAdapter
+    with pytest.raises(NotImplementedError, match="does not exist"):
+        HermesAdapter().install_hooks()
+
+
+def test_hermes_uninstall_raises():
+    from truememory.hooks.adapters.hermes import HermesAdapter
+    with pytest.raises(NotImplementedError, match="does not exist"):
+        HermesAdapter().uninstall()
+
+
+def test_hermes_stub_properties():
+    from truememory.hooks.adapters.hermes import HermesAdapter
+    adapter = HermesAdapter()
+    assert adapter.cli_id == "hermes"
+    assert "REMOVED" in adapter.name
+    assert adapter.get_system_prompt_path() is None
+    assert adapter.get_system_prompt_content() == ""

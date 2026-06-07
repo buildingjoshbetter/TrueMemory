@@ -1,6 +1,6 @@
 """Abstract base class for CLI adapters.
 
-Each supported CLI (Claude Code, Kimi, Hermes, OpenClaw) implements
+Each supported CLI (Claude Code, Codex, Cursor, Gemini, Kimi) implements
 this interface to handle its config format, hook registration, and
 MCP server setup.
 """
@@ -21,7 +21,7 @@ class CLIAdapter(ABC):
     @property
     @abstractmethod
     def cli_id(self) -> str:
-        """Machine identifier (e.g. 'claude', 'kimi', 'hermes', 'openclaw')."""
+        """Machine identifier (e.g. 'claude', 'codex', 'cursor', 'gemini', 'kimi')."""
 
     @property
     @abstractmethod

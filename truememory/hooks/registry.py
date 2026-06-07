@@ -18,15 +18,18 @@ STATE_FILE = Path.home() / ".truememory" / "integrations.json"
 
 
 def _get_all_adapters() -> list[CLIAdapter]:
-    """Return instances of all known CLI adapters."""
+    """Return instances of all known CLI adapters.
+
+    Note: HermesAdapter and OpenClawAdapter were removed in June 2026
+    because the target products (NousResearch/hermes-agent, openclaw/openclaw)
+    do not exist. See the adapter module docstrings for details.
+    """
     from truememory.hooks.adapters.claude import ClaudeAdapter
     from truememory.hooks.adapters.codex import CodexAdapter
     from truememory.hooks.adapters.cursor import CursorAdapter
     from truememory.hooks.adapters.gemini import GeminiAdapter
     from truememory.hooks.adapters.kimi import KimiAdapter
-    from truememory.hooks.adapters.hermes import HermesAdapter
-    from truememory.hooks.adapters.openclaw import OpenClawAdapter
-    return [ClaudeAdapter(), CodexAdapter(), CursorAdapter(), GeminiAdapter(), KimiAdapter(), HermesAdapter(), OpenClawAdapter()]
+    return [ClaudeAdapter(), CodexAdapter(), CursorAdapter(), GeminiAdapter(), KimiAdapter()]
 
 
 def detect_installed() -> list[CLIAdapter]:
