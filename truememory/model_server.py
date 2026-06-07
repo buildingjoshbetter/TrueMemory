@@ -75,11 +75,17 @@ def _json_default(obj):
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
+_ALLOWED_DTYPES = frozenset({"float32", "float64", "float16", "int32", "int64"})
+
+
 def _json_object_hook(obj):
     """Decode base64-encoded numpy arrays from JSON."""
     if "__ndarray__" in obj:
+        dtype_str = obj["dtype"]
+        if dtype_str not in _ALLOWED_DTYPES:
+            raise ValueError(f"Disallowed dtype: {dtype_str}")
         data = base64.b64decode(obj["__ndarray__"])
-        return np.frombuffer(data, dtype=np.dtype(obj["dtype"])).reshape(obj["shape"])
+        return np.frombuffer(data, dtype=np.dtype(dtype_str)).reshape(obj["shape"])
     return obj
 
 
@@ -305,6 +311,8 @@ class ModelServer:
 
     def _send_response(self, conn: socket.socket, response: dict):
         data = json.dumps(response, default=_json_default).encode("utf-8")
+        if len(data) > _MAX_MESSAGE_SIZE:
+            data = json.dumps({"ok": False, "error": "Response too large"}).encode("utf-8")
         header = struct.pack(_HEADER_FMT, len(data))
         conn.sendall(header + data)
 
@@ -405,7 +413,7 @@ def main():
             os.kill(old_pid, 0)
             log.error("Model server already running (pid=%d)", old_pid)
             sys.exit(1)
-        except (ProcessLookupError, ValueError):
+        except (ProcessLookupError, PermissionError, ValueError):
             PID_PATH.unlink(missing_ok=True)
             if SOCK_PATH.exists():
                 SOCK_PATH.unlink(missing_ok=True)
