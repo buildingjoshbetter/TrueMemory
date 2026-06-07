@@ -12,16 +12,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: 'pip'
           cache-dependency-path: pyproject.toml
       - name: Install dependencies
-        # Issue #426: reproducible resolution for the release gate.
-        env:
-          PIP_CONSTRAINT: constraints.txt
         run: pip install -e ".[all,dev]"
       - name: Run tests (gate — deterministic, no network)
         # Issue #426: a transient HuggingFace download flake must not block a
