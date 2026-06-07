@@ -6,9 +6,12 @@ Gemini CLI uses:
 - Hooks under hooks key with PascalCase event names, nested HookDefinition format
 - Same JSON stdin/stdout hook protocol as Claude Code
 
-Hook format (from google-gemini/gemini-cli TypeScript types):
+Hook format (from google-gemini/gemini-cli docs/hooks/reference.md):
   HookDefinition: { matcher?: string, sequential?: bool, hooks: HookConfig[] }
   CommandHookConfig: { type: "command", command: string, name?: string, timeout?: number }
+
+Event names verified against google-gemini/gemini-cli docs/hooks/reference.md:
+  SessionStart, SessionEnd, BeforeAgent, PreCompress (+ BeforeTool, AfterTool, etc.)
 """
 from __future__ import annotations
 
@@ -210,10 +213,41 @@ class GeminiAdapter(CLIAdapter):
                 entries = hooks[event]
                 if not isinstance(entries, list):
                     continue
-                cleaned = [
-                    h for h in entries
-                    if not self._definition_has_truememory(h)
-                ]
+                cleaned: list = []
+                for h in entries:
+                    if not isinstance(h, dict):
+                        cleaned.append(h)
+                        continue
+                    # Legacy flat format: check top-level command
+                    if (
+                        "command" in h
+                        and "hooks" not in h
+                        and _TRUEMEMORY_MARKER in h.get("command", "").lower()
+                    ):
+                        continue  # drop entire legacy entry
+                    # Nested format: filter inner hooks array, keep definition
+                    # if non-TrueMemory hooks remain
+                    inner = h.get("hooks")
+                    if isinstance(inner, list):
+                        kept = [
+                            hc for hc in inner
+                            if not (
+                                isinstance(hc, dict)
+                                and _TRUEMEMORY_MARKER
+                                in hc.get("command", "").lower()
+                            )
+                        ]
+                        if len(kept) == len(inner):
+                            # No TrueMemory hooks in this definition
+                            cleaned.append(h)
+                        elif kept:
+                            # Some non-TrueMemory hooks remain; keep them
+                            h["hooks"] = kept
+                            cleaned.append(h)
+                        # else: all inner hooks were TrueMemory -> drop
+                    else:
+                        # Not a recognized format; preserve as-is
+                        cleaned.append(h)
                 if cleaned:
                     hooks[event] = cleaned
                 else:
@@ -279,6 +313,13 @@ class GeminiAdapter(CLIAdapter):
             return False
 
     def _has_hook_entries(self) -> bool:
+        """Check if correctly-nested TrueMemory hooks exist.
+
+        Only counts entries in the proper HookDefinition format
+        (with a ``hooks`` sub-array).  Legacy flat-format entries are
+        ignored so that ``verify()`` returns False until
+        ``install_hooks()`` has migrated them.
+        """
         if not _CONFIG_PATH.exists():
             return False
         try:
@@ -289,7 +330,7 @@ class GeminiAdapter(CLIAdapter):
             for entries in hooks.values():
                 if not isinstance(entries, list):
                     continue
-                if self._event_has_truememory(entries):
+                if self._event_has_nested_truememory(entries):
                     return True
         except (json.JSONDecodeError, OSError):
             pass
@@ -322,8 +363,32 @@ class GeminiAdapter(CLIAdapter):
 
     @staticmethod
     def _event_has_truememory(entries: list) -> bool:
-        """Check if any HookDefinition in the event list is a TrueMemory hook."""
+        """Check if any HookDefinition in the event list is a TrueMemory hook.
+
+        Matches both nested and legacy flat formats (used by install/uninstall).
+        """
         return any(
             GeminiAdapter._definition_has_truememory(h)
             for h in entries
         )
+
+    @staticmethod
+    def _event_has_nested_truememory(entries: list) -> bool:
+        """Check if any HookDefinition has a correctly-nested TrueMemory hook.
+
+        Only matches the proper ``{"hooks": [...]}`` format.
+        Used by ``verify()`` to avoid false positives on legacy entries.
+        """
+        for h in entries:
+            if not isinstance(h, dict):
+                continue
+            inner = h.get("hooks", [])
+            if not isinstance(inner, list):
+                continue
+            for hc in inner:
+                if (
+                    isinstance(hc, dict)
+                    and _TRUEMEMORY_MARKER in hc.get("command", "").lower()
+                ):
+                    return True
+        return False
