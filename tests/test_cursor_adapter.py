@@ -402,3 +402,121 @@ def test_hook_timeouts_are_in_seconds(tmp_path, monkeypatch):
                     f"Timeout for {event_name!r} is {timeout}; expected 1-120 seconds, "
                     f"not milliseconds"
                 )
+
+
+def test_install_migrates_stale_user_prompt_submit(tmp_path, monkeypatch):
+    """Upgrade migration: old userPromptSubmit entries are removed, replaced by
+    beforeSubmitPrompt. Stale event should not remain in hooks.json."""
+    from truememory.hooks.adapters import cursor as cursor_mod
+    hook_path = tmp_path / "hooks.json"
+    monkeypatch.setattr(cursor_mod, "_HOOK_CONFIG", hook_path)
+
+    # Pre-seed with the old buggy config
+    old_config = {
+        "version": 1,
+        "hooks": {
+            "sessionStart": [
+                {"command": "/usr/bin/python3 /path/to/truememory/session_start.py", "timeout": 10000}
+            ],
+            "stop": [
+                {"command": "/usr/bin/python3 /path/to/truememory/stop.py", "timeout": 5000}
+            ],
+            "userPromptSubmit": [
+                {"command": "/usr/bin/python3 /path/to/truememory/user_prompt_submit.py", "timeout": 5000}
+            ],
+            "preCompact": [
+                {"command": "/usr/bin/python3 /path/to/truememory/compact.py", "timeout": 5000}
+            ],
+        },
+    }
+    hook_path.write_text(json.dumps(old_config), encoding="utf-8")
+
+    from truememory.hooks.adapters.cursor import CursorAdapter
+    adapter = CursorAdapter()
+    adapter.install_hooks(python_path="/usr/bin/python3")
+
+    data = json.loads(hook_path.read_text(encoding="utf-8"))
+    hooks = data["hooks"]
+
+    # Stale event must be gone
+    assert "userPromptSubmit" not in hooks, (
+        "userPromptSubmit should be removed during migration"
+    )
+    # Correct event must exist
+    assert "beforeSubmitPrompt" in hooks
+    assert len(hooks["beforeSubmitPrompt"]) == 1
+    assert "truememory" in hooks["beforeSubmitPrompt"][0]["command"].lower()
+
+
+def test_install_updates_stale_millisecond_timeouts(tmp_path, monkeypatch):
+    """Upgrade migration: existing TrueMemory hooks with old millisecond timeout
+    values should be updated to seconds on re-install."""
+    from truememory.hooks.adapters import cursor as cursor_mod
+    hook_path = tmp_path / "hooks.json"
+    monkeypatch.setattr(cursor_mod, "_HOOK_CONFIG", hook_path)
+
+    # Pre-seed with old ms-based timeouts
+    old_config = {
+        "version": 1,
+        "hooks": {
+            "sessionStart": [
+                {"command": "/usr/bin/python3 /path/to/truememory/session_start.py", "timeout": 10000}
+            ],
+            "stop": [
+                {"command": "/usr/bin/python3 /path/to/truememory/stop.py", "timeout": 5000}
+            ],
+            "preCompact": [
+                {"command": "/usr/bin/python3 /path/to/truememory/compact.py", "timeout": 5000}
+            ],
+        },
+    }
+    hook_path.write_text(json.dumps(old_config), encoding="utf-8")
+
+    from truememory.hooks.adapters.cursor import CursorAdapter
+    adapter = CursorAdapter()
+    adapter.install_hooks(python_path="/usr/bin/python3")
+
+    data = json.loads(hook_path.read_text(encoding="utf-8"))
+    hooks = data["hooks"]
+
+    # All timeouts should now be in seconds
+    assert hooks["sessionStart"][0]["timeout"] == 10
+    assert hooks["stop"][0]["timeout"] == 5
+    assert hooks["preCompact"][0]["timeout"] == 5
+
+
+def test_install_preserves_non_truememory_hooks(tmp_path, monkeypatch):
+    """Migration must not remove hooks that belong to other tools."""
+    from truememory.hooks.adapters import cursor as cursor_mod
+    hook_path = tmp_path / "hooks.json"
+    monkeypatch.setattr(cursor_mod, "_HOOK_CONFIG", hook_path)
+
+    # Pre-seed with mixed config: TrueMemory + user's own hook
+    old_config = {
+        "version": 1,
+        "hooks": {
+            "userPromptSubmit": [
+                {"command": "/usr/bin/python3 /path/to/truememory/user_prompt_submit.py", "timeout": 5000},
+                {"command": "/usr/local/bin/my-custom-linter", "timeout": 10},
+            ],
+            "sessionStart": [
+                {"command": "/usr/bin/python3 /path/to/truememory/session_start.py", "timeout": 10000}
+            ],
+        },
+    }
+    hook_path.write_text(json.dumps(old_config), encoding="utf-8")
+
+    from truememory.hooks.adapters.cursor import CursorAdapter
+    adapter = CursorAdapter()
+    adapter.install_hooks(python_path="/usr/bin/python3")
+
+    data = json.loads(hook_path.read_text(encoding="utf-8"))
+    hooks = data["hooks"]
+
+    # User's custom linter under the stale event name should survive
+    assert "userPromptSubmit" in hooks
+    assert len(hooks["userPromptSubmit"]) == 1
+    assert "my-custom-linter" in hooks["userPromptSubmit"][0]["command"]
+
+    # TrueMemory should now be under the correct event
+    assert "beforeSubmitPrompt" in hooks

@@ -38,6 +38,9 @@ _HOOK_EVENTS = {
     },
 }
 
+# Legacy event names from prior buggy versions that must be cleaned up.
+_STALE_EVENTS = ("userPromptSubmit",)
+
 _TRUEMEMORY_MARKER = "truememory"
 
 _SYSTEM_PROMPT_TEMPLATE = """\
@@ -152,6 +155,36 @@ class CursorAdapter(CLIAdapter):
         if not isinstance(hooks, dict):
             hooks = {}
             existing["hooks"] = hooks
+
+        # --- Migration: remove stale event names from prior versions ---
+        for stale in _STALE_EVENTS:
+            stale_list = hooks.get(stale)
+            if not isinstance(stale_list, list):
+                continue
+            cleaned = [
+                h for h in stale_list
+                if not (
+                    isinstance(h, dict)
+                    and _TRUEMEMORY_MARKER in h.get("command", "").lower()
+                )
+            ]
+            if cleaned:
+                hooks[stale] = cleaned
+            else:
+                hooks.pop(stale, None)
+
+        # --- Migration: update existing TrueMemory hook timeouts ---
+        for event, info in _HOOK_EVENTS.items():
+            event_list = hooks.get(event)
+            if not isinstance(event_list, list):
+                continue
+            for entry in event_list:
+                if (
+                    isinstance(entry, dict)
+                    and _TRUEMEMORY_MARKER in entry.get("command", "").lower()
+                    and entry.get("timeout") != info["timeout"]
+                ):
+                    entry["timeout"] = info["timeout"]
 
         for event, info in _HOOK_EVENTS.items():
             event_list = hooks.setdefault(event, [])
