@@ -834,8 +834,12 @@ def truememory_configure(
     except Exception:
         pass
 
-    if api_key or email:
-        _save_config(config)
+    # Always persist the tier selection — even on first run with no api_key
+    # or email.  Without this, Edge tier on first run (old_tier defaults to
+    # "edge", so old_tier == tier, skipping the tier-switch block) was never
+    # written to config.json, leaving setup_required=True forever (#497).
+    config["tier"] = tier
+    _save_config(config)
 
     # Invalidate cached LLM function so it picks up the new key
     if api_key:
