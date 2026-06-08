@@ -293,10 +293,14 @@ def detect_temporal_intent(query: str) -> dict:
             result["has_temporal"] = True
 
     # --- "after [date/event]" ---
-    m = re.search(r"\bafter\s+(.+?)(?:\?|$|,|\band\b)", ql)
+    # Use a greedy-enough pattern that captures American date formats with
+    # commas (e.g. "January 15, 2026") before terminating at sentence-level
+    # punctuation.  The old pattern used `,` as a terminator which truncated
+    # "January 15, 2026" to "January 15".
+    m = re.search(r"\bafter\s+(.+?)(?:\?|$|\.\s|\band\b)", ql)
     if m and result["after"] is None:
         # Look for a date, including in parentheses in the original query
-        after_text = m.group(1)
+        after_text = m.group(1).rstrip(", ")
         # Also check the original query for parenthesized dates near this match
         paren_match = re.search(r"\(([^)]+)\)", q[m.start():])
         if paren_match:
@@ -309,9 +313,9 @@ def detect_temporal_intent(query: str) -> dict:
             result["sort_by_time"] = True
 
     # --- "before [date/event]" ---
-    m = re.search(r"\bbefore\s+(.+?)(?:\?|$|,|\band\b)", ql)
+    m = re.search(r"\bbefore\s+(.+?)(?:\?|$|\.\s|\band\b)", ql)
     if m and result["before"] is None:
-        before_text = m.group(1)
+        before_text = m.group(1).rstrip(", ")
         paren_match = re.search(r"\(([^)]+)\)", q[m.start():])
         if paren_match:
             before_text = before_text + " " + paren_match.group(1)
@@ -378,11 +382,51 @@ def detect_temporal_intent(query: str) -> dict:
         except ValueError:
             pass
 
-    # --- "last month/week/year" (relative) ---
+    # --- Relative temporal expressions ---
+    # Resolve "yesterday", "last week", "last month", "last year", and
+    # "last N days/weeks/months" to concrete date ranges using the
+    # current date.  Previously these were detected but never resolved
+    # to actual after/before values (#509).
+
+    _now = datetime.now()
+
+    # "yesterday"
+    if re.search(r"\byesterday\b", ql) and not result["after"] and not result["before"]:
+        yesterday = _now - timedelta(days=1)
+        result["after"] = yesterday.strftime("%Y-%m-%d")
+        result["before"] = yesterday.strftime("%Y-%m-%d")
+        result["has_temporal"] = True
+        result["sort_by_time"] = True
+
+    # "last N days/weeks/months"
+    m_rel_n = re.search(r"\blast\s+(\d+)\s+(day|week|month|year)s?\b", ql)
+    if m_rel_n and not result["after"] and not result["before"]:
+        n = int(m_rel_n.group(1))
+        unit = m_rel_n.group(2)
+        if unit == "day":
+            delta = timedelta(days=n)
+        elif unit == "week":
+            delta = timedelta(weeks=n)
+        elif unit == "month":
+            delta = timedelta(days=n * 30)
+        else:  # year
+            delta = timedelta(days=n * 365)
+        result["after"] = (_now - delta).strftime("%Y-%m-%d")
+        result["before"] = _now.strftime("%Y-%m-%d")
+        result["has_temporal"] = True
+        result["sort_by_time"] = True
+
+    # "last month/week/year" (single unit, no number)
     m = re.search(r"\blast\s+(month|week|year)\b", ql)
-    if m and not result["has_temporal"]:
-        # Without a known "now", we can't compute exact dates, but we flag it
-        # and let the caller supply the reference via the latest timestamp.
+    if m and not result["after"] and not result["before"]:
+        unit = m.group(1)
+        if unit == "week":
+            result["after"] = (_now - timedelta(weeks=1)).strftime("%Y-%m-%d")
+        elif unit == "month":
+            result["after"] = (_now - timedelta(days=30)).strftime("%Y-%m-%d")
+        else:  # year
+            result["after"] = (_now - timedelta(days=365)).strftime("%Y-%m-%d")
+        result["before"] = _now.strftime("%Y-%m-%d")
         result["has_temporal"] = True
         result["sort_by_time"] = True
 
@@ -560,6 +604,19 @@ def get_timeline(
 # Episode boundaries (B1: 6-hour gap heuristic)
 # ---------------------------------------------------------------------------
 
+_TZ_SUFFIX_RE = re.compile(r'([+-]\d{2}:\d{2}|Z)$')
+
+
+def _parse_naive(ts: str) -> datetime:
+    """Parse an ISO timestamp to a naive (tz-unaware) datetime.
+
+    Strips any timezone suffix (Z, +HH:MM, -HH:MM) to guarantee all
+    results are naive, avoiding TypeError on mixed-tz comparisons.
+    """
+    stripped = _TZ_SUFFIX_RE.sub('', ts)
+    return datetime.fromisoformat(stripped)
+
+
 def detect_episodes(conn, gap_hours=6):
     """
     Group messages into episodes using a time-gap heuristic.
@@ -594,9 +651,8 @@ def detect_episodes(conn, gap_hours=6):
         prev_id, prev_ts = rows[i - 1]
 
         try:
-            # Parse timestamps (handle both date-only and datetime formats)
-            curr_dt = datetime.fromisoformat(ts.replace('Z', '+00:00').split('+')[0])
-            prev_dt = datetime.fromisoformat(prev_ts.replace('Z', '+00:00').split('+')[0])
+            curr_dt = _parse_naive(ts)
+            prev_dt = _parse_naive(prev_ts)
 
             if (curr_dt - prev_dt) > gap_delta:
                 # New episode

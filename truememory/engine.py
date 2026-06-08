@@ -61,7 +61,7 @@ _ALLOWED_TABLES = frozenset({
 })
 
 _ALLOWED_COLUMNS = frozenset({
-    "source_message_id", "cause_msg_id", "effect_msg_id",
+    "source_message_id", "cause_msg_id", "effect_msg_id", "message_id",
 })
 
 _SQLITE_IN_CHUNK = 500
@@ -359,6 +359,16 @@ class TrueMemoryEngine:
         self._has_clustering = _HAS_CLUSTERING
         self._has_style_vec = _HAS_STYLE_VEC
 
+        # Coordination flag for background NaN re-embed thread (#485).
+        self._nan_migration_in_progress = False
+
+        # Auto-consolidation: run L5 consolidation every N adds (#498)
+        self._adds_since_consolidation = 0
+        self._auto_consolidate_threshold = int(
+            os.environ.get("TRUEMEMORY_AUTO_CONSOLIDATE_EVERY", "25")
+        )
+        self._consolidation_thread: threading.Thread | None = None
+
     # ──────────────────────────────────────────────────────────────────────
     # Auto-connect (production API)
     # ──────────────────────────────────────────────────────────────────────
@@ -421,27 +431,102 @@ class TrueMemoryEngine:
                                 "SELECT value FROM metadata WHERE key = 'qwen3_nan_fix_applied'"
                             ).fetchone()
                             if _row is None:
-                                from truememory.vector_search import (
-                                    build_vectors as _bv,
-                                    build_separation_vectors as _bsv,
-                                    init_vec_table as _ivt,
-                                )
-                                self.conn.execute("DROP TABLE IF EXISTS vec_messages")
-                                self.conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
-                                self.conn.commit()
-                                _ivt(self.conn)
-                                _bv(self.conn)
-                                _bsv(self.conn)
-                                logger.warning(
-                                    "Qwen3 NaN fix: re-embedded all vectors with "
-                                    "eager attention (one-time macOS migration)"
-                                )
-                                self.conn.execute(
-                                    "INSERT OR REPLACE INTO metadata (key, value) "
-                                    "VALUES (?, ?)",
-                                    ("qwen3_nan_fix_applied", "1"),
-                                )
-                                self.conn.commit()
+                                _msg_count = self.conn.execute(
+                                    "SELECT COUNT(*) FROM messages"
+                                ).fetchone()[0] if "messages" in _tables else 0
+                                if _msg_count > 0:
+                                    def _bg_reembed(db_path):
+                                        import sqlite3 as _sql
+                                        try:
+                                            _conn = _sql.connect(str(db_path), check_same_thread=False)
+                                            _conn.execute("PRAGMA journal_mode=WAL")
+                                            _conn.execute("PRAGMA busy_timeout=30000")
+                                            _conn.execute("PRAGMA foreign_keys=ON")
+                                            # Issue #499: load sqlite-vec on the
+                                            # background thread's connection so
+                                            # vec virtual tables are available.
+                                            import sqlite_vec as _sv
+                                            _conn.enable_load_extension(True)
+                                            _sv.load(_conn)
+                                            _conn.enable_load_extension(False)
+                                            from truememory.vector_search import (
+                                                build_vectors as _bv,
+                                                build_separation_vectors as _bsv,
+                                                init_vec_table as _ivt,
+                                            )
+                                            _conn.execute("DROP TABLE IF EXISTS vec_messages")
+                                            _conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
+                                            _conn.commit()
+                                            _ivt(_conn)
+                                            _bv(_conn)
+                                            _bsv(_conn)
+                                            # Issue #485: only set the flag AFTER
+                                            # successful re-embed so a failed
+                                            # thread allows retry on next init.
+                                            _conn.execute(
+                                                "INSERT OR REPLACE INTO metadata "
+                                                "(key, value) VALUES (?, ?)",
+                                                ("qwen3_nan_fix_applied", "1"),
+                                            )
+                                            _conn.commit()
+                                            _conn.close()
+                                            logger.warning(
+                                                "Qwen3 NaN fix: re-embedded %d vectors "
+                                                "in background", _msg_count,
+                                            )
+                                        except Exception:
+                                            logger.warning(
+                                                "Qwen3 NaN background migration failed — "
+                                                "will retry on next startup",
+                                                exc_info=True,
+                                            )
+                                    _db = self.db_path
+                                    if str(_db) != ":memory:":
+                                        self._nan_migration_in_progress = True
+                                        def _bg_wrapper(db_path):
+                                            try:
+                                                _bg_reembed(db_path)
+                                            finally:
+                                                self._nan_migration_in_progress = False
+                                        _t = threading.Thread(
+                                            target=_bg_wrapper, args=(_db,),
+                                            daemon=True,
+                                        )
+                                        _t.start()
+                                        logger.info(
+                                            "Qwen3 NaN fix: re-embedding %d vectors "
+                                            "in background thread", _msg_count,
+                                        )
+                                    else:
+                                        from truememory.vector_search import (
+                                            build_vectors as _bv,
+                                            build_separation_vectors as _bsv,
+                                            init_vec_table as _ivt,
+                                        )
+                                        self.conn.execute("DROP TABLE IF EXISTS vec_messages")
+                                        self.conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
+                                        self.conn.commit()
+                                        _ivt(self.conn)
+                                        _bv(self.conn)
+                                        _bsv(self.conn)
+                                        self.conn.execute(
+                                            "INSERT OR REPLACE INTO metadata "
+                                            "(key, value) VALUES (?, ?)",
+                                            ("qwen3_nan_fix_applied", "1"),
+                                        )
+                                        self.conn.commit()
+                                        logger.warning(
+                                            "Qwen3 NaN fix: re-embedded all vectors",
+                                        )
+                                else:
+                                    # No messages — just set the flag to skip
+                                    # future checks.
+                                    self.conn.execute(
+                                        "INSERT OR REPLACE INTO metadata "
+                                        "(key, value) VALUES (?, ?)",
+                                        ("qwen3_nan_fix_applied", "1"),
+                                    )
+                                    self.conn.commit()
                 except Exception:
                     logger.warning(
                         "Qwen3 NaN migration failed — run "
@@ -450,6 +535,28 @@ class TrueMemoryEngine:
                     )
 
             self.ready = True
+            self._maybe_startup_consolidate()
+
+    def _maybe_startup_consolidate(self) -> None:
+        """Trigger background consolidation on startup if data looks stale."""
+        if not self._has_consolidation or self.conn is None:
+            return
+        try:
+            msg_count = self.conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            if msg_count < self._auto_consolidate_threshold:
+                return
+            cluster_count = self.conn.execute(
+                "SELECT COUNT(*) FROM message_clusters"
+            ).fetchone()[0]
+            if cluster_count == 0:
+                self._consolidation_thread = threading.Thread(
+                    target=self._bg_consolidate,
+                    daemon=True,
+                    name="startup-consolidate",
+                )
+                self._consolidation_thread.start()
+        except Exception:
+            pass
 
     # ──────────────────────────────────────────────────────────────────────
     # Production CRUD API
@@ -485,6 +592,28 @@ class TrueMemoryEngine:
 
         self._ensure_connection()
 
+        pre_embedding = None
+        pre_sep_embedding = None
+        if self._has_vectors:
+            try:
+                from truememory.vector_search import (
+                    get_model, _encode_with_mps_fallback, _build_sep_text,
+                )
+                model = get_model()
+                pre_embedding = _encode_with_mps_fallback(model, [content])[0]
+                sep_text = _build_sep_text(sender, recipient, timestamp, content)
+                pre_sep_embedding = _encode_with_mps_fallback(model, [sep_text])[0]
+            except Exception:
+                logger.debug("Failed to pre-compute embedding during add()", exc_info=True)
+
+        pre_style_vec = None
+        if self._has_style_vec and sender:
+            try:
+                from truememory.personality_style_vec import compute_style_vector
+                pre_style_vec = compute_style_vector(content)
+            except Exception:
+                logger.debug("Failed to pre-compute style vector during add()", exc_info=True)
+
         with self._write_lock:
             msg = {
                 "content": content,
@@ -496,13 +625,26 @@ class TrueMemoryEngine:
             }
             new_id = insert_message(self.conn, msg)
 
-            # Embed the message for vector search
-            if self._has_vectors:
+            if pre_embedding is not None:
                 try:
-                    from truememory.vector_search import embed_single
-                    embed_single(self.conn, new_id, content)
+                    from truememory.vector_search import (
+                        serialize_f32, _active_vec_table, _active_sep_table,
+                        _write_embedder_metadata,
+                    )
+                    vec_tbl = _active_vec_table(self.conn)
+                    self.conn.execute(
+                        f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
+                        (new_id, serialize_f32(pre_embedding)),
+                    )
+                    if pre_sep_embedding is not None:
+                        sep_tbl = _active_sep_table(self.conn)
+                        self.conn.execute(
+                            f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
+                            (new_id, serialize_f32(pre_sep_embedding)),
+                        )
+                    _write_embedder_metadata(self.conn)
                 except Exception:
-                    logger.debug("Failed to embed message %s during add()", new_id, exc_info=True)
+                    logger.debug("Failed to store embedding for message %s during add()", new_id, exc_info=True)
 
             # Incrementally update entity profile
             if self._has_personality and sender:
@@ -512,15 +654,16 @@ class TrueMemoryEngine:
                 except Exception:
                     logger.debug("Failed to update entity profile for %s during add()", sender, exc_info=True)
 
-            # Incrementally update style vector (L0 char-n-gram)
-            if self._has_style_vec and sender:
+            # Store pre-computed style vector (DB write only, computation happened outside lock)
+            if pre_style_vec is not None:
                 try:
-                    _update_style_vec(self.conn, sender, content)
+                    _update_style_vec(self.conn, sender, content, _pre_computed_vec=pre_style_vec)
                 except Exception:
                     logger.debug("Failed to update style vector for %s during add()", sender, exc_info=True)
 
-            # Persist vector embedding and any profile updates
             self.conn.commit()
+
+        self._maybe_auto_consolidate()
 
         return {
             "id": new_id,
@@ -530,6 +673,31 @@ class TrueMemoryEngine:
             "timestamp": timestamp,
             "category": category,
         }
+
+    def _maybe_auto_consolidate(self) -> None:
+        """Trigger background consolidation after threshold adds."""
+        self._adds_since_consolidation += 1
+        if self._adds_since_consolidation < self._auto_consolidate_threshold:
+            return
+        if not self._has_consolidation:
+            return
+        if (self._consolidation_thread is not None
+                and self._consolidation_thread.is_alive()):
+            return
+        self._adds_since_consolidation = 0
+        self._consolidation_thread = threading.Thread(
+            target=self._bg_consolidate,
+            daemon=True,
+            name="auto-consolidate",
+        )
+        self._consolidation_thread.start()
+
+    def _bg_consolidate(self) -> None:
+        """Run consolidation in a background thread with its own connection."""
+        try:
+            self.consolidate()
+        except Exception:
+            logger.debug("Auto-consolidation failed", exc_info=True)
 
     def delete(self, memory_id: int) -> bool:
         """Delete a memory by ID.
@@ -546,6 +714,7 @@ class TrueMemoryEngine:
         Handles deletion from ALL tables in the schema: messages,
         messages_fts, entity_profiles, fact_timeline, summaries,
         episodes, landmark_events, causal_edges, entity_relationships,
+        surprise_scores, message_clusters, cluster_centroids,
         and vector tables (vec_messages, vec_messages_sep).
 
         Args:
@@ -577,19 +746,15 @@ class TrueMemoryEngine:
                     ).fetchall()
                 })
 
-                cursor = self.conn.execute(
-                    "DELETE FROM messages WHERE sender = ?", (user_id,)
-                )
-                deleted = cursor.rowcount > 0
-
-                # Clean up related tables scoped to this user (chunked
-                # to avoid SQLite's 999-variable limit on large datasets)
+                # Delete child rows BEFORE parent to avoid FK violations
                 if msg_ids:
                     for table, col in [
                         ("fact_timeline", "source_message_id"),
                         ("landmark_events", "source_message_id"),
                         ("causal_edges", "cause_msg_id"),
                         ("causal_edges", "effect_msg_id"),
+                        ("surprise_scores", "message_id"),
+                        ("message_clusters", "message_id"),
                     ]:
                         if table not in _ALLOWED_TABLES:
                             raise ValueError(f"Invalid table name: {table}")
@@ -600,27 +765,27 @@ class TrueMemoryEngine:
                         except Exception:
                             logger.warning("Failed to clean %s for user %s", table, user_id, exc_info=True)
 
-                # Clean entity profile for this user
+                # Clean entity profile for this user (normalize to lowercase #467)
                 try:
                     self.conn.execute(
-                        "DELETE FROM entity_profiles WHERE entity = ?", (user_id,)
+                        "DELETE FROM entity_profiles WHERE entity = ?", (user_id.lower(),)
                     )
                 except Exception:
                     logger.warning("Failed to clean entity_profiles for user %s", user_id, exc_info=True)
 
-                # Clean entity style vectors for this user
+                # Clean entity style vectors for this user (normalize to lowercase #467)
                 try:
                     self.conn.execute(
-                        "DELETE FROM entity_style_vectors WHERE entity = ?", (user_id,)
+                        "DELETE FROM entity_style_vectors WHERE entity = ?", (user_id.lower(),)
                     )
                 except Exception:
                     logger.warning("Failed to clean entity_style_vectors for user %s", user_id, exc_info=True)
 
-                # Clean entity relationships involving this user
+                # Clean entity relationships involving this user (normalize to lowercase #467)
                 try:
                     self.conn.execute(
                         "DELETE FROM entity_relationships WHERE entity_a = ? OR entity_b = ?",
-                        (user_id, user_id),
+                        (user_id.lower(), user_id.lower()),
                     )
                 except Exception:
                     logger.warning("Failed to clean entity_relationships for user %s", user_id, exc_info=True)
@@ -628,7 +793,7 @@ class TrueMemoryEngine:
                 # Clean summaries scoped to this user
                 try:
                     self.conn.execute(
-                        "DELETE FROM summaries WHERE entity = ?", (user_id,)
+                        "DELETE FROM summaries WHERE entity = ?", (user_id.lower(),)
                     )
                 except Exception:
                     logger.warning("Failed to clean summaries for user %s", user_id, exc_info=True)
@@ -653,11 +818,24 @@ class TrueMemoryEngine:
                         except Exception:
                             logger.warning("Failed to clean %s for user %s", vec_table, user_id, exc_info=True)
 
-            else:
-                # Full wipe of all tables
-                cursor = self.conn.execute("DELETE FROM messages")
+                # Remove orphaned cluster_centroids (clusters with no
+                # remaining message_clusters rows after user deletion).
+                try:
+                    self.conn.execute(
+                        "DELETE FROM cluster_centroids WHERE cluster_id NOT IN "
+                        "(SELECT DISTINCT cluster_id FROM message_clusters)"
+                    )
+                except Exception:
+                    logger.warning("Failed to clean cluster_centroids for user %s", user_id, exc_info=True)
+
+                # Delete parent rows AFTER all child FK references are gone
+                cursor = self.conn.execute(
+                    "DELETE FROM messages WHERE sender = ?", (user_id,)
+                )
                 deleted = cursor.rowcount > 0
 
+            else:
+                # Full wipe — delete child tables BEFORE messages to avoid FK violations
                 for table in (
                     "entity_profiles",
                     "entity_style_vectors",
@@ -667,6 +845,9 @@ class TrueMemoryEngine:
                     "landmark_events",
                     "causal_edges",
                     "entity_relationships",
+                    "surprise_scores",
+                    "message_clusters",
+                    "cluster_centroids",
                 ):
                     if table not in _ALLOWED_TABLES:
                         raise ValueError(f"Invalid table name: {table}")
@@ -676,15 +857,14 @@ class TrueMemoryEngine:
                         logger.warning("Failed to clear table %s during delete_all", table, exc_info=True)
 
                 # Clear ALL known vector tables across all tiers.
-                # A full wipe must not leave orphaned vectors in an
-                # inactive tier (important for GDPR/privacy full-delete).
                 for vec_table in _ALL_VEC_TABLES:
                     try:
                         self.conn.execute(f"DELETE FROM {vec_table}")
                     except Exception:
-                        # Table may not exist (e.g. pre-migration DB only has
-                        # vec_messages); that's fine, log at debug level.
                         logger.debug("Failed to clear %s during delete_all (table may not exist)", vec_table, exc_info=True)
+
+                cursor = self.conn.execute("DELETE FROM messages")
+                deleted = cursor.rowcount > 0
 
             # Rebuild FTS index
             try:
@@ -694,6 +874,146 @@ class TrueMemoryEngine:
 
             self.conn.commit()
             return deleted
+
+    def consolidate(self) -> dict[str, str]:
+        """Run all consolidation layers (L0-L5) under the write lock.
+
+        Returns timing stats for each step.
+        """
+        import time as _time
+
+        self._ensure_connection()
+        stats: dict[str, str] = {}
+
+        try:
+            from truememory.consolidation import (
+                build_summaries,
+                detect_contradictions,
+                build_structured_facts,
+            )
+        except (ImportError, ModuleNotFoundError):
+            stats["consolidation"] = "SKIPPED (module not available)"
+            return stats
+
+        try:
+            from truememory.predictive import build_surprise_index
+        except (ImportError, ModuleNotFoundError):
+            build_surprise_index = None
+
+        try:
+            from truememory.temporal import detect_episodes, detect_landmark_events
+        except (ImportError, ModuleNotFoundError):
+            detect_episodes = None
+            detect_landmark_events = None
+
+        try:
+            from truememory.personality import build_dunbar_hierarchy
+        except (ImportError, ModuleNotFoundError):
+            build_dunbar_hierarchy = None
+
+        _cluster_messages = None
+        if _HAS_CLUSTERING and self._has_vectors:
+            try:
+                from truememory.clustering import cluster_messages as _cm
+                _cluster_messages = _cm
+            except (ImportError, ModuleNotFoundError):
+                pass
+
+        _extract_preferences = None
+        if _HAS_PERSONALITY:
+            try:
+                from truememory.personality import extract_preferences as _ep
+                _extract_preferences = _ep
+            except (ImportError, ModuleNotFoundError):
+                pass
+
+        with self._write_lock:
+            if _cluster_messages:
+                try:
+                    t0 = _time.time()
+                    n = _cluster_messages(self.conn)
+                    stats["cluster_messages"] = f"{n} clusters in {_time.time() - t0:.3f}s"
+                    self._has_clustering = True
+                except Exception as exc:
+                    stats["cluster_messages"] = f"ERROR: {exc}"
+
+            if _extract_preferences:
+                try:
+                    t0 = _time.time()
+                    _extract_preferences(self.conn)
+                    stats["extract_preferences"] = f"{_time.time() - t0:.3f}s"
+                except Exception as exc:
+                    stats["extract_preferences"] = f"ERROR: {exc}"
+
+            try:
+                t0 = _time.time()
+                build_summaries(self.conn)
+                stats["build_summaries"] = f"{_time.time() - t0:.3f}s"
+            except Exception as exc:
+                stats["build_summaries"] = f"ERROR: {exc}"
+
+            try:
+                t0 = _time.time()
+                detect_contradictions(self.conn)
+                stats["detect_contradictions"] = f"{_time.time() - t0:.3f}s"
+            except Exception as exc:
+                stats["detect_contradictions"] = f"ERROR: {exc}"
+
+            try:
+                t0 = _time.time()
+                n = build_structured_facts(self.conn)
+                stats["structured_facts"] = f"{n} facts in {_time.time() - t0:.3f}s"
+            except Exception as exc:
+                stats["structured_facts"] = f"ERROR: {exc}"
+
+            if build_surprise_index:
+                try:
+                    t0 = _time.time()
+                    build_surprise_index(self.conn)
+                    stats["build_surprise_index"] = f"{_time.time() - t0:.3f}s"
+                except Exception as exc:
+                    stats["build_surprise_index"] = f"ERROR: {exc}"
+
+            if detect_episodes:
+                try:
+                    t0 = _time.time()
+                    ep = detect_episodes(self.conn)
+                    stats["detect_episodes"] = f"{ep} episodes in {_time.time() - t0:.3f}s"
+                except Exception as exc:
+                    stats["detect_episodes"] = f"ERROR: {exc}"
+
+            if detect_landmark_events:
+                try:
+                    t0 = _time.time()
+                    lm = detect_landmark_events(self.conn)
+                    stats["detect_landmarks"] = f"{lm} events in {_time.time() - t0:.3f}s"
+                except Exception as exc:
+                    stats["detect_landmarks"] = f"ERROR: {exc}"
+
+            if build_dunbar_hierarchy:
+                try:
+                    t0 = _time.time()
+                    primary = None
+                    try:
+                        row = self.conn.execute(
+                            "SELECT sender, COUNT(*) as cnt FROM messages "
+                            "WHERE sender != '' AND sender IS NOT NULL "
+                            "GROUP BY sender ORDER BY cnt DESC LIMIT 1"
+                        ).fetchone()
+                        if row and row[0] and row[0].strip():
+                            primary = row[0]
+                    except Exception:
+                        pass
+                    result = build_dunbar_hierarchy(self.conn, primary_entity=primary)
+                    n_rel = len(result) if isinstance(result, dict) else result
+                    stats["dunbar_hierarchy"] = f"{n_rel} relationships in {_time.time() - t0:.3f}s"
+                except Exception as exc:
+                    stats["dunbar_hierarchy"] = f"ERROR: {exc}"
+
+            self.conn.commit()
+
+        self._has_consolidation = True
+        return stats
 
     def update(self, memory_id: int, content: str | None = None, **fields) -> dict | None:
         """Update a memory.
@@ -710,6 +1030,29 @@ class TrueMemoryEngine:
             Updated memory dict, or None if not found.
         """
         self._ensure_connection()
+
+        pre_embedding = None
+        pre_sep_embedding = None
+        if content is not None and self._has_vectors:
+            try:
+                from truememory.vector_search import (
+                    get_model, _encode_with_mps_fallback, _build_sep_text,
+                )
+                model = get_model()
+                pre_embedding = _encode_with_mps_fallback(model, [content])[0]
+                row = self.conn.execute(
+                    "SELECT sender, recipient, timestamp FROM messages WHERE id = ?",
+                    (memory_id,),
+                ).fetchone()
+                if row:
+                    sender_val = fields.get("sender", row[0])
+                    recipient_val = fields.get("recipient", row[1])
+                    timestamp_val = fields.get("timestamp", row[2])
+                    sep_text = _build_sep_text(sender_val, recipient_val, timestamp_val, content)
+                    pre_sep_embedding = _encode_with_mps_fallback(model, [sep_text])[0]
+            except Exception:
+                logger.debug("Failed to pre-compute embedding during update()", exc_info=True)
+
         with self._write_lock:
             if content is not None:
                 fields["content"] = content
@@ -718,29 +1061,35 @@ class TrueMemoryEngine:
             if not ok:
                 return None
 
-            # Re-embed if content changed
-            if content is not None and self._has_vectors:
+            if pre_embedding is not None:
                 try:
-                    from truememory.vector_search import embed_single
-                    # Remove old embeddings from both vector tables, insert new
+                    from truememory.vector_search import (
+                        serialize_f32, _active_vec_table, _active_sep_table,
+                        _write_embedder_metadata,
+                    )
+                    vec_tbl = _active_vec_table(self.conn)
                     try:
-                        _vec_tbl, _sep_tbl = _resolve_vec_tables(self.conn)
-                    except Exception:
-                        logger.warning("_resolve_vec_tables failed in update(memory_id=%d); falling back to legacy table names", memory_id, exc_info=True)
-                        _vec_tbl, _sep_tbl = "vec_messages", "vec_messages_sep"
-                    try:
-                        self.conn.execute(f"DELETE FROM {_vec_tbl} WHERE rowid = ?", (memory_id,))
+                        self.conn.execute(f"DELETE FROM {vec_tbl} WHERE rowid = ?", (memory_id,))
                     except Exception:
                         logger.debug("Failed to delete old vector embedding for message %d", memory_id, exc_info=True)
-                    try:
-                        self.conn.execute(f"DELETE FROM {_sep_tbl} WHERE rowid = ?", (memory_id,))
-                    except Exception:
-                        logger.debug("Failed to delete old sep vector for message %d", memory_id, exc_info=True)
-                    embed_single(self.conn, memory_id, content)
+                    self.conn.execute(
+                        f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
+                        (memory_id, serialize_f32(pre_embedding)),
+                    )
+                    if pre_sep_embedding is not None:
+                        sep_tbl = _active_sep_table(self.conn)
+                        try:
+                            self.conn.execute(f"DELETE FROM {sep_tbl} WHERE rowid = ?", (memory_id,))
+                        except Exception:
+                            logger.debug("Failed to delete old sep vector for message %d", memory_id, exc_info=True)
+                        self.conn.execute(
+                            f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
+                            (memory_id, serialize_f32(pre_sep_embedding)),
+                        )
+                    _write_embedder_metadata(self.conn)
                 except Exception:
                     logger.warning("Vector embedding failed for message %d", memory_id, exc_info=True)
 
-            # Persist vector embedding and any profile updates
             self.conn.commit()
 
         return self.get(memory_id)
@@ -803,6 +1152,7 @@ class TrueMemoryEngine:
         self.conn.row_factory = None  # Use default tuple rows
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
+        self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.execute("PRAGMA cache_size=-64000")
         self.conn.execute("PRAGMA mmap_size=268435456")
@@ -1426,13 +1776,13 @@ class TrueMemoryEngine:
                     # Cross-source feedback (A1): if temporal found a date
                     # window, re-scope vector search to that window for
                     # additional candidates.
-                    if self._has_hybrid and intent.get("start_date") and intent.get("end_date"):
+                    if self._has_hybrid and intent.get("after") and intent.get("before"):
                         try:
                             from truememory.fts_search import search_fts_in_range
                             range_results = search_fts_in_range(
                                 self.conn, query,
-                                after=intent["start_date"],
-                                before=intent["end_date"],
+                                after=intent["after"],
+                                before=intent["before"],
                                 limit=limit,
                             )
                             if range_results:

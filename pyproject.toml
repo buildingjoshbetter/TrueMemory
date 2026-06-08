@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "truememory"
-version = "0.7.1.3"
+version = "0.7.2.0"
 description = "SOTA-level agent memory at zero infrastructure cost."
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -36,6 +36,7 @@ dependencies = [
     "anthropic>=0.80.0,<1.0",
     "psutil>=5.9,<8.0",
     "setproctitle>=1.3,<2.0",
+    "packaging>=21.0",
 ]
 
 [project.optional-dependencies]
@@ -70,6 +71,12 @@ Changelog = "https://github.com/buildingjoshbetter/TrueMemory/blob/main/CHANGELO
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Issue #426: register custom markers and fail on typos so the gate can
+# reliably exclude network/model-download tests via `-m "not network"`.
+addopts = "--strict-markers"
+markers = [
+    "network: test performs real network I/O (e.g. HuggingFace model download). Excluded from the deterministic CI gate via `-m \"not network\"`; run in a dedicated non-gating job.",
+]
 
 [tool.ruff.lint]
 # Default ruleset is fine for the core codebase. Per-file ignores below.

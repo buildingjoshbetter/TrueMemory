@@ -57,6 +57,33 @@ _LOCK_PATH = Path(os.environ.get(
 ))
 
 
+_LOCK_TTL_SECONDS = 3600
+
+
+def _is_lock_stale(lock_path: Path) -> bool:
+    """Check if a lock file is stale (dead PID or expired TTL)."""
+    try:
+        content = lock_path.read_text(encoding="utf-8").strip()
+        if not content:
+            return True
+        pid = int(content)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass
+    except (OSError, ValueError):
+        pass
+    try:
+        age = time.time() - lock_path.stat().st_mtime
+        if age > _LOCK_TTL_SECONDS:
+            return True
+    except OSError:
+        pass
+    return False
+
+
 @contextlib.contextmanager
 def _dedup_store_lock():
     """Serialize dedup-then-store across concurrent ingest processes.
@@ -72,6 +99,9 @@ def _dedup_store_lock():
     pair makes the sequence atomic across concurrent hooks. On Windows
     (no fcntl) we skip locking and rely on ``busy_timeout`` + the embedding
     similarity check as best-effort protection.
+
+    The lock file contains the holder's PID. On acquisition, stale locks
+    from dead processes or locks older than 1 hour are automatically stolen.
     """
     if not _HAS_FCNTL:
         yield
@@ -80,9 +110,15 @@ def _dedup_store_lock():
     try:
         _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
-        # Can't create the lock dir — degrade to no-lock rather than abort.
         yield
         return
+
+    if _LOCK_PATH.exists() and _is_lock_stale(_LOCK_PATH):
+        log.info("Removing stale ingest lock file %s", _LOCK_PATH)
+        try:
+            _LOCK_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     try:
         lock_fd = os.open(str(_LOCK_PATH), os.O_CREAT | os.O_RDWR, 0o600)
@@ -96,6 +132,8 @@ def _dedup_store_lock():
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
         except OSError as e:
             log.debug("flock acquire failed: %s", e)
+        os.write(lock_fd, f"{os.getpid()}\n".encode())
+        os.ftruncate(lock_fd, os.lseek(lock_fd, 0, os.SEEK_CUR))
         try:
             yield
         finally:

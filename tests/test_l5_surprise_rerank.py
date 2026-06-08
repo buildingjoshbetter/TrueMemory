@@ -483,6 +483,9 @@ def test_sparse_surprise_across_chunk_boundary(engine_with_surprise):
     eng._alpha_surprise_override = 0.5
 
     # Re-seed surprise_scores so only ids {1,2,3,1450,1451,1452} get a row.
+    # Temporarily disable FK checks — this test validates boost logic on
+    # synthetic result sets with IDs that don't exist in messages.
+    eng.conn.execute("PRAGMA foreign_keys = OFF")
     eng.conn.execute("DELETE FROM surprise_scores")
     for mid, s in [
         (1, 0.9), (2, 0.9), (3, 0.9),
@@ -493,6 +496,7 @@ def test_sparse_surprise_across_chunk_boundary(engine_with_surprise):
             (mid, s),
         )
     eng.conn.commit()
+    eng.conn.execute("PRAGMA foreign_keys = ON")
 
     # Construct fake results with all 1500 ids at the same base score.
     base = 1.0

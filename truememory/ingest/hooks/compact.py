@@ -84,7 +84,11 @@ def main():
                     transcript_path, session_id,
                     user_id=args.user, db_path=args.db,
                 )
-                mark_session_extracted(session_id, transcript_path, spawned_pid=spawned_pid)
+                # Only mark extracted on a real spawn; pid==0 means the session
+                # was queued to the backlog (spawn cap / Popen failure) and must
+                # stay eligible so it is not silently dropped (see #400).
+                if spawned_pid > 0:
+                    mark_session_extracted(session_id, transcript_path, spawned_pid=spawned_pid)
     except Exception as e:
         log.error("Compact background extraction failed: %s", e)
 

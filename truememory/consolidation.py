@@ -585,11 +585,14 @@ def build_summaries(conn: sqlite3.Connection) -> int:
     if not all_msgs:
         return 0
 
-    # Clear existing summaries for a clean rebuild
-    conn.execute("DELETE FROM summaries")
-
     now = datetime.now(timezone.utc).isoformat()
-    summary_count = 0
+    # Collect all summary rows first WITHOUT opening a write transaction, so the
+    # heavy salience/sentence scoring below does not hold the SQLite write lock.
+    # The clear + bulk insert happens in one short transaction at the very end
+    # (see #401: the old code ran DELETE first and held the write lock for the
+    # entire 30-60s computation, causing "database is locked" for concurrent
+    # writers once the 10s busy_timeout was exceeded).
+    rows: list[tuple] = []
 
     # ---- Monthly summaries ----
     by_month: dict[str, list[dict]] = defaultdict(list)
@@ -662,29 +665,22 @@ def build_summaries(conn: sqlite3.Connection) -> int:
         start_date = min(timestamps) if timestamps else f"{month}-01"
         end_date = max(timestamps) if timestamps else f"{month}-28"
 
-        conn.execute(
-            "INSERT INTO summaries "
-            "(period, start_date, end_date, entity, summary, "
-            " key_facts, message_ids, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                "monthly",
-                start_date,
-                end_date,
-                "",
-                summary_text,
-                json.dumps(key_facts),
-                json.dumps(message_ids),
-                now,
-            ),
-        )
-        summary_count += 1
+        rows.append((
+            "monthly",
+            start_date,
+            end_date,
+            "",
+            summary_text,
+            json.dumps(key_facts),
+            json.dumps(message_ids),
+            now,
+        ))
 
     # ---- Per-entity summaries ----
     by_entity: dict[str, list[dict]] = defaultdict(list)
     for msg in all_msgs:
         if msg["sender"]:
-            by_entity[msg["sender"]].append(msg)
+            by_entity[msg["sender"].lower()].append(msg)
 
     for entity, messages in by_entity.items():
         if len(messages) < 10:
@@ -725,26 +721,53 @@ def build_summaries(conn: sqlite3.Connection) -> int:
             start_date = min(timestamps) if timestamps else f"{month}-01"
             end_date = max(timestamps) if timestamps else f"{month}-28"
 
-            conn.execute(
+            rows.append((
+                "entity_monthly",
+                start_date,
+                end_date,
+                entity,
+                summary_text,
+                json.dumps(key_facts),
+                json.dumps(message_ids),
+                now,
+            ))
+
+    # Short, explicit, atomic write: hold the write lock only for the clear +
+    # bulk insert, not the computation above. We drive the transaction manually
+    # and switch the connection to autocommit (isolation_level=None) for the
+    # duration so pysqlite does NOT also manage transactions implicitly — this
+    # makes our BEGIN IMMEDIATE / COMMIT / ROLLBACK authoritative regardless of
+    # the connection's configured isolation_level (avoids both "cannot start a
+    # transaction within a transaction" and pysqlite's commit()/rollback()
+    # becoming no-ops after a manual BEGIN). Any pending implicit transaction is
+    # flushed first so the write lock is acquired cleanly, and isolation_level
+    # is always restored. Rollback-on-error guarantees the summaries table is
+    # never left emptied without its replacement rows.
+    if conn.in_transaction:
+        conn.commit()
+    prev_isolation = conn.isolation_level
+    try:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM summaries")
+        if rows:
+            conn.executemany(
                 "INSERT INTO summaries "
                 "(period, start_date, end_date, entity, summary, "
                 " key_facts, message_ids, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    "entity_monthly",
-                    start_date,
-                    end_date,
-                    entity,
-                    summary_text,
-                    json.dumps(key_facts),
-                    json.dumps(message_ids),
-                    now,
-                ),
+                rows,
             )
-            summary_count += 1
-
-    conn.commit()
-    return summary_count
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.isolation_level = prev_isolation
+    return len(rows)
 
 
 def search_contradictions(conn: sqlite3.Connection,
@@ -836,6 +859,7 @@ def search_contradictions(conn: sqlite3.Connection,
                 continue
 
             results.append({
+                "id": latest["source_message_id"],
                 "subject": subject,
                 "current_fact": latest["fact"],
                 "current_timestamp": latest["timestamp"],
@@ -952,6 +976,7 @@ def search_consolidated(conn: sqlite3.Connection, query: str,
         score = overlap + time_bonus
         if score > 0:
             results.append({
+                "id": f"summary_{row[0]}",
                 "content": summary_text,
                 "period": row[1],
                 "start_date": row[2],
@@ -974,6 +999,7 @@ def search_consolidated(conn: sqlite3.Connection, query: str,
         history_text = "\n".join(history_text_parts)
 
         results.append({
+            "id": cr["id"],
             "content": f"[Fact Timeline: {cr['subject']}]\n"
                        f"Current: {cr['current_fact']}\n"
                        f"History:\n{history_text}",
@@ -994,6 +1020,7 @@ def search_consolidated(conn: sqlite3.Connection, query: str,
             fts_results = _fts_search(conn, fts_query, limit=limit)
             for r in fts_results:
                 results.append({
+                    "id": r.get("id"),
                     "content": r["content"],
                     "period": "message",
                     "start_date": r["timestamp"],

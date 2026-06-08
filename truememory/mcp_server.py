@@ -49,19 +49,56 @@ log = logging.getLogger(__name__)
 _TRUEMEMORY_DIR = Path.home() / ".truememory"
 _CONFIG_PATH = _TRUEMEMORY_DIR / "config.json"
 
+# M5 (#502) — Config cache: avoid re-reading disk on every _load_config() call.
+# The cache is invalidated after _CONFIG_CACHE_TTL seconds OR when the file's
+# mtime changes (whichever comes first).
+_CONFIG_CACHE_TTL = 5.0  # seconds
+_config_cache: dict | None = None
+_config_cache_mtime: float = 0.0
+_config_cache_time: float = 0.0
+
+# M7 (#504) — Serialize config writes from concurrent MCP handlers / tier-switch.
+_config_write_lock = threading.Lock()
+
 
 def _load_config() -> dict:
     """Load persistent config from ~/.truememory/config.json.
+
+    Uses an in-memory cache with a staleness window (_CONFIG_CACHE_TTL) to
+    avoid redundant disk reads (M5 / #502). The cache is also invalidated
+    when the file's mtime changes.
 
     On JSON corruption, rename the file to ``config.json.corrupt.<unix-ts>``
     so the user can recover any API keys that were in it. On OSError, warn
     to stderr. Returns ``{}`` in both failure modes so callers never see a
     half-loaded config.
     """
+    global _config_cache, _config_cache_mtime, _config_cache_time
+
+    now = time.monotonic()
+    if _config_cache is not None and (now - _config_cache_time) < _CONFIG_CACHE_TTL:
+        # Fast path: cache is fresh — but verify mtime hasn't changed
+        try:
+            current_mtime = _CONFIG_PATH.stat().st_mtime if _CONFIG_PATH.exists() else 0.0
+        except OSError:
+            current_mtime = 0.0
+        if current_mtime == _config_cache_mtime:
+            return _config_cache.copy()
+
     if not _CONFIG_PATH.exists():
+        _config_cache = {}
+        _config_cache_mtime = 0.0
+        _config_cache_time = now
         return {}
     try:
-        return json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+        result = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+        try:
+            _config_cache_mtime = _CONFIG_PATH.stat().st_mtime
+        except OSError:
+            _config_cache_mtime = 0.0
+        _config_cache = result
+        _config_cache_time = now
+        return result.copy()
     except json.JSONDecodeError as e:
         # .with_suffix would replace ".json"; we want to APPEND to preserve
         # the origin filename in the backup so users can find it easily.
@@ -81,17 +118,29 @@ def _load_config() -> dict:
                 "backed up. Run `truememory-mcp --setup` to recreate.",
                 file=sys.stderr,
             )
+        _config_cache = {}
+        _config_cache_mtime = 0.0
+        _config_cache_time = now
         return {}
     except OSError as e:
         print(
             f"truememory: could not read config.json: {e}",
             file=sys.stderr,
         )
+        _config_cache = {}
+        _config_cache_mtime = 0.0
+        _config_cache_time = now
         return {}
 
 
 def _save_config(config: dict) -> None:
     """Save config to ~/.truememory/config.json.
+
+    Uses atomic write (M6 / #503): writes to a temp file in the same
+    directory, then calls os.replace() to atomically swap. This prevents
+    config corruption if the process crashes mid-write.
+
+    Serializes concurrent writes via _config_write_lock (M7 / #504).
 
     the POSIX `chmod` calls below are silent no-ops on Windows;
     the config file (which stores API keys in plaintext) inherits the
@@ -99,10 +148,39 @@ def _save_config(config: dict) -> None:
     storing a key on Windows we warn to stderr and suggest the env-var
     route, which is the actually-private channel.
     """
-    _TRUEMEMORY_DIR.mkdir(parents=True, exist_ok=True)
-    _TRUEMEMORY_DIR.chmod(0o700)
-    _CONFIG_PATH.write_text(json.dumps(config, indent=2), encoding="utf-8")
-    _CONFIG_PATH.chmod(0o600)
+    global _config_cache, _config_cache_mtime, _config_cache_time
+    import tempfile
+
+    with _config_write_lock:
+        _TRUEMEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        _TRUEMEMORY_DIR.chmod(0o700)
+
+        # Atomic write: temp file + os.replace() (M6 / #503)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".config.tmp.", suffix=".json",
+            dir=str(_TRUEMEMORY_DIR),
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, str(_CONFIG_PATH))
+        except BaseException:
+            # Clean up the temp file on failure — original config survives
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+        # Invalidate cache so the next _load_config() picks up the new data
+        try:
+            _config_cache_mtime = _CONFIG_PATH.stat().st_mtime
+        except OSError:
+            _config_cache_mtime = 0.0
+        _config_cache = config.copy()
+        _config_cache_time = time.monotonic()
+
     if sys.platform == "win32" and any(k.endswith("_api_key") for k in config):
         print(
             "truememory: warning — on Windows, ~/.truememory/config.json "
@@ -553,6 +631,19 @@ def truememory_store(
         metadata: Optional JSON string of metadata.
     """
     _touch_search_time()
+    # Reject None / empty / whitespace-only content with an explicit error
+    # instead of silently returning a skip-marker record (id=null). The
+    # lower-level Memory.add() returns {"id": None, ...} for empty content,
+    # which looks success-shaped to a calling agent and hides the no-op
+    # (issue #425).
+    #
+    # Guard against content=None FIRST: although the declared type is `str`,
+    # an MCP client / agent can pass null, and calling .strip() on None would
+    # raise AttributeError. Check `content is None` before any .strip() call.
+    # Note we strip only to *test* for emptiness — the original (untrimmed)
+    # content is what gets stored, so whitespace-padded real text is preserved.
+    if content is None or not content.strip():
+        return json.dumps({"error": "Content is empty or whitespace-only; nothing stored."})
     MAX_CONTENT_LENGTH = 50_000
     if len(content) > MAX_CONTENT_LENGTH:
         return json.dumps({"error": f"Content too large ({len(content)} chars). Maximum is {MAX_CONTENT_LENGTH}."})
@@ -600,7 +691,7 @@ def truememory_search(
     _touch_search_time()
     limit = max(1, min(limit, 200))
     _set_reranker(_current_reranker())
-    llm_fn = _get_llm_fn()
+    llm_fn = _get_llm_fn() if _load_config().get("tier", "edge") == "pro" else None
     uid = user_id or None
     if not query_list:
         return json.dumps([])
@@ -651,7 +742,7 @@ def truememory_search_deep(
     _touch_search_time()
     limit = max(1, min(limit, 200))
     _set_reranker(_DEEP_RERANKER)
-    llm_fn = _get_llm_fn()
+    llm_fn = _get_llm_fn() if _load_config().get("tier", "edge") == "pro" else None
     uid = user_id or None
     if not query_list:
         return json.dumps([])
@@ -779,8 +870,16 @@ def truememory_configure(
     """
     global _memory
     tier = tier.lower().strip()
-    if tier not in ("edge", "base", "pro"):
-        return json.dumps({"error": "tier must be 'edge', 'base', or 'pro'"})
+    if tier not in ("edge", "base", "pro", "custom"):
+        return json.dumps({"error": "tier must be 'edge', 'base', 'pro', or 'custom'"})
+
+    # Custom tier: validate env vars are set before proceeding
+    if tier == "custom":
+        try:
+            from truememory.tier_config import resolve_custom_tier
+            resolve_custom_tier()  # raises ValueError on missing env vars
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
 
     if api_key and len(api_key) > 4096:
         return json.dumps({"error": "api_key exceeds maximum length of 4096 characters"})
@@ -821,8 +920,12 @@ def truememory_configure(
     except Exception:
         pass
 
-    if api_key or email:
-        _save_config(config)
+    # Always persist the tier selection — even on first run with no api_key
+    # or email.  Without this, Edge tier on first run (old_tier defaults to
+    # "edge", so old_tier == tier, skipping the tier-switch block) was never
+    # written to config.json, leaving setup_required=True forever (#497).
+    config["tier"] = tier
+    _save_config(config)
 
     # Invalidate cached LLM function so it picks up the new key
     if api_key:
@@ -860,7 +963,15 @@ def truememory_configure(
                 rebuild_action = action
 
                 if action == "config_only":
-                    pass  # Base↔Pro: same embeddings, nothing to rebuild
+                    # Base↔Pro share the same embedding space (qwen3_256), so
+                    # there is nothing to re-embed. The tier selection must
+                    # still be persisted here: unlike the delta_or_full path
+                    # (where RebuildManager writes the tier only once the new
+                    # vectors exist), config_only has no rebuild step, so
+                    # without this write the tier change is lost on restart and
+                    # the runtime/config tiers diverge.
+                    config["tier"] = tier
+                    _save_config(config)
 
                 elif action == "delta_or_full":
                     from truememory.tier_switch.manager import RebuildManager
@@ -882,6 +993,7 @@ def truememory_configure(
         "edge": "Edge: Model2Vec embeddings (8M params), MiniLM reranker",
         "base": "Base: Qwen3 embeddings (256d), gte-reranker-modernbert",
         "pro": "Pro: Qwen3 + HyDE query expansion",
+        "custom": "Custom: user-provided embedding model + reranker via TRUEMEMORY_CUSTOM_* env vars",
     }
     result = {
         "status": "configured",
@@ -906,7 +1018,8 @@ def truememory_configure(
     if api_key:
         result["api_key_saved"] = f"{api_provider} key stored"
 
-    # Check if HyDE search is available
+    # Check if HyDE search is available — HyDE is Pro-only (M8 / #505).
+    # Non-Pro tiers never use HyDE regardless of API key presence.
     has_key = bool(
         os.environ.get("ANTHROPIC_API_KEY")
         or os.environ.get("OPENROUTER_API_KEY")
@@ -915,7 +1028,12 @@ def truememory_configure(
         or config.get("openrouter_api_key")
         or config.get("openai_api_key")
     )
-    result["hyde_search"] = "enabled" if has_key else "disabled (no API key — search still works, just without query expansion)"
+    if tier != "pro":
+        result["hyde_search"] = "disabled (HyDE is Pro-only)"
+    elif has_key:
+        result["hyde_search"] = "enabled"
+    else:
+        result["hyde_search"] = "disabled (no API key — search still works, just without query expansion)"
 
     # Mark onboarding complete so the SessionStart hook stops showing
     # the setup banner on subsequent sessions.
@@ -991,6 +1109,27 @@ def truememory_entity_profile(entity: str) -> str:
         return json.dumps({"error": f"No profile found for '{entity}'"})
     except Exception as e:
         return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+@_tracked("tool_consolidate")
+def truememory_consolidate() -> str:
+    """Rebuild all consolidation layers (L2-L5) on existing memories.
+
+    This fills the gap left by add() which only does basic insert + embed.
+    Call after batch additions or at session end (via hooks) to enable:
+    - Fact timeline with contradiction detection
+    - Monthly and entity summaries
+    - Surprise scoring for predictive retrieval
+    - Episode detection and landmark events
+    - Structured fact extraction
+    - Dunbar relationship hierarchy
+
+    Returns timing stats for each step.
+    """
+    m = _get_memory()
+    stats = m._engine.consolidate()
+    return json.dumps(stats, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -1276,8 +1415,12 @@ def _drain_batch_from_backlog(markers: list[Path]) -> None:
                 register_spawned_pid(proc.pid)
                 record_stale_processing_pid(claimed_path, proc.pid)
 
-            claimed_path.unlink(missing_ok=True)
-            log.info("Backlog drainer: processed session %s", data.get("session_id", "?"))
+            # NOTE (issue #422): do NOT unlink the .processing claim on spawn.
+            # The spawned ingest CLI removes it on confirmed success
+            # (clear_backlog_processing); a worker that exits non-zero leaves it
+            # so cleanup_stale_processing restores it to .json and re-queues the
+            # session instead of dropping it silently.
+            log.info("Backlog drainer: spawned session %s", data.get("session_id", "?"))
         except Exception:
             try:
                 claimed_path.rename(marker_path)
@@ -1295,6 +1438,77 @@ def _start_backlog_drainer() -> None:
     t = threading.Thread(target=_backlog_drainer, daemon=True, name="backlog-drainer")
     t.start()
     log.info("Backlog drainer started (interval=%ds)", _BACKLOG_DRAIN_INTERVAL_NORMAL)
+
+
+def _is_orphaned(initial_ppid: int | None = None) -> bool:
+    """True if this process has been orphaned (its launching parent died).
+
+    Orphaning is detected as a *transition*: a POSIX process whose parent dies
+    is reparented to init (pid 1 — ``init`` on Linux, ``launchd`` on macOS). We
+    therefore report orphaned only when the parent pid has CHANGED to 1 from a
+    non-1 ``initial_ppid``.
+
+    A process that was launched *directly* by init (``initial_ppid == 1`` — e.g.
+    systemd/launchd units or a container entrypoint) can never be detected as
+    orphaned this way, so callers should not start the watcher in that case.
+    Passing ``initial_ppid=None`` falls back to a bare ``ppid == 1`` check
+    (used only where no baseline is available). Windows has no equivalent
+    reparent signal, so we never report orphaned there.
+    """
+    if sys.platform == "win32" or not hasattr(os, "getppid"):
+        return False
+    try:
+        current = os.getppid()
+    except Exception:
+        return False
+    if initial_ppid is not None:
+        return initial_ppid != 1 and current == 1
+    return current == 1
+
+
+def _start_parent_death_watcher(poll_interval: float = 30.0) -> None:
+    """Self-terminate this MCP server if its launching parent dies.
+
+    The server normally exits when its stdio client disconnects (``mcp.run``
+    returns on EOF; see the finally block in ``main``). But if the parent dies
+    abruptly without closing stdin (e.g. a crash), the server can linger
+    holding a ``memories.db`` connection and contributing to write-lock
+    contention (#401). This watcher records the launching parent pid and exits
+    ONLY the current process once it is reparented to init. It never inspects
+    or signals sibling processes, so it cannot kill a live concurrent session's
+    MCP server. POSIX-only; a no-op on Windows.
+
+    If the server was launched directly by init (``ppid == 1`` at startup —
+    systemd/launchd/container entrypoint), reparent-based orphan detection is
+    impossible, so the watcher is not started (avoids a false-positive
+    self-exit of a perfectly live server).
+    """
+    if os.environ.get("TRUEMEMORY_EXTRACTION"):
+        return
+    if sys.platform == "win32" or not hasattr(os, "getppid"):
+        return
+    try:
+        initial_ppid = os.getppid()
+    except Exception:
+        return
+    if initial_ppid == 1:
+        log.info("Parent-death watcher disabled: launched as a child of init (ppid==1)")
+        return
+
+    def _watch() -> None:
+        while True:
+            if _is_orphaned(initial_ppid):
+                # os._exit(0) without touching the shared DB connection: the
+                # connection may be in use by the main thread, and SQLite WAL
+                # tolerates an abrupt exit. (Matches the os._exit rationale in
+                # main()'s shutdown path.)
+                log.info("MCP server orphaned (parent died); exiting to release the DB connection")
+                os._exit(0)
+            time.sleep(poll_interval)
+
+    t = threading.Thread(target=_watch, daemon=True, name="parent-death-watcher")
+    t.start()
+    log.info("Parent-death watcher started (poll=%.0fs)", poll_interval)
 
 
 # ---------------------------------------------------------------------------
@@ -1615,6 +1829,16 @@ def main():
     except Exception:
         pass
 
+    # Install opt-in instrumentation (TRUEMEMORY_INSTRUMENTATION=1).
+    # Must run early — before any tool handler fires — so the monkey-patches
+    # are in place for the first request.  Swallows all errors; a broken
+    # telemetry overlay must never prevent the server from starting.
+    try:
+        from truememory.instrumentation import install as _install_instrumentation
+        _install_instrumentation()
+    except Exception:
+        pass
+
     # Start shared model server (loads models once for all processes).
     # Falls back to per-process loading if server can't start.
     from truememory.model_client import ensure_server_running
@@ -1625,6 +1849,11 @@ def main():
     # transcripts every 60s while the MCP server is alive, respecting
     # the spawn cap. Dies automatically when the server exits.
     _start_backlog_drainer()
+
+    # Self-terminate if orphaned (parent died without closing stdin) so we do
+    # not linger holding a memories.db connection. Self-only: never signals
+    # sibling MCP servers, so concurrent live sessions are unaffected (#401).
+    _start_parent_death_watcher()
 
     # Force-exit after mcp.run() to avoid PyTorch teardown deadlocks.
     # PyTorch's C++ threads (OpenMP pools, autograd engine) deadlock against

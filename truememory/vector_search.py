@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import math
 import os
 import re
 import struct
@@ -68,19 +69,21 @@ class TrueMemoryMigrationError(Exception):
 # Singleton model loader
 # ---------------------------------------------------------------------------
 
-# Public tier names → internal model identifiers (v0.4.0 paper-aligned Edge/Base/Pro)
-_TIER_ALIASES = {
-    "edge": "model2vec",
-    "base": "qwen3_256",
-    "pro": "qwen3_256",
-}
+# Centralized tier config -- single source of truth lives in tier_config.py.
+# Legacy symbols (_TIER_ALIASES, _MODEL_DIMS, _MODEL_TO_GROUP) are kept as
+# thin delegates so that existing callers (model_server.py etc.) don't break.
+from truememory.tier_config import (
+    TIERS as _TIERS,
+    MODEL_DIMS as _MODEL_DIMS,
+    MODEL_TO_GROUP as _MODEL_TO_GROUP,
+    VALID_TIER_GROUPS as _VALID_GROUPS,
+    get_embed_model as _cfg_get_embed_model,
+    get_embed_dim_for_model as _cfg_get_embed_dim_for_model,
+    get_model_group as _cfg_get_model_group,
+)
 
-_MODEL_DIMS = {
-    "model2vec": 256,
-    "minilm": 384,
-    "bge-small": 384,
-    "qwen3_256": 256,
-}
+# Backward-compat alias -- model_server.py imports this symbol.
+_TIER_ALIASES = {t: cfg["embed_model"] for t, cfg in _TIERS.items()}
 
 # v0.4.0 breaking change: the old internal name "qwen3" (1024d native) is gone.
 # Callers must migrate to "pro" (tier alias) or "qwen3_256" (internal name).
@@ -88,7 +91,7 @@ _REMOVED_MODELS = {"qwen3"}
 
 
 def _resolve_model_name(name: str) -> str:
-    """Resolve a public tier name (edge/base/pro) or internal model name.
+    """Resolve a public tier name (edge/base/pro/custom) or internal model name.
 
     Raises:
         ValueError: if *name* refers to a model removed in v0.4.0.
@@ -97,14 +100,20 @@ def _resolve_model_name(name: str) -> str:
     if lowered in _REMOVED_MODELS:
         raise ValueError(
             f"Embedding model {name!r} was removed in TrueMemory v0.4.0. "
-            f"Migrate to 'pro' (tier alias) or 'qwen3_256' (internal name) — "
+            f"Migrate to 'pro' (tier alias) or 'qwen3_256' (internal name) -- "
             f"the paper-aligned Qwen3-Embedding-0.6B @ 256d Matryoshka config."
         )
+    if lowered == "custom":
+        try:
+            return _cfg_get_embed_model("custom")
+        except ValueError:
+            logger.warning("Custom tier resolution failed; falling back to model2vec.")
+            return "model2vec"
     return _TIER_ALIASES.get(lowered, name)
 
 
 def resolve_tier() -> str:
-    """Resolve the active tier: env var → config.json → ``'edge'``.
+    """Resolve the active tier: env var -> config.json -> ``'edge'``.
 
     Canonical tier resolver for the entire codebase.  Every call site
     that formerly did ``os.environ.get("TRUEMEMORY_EMBED_MODEL", "edge")``
@@ -133,18 +142,10 @@ _model = None
 _embedding_dim: int = _MODEL_DIMS.get(EMBEDDING_MODEL, 256)
 _lock = threading.Lock()
 
-_MODEL_TO_GROUP = {
-    "model2vec": "edge",
-    "qwen3_256": "basepro",
-    "minilm": "basepro",
-    "bge-small": "basepro",
-}
-_VALID_GROUPS = frozenset({"edge", "basepro"})
-
 
 def _active_tier_group() -> str:
     """Map the current embedding model to its tier group."""
-    return _MODEL_TO_GROUP.get(EMBEDDING_MODEL, "basepro")
+    return _cfg_get_model_group(EMBEDDING_MODEL)
 
 
 def _active_vec_table(conn: sqlite3.Connection) -> str:
@@ -191,8 +192,11 @@ def set_embedding_model(name: str) -> None:
 
 def get_embedding_dim(name: str | None = None) -> int:
     """Return the embedding dimension for a given model name."""
+    if name and name.lower().strip() == "custom":
+        from truememory.tier_config import get_embed_dim
+        return get_embed_dim("custom")
     name = _resolve_model_name(name) if name else EMBEDDING_MODEL
-    return _MODEL_DIMS.get(name, 256)
+    return _cfg_get_embed_dim_for_model(name)
 
 
 def unload_model() -> None:
@@ -254,6 +258,32 @@ def get_model():
                 model_kwargs=_mkwargs or None,
             )
             _embedding_dim = 256
+        elif resolved not in _MODEL_DIMS:
+            # Custom tier: load arbitrary SentenceTransformer model.
+            # Requires TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 (enforced by
+            # tier_config.resolve_custom_tier at config time).
+            if os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "").strip() != "1":
+                logger.warning(
+                    "Custom model %r requested without "
+                    "TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 -- "
+                    "falling back to model2vec.",
+                    resolved,
+                )
+                from model2vec import StaticModel
+                _model = StaticModel.from_pretrained(
+                    "minishlab/potion-base-8M", force_download=False
+                )
+                _embedding_dim = 256
+            else:
+                from sentence_transformers import SentenceTransformer
+                from truememory.tier_config import resolve_custom_tier
+                cfg = resolve_custom_tier()
+                custom_dim = cfg["embed_dim"]
+                _model = SentenceTransformer(
+                    resolved, truncate_dim=custom_dim,
+                    trust_remote_code=False,
+                )
+                _embedding_dim = custom_dim
         else:
             from model2vec import StaticModel
             _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
@@ -415,9 +445,16 @@ def serialize_f32(vector) -> bytes:
 
     Accepts any array-like (list, tuple, numpy array).  Returns a
     ``struct``-packed blob of 32-bit floats.
+
+    Raises ValueError if any element is NaN or Inf.
     """
     if isinstance(vector, np.ndarray):
+        if not np.all(np.isfinite(vector)):
+            raise ValueError("Embedding contains NaN or Inf values")
         vector = vector.tolist()
+    else:
+        if any(math.isnan(v) or math.isinf(v) for v in vector):
+            raise ValueError("Embedding contains NaN or Inf values")
     return struct.pack(f"{len(vector)}f", *vector)
 
 
@@ -454,7 +491,10 @@ def init_vec_table(
 
     if tier_group:
         if tier_group not in _VALID_GROUPS:
-            raise ValueError(f"Invalid tier_group: {tier_group!r}")
+            raise ValueError(
+                f"Invalid tier_group: {tier_group!r}. "
+                f"Valid: {sorted(_VALID_GROUPS)}"
+            )
         vec_name = f"vec_messages_{tier_group}"
         sep_name = f"vec_messages_sep_{tier_group}"
     else:
@@ -495,15 +535,20 @@ def _get_batch_size() -> int:
 
 def _flush_mps_cache() -> None:
     """Release MPS GPU memory after each batch to prevent accumulation."""
-    try:
-        import torch
-        if torch.backends.mps.is_available():
-            torch.mps.empty_cache()
-            torch.mps.synchronize()
-    except Exception:
-        pass
-    import gc
-    gc.collect()
+    from truememory.mps_utils import flush_mps_cache
+    flush_mps_cache()
+
+
+def _is_mps_oom(exc: Exception) -> bool:
+    """Return True if the exception is an MPS out-of-memory error."""
+    from truememory.mps_utils import is_mps_oom
+    return is_mps_oom(exc)
+
+
+def _encode_with_mps_fallback(model, texts, **kwargs):
+    """Encode texts with MPS OOM fallback. Thread-safe device transitions."""
+    from truememory.mps_utils import encode_with_mps_fallback
+    return encode_with_mps_fallback(model, texts, **kwargs)
 
 
 def build_vectors(
@@ -562,7 +607,7 @@ def build_vectors(
             texts = [m["content"] for m in batch]
             ids = [m["id"] for m in batch]
 
-            embeddings = model.encode(texts, show_progress_bar=False)
+            embeddings = _encode_with_mps_fallback(model, texts, show_progress_bar=False)
 
             conn.executemany(
                 f"INSERT INTO {tbl}(rowid, embedding) VALUES (?, ?)",
@@ -620,7 +665,7 @@ def search_vector(
 
     if _query_blob is None:
         model = get_model()
-        query_embedding = model.encode([query])[0]
+        query_embedding = _encode_with_mps_fallback(model, [query])[0]
         _query_blob = serialize_f32(query_embedding)
 
     query_blob = _query_blob
@@ -676,7 +721,7 @@ def search_vector_raw(
     gate where the paper equation (1) requires ``n_t = 1 - cos_sim``.
     """
     model = get_model()
-    query_embedding = model.encode([query])[0]
+    query_embedding = _encode_with_mps_fallback(model, [query])[0]
     query_blob = serialize_f32(query_embedding)
 
     tbl = _active_vec_table(conn)
@@ -790,7 +835,7 @@ def build_separation_vectors(
                 texts.append(sep_text)
                 ids.append(m["id"])
 
-            embeddings = model.encode(texts, show_progress_bar=False)
+            embeddings = _encode_with_mps_fallback(model, texts, show_progress_bar=False)
 
             conn.executemany(
                 f"INSERT INTO {tbl}(rowid, embedding) VALUES (?, ?)",
@@ -828,7 +873,7 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
         content:    The text to embed.
     """
     model = get_model()
-    embedding = model.encode([content])[0]  # shape (dim,)
+    embedding = _encode_with_mps_fallback(model, [content])[0]  # shape (dim,)
     vec_tbl = _active_vec_table(conn)
     conn.execute(
         f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
@@ -842,7 +887,7 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
         ).fetchone()
         if row:
             sep_text = _build_sep_text(row[0], row[1], row[2], content)
-            sep_embedding = model.encode([sep_text])[0]
+            sep_embedding = _encode_with_mps_fallback(model, [sep_text])[0]
             sep_tbl = _active_sep_table(conn)
             conn.execute(
                 f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
@@ -850,6 +895,7 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
             )
     except Exception:
         logger.warning("Failed to create separation vector for message %d", message_id, exc_info=True)
+    _write_embedder_metadata(conn)
     # Caller is responsible for committing
 
 
@@ -886,13 +932,13 @@ def search_vector_separation(
     if sender:
         model = get_model()
         query_text = f"{sender}: {query}"
-        query_embedding = model.encode([query_text])[0]
+        query_embedding = _encode_with_mps_fallback(model, [query_text])[0]
         query_blob = serialize_f32(query_embedding)
     elif _query_blob is not None:
         query_blob = _query_blob
     else:
         model = get_model()
-        query_embedding = model.encode([query])[0]
+        query_embedding = _encode_with_mps_fallback(model, [query])[0]
         query_blob = serialize_f32(query_embedding)
 
     sep_tbl = _active_sep_table(conn)
@@ -965,6 +1011,12 @@ def migrate_legacy_vec_tables(conn: sqlite3.Connection) -> bool:
 
     count = conn.execute("SELECT COUNT(*) FROM vec_messages").fetchone()[0]
     if count == 0:
+        has_tiered = conn.execute(
+            "SELECT name FROM sqlite_master WHERE name=? AND type='table'",
+            (new_vec,),
+        ).fetchone()
+        if not has_tiered:
+            return False
         conn.execute("DROP TABLE IF EXISTS vec_messages")
         conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
         conn.commit()

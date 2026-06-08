@@ -388,11 +388,14 @@ def filter_by_entity(
     Boost results that mention the target entities.
 
     Instead of removing non-matching results (which would be too aggressive),
-    this function re-scores results based on entity relevance:
+    this function re-scores results based on entity relevance.
 
-    - Results **from or to** a target entity: ``+0.3`` boost
-    - Results **mentioning** a target entity in content: ``+0.2`` boost
-    - Results with **no entity connection**: ``-0.15`` penalty
+    Boost factors are **proportional** to the score range of the result set
+    (fixes #487: flat +0.3 on RRF scores ~0.015 caused 21x amplification):
+
+    - Results **from or to** a target entity: ``+30%`` of max score
+    - Results **mentioning** a target entity in content: ``+20%`` of max score
+    - Results with **no entity connection**: ``-15%`` of max score penalty
 
     The ``entity_boost`` value is stored on each result dict for
     transparency.
@@ -410,6 +413,17 @@ def filter_by_entity(
 
     target_set = {e.lower() for e in target_entities}
 
+    # Compute the max score in the result set to make boosts proportional.
+    # This ensures the boost scales with the score magnitude (RRF ~0.015
+    # vs raw cosine ~0.8) instead of being a fixed constant.
+    max_score = max(
+        (r.get("score", r.get("salience", 0.0)) for r in results),
+        default=0.01,
+    )
+    # Guard against degenerate case where all scores are 0
+    if max_score <= 0:
+        max_score = 0.01
+
     for r in results:
         sender = r.get("sender", "").lower()
         recipient = r.get("recipient", "").lower()
@@ -417,19 +431,19 @@ def filter_by_entity(
 
         boost = 0.0
 
-        # Direct involvement (from/to)
+        # Direct involvement (from/to) — 30% of max score
         if sender in target_set or recipient in target_set:
-            boost += 0.3
+            boost += max_score * 0.30
 
-        # Mentioned in content
+        # Mentioned in content — 20% of max score
         for entity in target_set:
             if entity in content_lower:
-                boost += 0.2
+                boost += max_score * 0.20
                 break  # One content match is enough
 
-        # No connection at all -> small penalty
+        # No connection at all -> small proportional penalty (15% of max)
         if boost == 0.0:
-            boost = -0.15
+            boost = -(max_score * 0.15)
 
         r["entity_boost"] = boost
 
@@ -477,8 +491,9 @@ def apply_salience_guard(
     Applies all salience filtering and entity boosting in sequence:
 
     1. **Entity detection**: Identify person names in the query.
-    2. **Salience filtering**: Remove low-value noise (``"ok"``, ``"lol"``).
-    3. **Entity boosting**: Promote results relevant to queried entities.
+    2. **Entity boosting**: Promote results relevant to queried entities
+       (runs first so entity-relevant results are not prematurely discarded).
+    3. **Salience filtering**: Remove low-value noise (``"ok"``, ``"lol"``).
     4. **Return**: Re-ranked results with ``salience`` and ``entity_boost``
        scores attached for downstream inspection.
 
@@ -501,11 +516,13 @@ def apply_salience_guard(
     # Step 1: Detect entities in the query
     entities = detect_entities(query, conn=conn)
 
-    # Step 2: Filter low-salience noise
-    results = filter_by_salience(results, min_salience=min_salience)
-
-    # Step 3: Boost entity-relevant results
+    # Step 2: Boost entity-relevant results BEFORE salience filtering
+    # (fixes #488: previously, salience filtering ran first and discarded
+    # low-salience entity-relevant results before the boost could rescue them)
     if entities:
         results = filter_by_entity(results, entities)
+
+    # Step 3: Filter low-salience noise (runs AFTER entity boosting)
+    results = filter_by_salience(results, min_salience=min_salience)
 
     return results

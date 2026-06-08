@@ -169,12 +169,12 @@ class TestTCPAuth:
 
 class TestOversizedRequest:
     def test_rejects_oversized_payload(self):
-        from truememory.model_server import ModelServer, MAX_REQUEST_SIZE
+        from truememory.model_server import ModelServer, _MAX_MESSAGE_SIZE
         srv = ModelServer()
 
         client_sock, server_sock = socket.socketpair()
         try:
-            fake_length = MAX_REQUEST_SIZE + 1
+            fake_length = _MAX_MESSAGE_SIZE + 1
             header = struct.pack(">I", fake_length)
             client_sock.sendall(header)
 

@@ -141,7 +141,7 @@ def build_entity_style_vectors(conn: sqlite3.Connection) -> dict[str, list[float
     from collections import defaultdict
     by_sender: dict[str, list[str]] = defaultdict(list)
     for sender, content in rows:
-        by_sender[sender].append(content)
+        by_sender[sender.lower()].append(content)
 
     result: dict[str, list[float]] = {}
     now = datetime.now(timezone.utc).isoformat()
@@ -164,6 +164,7 @@ def build_entity_style_vectors(conn: sqlite3.Connection) -> dict[str, list[float
 
 def update_entity_style_vector_incremental(
     conn: sqlite3.Connection, entity: str, new_message: str,
+    *, _pre_computed_vec: list[float] | None = None,
 ) -> None:
     """Incrementally update an entity's style vector with a new message.
 
@@ -178,9 +179,13 @@ def update_entity_style_vector_incremental(
         conn:        Open database connection.
         entity:      Entity name (sender).
         new_message: The new message text.
+        _pre_computed_vec: If provided, skip compute_style_vector() call.
     """
     if not entity or not new_message:
         return
+
+    # Normalize entity name to lowercase for case-insensitive matching (#467)
+    entity = entity.lower()
 
     conn.execute(
         """CREATE TABLE IF NOT EXISTS entity_style_vectors (
@@ -191,7 +196,7 @@ def update_entity_style_vector_incremental(
         )"""
     )
 
-    new_vec = compute_style_vector(new_message)
+    new_vec = _pre_computed_vec if _pre_computed_vec is not None else compute_style_vector(new_message)
     now = datetime.now(timezone.utc).isoformat()
 
     row = conn.execute(
@@ -227,8 +232,6 @@ def update_entity_style_vector_incremental(
             (entity, json.dumps(merged), new_count, now),
         )
 
-    conn.commit()
-
 
 def get_entity_style_vector(
     conn: sqlite3.Connection, entity: str,
@@ -237,11 +240,13 @@ def get_entity_style_vector(
 
     Args:
         conn:   Open database connection.
-        entity: Entity name (case-sensitive match).
+        entity: Entity name (case-insensitive match).
 
     Returns:
         256-element float list, or ``None`` if no vector is stored.
     """
+    # Normalize entity name to lowercase for case-insensitive matching (#467)
+    entity = entity.lower()
     try:
         row = conn.execute(
             "SELECT vector FROM entity_style_vectors WHERE entity = ?",

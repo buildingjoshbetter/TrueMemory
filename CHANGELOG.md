@@ -1,5 +1,102 @@
 # Changelog
 
+## [0.7.2.0] — 2026-06-07
+
+Production hardening release. 37 findings closed from the v3 exhaustive system audit
+(76 agents, 675 findings, 7 criticals). Shipped across 20 PRs (#520–#539), each with
+TDD regression tests. ~100+ new tests added.
+
+### Fixed — Critical
+
+- **L5 consolidation search missing `id` key** — search results from consolidation
+  lacked the `id` field, causing KeyError in downstream scoring. (#486, PR #520)
+- **`migrate_legacy_vec_tables` destroying fresh vec tables** — migration ran on
+  newly-created databases and dropped the empty tables it had just created. (#490,
+  PR #521)
+- **Consolidation without write lock** — `consolidate()` mutated the database without
+  holding `_write_lock`, enabling concurrent `add()` calls to interleave. (#484,
+  PR #522)
+- **NaN re-embed flag set before success** — the "already re-embedded" marker was
+  written before the re-embed completed; a crash left the flag set with corrupt
+  vectors still in place. Also fixed sqlite-vec not loaded in background thread.
+  (#485, #499, PR #532)
+
+### Fixed — High
+
+- **MPS OOM handling fragmented across files** — consolidated into shared
+  `mps_utils.py` module with `is_mps_oom()`, `flush_mps_cache()`, and
+  `encode_with_mps_fallback()`. Covers hybrid search, model server, and engine.
+  (#489, PR #523)
+- **MPS device not restored after CPU fallback** — model stayed on CPU after an OOM
+  fallback, degrading all subsequent searches. Now restores to MPS after successful
+  CPU encoding. (PR #523)
+- **Foreign keys not enforced** — `PRAGMA foreign_keys=ON` was missing from all
+  SQLite connections, allowing orphaned rows. (#491, PR #537)
+- **NaN/Inf vectors silently inserted** — `serialize_f32()` now validates all
+  embeddings before insert; raises `ValueError` on NaN or Inf. (#492, PR #526)
+- **Cascade delete missing for 3 tables** — `surprise_scores`, `message_clusters`,
+  and `cluster_centroids` had no ON DELETE CASCADE, leaving orphaned rows on message
+  deletion. (#493, #500, PR #535)
+- **Entity names not case-normalized** — recipients, Dunbar hierarchy, and
+  consolidation grouping used case-sensitive comparisons, splitting "Alice" and
+  "alice" into separate entities. (#495, PR #529)
+- **Embedding computed inside write lock in `update()`** — pre-compute embeddings
+  outside `_write_lock`, then only do DB writes inside lock. Mirrors the `add()`
+  pattern. (#496, PR #525)
+- **Edge tier selection not persisted** — choosing Edge tier in setup wrote to memory
+  but not to `config.json`, reverting to Base on restart. (#497, PR #524)
+- **Entity boost 21x amplification** — flat `+0.3` boost on RRF scores of ~0.015
+  created massive amplification. Changed to proportional boosts (30%/20%/15% of
+  max_score). (#487, PR #538)
+- **Salience filter before entity boost** — salience filtering discarded low-salience
+  entity-relevant results before boosting could rescue them. Reordered: entity boost
+  now runs first. (#488, PR #538)
+
+### Fixed — Medium
+
+- **No auto-consolidation** — added configurable auto-consolidation after N adds
+  (default 100, env: `TRUEMEMORY_AUTO_CONSOLIDATE_EVERY`). (#498, PR #534)
+- **Triple commit per `add()`** — engine, personality, and style_vec each committed
+  separately. Removed sub-function commits; single commit in `add()`. Also
+  pre-computes style vector outside lock. (#511, #512, #513, PR #528)
+- **`user_id` not lowercased in summaries DELETE** — `(user_id,)` not matched when
+  case differed. (#501, PR #527)
+- **Config read on every search** — `_load_config()` now caches in memory with 5s
+  TTL + mtime invalidation. (#502, PR #539)
+- **Config write not atomic** — `_save_config()` now uses `tempfile.mkstemp()` +
+  `os.replace()` for crash-safe writes. (#503, PR #539)
+- **Config write race** — added `_config_write_lock` (threading.Lock) to serialize
+  concurrent writes from MCP handlers and tier-switch. (#504, PR #539)
+- **HyDE reported enabled for non-Pro tiers** — `truememory_configure` now checks
+  tier before reporting HyDE status. (#505, PR #539)
+- **Temporal search boundary exclusion** — off-by-one in date range queries excluded
+  boundary timestamps. (#506, PR #536)
+- **American date format not parsed** — MM/DD/YYYY format now recognized alongside
+  ISO format. (#507, PR #536)
+- **Relative date resolution incorrect** — "last week", "yesterday" etc. now resolve
+  correctly. (#509, PR #536)
+- **Timezone-aware/naive datetime comparison** — `.split('+')[0]` only stripped
+  positive UTC offsets; negative offsets caused TypeError. Replaced with regex-based
+  `_parse_naive()`. (#508, PR #530)
+- **Missing tables in base schema DDL** — `surprise_scores`, `message_clusters`, and
+  `cluster_centroids` CREATE TABLE statements added to `_SCHEMA_SQL`. (#510, #519,
+  PR #533)
+- **Model server dtype injection** — added `_ALLOWED_DTYPES` whitelist for
+  `np.dtype()` in JSON deserialization. (#514, PR #531)
+- **Model server unbounded response** — added `_MAX_MESSAGE_SIZE` check in
+  `_send_response`. (#515, PR #531)
+- **Model server PID check missing PermissionError** — added `PermissionError` to
+  exception tuple. (#516, PR #531)
+- **Tier rebuild not process-locked** — added `fcntl.flock()` for cross-process
+  rebuild serialization. (#517, PR #531)
+- **MPS OOM detection string matching** — replaced inline string checks with shared
+  `is_mps_oom()` from `mps_utils.py`. (#518, PR #523)
+
+### Added
+- **`truememory/mps_utils.py`** — shared MPS OOM handling module with thread-safe
+  `encode_with_mps_fallback()`, `is_mps_oom()`, and `flush_mps_cache()`.
+- **~100+ regression tests** across 15 new test files covering all 37 fixed issues.
+
 ## [0.6.9] — 2026-05-17
 
 ### Fixed

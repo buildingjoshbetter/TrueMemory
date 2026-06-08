@@ -42,13 +42,15 @@ def _set_mps_memory_cap():
 
 _set_mps_memory_cap()
 
+import base64  # noqa: E402
 import gc  # noqa: E402
 import hmac  # noqa: E402
+import json  # noqa: E402
 import logging  # noqa: E402
-import pickle  # noqa: E402
 import secrets  # noqa: E402
 import signal  # noqa: E402
 import socket  # noqa: E402
+import stat  # noqa: E402
 import struct  # noqa: E402
 import sys  # noqa: E402
 import threading  # noqa: E402
@@ -70,10 +72,35 @@ IDLE_TIMEOUT = int(os.environ.get("TRUEMEMORY_MODEL_SERVER_IDLE", "300"))
 
 _HEADER_FMT = ">I"
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
+_MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
+
+
+def _json_default(obj):
+    """Encode numpy arrays as base64 for safe JSON serialization."""
+    if isinstance(obj, np.ndarray):
+        arr = np.ascontiguousarray(obj, dtype=np.float32)
+        return {
+            "__ndarray__": base64.b64encode(arr.tobytes()).decode("ascii"),
+            "dtype": "float32",
+            "shape": list(arr.shape),
+        }
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+_ALLOWED_DTYPES = frozenset({"float32", "float64", "float16", "int32", "int64"})
+
+
+def _json_object_hook(obj):
+    """Decode base64-encoded numpy arrays from JSON."""
+    if "__ndarray__" in obj:
+        dtype_str = obj["dtype"]
+        if dtype_str not in _ALLOWED_DTYPES:
+            raise ValueError(f"Disallowed dtype: {dtype_str}")
+        data = base64.b64decode(obj["__ndarray__"])
+        return np.frombuffer(data, dtype=np.dtype(dtype_str)).reshape(obj["shape"])
+    return obj
 
 # Maximum request payload size (100 MB) — reject before allocating memory.
-MAX_REQUEST_SIZE = 100 * 1024 * 1024
-
 _HMAC_TOKEN_BYTES = 32
 
 
@@ -108,8 +135,19 @@ class ModelServer:
             set_embedding_model(tier)
 
         resolved = EMBEDDING_MODEL if not tier else tier
+        # Resolve tier -> internal model ID via centralized tier_config.
+        # _TIER_ALIASES is still exported by vector_search for compat.
         from truememory.vector_search import _TIER_ALIASES
         model_id = _TIER_ALIASES.get(resolved, resolved)
+
+        # Custom tier: resolve via tier_config
+        if resolved == "custom":
+            try:
+                from truememory.tier_config import get_embed_model
+                model_id = get_embed_model("custom")
+            except (ValueError, ImportError) as e:
+                log.warning("Custom tier resolution failed (%s); falling back to model2vec.", e)
+                model_id = "model2vec"
 
         if model_id == "model2vec":
             from model2vec import StaticModel
@@ -126,6 +164,28 @@ class ModelServer:
                 truncate_dim=256,
                 model_kwargs=mkwargs or None,
             )
+        elif model_id not in ("model2vec", "minilm", "bge-small", "qwen3_256"):
+            # Custom model: require explicit opt-in for arbitrary downloads
+            if os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "").strip() != "1":
+                log.warning(
+                    "Custom model %r requested without "
+                    "TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 -- "
+                    "falling back to model2vec.",
+                    model_id,
+                )
+                from model2vec import StaticModel
+                self._embed_model = StaticModel.from_pretrained(
+                    "minishlab/potion-base-8M", force_download=False
+                )
+            else:
+                from sentence_transformers import SentenceTransformer
+                from truememory.tier_config import resolve_custom_tier
+                cfg = resolve_custom_tier()
+                custom_dim = cfg["embed_dim"]
+                self._embed_model = SentenceTransformer(
+                    model_id, truncate_dim=custom_dim,
+                    trust_remote_code=False,
+                )
         else:
             from model2vec import StaticModel
             self._embed_model = StaticModel.from_pretrained(
@@ -187,7 +247,23 @@ class ModelServer:
             encode_start = time.time()
             with self._lock:
                 model = self._get_embed_model(tier)
-                vectors = model.encode(texts, show_progress_bar=False)
+                try:
+                    vectors = model.encode(texts, show_progress_bar=False)
+                except RuntimeError as exc:
+                    from truememory.mps_utils import is_mps_oom, flush_mps_cache
+                    if not is_mps_oom(exc):
+                        raise
+                    log.warning("MPS OOM during encoding — flushing cache and retrying on CPU")
+                    flush_mps_cache()
+                    if hasattr(model, "to"):
+                        model.to("cpu")
+                    vectors = model.encode(texts, show_progress_bar=False)
+                    try:
+                        import torch
+                        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                            model.to("mps")
+                    except Exception:
+                        pass
             encode_time = time.time() - encode_start
 
             if self._throttler_active and self._throttler:
@@ -279,22 +355,19 @@ class ModelServer:
             if not header:
                 return
             length = struct.unpack(_HEADER_FMT, header)[0]
-
-            # Reject oversized requests before allocating memory.
-            if length > MAX_REQUEST_SIZE:
+            if length > _MAX_MESSAGE_SIZE:
                 log.warning(
                     "Rejecting oversized request (%d bytes, max %d)",
                     length,
-                    MAX_REQUEST_SIZE,
+                    _MAX_MESSAGE_SIZE,
                 )
                 conn.close()
                 return
-
             data = self._recv_exact(conn, length)
             if not data:
                 return
 
-            request = pickle.loads(data)
+            request = json.loads(data, object_hook=_json_object_hook)
             response = self.handle_request(request)
             self._send_response(conn, response)
         except Exception as e:
@@ -315,7 +388,9 @@ class ModelServer:
         return bytes(buf)
 
     def _send_response(self, conn: socket.socket, response: dict):
-        data = pickle.dumps(response, protocol=pickle.HIGHEST_PROTOCOL)
+        data = json.dumps(response, default=_json_default).encode("utf-8")
+        if len(data) > _MAX_MESSAGE_SIZE:
+            data = json.dumps({"ok": False, "error": "Response too large"}).encode("utf-8")
         header = struct.pack(_HEADER_FMT, len(data))
         conn.sendall(header + data)
 
@@ -378,29 +453,20 @@ class ModelServer:
         PID_PATH.write_text(str(os.getpid()))
 
         if _USE_UNIX:
-            # ----- POSIX: AF_UNIX transport (unchanged behaviour) -----
             if SOCK_PATH.exists():
                 SOCK_PATH.unlink()
-
             srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             srv.bind(str(SOCK_PATH))
+            os.chmod(str(SOCK_PATH), stat.S_IRUSR | stat.S_IWUSR)
             transport_desc = f"sock={SOCK_PATH}"
         else:
-            # ----- Windows: TCP loopback transport -----
             srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            srv.bind((_LOOPBACK_HOST, 0))  # ephemeral port
+            srv.bind((_LOOPBACK_HOST, 0))
             self._bound_port = srv.getsockname()[1]
-
-            # Generate HMAC auth token first (so token is ready before
-            # PORT_PATH signals readiness to clients).
             self._token = secrets.token_bytes(_HMAC_TOKEN_BYTES)
             self._atomic_write_text(TOKEN_PATH, self._token.hex(), mode=0o600)
-
-            # Write port file last -- its presence is the readiness marker.
             self._atomic_write_text(PORT_PATH, str(self._bound_port), mode=0o600)
-
             transport_desc = f"tcp={_LOOPBACK_HOST}:{self._bound_port}"
-
         srv.listen(16)
         srv.settimeout(2.0)
 
@@ -477,7 +543,6 @@ def main():
                 sys.exit(1)
         except (ValueError, OSError):
             pass
-        # Stale PID file -- clean up leftover artefacts.
         PID_PATH.unlink(missing_ok=True)
         if SOCK_PATH.exists():
             SOCK_PATH.unlink(missing_ok=True)
