@@ -13,6 +13,7 @@ Issue #499 — Background Thread Doesn't Load sqlite-vec:
 from __future__ import annotations
 
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -23,6 +24,11 @@ import numpy as np
 import pytest
 
 from tests.conftest import requires_sqlite_ext
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="Qwen3 NaN background thread only runs on macOS",
+)
 
 
 def _make_mock_model():

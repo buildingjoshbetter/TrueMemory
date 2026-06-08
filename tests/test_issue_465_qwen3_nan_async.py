@@ -8,15 +8,18 @@ The NaN fix should:
 """
 from __future__ import annotations
 
+import sys
 import time
 from unittest.mock import patch, MagicMock
 
 import numpy as np
+import pytest
 
 from tests.conftest import requires_sqlite_ext
 
 
 @requires_sqlite_ext
+@pytest.mark.skipif(sys.platform != "darwin", reason="Qwen3 NaN fix only runs on macOS")
 class TestIssue465Qwen3NanAsync:
     """Verify NaN fix doesn't block MCP startup."""
 
