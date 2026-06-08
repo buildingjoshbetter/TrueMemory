@@ -17,7 +17,11 @@ from truememory.storage import create_db
 
 
 def _make_engine_with_messages(n=20):
-    """Create an engine with messages in a temp DB (no vectors needed)."""
+    """Create an engine with messages in a temp DB (no vectors needed).
+
+    Disables startup consolidation to prevent background threads from
+    accessing SQLite cross-thread (causes segfault on Python 3.14).
+    """
     td = tempfile.mkdtemp()
     db = os.path.join(td, "test.db")
     conn = create_db(db)
@@ -31,6 +35,7 @@ def _make_engine_with_messages(n=20):
     conn.close()
 
     eng = TrueMemoryEngine(db_path=db)
+    eng._has_consolidation = False
     eng._ensure_connection()
     return eng, td
 
@@ -99,12 +104,17 @@ def test_auto_consolidation_threshold_lowered():
 def test_startup_consolidation_triggers_when_clusters_empty():
     """On startup, if messages exist but clusters are empty, consolidate fires."""
     eng, td = _make_engine_with_messages(n=30)
+    eng._has_consolidation = True
 
-    with patch.object(eng, "_bg_consolidate") as mock_bg:
-        eng._has_consolidation = True
+    import truememory.engine as _eng_mod
+    with patch.object(_eng_mod.threading, "Thread") as mock_thread_cls:
+        mock_thread = MagicMock()
+        mock_thread_cls.return_value = mock_thread
         eng._maybe_startup_consolidate()
 
-    assert mock_bg.called or eng._consolidation_thread is not None
+    mock_thread_cls.assert_called_once()
+    assert mock_thread_cls.call_args.kwargs["name"] == "startup-consolidate"
+    mock_thread.start.assert_called_once()
     eng.close()
 
 
