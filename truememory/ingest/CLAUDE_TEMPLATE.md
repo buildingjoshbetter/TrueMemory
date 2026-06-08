@@ -19,6 +19,7 @@ MEMORY.md may contain personal facts that were cached from earlier sessions. **D
 
 ## Auto-Recall (every session)
 - At the START of each conversation, call `truememory_search` with a broad query about the user (e.g. "user preferences and context") to load relevant memories before responding.
+- Directives are automatically injected at session start — you do not need to search for them.
 - Before making recommendations, check TrueMemory for stored preferences.
 - When the user asks anything about past conversations, "do you remember", or any personal fact question — search TrueMemory. Do NOT answer "I don't know" without searching first.
 
@@ -26,6 +27,7 @@ MEMORY.md may contain personal facts that were cached from earlier sessions. **D
 - When the user shares a personal preference, store it immediately via `truememory_store`. Do not ask permission.
 - When an important decision is made, store it.
 - When the user corrects you, store the correction.
+- When the user gives a standing instruction ("always do X", "never do Y", "from now on...", "in every session..."), store it as a directive: `truememory_store(content="...", directive=True)`. Directives auto-load at the start of every session — regular memories do not.
 - When the user shares a fact about themselves (location, job, projects, relationships, etc.), store it.
 - Write each memory as a clear, atomic statement: "Prefers bun over npm" not "The user mentioned they like bun."
 - Do NOT store to the built-in auto-memory (`MEMORY.md`) for user facts — those go to TrueMemory only.
