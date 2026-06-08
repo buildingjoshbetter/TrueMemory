@@ -66,6 +66,7 @@ def test_spawn_cap_allows_spawn_under_cap(monkeypatch, tmp_path):
     """Under the cap, Popen must be called and no backlog marker written."""
     from contextlib import contextmanager
     from truememory.ingest.hooks import stop as stop_mod
+    from truememory.ingest.hooks import _shared as shared_mod
     from truememory.hooks import core as core_mod
 
     @contextmanager
@@ -74,6 +75,7 @@ def test_spawn_cap_allows_spawn_under_cap(monkeypatch, tmp_path):
 
     monkeypatch.setattr(core_mod, "spawn_gate", _gate_under_cap)
     monkeypatch.setattr(core_mod, "register_spawned_pid", lambda pid: None)
+    monkeypatch.setattr(shared_mod, "check_extraction_budget", lambda: True)
     monkeypatch.setattr(stop_mod, "BACKLOG_DIR", tmp_path / "backlog")
     monkeypatch.setattr(stop_mod, "TRACE_DIR", tmp_path / "traces")
     monkeypatch.setattr(stop_mod, "LOG_DIR", tmp_path / "logs")
@@ -139,6 +141,7 @@ def test_popen_failure_queues_backlog_not_inline(monkeypatch, tmp_path):
     ingestion — that path blocks Claude Code's shutdown."""
     from contextlib import contextmanager
     from truememory.ingest.hooks import stop as stop_mod
+    from truememory.ingest.hooks import _shared as shared_mod
     from truememory.hooks import core as core_mod
 
     @contextmanager
@@ -146,6 +149,7 @@ def test_popen_failure_queues_backlog_not_inline(monkeypatch, tmp_path):
         yield True
 
     monkeypatch.setattr(core_mod, "spawn_gate", _gate_allows)
+    monkeypatch.setattr(shared_mod, "check_extraction_budget", lambda: True)
     monkeypatch.setattr(stop_mod, "BACKLOG_DIR", tmp_path / "backlog")
     monkeypatch.setattr(stop_mod, "TRACE_DIR", tmp_path / "traces")
     monkeypatch.setattr(stop_mod, "LOG_DIR", tmp_path / "logs")

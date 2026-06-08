@@ -161,17 +161,17 @@ class TestBuildEntityStyleVectors:
 
         result = build_entity_style_vectors(conn)
 
-        assert "Alice" in result
-        assert "Bob" in result
-        assert len(result["Alice"]) == DIM
-        assert len(result["Bob"]) == DIM
+        assert "alice" in result
+        assert "bob" in result
+        assert len(result["alice"]) == DIM
+        assert len(result["bob"]) == DIM
 
         # Vectors should be stored in DB
-        stored_alice = get_entity_style_vector(conn, "Alice")
+        stored_alice = get_entity_style_vector(conn, "alice")
         assert stored_alice is not None
         assert len(stored_alice) == DIM
 
-        stored_bob = get_entity_style_vector(conn, "Bob")
+        stored_bob = get_entity_style_vector(conn, "bob")
         assert stored_bob is not None
         conn.close()
 
@@ -195,14 +195,14 @@ class TestIncrementalUpdate:
         for msg in messages:
             _insert_msg(conn, msg, sender="Alice")
         batch_result = build_entity_style_vectors(conn)
-        batch_vec = batch_result["Alice"]
+        batch_vec = batch_result["alice"]
 
         # Incremental build (fresh DB)
         conn2 = _make_test_db()
         for msg in messages:
             _insert_msg(conn2, msg, sender="Alice")
-            update_entity_style_vector_incremental(conn2, "Alice", msg)
-        inc_vec = get_entity_style_vector(conn2, "Alice")
+            update_entity_style_vector_incremental(conn2, "alice", msg)
+        inc_vec = get_entity_style_vector(conn2, "alice")
 
         assert inc_vec is not None
         # Cosine should be reasonably high (incremental weighted average
@@ -226,10 +226,10 @@ class TestGetEntityStyleVector:
         _insert_msg(conn, "Test message two", sender="Charlie")
 
         result = build_entity_style_vectors(conn)
-        stored = get_entity_style_vector(conn, "Charlie")
+        stored = get_entity_style_vector(conn, "charlie")
 
         assert stored is not None
-        for a, b in zip(result["Charlie"], stored):
+        for a, b in zip(result["charlie"], stored):
             assert abs(a - b) < 1e-10
         conn.close()
 
@@ -252,13 +252,13 @@ class TestForgetClearsVector:
         _insert_msg(conn, "Hello from Dave", sender="Dave")
         build_entity_style_vectors(conn)
 
-        assert get_entity_style_vector(conn, "Dave") is not None
+        assert get_entity_style_vector(conn, "dave") is not None
 
         # Simulate forget
-        conn.execute("DELETE FROM entity_style_vectors WHERE entity = ?", ("Dave",))
+        conn.execute("DELETE FROM entity_style_vectors WHERE entity = ?", ("dave",))
         conn.commit()
 
-        assert get_entity_style_vector(conn, "Dave") is None
+        assert get_entity_style_vector(conn, "dave") is None
         conn.close()
 
 

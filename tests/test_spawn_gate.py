@@ -399,6 +399,7 @@ def _json_load(path):
 def test_drain_backlog_respects_spawn_cap(tmp_path, monkeypatch):
     """_drain_backlog must not spawn processes beyond the spawn cap."""
     from truememory.ingest.hooks import session_start as ss_mod
+    from truememory.ingest.hooks import _shared as shared_mod
     from truememory.hooks import core as core_mod
 
     backlog = tmp_path / "backlog"
@@ -414,6 +415,7 @@ def test_drain_backlog_respects_spawn_cap(tmp_path, monkeypatch):
         }))
 
     monkeypatch.setattr(ss_mod, "BACKLOG_DIR", backlog)
+    monkeypatch.setattr(shared_mod, "check_extraction_budget", lambda: True)
 
     spawn_count = {"n": 0}
 
