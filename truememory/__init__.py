@@ -124,6 +124,7 @@ __all__ = [
     "hybrid", "temporal", "salience", "personality", "personality_style_vec",
     "consolidation",
     "predictive", "query_classifier", "reranker", "hyde", "clustering",
+    "tier_config",
 ]
 
 
