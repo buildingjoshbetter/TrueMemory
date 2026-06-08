@@ -854,7 +854,7 @@ class TrueMemoryEngine:
             return deleted
 
     def consolidate(self) -> dict[str, str]:
-        """Run all consolidation layers (L2-L5) under the write lock.
+        """Run all consolidation layers (L0-L5) under the write lock.
 
         Returns timing stats for each step.
         """
@@ -889,7 +889,40 @@ class TrueMemoryEngine:
         except (ImportError, ModuleNotFoundError):
             build_dunbar_hierarchy = None
 
+        _cluster_messages = None
+        if _HAS_CLUSTERING and self._has_vectors:
+            try:
+                from truememory.clustering import cluster_messages as _cm
+                _cluster_messages = _cm
+            except (ImportError, ModuleNotFoundError):
+                pass
+
+        _extract_preferences = None
+        if _HAS_PERSONALITY:
+            try:
+                from truememory.personality import extract_preferences as _ep
+                _extract_preferences = _ep
+            except (ImportError, ModuleNotFoundError):
+                pass
+
         with self._write_lock:
+            if _cluster_messages:
+                try:
+                    t0 = _time.time()
+                    n = _cluster_messages(self.conn)
+                    stats["cluster_messages"] = f"{n} clusters in {_time.time() - t0:.3f}s"
+                    self._has_clustering = True
+                except Exception as exc:
+                    stats["cluster_messages"] = f"ERROR: {exc}"
+
+            if _extract_preferences:
+                try:
+                    t0 = _time.time()
+                    _extract_preferences(self.conn)
+                    stats["extract_preferences"] = f"{_time.time() - t0:.3f}s"
+                except Exception as exc:
+                    stats["extract_preferences"] = f"ERROR: {exc}"
+
             try:
                 t0 = _time.time()
                 build_summaries(self.conn)
