@@ -26,6 +26,13 @@ def _run_cli(args: list[str], env: dict | None = None) -> subprocess.CompletedPr
     base_env.pop("ANTHROPIC_API_KEY", None)
     base_env.pop("OPENROUTER_API_KEY", None)
     if env:
+        # Preserve user site-packages so dependencies (numpy etc.) remain
+        # importable even when HOME is overridden to a temp directory.
+        if "HOME" in env and "PYTHONPATH" not in env:
+            import site
+            user_sp = site.getusersitepackages()
+            existing = base_env.get("PYTHONPATH", "")
+            base_env["PYTHONPATH"] = f"{user_sp}:{existing}" if existing else user_sp
         base_env.update(env)
 
     return subprocess.run(
