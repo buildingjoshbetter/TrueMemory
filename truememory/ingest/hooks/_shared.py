@@ -111,10 +111,11 @@ def check_extraction_budget() -> bool:
     """Check if the hourly extraction budget allows another extraction.
 
     Returns True if extraction is allowed, False if budget is exhausted.
-    Uses flock for atomicity across concurrent processes.
+    Uses flock for atomicity across concurrent processes (no-op on Windows).
     """
     if _MAX_EXTRACTIONS_PER_HOUR <= 0:
         return True
+    fd = -1
     try:
         _BUDGET_FILE.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(_BUDGET_FILE), os.O_RDWR | os.O_CREAT)
@@ -129,16 +130,22 @@ def check_extraction_budget() -> bool:
         if data.get("hour") != current_hour:
             data = {"hour": current_hour, "count": 0}
         if data["count"] >= _MAX_EXTRACTIONS_PER_HOUR:
-            os.close(fd)
             return False
         data["count"] += 1
+        payload = json.dumps(data).encode("utf-8")
         os.lseek(fd, 0, os.SEEK_SET)
         os.ftruncate(fd, 0)
-        os.write(fd, json.dumps(data).encode("utf-8"))
-        os.close(fd)
+        os.write(fd, payload)
         return True
     except OSError:
+        log.warning("Budget file I/O error — allowing extraction", exc_info=True)
         return True
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def record_stale_processing_pid(processing_path: Path, pid: int) -> None:

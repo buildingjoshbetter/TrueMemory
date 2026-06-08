@@ -437,10 +437,12 @@ class TrueMemoryEngine:
                                 if _msg_count > 0:
                                     def _bg_reembed(db_path):
                                         import sqlite3 as _sql
+                                        _conn = None
                                         try:
                                             _conn = _sql.connect(str(db_path), check_same_thread=False)
                                             _conn.execute("PRAGMA journal_mode=WAL")
-                                            _conn.execute("PRAGMA busy_timeout=30000")
+                                            _conn.execute("PRAGMA busy_timeout=%d" % DEFAULT_BUSY_TIMEOUT_MS)
+                                            _conn.execute("PRAGMA synchronous=NORMAL")
                                             _conn.execute("PRAGMA foreign_keys=ON")
                                             # Issue #499: load sqlite-vec on the
                                             # background thread's connection so
@@ -469,7 +471,6 @@ class TrueMemoryEngine:
                                                 ("qwen3_nan_fix_applied", "1"),
                                             )
                                             _conn.commit()
-                                            _conn.close()
                                             logger.warning(
                                                 "Qwen3 NaN fix: re-embedded %d vectors "
                                                 "in background", _msg_count,
@@ -480,6 +481,12 @@ class TrueMemoryEngine:
                                                 "will retry on next startup",
                                                 exc_info=True,
                                             )
+                                        finally:
+                                            if _conn is not None:
+                                                try:
+                                                    _conn.close()
+                                                except Exception:
+                                                    pass
                                     _db = self.db_path
                                     if str(_db) != ":memory:":
                                         self._nan_migration_in_progress = True
@@ -644,7 +651,7 @@ class TrueMemoryEngine:
                         )
                     _write_embedder_metadata(self.conn)
                 except Exception:
-                    logger.debug("Failed to store embedding for message %s during add()", new_id, exc_info=True)
+                    logger.warning("Failed to store embedding for message %s during add()", new_id, exc_info=True)
 
             # Incrementally update entity profile
             if self._has_personality and sender:
@@ -2802,7 +2809,12 @@ Return ONLY the queries, one per line, no numbering or explanation:"""
         return stats
 
     def close(self):
-        """Close database connection."""
+        """Close database connection and join background threads."""
+        if self._consolidation_thread is not None and self._consolidation_thread.is_alive():
+            try:
+                self._consolidation_thread.join(timeout=5)
+            except Exception:
+                pass
         if self.conn:
             try:
                 self.conn.close()
