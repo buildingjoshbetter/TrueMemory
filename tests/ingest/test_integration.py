@@ -15,10 +15,14 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from truememory.ingest.encoding_gate import EncodingGate
 from truememory.ingest.pipeline import IngestionPipeline, IngestionResult
 from truememory.ingest.transcript import parse_transcript, format_for_extraction
+
+def _skip_model_load():
+    raise RuntimeError("model loading skipped in integration test")
 
 
 # Load the fixture once
@@ -138,7 +142,8 @@ def test_e2e_heuristic_extraction_and_storage():
     # Force heuristic extraction regardless of environment
     pipeline.llm_config = None
 
-    result = pipeline.ingest_transcript(str(FIXTURE_PATH), session_id="test-e2e")
+    with patch("truememory.vector_search.get_model", side_effect=_skip_model_load):
+        result = pipeline.ingest_transcript(str(FIXTURE_PATH), session_id="test-e2e")
 
     assert isinstance(result, IngestionResult)
     assert result.facts_extracted > 0, "Should extract at least one fact from the fixture"
@@ -171,8 +176,9 @@ def test_e2e_reset_batch_between_runs():
     # Inject stale batch state
     pipeline.gate._batch_scores.append(0.999)
 
-    # Ingest the fixture
-    pipeline.ingest_transcript(str(FIXTURE_PATH), session_id="test-reset-1")
+    # Ingest the fixture (patch get_model to skip slow model loading)
+    with patch("truememory.vector_search.get_model", side_effect=_skip_model_load):
+        pipeline.ingest_transcript(str(FIXTURE_PATH), session_id="test-reset-1")
 
     # After ingestion, the stale score should be gone
     # (batch may contain NEW scores from the actual facts, but not the stale one)
