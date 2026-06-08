@@ -87,3 +87,40 @@ def test_consolidate_handles_cluster_error_gracefully():
     assert "cluster_messages" in result
     assert "ERROR" in result["cluster_messages"]
     eng.close()
+
+
+def test_auto_consolidation_threshold_lowered():
+    """Default auto-consolidation threshold is 25 (was 100)."""
+    eng, td = _make_engine_with_messages()
+    assert eng._auto_consolidate_threshold == 25
+    eng.close()
+
+
+def test_startup_consolidation_triggers_when_clusters_empty():
+    """On startup, if messages exist but clusters are empty, consolidate fires."""
+    eng, td = _make_engine_with_messages(n=30)
+
+    with patch.object(eng, "_bg_consolidate") as mock_bg:
+        eng._has_consolidation = True
+        eng._maybe_startup_consolidate()
+
+    assert mock_bg.called or eng._consolidation_thread is not None
+    eng.close()
+
+
+def test_startup_consolidation_skips_when_few_messages():
+    """Don't consolidate on startup if fewer messages than threshold."""
+    eng, td = _make_engine_with_messages(n=5)
+
+    consolidate_called = False
+    orig = eng._bg_consolidate
+    def spy():
+        nonlocal consolidate_called
+        consolidate_called = True
+        return orig()
+
+    eng._bg_consolidate = spy
+    eng._has_consolidation = True
+    eng._maybe_startup_consolidate()
+    assert not consolidate_called
+    eng.close()
