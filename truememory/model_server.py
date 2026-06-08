@@ -3,11 +3,17 @@
 Run as: python -m truememory.model_server
 Or auto-started by model_client on first request.
 
-Listens on ~/.truememory/model.sock (Unix domain socket).
+Transport:
+  - POSIX: AF_UNIX socket at ~/.truememory/model.sock
+  - Windows: TCP loopback (127.0.0.1) on an ephemeral port written to
+    ~/.truememory/model_server.port, authenticated via HMAC token stored
+    in ~/.truememory/model_server.token (chmod 0o600).
+
 Auto-exits after idle timeout (default 300s, configurable via
 TRUEMEMORY_MODEL_SERVER_IDLE env var).
 """
 
+import atexit
 import os
 
 try:
@@ -38,8 +44,10 @@ _set_mps_memory_cap()
 
 import base64  # noqa: E402
 import gc  # noqa: E402
+import hmac  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
+import secrets  # noqa: E402
 import signal  # noqa: E402
 import socket  # noqa: E402
 import stat  # noqa: E402
@@ -51,11 +59,15 @@ from pathlib import Path  # noqa: E402
 
 import numpy as np  # noqa: E402
 
+from truememory._platform import _LOOPBACK_HOST, _USE_UNIX, pid_is_alive  # noqa: E402
+
 log = logging.getLogger(__name__)
 
 _TRUEMEMORY_DIR = Path.home() / ".truememory"
 SOCK_PATH = _TRUEMEMORY_DIR / "model.sock"
 PID_PATH = _TRUEMEMORY_DIR / "model_server.pid"
+PORT_PATH = _TRUEMEMORY_DIR / "model_server.port"
+TOKEN_PATH = _TRUEMEMORY_DIR / "model_server.token"
 IDLE_TIMEOUT = int(os.environ.get("TRUEMEMORY_MODEL_SERVER_IDLE", "300"))
 
 _HEADER_FMT = ">I"
@@ -88,9 +100,13 @@ def _json_object_hook(obj):
         return np.frombuffer(data, dtype=np.dtype(dtype_str)).reshape(obj["shape"])
     return obj
 
+# Maximum request payload size (100 MB) — reject before allocating memory.
+_HMAC_TOKEN_BYTES = 32
+
 
 class ModelServer:
-    """Serves embedding and reranking over a Unix domain socket."""
+    """Serves embedding and reranking over a Unix domain socket (POSIX)
+    or HMAC-authenticated TCP loopback (Windows)."""
 
     _SUSTAINED_THRESHOLD = 10
     _SUSTAINED_WINDOW = 30
@@ -106,6 +122,8 @@ class ModelServer:
         self._embed_timestamps: list[float] = []
         self._throttler = None
         self._throttler_active = False
+        self._token: bytes | None = None  # HMAC token for TCP transport
+        self._bound_port: int | None = None  # TCP port (Windows only)
 
     def _get_embed_model(self, tier: str):
         if self._embed_model is not None and self._embed_tier == tier:
@@ -309,13 +327,40 @@ class ModelServer:
             pass
         gc.collect()
 
+    _CLIENT_TIMEOUT = 30.0  # seconds; caps how long any single client can block
+
     def handle_client(self, conn: socket.socket):
         try:
+            conn.settimeout(self._CLIENT_TIMEOUT)
+
+            # --- HMAC authentication for TCP transport ---
+            if not _USE_UNIX:
+                if self._token is None:
+                    # Fail closed: TCP transport must always have a token.
+                    log.warning("TCP client rejected: no HMAC token configured")
+                    conn.close()
+                    return
+                token_bytes = self._recv_exact(conn, _HMAC_TOKEN_BYTES)
+                if token_bytes is None:
+                    # Connection closed before sending token (e.g. idle-timeout
+                    # dummy connection).  Drop silently -- not a real auth failure.
+                    conn.close()
+                    return
+                if not hmac.compare_digest(token_bytes, self._token):
+                    log.warning("TCP client failed HMAC authentication")
+                    conn.close()
+                    return
+
             header = self._recv_exact(conn, _HEADER_SIZE)
             if not header:
                 return
             length = struct.unpack(_HEADER_FMT, header)[0]
             if length > _MAX_MESSAGE_SIZE:
+                log.warning(
+                    "Rejecting oversized request (%d bytes, max %d)",
+                    length,
+                    _MAX_MESSAGE_SIZE,
+                )
                 conn.close()
                 return
             data = self._recv_exact(conn, length)
@@ -360,25 +405,68 @@ class ModelServer:
                     "Idle timeout (%.0fs), shutting down model server", elapsed
                 )
                 self._running = False
+                # Send a dummy connection to unblock accept().
                 try:
-                    dummy = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    dummy.connect(str(SOCK_PATH))
+                    if _USE_UNIX:
+                        dummy = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                        dummy.connect(str(SOCK_PATH))
+                    else:
+                        port = self._bound_port
+                        if port:
+                            dummy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            dummy.connect((_LOOPBACK_HOST, port))
+                        else:
+                            break
                     dummy.close()
                 except Exception:
                     pass
                 break
 
+    @staticmethod
+    def _atomic_write_text(path: Path, text: str, mode: int = 0o644) -> None:
+        """Write *text* to *path* atomically via a temp file + rename.
+
+        *mode* is applied to the temp file **before** the rename so the
+        target is never visible with default permissions (eliminates the
+        TOCTOU window for sensitive files like the HMAC token).
+        """
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        # Create with restricted permissions from the start.
+        fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, mode)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        try:
+            os.replace(str(tmp), str(path))
+        except OSError:
+            # os.replace can fail on Windows if another process holds the
+            # file open.  Fall back to direct write.
+            path.write_text(text)
+            tmp.unlink(missing_ok=True)
+
     def run(self):
         _TRUEMEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
-        if SOCK_PATH.exists():
-            SOCK_PATH.unlink()
-
         PID_PATH.write_text(str(os.getpid()))
 
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(str(SOCK_PATH))
-        os.chmod(str(SOCK_PATH), stat.S_IRUSR | stat.S_IWUSR)
+        if _USE_UNIX:
+            if SOCK_PATH.exists():
+                SOCK_PATH.unlink()
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            srv.bind(str(SOCK_PATH))
+            os.chmod(str(SOCK_PATH), stat.S_IRUSR | stat.S_IWUSR)
+            transport_desc = f"sock={SOCK_PATH}"
+        else:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.bind((_LOOPBACK_HOST, 0))
+            self._bound_port = srv.getsockname()[1]
+            self._token = secrets.token_bytes(_HMAC_TOKEN_BYTES)
+            self._atomic_write_text(TOKEN_PATH, self._token.hex(), mode=0o600)
+            self._atomic_write_text(PORT_PATH, str(self._bound_port), mode=0o600)
+            transport_desc = f"tcp={_LOOPBACK_HOST}:{self._bound_port}"
         srv.listen(16)
         srv.settimeout(2.0)
 
@@ -386,8 +474,8 @@ class ModelServer:
         idle_thread.start()
 
         log.info(
-            "Model server started: pid=%d sock=%s idle_timeout=%ds",
-            os.getpid(), SOCK_PATH, IDLE_TIMEOUT,
+            "Model server started: pid=%d %s idle_timeout=%ds",
+            os.getpid(), transport_desc, IDLE_TIMEOUT,
         )
 
         try:
@@ -401,19 +489,26 @@ class ModelServer:
                 if not self._running:
                     conn.close()
                     break
-                t = threading.Thread(target=self.handle_client, args=(conn,), daemon=True)
+                t = threading.Thread(
+                    target=self.handle_client, args=(conn,), daemon=True
+                )
                 t.start()
         finally:
             srv.close()
             self._cleanup()
 
     def _cleanup(self):
-        if SOCK_PATH.exists():
-            SOCK_PATH.unlink(missing_ok=True)
-        if PID_PATH.exists():
-            PID_PATH.unlink(missing_ok=True)
+        if getattr(self, "_cleaned_up", False):
+            return
+        self._cleaned_up = True
+        for p in (SOCK_PATH, PID_PATH, PORT_PATH, TOKEN_PATH):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
         self._embed_model = None
         self._reranker = None
+        self._token = None
         gc.collect()
         log.info("Model server stopped")
 
@@ -443,15 +538,22 @@ def main():
     if PID_PATH.exists():
         try:
             old_pid = int(PID_PATH.read_text().strip())
-            os.kill(old_pid, 0)
-            log.error("Model server already running (pid=%d)", old_pid)
-            sys.exit(1)
-        except (ProcessLookupError, PermissionError, ValueError):
-            PID_PATH.unlink(missing_ok=True)
-            if SOCK_PATH.exists():
-                SOCK_PATH.unlink(missing_ok=True)
+            if pid_is_alive(old_pid):
+                log.error("Model server already running (pid=%d)", old_pid)
+                sys.exit(1)
+        except (ValueError, OSError):
+            pass
+        PID_PATH.unlink(missing_ok=True)
+        if SOCK_PATH.exists():
+            SOCK_PATH.unlink(missing_ok=True)
+        PORT_PATH.unlink(missing_ok=True)
+        TOKEN_PATH.unlink(missing_ok=True)
 
     server = ModelServer()
+
+    # Ensure cleanup runs even on unhandled exit.
+    atexit.register(server._cleanup)
+
     server.run()
 
 
