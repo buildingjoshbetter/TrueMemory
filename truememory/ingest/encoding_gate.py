@@ -139,6 +139,8 @@ _CATEGORY_THRESHOLD_OVERRIDE = {
     "correction": -0.06,
     "decision": -0.04,
     "relationship": -0.04,
+    "event": -0.04,
+    "activity": -0.02,
 }
 
 

@@ -73,8 +73,10 @@ _COMMITMENT_PATTERNS = frozenset({
 _CATEGORY_SALIENCE_BOOST = {
     "correction": 0.40,
     "decision": 0.30,
+    "event": 0.28,
     "personal": 0.25,
     "preference": 0.25,
+    "activity": 0.22,
     "relationship": 0.20,
     "temporal": 0.15,
     "technical": 0.10,
