@@ -117,8 +117,19 @@ class ModelServer:
             set_embedding_model(tier)
 
         resolved = EMBEDDING_MODEL if not tier else tier
+        # Resolve tier -> internal model ID via centralized tier_config.
+        # _TIER_ALIASES is still exported by vector_search for compat.
         from truememory.vector_search import _TIER_ALIASES
         model_id = _TIER_ALIASES.get(resolved, resolved)
+
+        # Custom tier: resolve via tier_config
+        if resolved == "custom":
+            try:
+                from truememory.tier_config import get_embed_model
+                model_id = get_embed_model("custom")
+            except (ValueError, ImportError) as e:
+                log.warning("Custom tier resolution failed (%s); falling back to model2vec.", e)
+                model_id = "model2vec"
 
         if model_id == "model2vec":
             from model2vec import StaticModel
@@ -135,6 +146,28 @@ class ModelServer:
                 truncate_dim=256,
                 model_kwargs=mkwargs or None,
             )
+        elif model_id not in ("model2vec", "minilm", "bge-small", "qwen3_256"):
+            # Custom model: require explicit opt-in for arbitrary downloads
+            if os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "").strip() != "1":
+                log.warning(
+                    "Custom model %r requested without "
+                    "TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 -- "
+                    "falling back to model2vec.",
+                    model_id,
+                )
+                from model2vec import StaticModel
+                self._embed_model = StaticModel.from_pretrained(
+                    "minishlab/potion-base-8M", force_download=False
+                )
+            else:
+                from sentence_transformers import SentenceTransformer
+                from truememory.tier_config import resolve_custom_tier
+                cfg = resolve_custom_tier()
+                custom_dim = cfg["embed_dim"]
+                self._embed_model = SentenceTransformer(
+                    model_id, truncate_dim=custom_dim,
+                    trust_remote_code=False,
+                )
         else:
             from model2vec import StaticModel
             self._embed_model = StaticModel.from_pretrained(

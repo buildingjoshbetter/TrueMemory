@@ -1,4 +1,4 @@
-"""Vector cache registry — tracks per-tier-group vector table state.
+"""Vector cache registry -- tracks per-tier-group vector table state.
 
 Enables instant switch-back by keeping old vector tables and only
 re-embedding the delta (new messages since last switch).
@@ -10,8 +10,14 @@ import time
 
 import psutil
 
+from truememory.tier_config import (
+    get_tier_group as _cfg_get_tier_group,
+    get_model_name_for_group as _cfg_get_model_name_for_group,
+)
+
 log = logging.getLogger(__name__)
 
+# Backward-compat: kept for any external callers, delegates to tier_config.
 _MODEL_NAMES = {
     "edge": "potion-base-8M",
     "basepro": "Qwen3-Embedding-0.6B",
@@ -19,17 +25,17 @@ _MODEL_NAMES = {
 
 
 def tier_group(tier: str) -> str:
-    """Map a tier name to its embedding model group."""
-    if tier == "edge":
-        return "edge"
-    if tier in ("base", "pro"):
-        return "basepro"
-    raise ValueError(f"Unknown tier: {tier!r}")
+    """Map a tier name to its embedding model group.
+
+    Delegates to :func:`truememory.tier_config.get_tier_group` so that
+    the custom tier is resolved via the centralized config.
+    """
+    return _cfg_get_tier_group(tier)
 
 
 def model_name_for_group(group: str) -> str:
     """Return the canonical embedding model name for a tier group."""
-    return _MODEL_NAMES.get(group, "")
+    return _cfg_get_model_name_for_group(group) or _MODEL_NAMES.get(group, "")
 
 
 class VectorCacheRegistry:

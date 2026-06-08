@@ -870,8 +870,16 @@ def truememory_configure(
     """
     global _memory
     tier = tier.lower().strip()
-    if tier not in ("edge", "base", "pro"):
-        return json.dumps({"error": "tier must be 'edge', 'base', or 'pro'"})
+    if tier not in ("edge", "base", "pro", "custom"):
+        return json.dumps({"error": "tier must be 'edge', 'base', 'pro', or 'custom'"})
+
+    # Custom tier: validate env vars are set before proceeding
+    if tier == "custom":
+        try:
+            from truememory.tier_config import resolve_custom_tier
+            resolve_custom_tier()  # raises ValueError on missing env vars
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
 
     if api_key and len(api_key) > 4096:
         return json.dumps({"error": "api_key exceeds maximum length of 4096 characters"})
@@ -985,6 +993,7 @@ def truememory_configure(
         "edge": "Edge: Model2Vec embeddings (8M params), MiniLM reranker",
         "base": "Base: Qwen3 embeddings (256d), gte-reranker-modernbert",
         "pro": "Pro: Qwen3 + HyDE query expansion",
+        "custom": "Custom: user-provided embedding model + reranker via TRUEMEMORY_CUSTOM_* env vars",
     }
     result = {
         "status": "configured",
