@@ -238,6 +238,7 @@ Storing memories (truememory_store):
 - When the user corrects you or clarifies something, store the correction.
 - Store each fact as a clear, atomic statement. Prefer "User prefers dark mode" over "The user mentioned something about dark mode."
 - Include the user_id parameter when you know who the user is.
+- For standing instructions that should apply every session ("always do X", "never do Y"), use directive=True — see Directives section below.
 
 Recalling memories (truememory_search):
 - At the START of each conversation, call truememory_search with a broad query to load relevant context.
@@ -258,9 +259,11 @@ Proactive search — BEFORE saying "I don't have":
 
 Directives (truememory_store with directive=True, truememory_directives):
 - Directives are always-loaded user instructions that shape every session (e.g. "Never put my real name in code repos", "Always load my SSH keys at session start").
-- When the user says "save this as a directive", "always do X", "never do Y", or similar standing instructions, store with directive=True: truememory_store(content="...", directive=True).
+- When the user says "save this as a directive", "always do X", "never do Y", "from now on do X", "in every session", "make this a rule", "this should always apply", or similar standing instructions, store with directive=True: truememory_store(content="...", directive=True).
 - Directives are automatically injected at the start of every session before search-ranked memories — they do not need to be searched for.
 - Use truememory_directives to list all active directives for a user.
+- To remove a directive: call truememory_directives to find its ID, then truememory_forget to delete it.
+- If a new instruction contradicts an existing directive, remove the old directive first, then store the new one.
 - Regular facts and preferences should NOT be stored as directives — only standing instructions that should override defaults in every session.
 
 You should store and recall memories as naturally as a good assistant who remembers past conversations. Do not ask permission to remember things — just do it.""",
