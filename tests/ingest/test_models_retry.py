@@ -99,30 +99,25 @@ def test_retry_backoff_bounds():
 def test_complete_on_unreachable_host_raises_llmerror():
     """
     Calling an unreachable URL should raise LLMError (not URLError) after retries.
-    Uses a guaranteed-unroutable IP to ensure we get a connection error.
+    Mocks urlopen to raise immediately so we don't wait for real socket timeouts.
     """
+    from unittest.mock import patch
+
     config = LLMConfig(
         provider="test",
         model="test-model",
-        # Reserved TEST-NET-1 range (RFC 5737) — should never respond
         base_url="http://192.0.2.1:1",
         api_key="",
         max_tokens=10,
     )
 
-    # This will hit retry, exhaust attempts, and raise LLMError
-    # We don't actually wait through the real backoff — just verify the error
-    # type. In CI this would take ~7 seconds (1 + 2 + 4 backoffs) so we keep
-    # the test focused and don't assert on timing.
-    import time
-    start = time.time()
-    try:
-        _complete_openai_compat(config, "hi", "")
-        assert False, "Expected LLMError"
-    except LLMError as e:
-        # Success: we got an LLMError, not a raw URLError
-        assert "test" in str(e).lower() or "network" in str(e).lower() or "connection" in str(e).lower()
-    elapsed = time.time() - start
-    # Should have attempted retries (takes some time, even if connection fails fast)
-    # Just verify it didn't fail instantly without any retry attempts
-    assert elapsed >= 0  # sanity check, don't enforce min time to keep CI fast
+    def fake_urlopen(*args, **kwargs):
+        raise urllib.error.URLError("connection refused")
+
+    with patch("truememory.ingest.models.urllib.request.urlopen", side_effect=fake_urlopen), \
+         patch("truememory.ingest.models._retry_backoff", return_value=0.0):
+        try:
+            _complete_openai_compat(config, "hi", "")
+            assert False, "Expected LLMError"
+        except LLMError as e:
+            assert "test" in str(e).lower() or "network" in str(e).lower() or "connection" in str(e).lower()
