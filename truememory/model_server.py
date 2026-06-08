@@ -220,7 +220,8 @@ class ModelServer:
         return self._reranker
 
     def handle_request(self, request: dict) -> dict:
-        self._last_activity = time.time()
+        with self._lock:
+            self._last_activity = time.time()
         op = request.get("op")
 
         if op == "ping":
@@ -231,14 +232,18 @@ class ModelServer:
             tier = request.get("tier", "")
 
             now = time.time()
-            self._embed_timestamps.append(now)
-            self._embed_timestamps = [
-                t for t in self._embed_timestamps
-                if now - t < self._SUSTAINED_WINDOW
-            ]
+            with self._lock:
+                self._embed_timestamps.append(now)
+                self._embed_timestamps = [
+                    t for t in self._embed_timestamps
+                    if now - t < self._SUSTAINED_WINDOW
+                ]
+                should_activate = (
+                    len(self._embed_timestamps) >= self._SUSTAINED_THRESHOLD
+                    and not self._throttler_active
+                )
 
-            if (len(self._embed_timestamps) >= self._SUSTAINED_THRESHOLD
-                    and not self._throttler_active):
+            if should_activate:
                 self._activate_throttler()
 
             if self._throttler_active and self._throttler:
@@ -271,7 +276,9 @@ class ModelServer:
                 if self._throttler.should_flush_cache():
                     self._flush_mps_cache()
 
-            if self._throttler_active and len(self._embed_timestamps) < 3:
+            with self._lock:
+                should_deactivate = self._throttler_active and len(self._embed_timestamps) < 3
+            if should_deactivate:
                 self._deactivate_throttler()
 
             return {"ok": True, "vectors": np.asarray(vectors, dtype=np.float32)}
@@ -399,7 +406,9 @@ class ModelServer:
             time.sleep(60)
             if not self._running:
                 break
-            elapsed = time.time() - self._last_activity
+            with self._lock:
+                last = self._last_activity
+            elapsed = time.time() - last
             if elapsed >= IDLE_TIMEOUT:
                 log.info(
                     "Idle timeout (%.0fs), shutting down model server", elapsed
@@ -443,8 +452,10 @@ class ModelServer:
             os.replace(str(tmp), str(path))
         except OSError:
             # os.replace can fail on Windows if another process holds the
-            # file open.  Fall back to direct write.
-            path.write_text(text)
+            # file open.  Fall back to direct write with restricted perms.
+            fd2 = os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, mode)
+            with os.fdopen(fd2, "w") as f2:
+                f2.write(text)
             tmp.unlink(missing_ok=True)
 
     def run(self):
