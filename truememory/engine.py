@@ -365,7 +365,7 @@ class TrueMemoryEngine:
         # Auto-consolidation: run L5 consolidation every N adds (#498)
         self._adds_since_consolidation = 0
         self._auto_consolidate_threshold = int(
-            os.environ.get("TRUEMEMORY_AUTO_CONSOLIDATE_EVERY", "100")
+            os.environ.get("TRUEMEMORY_AUTO_CONSOLIDATE_EVERY", "25")
         )
         self._consolidation_thread: threading.Thread | None = None
 
@@ -535,6 +535,28 @@ class TrueMemoryEngine:
                     )
 
             self.ready = True
+            self._maybe_startup_consolidate()
+
+    def _maybe_startup_consolidate(self) -> None:
+        """Trigger background consolidation on startup if data looks stale."""
+        if not self._has_consolidation or self.conn is None:
+            return
+        try:
+            msg_count = self.conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            if msg_count < self._auto_consolidate_threshold:
+                return
+            cluster_count = self.conn.execute(
+                "SELECT COUNT(*) FROM message_clusters"
+            ).fetchone()[0]
+            if cluster_count == 0:
+                self._consolidation_thread = threading.Thread(
+                    target=self._bg_consolidate,
+                    daemon=True,
+                    name="startup-consolidate",
+                )
+                self._consolidation_thread.start()
+        except Exception:
+            pass
 
     # ──────────────────────────────────────────────────────────────────────
     # Production CRUD API
