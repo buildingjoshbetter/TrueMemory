@@ -568,6 +568,7 @@ class TrueMemoryEngine:
         timestamp: str = "",
         category: str = "",
         metadata: dict | None = None,
+        preference: bool = False,
     ) -> dict:
         """Store a single memory.
 
@@ -620,6 +621,7 @@ class TrueMemoryEngine:
                 "timestamp": timestamp,
                 "category": category,
                 "modality": "",
+                "preference": preference,
             }
             new_id = insert_message(self.conn, msg)
 

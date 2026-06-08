@@ -620,6 +620,7 @@ def truememory_store(
     content: str,
     user_id: str = "",
     metadata: str = "",
+    preference: bool = False,
 ) -> str:
     """Store a memory. Call this proactively whenever the user shares preferences,
     personal facts, decisions, or corrections — do not wait to be asked.
@@ -655,8 +656,41 @@ def truememory_store(
         meta = json.loads(metadata) if metadata else None
     except (json.JSONDecodeError, ValueError):
         meta = None
-    result = m.add(content=content, user_id=user_id or None, metadata=meta)
+    result = m.add(content=content, user_id=user_id or None, metadata=meta, preference=preference)
     return json.dumps(result, indent=2)
+
+
+@mcp.tool(meta={"anthropic/alwaysLoad": True})
+@_tracked("tool_preferences")
+def truememory_preferences(user_id: str = "") -> str:
+    """List all active preferences.
+
+    Preferences are always-loaded directives that shape every session
+    (e.g. "Never put my real name in code repos"). They are injected
+    at session start before search-ranked memories.
+
+    Args:
+        user_id: Filter to this user's preferences (optional).
+    """
+    m = _get_memory()
+    m._engine._ensure_connection()
+    query = "SELECT id, content, sender, timestamp, category FROM messages WHERE preference = 1"
+    params: list = []
+    if user_id:
+        query += " AND sender = ?"
+        params.append(user_id)
+    query += " ORDER BY id"
+    rows = m._engine.conn.execute(query, params).fetchall()
+    results = []
+    for row in rows:
+        results.append({
+            "id": row[0],
+            "content": row[1],
+            "user_id": row[2],
+            "created_at": row[3],
+            "category": row[4],
+        })
+    return json.dumps({"preferences": results, "count": len(results)}, indent=2)
 
 
 @mcp.tool(meta={"anthropic/alwaysLoad": True})

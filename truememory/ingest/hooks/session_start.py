@@ -431,6 +431,22 @@ def _first_run_context() -> str:
     return "\n".join(lines)
 
 
+def _load_preferences(memory, user_id: str = "") -> list[dict]:
+    """Load all preference memories unconditionally."""
+    try:
+        memory._engine._ensure_connection()
+        query = "SELECT id, content, sender, timestamp, category FROM messages WHERE preference = 1"
+        params: list = []
+        if user_id:
+            query += " AND sender = ?"
+            params.append(user_id)
+        query += " ORDER BY id"
+        rows = memory._engine.conn.execute(query, params).fetchall()
+        return [{"id": r[0], "content": r[1], "sender": r[2]} for r in rows]
+    except Exception:
+        return []
+
+
 def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> str:
     """Search TrueMemory and format relevant memories for injection."""
     try:
@@ -440,6 +456,26 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> s
 
     db = db_path or None
     memory = Memory(path=db) if db else Memory()
+
+    # Load preferences first — these are always injected
+    prefs = _load_preferences(memory, user_id=user_id)
+    pref_ids = {p["id"] for p in prefs}
+
+    parts = []
+
+    if prefs:
+        pref_lines = [
+            "<truememory-preferences>",
+            "## User Preferences (always loaded)",
+            "These directives override defaults and apply to every session:",
+            "",
+        ]
+        for p in prefs:
+            content = p.get("content", "").strip()
+            if content:
+                pref_lines.append(f"- {content}")
+        pref_lines.append("</truememory-preferences>")
+        parts.append("\n".join(pref_lines))
 
     queries = [
         "user preferences favorites likes dislikes",
@@ -452,7 +488,7 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> s
     per_query_limit = max(1, MEMORY_LIMIT // len(queries))
 
     all_results = []
-    seen_ids = set()
+    seen_ids = set(pref_ids)
     seen_content = set()
 
     for query in queries:
@@ -471,11 +507,9 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> s
                 content = r.get("content", "").strip()
                 if not content:
                     continue
-                # Content-based dedup: normalize and check for near-duplicates
                 normalized = content.lower().strip().rstrip(".")
                 if normalized in seen_content:
                     continue
-                # Check for substring containment (catches rephrased duplicates)
                 is_dup = False
                 for existing in seen_content:
                     if normalized in existing or existing in normalized:
@@ -490,23 +524,22 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> s
         except Exception:
             continue
 
-    if not all_results:
-        return ""
+    if all_results:
+        lines = [
+            "<truememory-context>",
+            "## TrueMemory — What You Know About This User",
+            "These are facts from TrueMemory (the primary long-horizon memory system).",
+            "Use these to answer user questions. Search TrueMemory for more if needed.",
+            "",
+        ]
+        for r in all_results[:MEMORY_LIMIT]:
+            content = r.get("content", "").strip()
+            if content:
+                lines.append(f"- {content}")
+        lines.append("</truememory-context>")
+        parts.append("\n".join(lines))
 
-    lines = [
-        "<truememory-context>",
-        "## TrueMemory — What You Know About This User",
-        "These are facts from TrueMemory (the primary long-horizon memory system).",
-        "Use these to answer user questions. Search TrueMemory for more if needed.",
-        "",
-    ]
-    for r in all_results[:MEMORY_LIMIT]:
-        content = r.get("content", "").strip()
-        if content:
-            lines.append(f"- {content}")
-
-    lines.append("</truememory-context>")
-    return "\n".join(lines)
+    return "\n\n".join(parts) if parts else ""
 
 
 if __name__ == "__main__":
