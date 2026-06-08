@@ -212,11 +212,6 @@ mcp = FastMCP(
     "truememory",
     instructions="""You have access to a persistent memory system (TrueMemory). Use it proactively.
 
-CRITICAL — LOADING TRUEMEMORY TOOLS:
-TrueMemory tools may be DEFERRED (schemas not loaded at startup). Before calling any truememory tool, you MUST first load the schemas via ToolSearch:
-  ToolSearch(query="select:mcp__truememory__truememory_search,mcp__truememory__truememory_store,mcp__truememory__truememory_stats")
-Do this at the START of every conversation, before any other work. If you skip this step, tool calls will fail with InputValidationError.
-
 IMPORTANT — MEMORY PRECEDENCE:
 TrueMemory is the PRIMARY long-horizon memory for this user. It persists facts, preferences, decisions, and corrections across sessions, projects, and machines. Claude Code's built-in auto-memory (MEMORY.md files) is for session-specific working notes only — NOT for user facts.
 On ANY question about the user ("what does the user like", "do you remember…", "what's my favorite…"), search TrueMemory FIRST, ALWAYS, before answering "I don't know." Do NOT store user facts to the built-in auto-memory — those go to TrueMemory only.
@@ -619,7 +614,7 @@ def _parallel_search(queries, user_id, internal_limit, llm_fn, output_limit):
 # Tools
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(meta={"anthropic/alwaysLoad": True})
 @_tracked("tool_store")
 def truememory_store(
     content: str,
@@ -664,7 +659,7 @@ def truememory_store(
     return json.dumps(result, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(meta={"anthropic/alwaysLoad": True})
 @_tracked("tool_search")
 def truememory_search(
     query: str,
@@ -714,7 +709,7 @@ def truememory_search(
     return json.dumps(results, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(meta={"anthropic/alwaysLoad": True})
 @_tracked("tool_search_deep")
 def truememory_search_deep(
     query: str,
@@ -797,7 +792,7 @@ def truememory_forget(memory_id: int) -> str:
     return json.dumps({"deleted": deleted, "memory_id": memory_id})
 
 
-@mcp.tool()
+@mcp.tool(meta={"anthropic/alwaysLoad": True})
 @_tracked("tool_stats")
 def truememory_stats() -> str:
     """Get memory system statistics. On first run, returns a welcome message

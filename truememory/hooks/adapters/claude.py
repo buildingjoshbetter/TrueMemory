@@ -68,6 +68,19 @@ class ClaudeAdapter(CLIAdapter):
         except FileNotFoundError:
             pass
 
+        # `claude mcp add` doesn't support alwaysLoad, so patch it in directly.
+        try:
+            if self.config_path.exists():
+                cfg = json.loads(self.config_path.read_text(encoding="utf-8"))
+                mcp = cfg.get("mcpServers", {})
+                if "truememory" in mcp and not mcp["truememory"].get("alwaysLoad"):
+                    mcp["truememory"]["alwaysLoad"] = True
+                    self.config_path.write_text(
+                        json.dumps(cfg, indent=2), encoding="utf-8",
+                    )
+        except (json.JSONDecodeError, OSError):
+            pass
+
     def install_hooks(
         self,
         python_path: str | None = None,
