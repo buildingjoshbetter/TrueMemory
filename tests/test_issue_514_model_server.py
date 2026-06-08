@@ -53,13 +53,19 @@ class TestM18OutboundSizeCheck(unittest.TestCase):
 
 
 class TestM19PermissionError(unittest.TestCase):
-    """M19: PID check should catch PermissionError."""
+    """M19: PID check should handle PermissionError (via pid_is_alive)."""
 
-    def test_pid_check_catches_permission_error(self):
+    def test_pid_check_handles_permission_error(self):
+        from truememory._platform import pid_is_alive
+        source = inspect.getsource(pid_is_alive)
+        self.assertIn("PermissionError", source,
+                       "pid_is_alive() should catch PermissionError")
+
+    def test_main_uses_pid_is_alive(self):
         from truememory.model_server import main
         source = inspect.getsource(main)
-        self.assertIn("PermissionError", source,
-                       "main() PID check should catch PermissionError")
+        self.assertIn("pid_is_alive", source,
+                       "main() should use pid_is_alive for cross-platform PID check")
 
 
 class TestM20RebuildLock(unittest.TestCase):
