@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.7.6.0] — 2026-06-08
+
+Directives discoverability release. Claude now learns about directives from every
+surface it reads — CLAUDE.md template, MCP instructions, and tool schemas — solving
+the chicken-and-egg problem where the first directive could never be created correctly.
+
+### Added
+
+- **Directive guidance in CLAUDE_TEMPLATE.md** — Auto-Store section now teaches Claude
+  to use `directive=True` for standing instructions ("always do X", "never do Y",
+  "from now on..."). Auto-Recall section notes directives are auto-injected. (#563)
+- **Directive management guidance in MCP instructions** — Directives section now
+  explains deletion (truememory_directives → truememory_forget) and contradiction
+  handling. (#565)
+- **Comprehensive discoverability regression tests** — 17 tests covering all 4
+  Claude-facing surfaces (CLAUDE_TEMPLATE.md, MCP instructions, tool schemas,
+  session start hook). (#568)
+
+### Fixed
+
+- **`truememory_forget` now `alwaysLoad`** — was the only core CRUD tool without
+  eager loading, potentially deferred behind ToolSearch. (#566)
+- **MCP "Storing memories" section cross-references directives** — models reading
+  the storing section now discover the `directive=True` flag. (#564)
+- **Expanded directive trigger phrases** — added "from now on", "in every session",
+  "make this a rule", "this should always apply" to MCP instructions. (#565)
+
 ## [0.7.5.0] — 2026-06-08
 
 Deterministic memory triggering release. TrueMemory tools are now guaranteed to be
