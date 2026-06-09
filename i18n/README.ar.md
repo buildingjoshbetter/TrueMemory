@@ -34,10 +34,8 @@
 <p align="center">
   <a href="https://github.com/buildingjoshbetter/TrueMemory"><img src="https://img.shields.io/github/stars/buildingjoshbetter/TrueMemory?style=social" alt="Stars"></a>
   <a href="https://pypi.org/project/truememory/"><img src="https://img.shields.io/badge/installs-7.3k+-brightgreen" alt="Installs"></a>
-  <a href="https://github.com/buildingjoshbetter/TrueMemory/actions/workflows/ci.yml"><img src="https://github.com/buildingjoshbetter/TrueMemory/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://pypi.org/project/truememory/"><img src="https://img.shields.io/pypi/v/truememory?color=blue&label=PyPI" alt="PyPI"></a>
-  <a href="https://github.com/buildingjoshbetter/TrueMemory/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License"></a>
   <a href="https://arxiv.org/abs/2605.04897"><img src="https://img.shields.io/badge/arXiv-2605.04897-b31b1b" alt="arXiv"></a>
+  <a href="https://discord.gg/ZJ74JB2gVW"><img src="https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
 <p align="center">
@@ -301,6 +299,7 @@ TrueMemory مدعوم بورقة بحثية محكّمة حول ذاكرة ال�
 
 ## المجتمع
 
+- [انضم إلى Discord الخاص بنا](https://discord.gg/ZJ74JB2gVW) للمساعدة والملاحظات والتحديثات
 - تابع [@Building_Josh](https://x.com/Building_Josh) على X للتحديثات
 - تابع [@Sauron_Labs](https://x.com/Sauron_Labs) لأخبار الشركة
 - [افتح نقاشاً](https://github.com/buildingjoshbetter/TrueMemory/discussions) للأسئلة أو الأفكار

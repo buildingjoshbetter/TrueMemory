@@ -32,10 +32,8 @@
 <p align="center">
   <a href="https://github.com/buildingjoshbetter/TrueMemory"><img src="https://img.shields.io/github/stars/buildingjoshbetter/TrueMemory?style=social" alt="Stars"></a>
   <a href="https://pypi.org/project/truememory/"><img src="https://img.shields.io/badge/installs-7.3k+-brightgreen" alt="Installs"></a>
-  <a href="https://github.com/buildingjoshbetter/TrueMemory/actions/workflows/ci.yml"><img src="https://github.com/buildingjoshbetter/TrueMemory/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://pypi.org/project/truememory/"><img src="https://img.shields.io/pypi/v/truememory?color=blue&label=PyPI" alt="PyPI"></a>
-  <a href="https://github.com/buildingjoshbetter/TrueMemory/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License"></a>
   <a href="https://arxiv.org/abs/2605.04897"><img src="https://img.shields.io/badge/arXiv-2605.04897-b31b1b" alt="arXiv"></a>
+  <a href="https://discord.gg/ZJ74JB2gVW"><img src="https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
 <p align="center">
@@ -299,6 +297,7 @@ TrueMemory підкріплений рецензованою науковою р
 
 ## Спільнота
 
+- [Приєднуйтесь до нашого Discord](https://discord.gg/ZJ74JB2gVW) для допомоги, зворотного зв'язку та оновлень
 - Слідкуйте за [@Building_Josh](https://x.com/Building_Josh) у X для оновлень
 - Слідкуйте за [@Sauron_Labs](https://x.com/Sauron_Labs) для новин компанії
 - [Відкрийте обговорення](https://github.com/buildingjoshbetter/TrueMemory/discussions) для запитань або ідей
