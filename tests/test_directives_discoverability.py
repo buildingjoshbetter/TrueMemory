@@ -8,8 +8,6 @@ Covers:
 """
 
 import inspect
-import os
-import tempfile
 from pathlib import Path
 
 TEMPLATE = Path(__file__).parent.parent / "truememory" / "ingest" / "CLAUDE_TEMPLATE.md"
@@ -137,59 +135,47 @@ def test_truememory_forget_has_always_load():
 # ── Surface 4: Session start hook ──────────────────────────────────────────
 
 
-def test_session_start_directives_before_context():
+def test_session_start_directives_before_context(tmp_path):
     from truememory import Memory
     from truememory.ingest.hooks.session_start import recall_memories
 
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        db_path = f.name
-    try:
-        m = Memory(path=db_path)
-        m.add("Always use dark mode", user_id="testuser", directive=True)
-        m.add("Likes Python", user_id="testuser")
-        m.close()
-        ctx = recall_memories({}, user_id="testuser", db_path=db_path)
-        assert "<truememory-directives>" in ctx
-        assert "<truememory-context>" in ctx
-        assert ctx.index("<truememory-directives>") < ctx.index("<truememory-context>")
-    finally:
-        os.unlink(db_path)
+    db_path = str(tmp_path / "directives.db")
+    m = Memory(path=db_path)
+    m.add("Always use dark mode", user_id="testuser", directive=True)
+    m.add("Likes Python", user_id="testuser")
+    m.close()
+    ctx = recall_memories({}, user_id="testuser", db_path=db_path)
+    assert "<truememory-directives>" in ctx
+    assert "<truememory-context>" in ctx
+    assert ctx.index("<truememory-directives>") < ctx.index("<truememory-context>")
 
 
-def test_session_start_no_directive_duplication():
+def test_session_start_no_directive_duplication(tmp_path):
     from truememory import Memory
     from truememory.ingest.hooks.session_start import recall_memories
 
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        db_path = f.name
-    try:
-        m = Memory(path=db_path)
-        m.add("Always use dark mode", user_id="testuser", directive=True)
-        m.add("Likes Python", user_id="testuser")
-        m.close()
-        ctx = recall_memories({}, user_id="testuser", db_path=db_path)
-        if "<truememory-context>" in ctx:
-            context_block = ctx.split("<truememory-context>")[1].split("</truememory-context>")[0]
-            assert "dark mode" not in context_block, (
-                "Directive content should not appear in context block"
-            )
-    finally:
-        os.unlink(db_path)
-
-
-def test_session_start_zero_directives_no_block():
-    from truememory import Memory
-    from truememory.ingest.hooks.session_start import recall_memories
-
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        db_path = f.name
-    try:
-        m = Memory(path=db_path)
-        m.add("Likes Python", user_id="testuser")
-        m.close()
-        ctx = recall_memories({}, user_id="testuser", db_path=db_path)
-        assert "<truememory-directives>" not in ctx, (
-            "Directives block should not appear when there are no directives"
+    db_path = str(tmp_path / "dedup.db")
+    m = Memory(path=db_path)
+    m.add("Always use dark mode", user_id="testuser", directive=True)
+    m.add("Likes Python", user_id="testuser")
+    m.close()
+    ctx = recall_memories({}, user_id="testuser", db_path=db_path)
+    if "<truememory-context>" in ctx:
+        context_block = ctx.split("<truememory-context>")[1].split("</truememory-context>")[0]
+        assert "dark mode" not in context_block, (
+            "Directive content should not appear in context block"
         )
-    finally:
-        os.unlink(db_path)
+
+
+def test_session_start_zero_directives_no_block(tmp_path):
+    from truememory import Memory
+    from truememory.ingest.hooks.session_start import recall_memories
+
+    db_path = str(tmp_path / "no_directives.db")
+    m = Memory(path=db_path)
+    m.add("Likes Python", user_id="testuser")
+    m.close()
+    ctx = recall_memories({}, user_id="testuser", db_path=db_path)
+    assert "<truememory-directives>" not in ctx, (
+        "Directives block should not appear when there are no directives"
+    )
