@@ -11,11 +11,16 @@ Covers:
 """
 from __future__ import annotations
 
+import importlib
+import io
+import json
+import os
 import time
 
 import pytest
 
 from truememory.ingest.hooks import _shared
+from truememory.ingest.hooks import session_start as ss
 from truememory.ingest.hooks import user_prompt_submit as ups
 
 
@@ -93,3 +98,105 @@ class TestAutoRecallGate:
         )
         assert result is None
         assert called["prompt"] == "what's my favorite editor"
+
+
+def _run_session_start(monkeypatch, session_id: str, recall_context: str,
+                       update_notice: str = "") -> str:
+    """Run session_start.main() hermetically and return its stdout."""
+    monkeypatch.setattr(ss, "_drain_backlog", lambda: None)
+    monkeypatch.setattr(ss, "_scan_stale_sessions", lambda: None)
+    monkeypatch.setattr(ss, "_is_first_run", lambda: False)
+    monkeypatch.setattr(ss, "recall_memories", lambda *a, **k: recall_context)
+    monkeypatch.setattr(ss, "_check_for_update", lambda: update_notice)
+    monkeypatch.setattr(ss, "_check_email_needed", lambda: "")
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps({"session_id": session_id})))
+    captured = io.StringIO()
+    monkeypatch.setattr("sys.stdout", captured)
+    ss.main()
+    return captured.getvalue().strip()
+
+
+class TestSessionStartMarker:
+    """The session_start.py half of the debounce (issue #561)."""
+
+    def test_issue_561_marker_not_written_when_recall_empty(self, marker_dir, monkeypatch):
+        """An empty/failed recall injects nothing, so the marker must NOT be
+        written — otherwise the first prompt's targeted recall is suppressed
+        too and the session's first turn gets zero recall, silently."""
+        out = _run_session_start(monkeypatch, "sess-empty", "")
+        assert out == ""
+        assert not (marker_dir / "sess-empty").exists()
+
+    def test_issue_561_marker_written_when_context_nonempty(self, marker_dir, monkeypatch):
+        """Happy path: recall produced context, it was emitted, marker written."""
+        out = _run_session_start(monkeypatch, "sess-full", "<truememory-recall>x</truememory-recall>")
+        data = json.loads(out)
+        assert "additionalContext" in data
+        assert (marker_dir / "sess-full").exists()
+        assert _shared.consume_recall_injected("sess-full") is True
+
+    def test_issue_561_notices_alone_do_not_mark(self, marker_dir, monkeypatch):
+        """Update/email notices can make the emitted context truthy even when
+        recall returned nothing; that must not debounce the first prompt."""
+        out = _run_session_start(monkeypatch, "sess-notice", "", update_notice="update available")
+        data = json.loads(out)
+        assert "update available" in data["additionalContext"]
+        assert not (marker_dir / "sess-notice").exists()
+
+
+class TestRecallMarkerEdges:
+    def test_issue_561_per_session_isolation(self, marker_dir):
+        """Marking one session must never debounce another."""
+        _shared.mark_recall_injected("session-a")
+        assert _shared.consume_recall_injected("session-b") is False
+        assert _shared.consume_recall_injected("session-a") is True
+
+    def test_issue_561_stale_markers_pruned_on_write(self, marker_dir):
+        """Sessions that never send a prompt never consume their marker; the
+        next write opportunistically sweeps anything well past the window."""
+        _shared.mark_recall_injected("session-abandoned")
+        stale = marker_dir / "session-abandoned"
+        two_hours_ago = time.time() - 7200
+        os.utime(stale, (two_hours_ago, two_hours_ago))
+        _shared.mark_recall_injected("session-new")
+        assert not stale.exists()
+        assert (marker_dir / "session-new").exists()
+
+    def test_issue_561_fresh_markers_survive_the_sweep(self, marker_dir):
+        _shared.mark_recall_injected("session-a")
+        _shared.mark_recall_injected("session-b")
+        assert (marker_dir / "session-a").exists()
+        assert (marker_dir / "session-b").exists()
+
+    def test_issue_561_short_first_prompt_does_not_strand_marker(self, marker_dir, monkeypatch):
+        """A first prompt under the min-length gate must still consume the
+        marker, so the second (real) prompt is not debounced."""
+        _shared.mark_recall_injected("sess-short")
+        monkeypatch.delenv("TRUEMEMORY_EXTRACTION", raising=False)
+        monkeypatch.setattr(
+            "sys.stdin", io.StringIO(json.dumps({"prompt": "hi", "session_id": "sess-short"}))
+        )
+        ups.main()
+        assert not (marker_dir / "sess-short").exists()
+        assert _shared.consume_recall_injected("sess-short") is False
+
+    def test_issue_561_invalid_env_var_falls_back_to_default(self, tmp_path):
+        """TRUEMEMORY_RECALL_DEBOUNCE_SECONDS=abc must not crash the hooks.
+
+        The knob is parsed at import of _shared, which both SessionStart and
+        UserPromptSubmit import — an unguarded float() kills every hook."""
+        old = os.environ.get("TRUEMEMORY_RECALL_DEBOUNCE_SECONDS")
+        os.environ["TRUEMEMORY_RECALL_DEBOUNCE_SECONDS"] = "abc"
+        try:
+            importlib.reload(_shared)  # must not raise
+            assert _shared._RECALL_DEBOUNCE_SECONDS == 60.0
+            # And the marker round-trip still works on the reloaded module.
+            _shared.RECALL_MARKER_DIR = tmp_path / "recall_markers"
+            _shared.mark_recall_injected("sess-env")
+            assert _shared.consume_recall_injected("sess-env") is True
+        finally:
+            if old is None:
+                os.environ.pop("TRUEMEMORY_RECALL_DEBOUNCE_SECONDS", None)
+            else:
+                os.environ["TRUEMEMORY_RECALL_DEBOUNCE_SECONDS"] = old
+            importlib.reload(_shared)
