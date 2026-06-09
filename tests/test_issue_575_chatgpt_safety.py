@@ -39,8 +39,9 @@ def _patch_paths(monkeypatch, tmp_path, app_installed=True):
     return config_path
 
 
-def test_uninstall_corrupt_config_is_noop(tmp_path, monkeypatch):
-    """F2: uninstall over an unparseable config must leave it byte-identical."""
+def test_uninstall_corrupt_config_is_noop_with_warning(tmp_path, monkeypatch, capsys):
+    """F2: uninstall over an unparseable config must leave it byte-identical
+    and warn on stderr rather than silently no-op'ing."""
     from truememory.hooks.adapters.chatgpt import ChatGPTAdapter
 
     config_path = _patch_paths(monkeypatch, tmp_path)
@@ -50,6 +51,7 @@ def test_uninstall_corrupt_config_is_noop(tmp_path, monkeypatch):
     ChatGPTAdapter().uninstall()
 
     assert config_path.read_text(encoding="utf-8") == CORRUPT_CONFIG
+    assert "leaving it untouched" in capsys.readouterr().err
 
 
 def test_uninstall_foreign_servers_only_is_noop(tmp_path, monkeypatch):
@@ -66,7 +68,7 @@ def test_uninstall_foreign_servers_only_is_noop(tmp_path, monkeypatch):
     assert config_path.read_text(encoding="utf-8") == original
 
 
-def test_uninstall_non_dict_config_is_noop(tmp_path, monkeypatch):
+def test_uninstall_non_dict_config_is_noop_with_warning(tmp_path, monkeypatch, capsys):
     """uninstall must not crash or clobber when the config is valid JSON but not an object."""
     from truememory.hooks.adapters.chatgpt import ChatGPTAdapter
 
@@ -78,6 +80,7 @@ def test_uninstall_non_dict_config_is_noop(tmp_path, monkeypatch):
     ChatGPTAdapter().uninstall()
 
     assert config_path.read_text(encoding="utf-8") == original
+    assert "leaving it untouched" in capsys.readouterr().err
 
 
 def test_install_backs_up_corrupt_config(tmp_path, monkeypatch, capsys):
@@ -136,6 +139,104 @@ def test_install_cli_reports_failure_when_app_absent(tmp_path, monkeypatch):
 
     assert install_cli("chatgpt") is False
     assert not state_file.exists()
+
+
+def test_install_write_failure_leaves_original_intact(tmp_path, monkeypatch):
+    """Atomic write: a failure at replace time must leave the original config
+    byte-identical with no stray temp files behind."""
+    from truememory.hooks.adapters import chatgpt as chatgpt_mod
+    from truememory.hooks.adapters.chatgpt import ChatGPTAdapter
+
+    config_path = _patch_paths(monkeypatch, tmp_path)
+    config_path.parent.mkdir(parents=True)
+    original = json.dumps({"mcpServers": {"github": {"command": "npx"}}})
+    config_path.write_text(original, encoding="utf-8")
+
+    real_atomic_write = chatgpt_mod._atomic_write
+
+    def failing_replace_write(path, text):
+        def boom(src, dst):
+            raise OSError("disk full")
+
+        real_replace = chatgpt_mod.os.replace
+        chatgpt_mod.os.replace = boom
+        try:
+            real_atomic_write(path, text)
+        finally:
+            chatgpt_mod.os.replace = real_replace
+
+    monkeypatch.setattr(chatgpt_mod, "_atomic_write", failing_replace_write)
+
+    with pytest.raises(OSError):
+        ChatGPTAdapter().install_mcp(python_path="/usr/bin/python3")
+
+    assert config_path.read_text(encoding="utf-8") == original
+    assert list(config_path.parent.glob("*.tmp")) == []
+
+
+def test_backup_names_are_unique_and_exclusive(tmp_path, monkeypatch):
+    """Backups carry pid + random suffix and are created with O_EXCL, so
+    repeated installs over corrupt configs in the same second never
+    overwrite a previous backup."""
+    import os as os_mod
+
+    from truememory.hooks.adapters.chatgpt import ChatGPTAdapter
+
+    config_path = _patch_paths(monkeypatch, tmp_path)
+    config_path.parent.mkdir(parents=True)
+
+    adapter = ChatGPTAdapter()
+    config_path.write_text(CORRUPT_CONFIG, encoding="utf-8")
+    adapter.install_mcp(python_path="/usr/bin/python3")
+    second_corrupt = CORRUPT_CONFIG.replace("github", "gitlab")
+    config_path.write_text(second_corrupt, encoding="utf-8")
+    adapter.install_mcp(python_path="/usr/bin/python3")
+
+    backups = sorted(config_path.parent.glob("mcp.json.bak-*"))
+    assert len(backups) == 2
+    contents = {b.read_text(encoding="utf-8") for b in backups}
+    assert contents == {CORRUPT_CONFIG, second_corrupt}
+    for b in backups:
+        assert f"-{os_mod.getpid()}-" in b.name
+
+
+def test_no_stray_backup_on_refuse(tmp_path, monkeypatch):
+    """The app-absent refusal must happen BEFORE any side effect: no backup
+    file, no write, config byte-identical."""
+    from truememory.hooks.adapters.chatgpt import ChatGPTAdapter
+
+    config_path = _patch_paths(monkeypatch, tmp_path, app_installed=False)
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(CORRUPT_CONFIG, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="not found"):
+        ChatGPTAdapter().install_mcp(python_path="/usr/bin/python3")
+
+    assert config_path.read_text(encoding="utf-8") == CORRUPT_CONFIG
+    assert list(config_path.parent.glob("mcp.json.bak-*")) == []
+    assert list(config_path.parent.glob("*.tmp")) == []
+
+
+def test_install_refuses_when_backup_fails(tmp_path, monkeypatch):
+    """If the corrupt config cannot be backed up, install must refuse and
+    leave the original byte-identical (never clobber without a backup)."""
+    from truememory.hooks.adapters import chatgpt as chatgpt_mod
+    from truememory.hooks.adapters.chatgpt import ChatGPTAdapter
+
+    config_path = _patch_paths(monkeypatch, tmp_path)
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(CORRUPT_CONFIG, encoding="utf-8")
+
+    def backup_boom(path):
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(chatgpt_mod, "_backup_config", backup_boom)
+
+    with pytest.raises(RuntimeError, match="refusing to overwrite"):
+        ChatGPTAdapter().install_mcp(python_path="/usr/bin/python3")
+
+    assert config_path.read_text(encoding="utf-8") == CORRUPT_CONFIG
+    assert list(config_path.parent.glob("*.tmp")) == []
 
 
 def test_experimental_warning_emitted_on_install(tmp_path, monkeypatch, capsys):

@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
+import tempfile
 import time
+import uuid
 from pathlib import Path
 
 from truememory.hooks.adapters.base import CLIAdapter
@@ -75,6 +76,48 @@ def _app_installed() -> bool:
     return False
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """Write text to path atomically: tempfile in the same dir + os.replace.
+
+    A crash mid-write must never leave a truncated config behind — the old
+    file stays intact until the replace, which is atomic on POSIX and Windows.
+    """
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    except OSError:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _backup_config(config_path: Path) -> Path:
+    """Copy an unparseable config aside before overwriting it.
+
+    The backup name carries timestamp + pid + random suffix and is opened
+    with O_EXCL (exclusive create), so concurrent installs can never
+    overwrite each other's backups. Raises OSError on any failure — the
+    caller must refuse to overwrite the original in that case.
+    """
+    original = config_path.read_bytes()
+    backup = config_path.with_name(
+        f"{config_path.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}"
+        f"-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    )
+    fd = os.open(str(backup), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(original)
+    return backup
+
+
 class ChatGPTAdapter(CLIAdapter):
     """Adapter for ChatGPT Desktop MCP servers (experimental, forward-looking)."""
 
@@ -97,15 +140,18 @@ class ChatGPTAdapter(CLIAdapter):
         return self._has_mcp_entry()
 
     def install_mcp(self, python_path: str | None = None) -> None:
+        # Order matters: refuse (app absent) BEFORE any side effect — no
+        # backup files, no directories, no writes on any refuse path.
         if not _app_installed():
             raise RuntimeError(_APP_NOT_FOUND_MESSAGE)
 
+        config_path = _CONFIG_PATH
         py = python_path or sys.executable
 
         existing: dict = {}
-        if _CONFIG_PATH.exists():
+        if config_path.exists():
             try:
-                data = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+                data = json.loads(config_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 data = None
             if isinstance(data, dict):
@@ -113,18 +159,15 @@ class ChatGPTAdapter(CLIAdapter):
             else:
                 # Unparseable (or non-object) config: never silently destroy
                 # it. Back it up first; if the backup fails, refuse.
-                backup = _CONFIG_PATH.with_name(
-                    f"{_CONFIG_PATH.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}"
-                )
                 try:
-                    shutil.copy2(_CONFIG_PATH, backup)
+                    backup = _backup_config(config_path)
                 except OSError as e:
                     raise RuntimeError(
-                        f"Existing {_CONFIG_PATH} is not valid JSON and could "
+                        f"Existing {config_path} is not valid JSON and could "
                         f"not be backed up ({e}); refusing to overwrite it."
                     ) from e
                 print(
-                    f"\033[33m⚠ Existing {_CONFIG_PATH} is not valid JSON; "
+                    f"\033[33m⚠ Existing {config_path} is not valid JSON; "
                     f"backed it up to {backup} and starting fresh.\033[0m",
                     file=sys.stderr,
                 )
@@ -139,11 +182,8 @@ class ChatGPTAdapter(CLIAdapter):
             "args": ["-m", "truememory.mcp_server"],
         }
 
-        _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _CONFIG_PATH.write_text(
-            json.dumps(existing, indent=2),
-            encoding="utf-8",
-        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(config_path, json.dumps(existing, indent=2))
         print(_EXPERIMENTAL_WARNING, file=sys.stderr)
 
     def install_hooks(
@@ -156,23 +196,33 @@ class ChatGPTAdapter(CLIAdapter):
         del python_path, user_id, db_path
 
     def uninstall(self) -> None:
-        # Match the Cursor house pattern: never write unless the file parsed
-        # cleanly AND our entry is actually present. A corrupt config must be
-        # left untouched (it may be user-recoverable).
-        if not _CONFIG_PATH.exists():
+        # Never write unless the file parsed cleanly AND our entry is
+        # actually present. A corrupt config must be left untouched (it may
+        # be user-recoverable) — but never silently: warn before no-op'ing.
+        config_path = _CONFIG_PATH
+        if not config_path.exists():
             return
         try:
-            data = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                return
-            servers = data.get("mcpServers", {})
-            if isinstance(servers, dict) and _TRUEMEMORY_MARKER in servers:
-                del servers[_TRUEMEMORY_MARKER]
-                _CONFIG_PATH.write_text(
-                    json.dumps(data, indent=2), encoding="utf-8",
-                )
-        except (json.JSONDecodeError, OSError):
-            pass
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            print(
+                f"\033[33m⚠ {config_path} could not be parsed ({e}); "
+                f"leaving it untouched — remove the truememory entry "
+                f"manually if present.\033[0m",
+                file=sys.stderr,
+            )
+            return
+        if not isinstance(data, dict):
+            print(
+                f"\033[33m⚠ {config_path} is not a JSON object; "
+                f"leaving it untouched.\033[0m",
+                file=sys.stderr,
+            )
+            return
+        servers = data.get("mcpServers", {})
+        if isinstance(servers, dict) and _TRUEMEMORY_MARKER in servers:
+            del servers[_TRUEMEMORY_MARKER]
+            _atomic_write(config_path, json.dumps(data, indent=2))
 
     def verify(self) -> bool:
         return self._has_mcp_entry()
