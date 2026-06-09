@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
+import time
 from pathlib import Path
 
 from truememory.hooks.adapters.base import CLIAdapter
@@ -45,7 +47,33 @@ class ChatGPTAdapter(CLIAdapter):
 
     def install_mcp(self, python_path: str | None = None) -> None:
         py = python_path or sys.executable
-        existing = self._read_config()
+
+        existing: dict = {}
+        if _CONFIG_PATH.exists():
+            try:
+                data = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                data = None
+            if isinstance(data, dict):
+                existing = data
+            else:
+                # Unparseable (or non-object) config: never silently destroy
+                # it. Back it up first; if the backup fails, refuse.
+                backup = _CONFIG_PATH.with_name(
+                    f"{_CONFIG_PATH.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}"
+                )
+                try:
+                    shutil.copy2(_CONFIG_PATH, backup)
+                except OSError as e:
+                    raise RuntimeError(
+                        f"Existing {_CONFIG_PATH} is not valid JSON and could "
+                        f"not be backed up ({e}); refusing to overwrite it."
+                    ) from e
+                print(
+                    f"\033[33m⚠ Existing {_CONFIG_PATH} is not valid JSON; "
+                    f"backed it up to {backup} and starting fresh.\033[0m",
+                    file=sys.stderr,
+                )
 
         servers = existing.setdefault("mcpServers", {})
         if not isinstance(servers, dict):
@@ -73,13 +101,23 @@ class ChatGPTAdapter(CLIAdapter):
         del python_path, user_id, db_path
 
     def uninstall(self) -> None:
+        # Match the Cursor house pattern: never write unless the file parsed
+        # cleanly AND our entry is actually present. A corrupt config must be
+        # left untouched (it may be user-recoverable).
         if not _CONFIG_PATH.exists():
             return
-        data = self._read_config()
-        servers = data.get("mcpServers", {})
-        if isinstance(servers, dict):
-            servers.pop("truememory", None)
-        _CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        try:
+            data = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return
+            servers = data.get("mcpServers", {})
+            if isinstance(servers, dict) and _TRUEMEMORY_MARKER in servers:
+                del servers[_TRUEMEMORY_MARKER]
+                _CONFIG_PATH.write_text(
+                    json.dumps(data, indent=2), encoding="utf-8",
+                )
+        except (json.JSONDecodeError, OSError):
+            pass
 
     def verify(self) -> bool:
         return self._has_mcp_entry()
