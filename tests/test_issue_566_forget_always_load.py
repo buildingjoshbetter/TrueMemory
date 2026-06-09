@@ -1,7 +1,5 @@
 """Regression test for issue #566: truememory_forget must have alwaysLoad meta."""
 
-import pytest
-
 
 def test_issue_566_forget_has_always_load():
     """truememory_forget must declare alwaysLoad so it is never deferred behind ToolSearch."""
