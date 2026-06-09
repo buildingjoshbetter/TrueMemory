@@ -286,7 +286,7 @@ TrueMemory is backed by a peer-reviewed research paper on retrieval-centered age
 **[Storage Is Not Memory: A Retrieval-Centered Architecture for Agent Recall](https://arxiv.org/abs/2605.04897)** (arXiv 2605.04897)
 
 ```bibtex
-@article{adler2025storage,
+@article{sauronlabs2025storage,
   title   = {Storage Is Not Memory: A Retrieval-Centered Architecture for Agent Recall},
   author  = {Sauron Labs},
   journal = {arXiv preprint arXiv:2605.04897},
