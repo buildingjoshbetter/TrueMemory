@@ -36,6 +36,7 @@
   <a href="https://pypi.org/project/truememory/"><img src="https://img.shields.io/pypi/v/truememory?color=blue&label=PyPI" alt="PyPI"></a>
   <a href="https://github.com/buildingjoshbetter/TrueMemory/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License"></a>
   <a href="https://arxiv.org/abs/2605.04897"><img src="https://img.shields.io/badge/arXiv-2605.04897-b31b1b" alt="arXiv"></a>
+  <a href="https://discord.gg/ZJ74JB2gVW"><img src="https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
 <p align="center">
@@ -299,6 +300,7 @@ TrueMemory is backed by a peer-reviewed research paper on retrieval-centered age
 
 ## Community
 
+- [Join our Discord](https://discord.gg/ZJ74JB2gVW) for help, feedback, and updates
 - Follow [@Building_Josh](https://x.com/Building_Josh) on X for updates
 - Follow [@Sauron_Labs](https://x.com/Sauron_Labs) for company news
 - [Open a Discussion](https://github.com/buildingjoshbetter/TrueMemory/discussions) for questions or ideas
