@@ -9,7 +9,7 @@ Bug 2: Contradiction supplements had no 'score', so they sorted to the
 """
 import pytest
 
-from truememory.salience import filter_by_salience, compute_message_salience
+from truememory.salience import filter_by_salience
 
 
 # ---------------------------------------------------------------------------
