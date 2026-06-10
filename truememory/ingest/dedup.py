@@ -32,6 +32,52 @@ from truememory.ingest.models import LLMConfig, LLMError, complete
 
 log = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Update-marker detection (issue #576)
+# ---------------------------------------------------------------------------
+# Patterns that signal a genuine fact *update* rather than a duplicate.
+# When a high-similarity candidate contains these markers, the dedup
+# pipeline should treat it as UPDATE (or delegate to LLM), never SKIP.
+#
+# The list is intentionally broad — false positives are cheap (we pay one
+# LLM call or update an existing memory), but false negatives silently
+# drop real updates.
+
+_UPDATE_MARKER_PATTERNS: list[re.Pattern[str]] = [
+    # Explicit change language
+    re.compile(r"\bchanged?\s+(?:to|from)\b", re.IGNORECASE),
+    re.compile(r"\bnow\s+(?:is|uses?|prefers?|lives?|works?|takes?|runs?|has)\b", re.IGNORECASE),
+    re.compile(r"\bupdated?\b", re.IGNORECASE),
+    re.compile(r"\bno\s+longer\b", re.IGNORECASE),
+    re.compile(r"\bnot\s+anymore\b", re.IGNORECASE),
+    re.compile(r"\bswitched\s+(?:to|from)\b", re.IGNORECASE),
+    re.compile(r"\binstead\s+of\b", re.IGNORECASE),
+    re.compile(r"\bmoved\s+to\b", re.IGNORECASE),
+    re.compile(r"\breplaced\b", re.IGNORECASE),
+    re.compile(r"\bwas\b.*\bnow\b", re.IGNORECASE),
+    re.compile(r"\bformerly\b", re.IGNORECASE),
+    re.compile(r"\bpreviously\b", re.IGNORECASE),
+    re.compile(r"\bused\s+to\b", re.IGNORECASE),
+    re.compile(r"\bactually\b", re.IGNORECASE),
+    # Number-change patterns  ("5mg to 10mg", "6.5% -> 6.25%")
+    re.compile(r"\d[\d.]*[%a-zA-Z]*\s*(?:to|->|-->|=>|→)\s*\d[\d.]*", re.IGNORECASE),
+    # Date-change patterns  ("since 2024", "as of March")
+    re.compile(r"\b(?:since|as\s+of|starting|effective)\s+\w+", re.IGNORECASE),
+]
+
+
+def _has_update_markers(content: str) -> bool:
+    """Return True if *content* contains language suggesting a fact update.
+
+    This is the marker gate for issue #576: high-similarity candidates
+    that contain update markers should be routed to UPDATE (or LLM
+    arbitration), not silently SKIPped.
+    """
+    for pattern in _UPDATE_MARKER_PATTERNS:
+        if pattern.search(content):
+            return True
+    return False
+
 
 class DedupAction(Enum):
     ADD = "add"       # Store as new memory
@@ -114,8 +160,21 @@ def check_duplicate(
     top_content = top.get("content", "")
     top_id = top.get("id")
 
-    # Very high similarity — likely near-exact duplicate, skip without LLM
+    # Very high similarity — likely near-exact duplicate.
+    # BUT: if the new fact contains update markers (issue #576), it may be
+    # a genuine fact change that just happens to embed close to the old
+    # version.  Route those to LLM arbitration (if available) or the
+    # heuristic path rather than silently dropping them.
     if top_score > 0.92:
+        if _has_update_markers(fact):
+            log.debug(
+                "High-similarity candidate (%.2f) has update markers — "
+                "routing to arbitration instead of SKIP",
+                top_score,
+            )
+            if config:
+                return _llm_dedup(fact, top_content, top_id, config)
+            return _heuristic_dedup(fact, top_content, top_id, top_score)
         return DedupDecision(
             action=DedupAction.SKIP,
             fact=fact,
@@ -265,17 +324,16 @@ def _heuristic_dedup(
                 reason=f"shorter restatement of existing (word overlap {jaccard:.0%})",
             )
 
-    # High embedding similarity + update markers — likely a correction
-    if similarity > 0.75:
-        for marker in ["no longer", "not anymore", "now", "switched", "changed", "moved", "actually"]:
-            if marker in fact_norm:
-                return DedupDecision(
-                    action=DedupAction.UPDATE,
-                    fact=fact,
-                    existing_id=existing_id,
-                    existing_content=existing,
-                    reason=f"appears to update existing fact (marker: {marker})",
-                )
+    # High embedding similarity + update markers — likely a correction.
+    # Reuses the centralized marker detection from issue #576.
+    if similarity > 0.75 and _has_update_markers(fact):
+        return DedupDecision(
+            action=DedupAction.UPDATE,
+            fact=fact,
+            existing_id=existing_id,
+            existing_content=existing,
+            reason="appears to update existing fact (update markers detected)",
+        )
 
     # Default: add as separate memory
     return DedupDecision(
