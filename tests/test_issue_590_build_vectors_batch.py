@@ -8,13 +8,29 @@ proceed.
 from __future__ import annotations
 
 import sqlite3
+from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _make_mock_model():
+    """Mock embedding model that produces distinct 256-d vectors per input."""
+    mock = MagicMock()
+    def _encode(texts, **kw):
+        vecs = []
+        for t in texts:
+            rng = np.random.RandomState(hash(t) % (2**31))
+            vecs.append(rng.rand(256).astype(np.float32))
+        return np.array(vecs)
+    mock.encode = _encode
+    mock.dim = 256
+    return mock
+
 
 def _make_server(monkeypatch, tmp_path):
     """Return a (server_module, db_path) tuple with a minimal TrueMemory env."""
@@ -24,8 +40,13 @@ def _make_server(monkeypatch, tmp_path):
     db_path = tmp_path / "memories.db"
     monkeypatch.setenv("TRUEMEMORY_DB", str(db_path))
     monkeypatch.setenv("TRUEMEMORY_EMBED_MODEL", "edge")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    import truememory.vector_search as vs
     import truememory.mcp_server as ms
 
+    monkeypatch.setattr(vs, "get_model", _make_mock_model)
+    monkeypatch.setattr(vs, "_EMBED_DIM", 256)
     monkeypatch.setattr(ms, "_TRUEMEMORY_DIR", home / ".truememory")
     monkeypatch.setattr(ms, "_CONFIG_PATH", home / ".truememory" / "config.json")
     monkeypatch.setattr(ms, "_DB_PATH", str(db_path))
