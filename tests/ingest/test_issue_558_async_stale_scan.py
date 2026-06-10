@@ -13,12 +13,9 @@ Covers:
 from __future__ import annotations
 
 import io
-import json
 import subprocess
 import sys
-import types
 
-import pytest
 
 from truememory.ingest.hooks import session_start as ss
 
