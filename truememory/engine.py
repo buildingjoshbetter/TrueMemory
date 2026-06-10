@@ -2039,27 +2039,33 @@ class TrueMemoryEngine:
             except Exception:
                 logger.debug("HyDE search failed in search_agentic()", exc_info=True)
 
-        # Cluster search: add as low-priority supplement (never displace primary)
-        # Cluster scores (cosine 0-1) are in a different range than RRF scores
-        # (~0.01-0.03), so we must rescale cluster scores to be below the
-        # lowest primary result to ensure they only fill empty slots.
+        # ── Score normalization (issue #584) ─────────────────────────────
+        # Normalize primary results to [0, 1] before merging supplements so
+        # all sources compete in the same score space.
+        from truememory.agentic_search import normalize_scores
+
+        normalize_scores(primary_results)
+
+        # Cluster search: add as supplement, preserving cluster/diversity
+        # ordering.  Cluster scores (cosine 0-1) live in a different space
+        # than RRF scores; we normalize them independently and tag each
+        # result with its diversity position so downstream sorts can
+        # preserve the cluster-sampling order.
         if use_clustering and self._has_clustering:
             try:
                 cluster_results = search_clustered(
                     self.conn, query, limit=limit, top_clusters=3,
                 )
                 if cluster_results and primary_results:
-                    # Find the minimum score in primary results
-                    min_primary = min(
-                        r.get("score", r.get("rrf_score", 0))
-                        for r in primary_results
-                    )
+                    # Normalize cluster scores to [0, 1] independently
+                    normalize_scores(cluster_results)
+
                     existing_ids = {r.get("id") for r in primary_results if r.get("id")}
-                    for cr in cluster_results:
+                    for idx, cr in enumerate(cluster_results):
                         cid = cr.get("id")
                         if cid and cid not in existing_ids:
-                            # Scale to just below primary results
-                            cr["score"] = min_primary * 0.5
+                            # Preserve diversity position from clustering
+                            cr["_cluster_position"] = idx
                             cr["source"] = cr.get("source", "") + "+cluster_supp"
                             primary_results.append(cr)
                             existing_ids.add(cid)
@@ -2074,8 +2080,8 @@ class TrueMemoryEngine:
         # agencies...").
         #
         # Strategy: BOOST existing primary results that also appear in entity
-        # search (overlap = strong signal), and add genuinely new results at
-        # a competitive score level so they can displace weak primary results.
+        # search (overlap = strong signal), and add genuinely new results
+        # with independently normalized scores so they compete fairly.
         #
         # Fix #582: Use _entity_boosted flag to ensure boost is applied
         # exactly once.  The flag is checked before boosting and set after,
@@ -2083,6 +2089,9 @@ class TrueMemoryEngine:
         try:
             entity_results = self._entity_focused_search(query, limit * 2)
             if entity_results and primary_results:
+                # Normalize entity scores to [0, 1] independently
+                normalize_scores(entity_results)
+
                 entity_ids = {r.get("id") for r in entity_results if r.get("id")}
 
                 # Boost primary results that overlap with entity search
@@ -2094,21 +2103,11 @@ class TrueMemoryEngine:
                         if "entity_boost" not in pr.get("source", ""):
                             pr["source"] = pr.get("source", "") + "+entity_boost"
 
-                # Add genuinely new entity results at median primary score
-                primary_scores = [
-                    r.get("score", r.get("rrf_score", 0)) for r in primary_results
-                ]
-                primary_scores.sort(reverse=True)
-                # Use median score so new entity results can compete for top-k
-                median_idx = len(primary_scores) // 2
-                median_score = primary_scores[median_idx] if primary_scores else 0.01
-
                 existing_ids = {r.get("id") for r in primary_results if r.get("id")}
                 added = 0
                 for er in entity_results:
                     eid = er.get("id")
                     if eid and eid not in existing_ids:
-                        er["score"] = median_score * 0.9
                         er["source"] = er.get("source", "") + "+entity_new"
                         er["_entity_boosted"] = True
                         primary_results.append(er)
@@ -2117,9 +2116,10 @@ class TrueMemoryEngine:
                         if added >= limit:
                             break
 
-                # Re-sort after boosting
+                # Re-sort primary results only (cluster supplements keep
+                # their _cluster_position and are appended after primary).
                 primary_results.sort(
-                    key=lambda d: (-d.get("score", d.get("rrf_score", 0)), d.get("id", 0))
+                    key=lambda d: (-d.get("score", 0), d.get("id", 0))
                 )
         except Exception:
             logger.debug("Entity-focused search failed in search_agentic()", exc_info=True)
@@ -2163,6 +2163,8 @@ class TrueMemoryEngine:
             for rq in refined_queries:
                 try:
                     rq_results = self.search(rq, limit=limit, _skip_surprise_boost=True, _skip_reranker=True)
+                    # Normalize refined-query scores to [0, 1]
+                    normalize_scores(rq_results)
                     for rr in rq_results:
                         rid = rr.get("id")
                         if rid and rid not in existing_ids:
@@ -2181,7 +2183,7 @@ class TrueMemoryEngine:
 
             # Re-sort after adding refined results
             primary_results.sort(
-                key=lambda d: (-d.get("score", d.get("rrf_score", 0)), d.get("id", 0))
+                key=lambda d: (-d.get("score", 0), d.get("id", 0))
             )
 
         # ── L5 surprise rerank boost (MEMORIST-L5, applied BEFORE cross-encoder) ──
