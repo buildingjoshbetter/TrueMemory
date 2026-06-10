@@ -21,7 +21,6 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +77,6 @@ class TestFirstRunScan:
         # We need to patch the claude_dir lookup inside _scan_stale_sessions
         # Instead, patch at a higher level
 
-        from truememory.ingest.hooks._shared import EXTRACTED_DIR as _orig_extracted
         monkeypatch.setattr("truememory.ingest.hooks._shared.EXTRACTED_DIR", extracted_dir)
         monkeypatch.setattr("truememory.ingest.hooks.session_start._cleanup_extracted_markers", lambda: None)
 
@@ -87,7 +85,6 @@ class TestFirstRunScan:
         with patch.object(mod, "_is_extraction_transcript", return_value=False):
             with patch("truememory.ingest.hooks.stop._queue_to_backlog", side_effect=fake_queue):
                 # Patch the claude_dir inside the function
-                original_fn = mod._scan_stale_sessions
 
                 def patched_scan():
                     import re as _re
@@ -114,7 +111,7 @@ class TestFirstRunScan:
                             except OSError:
                                 pass
 
-                        from truememory.ingest.hooks._shared import _safe_session_id, mark_session_extracted
+                        from truememory.ingest.hooks._shared import _safe_session_id
                         uuid_re = _re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
                         cutoff = time.time() - 86400
                         queued = 0
