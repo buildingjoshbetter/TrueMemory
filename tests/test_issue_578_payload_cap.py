@@ -99,7 +99,7 @@ class TestApplyBudget:
         ]
         result = _apply_budget(lines, "", budget=7000)
         # Should drop lowest-score entries to fit
-        assert any("A" in l for l in result)
+        assert any("A" in line for line in result)
         # At least the lowest-score one should be gone
         kept_text = " ".join(result)
         # C (lowest score) should be dropped before A (highest)
