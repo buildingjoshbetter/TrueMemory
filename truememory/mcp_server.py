@@ -334,15 +334,19 @@ def _clear_all_llm_errors() -> None:
 
 def _build_anthropic_llm(api_key: str):
     import anthropic
+    from truememory.ingest.models import sanitize_model_params
+
     client = anthropic.Anthropic(api_key=api_key, timeout=30.0)
+    _model = "claude-haiku-4-5-20251001"
 
     def _anthropic_llm(prompt: str) -> str:
-        resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=300,
-            temperature=0.3,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        params = sanitize_model_params(_model, {
+            "model": _model,
+            "max_tokens": 300,
+            "temperature": 0.3,
+            "messages": [{"role": "user", "content": prompt}],
+        })
+        resp = client.messages.create(**params)
         return resp.content[0].text
 
     return _anthropic_llm
@@ -359,7 +363,7 @@ def _build_openrouter_llm(api_key: str):
                 "Content-Type": "application/json",
             },
             json={
-                "model": "anthropic/claude-haiku-4.5",
+                "model": "anthropic/claude-haiku-4-5-20251001",
                 "max_tokens": 500,
                 "messages": [{"role": "user", "content": prompt}],
             },

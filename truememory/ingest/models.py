@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import socket
 import subprocess
@@ -26,6 +27,55 @@ import urllib.error
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Model-family param safety
+# ---------------------------------------------------------------------------
+
+# Regex matching model IDs that do NOT support temperature, top_p, top_k,
+# budget_tokens, or explicit ``thinking: {type: disabled}``.  Covers both
+# Anthropic-direct IDs (``claude-fable-5-…``, ``claude-opus-4-8-…``) and
+# OpenRouter-prefixed variants (``anthropic/claude-fable-5-…``).
+_STRICT_PARAM_MODEL_RE = re.compile(
+    r"(?:^|/)claude-(?:fable-5|opus-4-8)(?:-|$)", re.IGNORECASE,
+)
+
+# Keys that must be stripped from the request body for strict-param models.
+_STRIPPED_KEYS = frozenset({
+    "temperature", "top_p", "top_k", "budget_tokens",
+})
+
+
+def sanitize_model_params(model_id: str, params: dict) -> dict:
+    """Return a copy of *params* safe for the given model.
+
+    For Fable-5 and Opus-4.8 models the following keys are removed because
+    the API rejects them:
+
+    * ``temperature``, ``top_p``, ``top_k``, ``budget_tokens``
+    * ``thinking`` when its value is ``{"type": "disabled"}``
+    * ``output_format`` (callers should migrate to ``output_config``)
+
+    For all other models the dict is returned unchanged (still a copy so
+    callers can safely mutate).
+    """
+    if not _STRICT_PARAM_MODEL_RE.search(model_id):
+        return dict(params)
+
+    out = {k: v for k, v in params.items() if k not in _STRIPPED_KEYS}
+
+    # Strip ``thinking: {type: disabled}`` — these models reject it.
+    thinking = out.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type") == "disabled":
+        out.pop("thinking", None)
+
+    # ``output_format`` → ``output_config.format`` migration hint; just drop
+    # the old key so the request doesn't blow up.  Callers that need the new
+    # form can add ``output_config`` themselves.
+    out.pop("output_format", None)
+
+    return out
 
 
 class LLMError(Exception):
@@ -223,12 +273,13 @@ def _complete_openai_compat(config: LLMConfig, prompt: str, system: str) -> str:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    body = json.dumps({
+    raw_params = {
         "model": config.model,
         "messages": messages,
         "temperature": config.temperature,
         "max_tokens": config.max_tokens,
-    }).encode()
+    }
+    body = json.dumps(sanitize_model_params(config.model, raw_params)).encode()
 
     url = f"{config.base_url.rstrip('/')}/chat/completions"
     headers = {"Content-Type": "application/json"}
@@ -295,13 +346,14 @@ def _complete_anthropic(config: LLMConfig, prompt: str, system: str) -> str:
 
     Raises LLMError on network failure, HTTP error, or malformed response.
     """
-    body = json.dumps({
+    raw_params = {
         "model": config.model,
         "max_tokens": config.max_tokens,
         "temperature": config.temperature,
         "messages": [{"role": "user", "content": prompt}],
         **({"system": system} if system else {}),
-    }).encode()
+    }
+    body = json.dumps(sanitize_model_params(config.model, raw_params)).encode()
 
     url = "https://api.anthropic.com/v1/messages"
     headers = {
