@@ -545,6 +545,77 @@ def _set_reranker(model_name: str):
 
 
 # ---------------------------------------------------------------------------
+# Encoding gate / PE degradation tracking (issue #592).
+# The encoding gate silently falls back to 0.0 PE when the embed model
+# is unavailable. We surface that via the health payload so users know
+# their ingestion quality is reduced.
+# ---------------------------------------------------------------------------
+
+_encoding_gate_last_error: str | None = None
+_encoding_gate_degradation_count: int = 0
+_encoding_gate_error_lock = threading.Lock()
+
+
+def record_encoding_gate_error(msg: str) -> None:
+    """Record an encoding gate / PE degradation event."""
+    global _encoding_gate_last_error, _encoding_gate_degradation_count
+    with _encoding_gate_error_lock:
+        _encoding_gate_last_error = msg
+        _encoding_gate_degradation_count += 1
+
+
+def clear_encoding_gate_error() -> None:
+    global _encoding_gate_last_error
+    with _encoding_gate_error_lock:
+        _encoding_gate_last_error = None
+
+
+# ---------------------------------------------------------------------------
+# Model server health (issue #592).
+# Checks whether the subprocess is alive, which device it uses, and
+# whether it has been OOM-degraded to CPU.
+# ---------------------------------------------------------------------------
+
+
+def _build_model_server_health() -> dict:
+    """Return model-server subsystem health for the health payload."""
+    try:
+        from truememory.model_client import (
+            PID_PATH,
+            SOCK_PATH,
+            _server_is_alive,
+        )
+        alive = _server_is_alive()
+        device = os.environ.get("TRUEMEMORY_DEVICE", "auto")
+
+        # Read sticky-CPU state from the server's status file if available.
+        status_path = PID_PATH.parent / "model_server.status"
+        sticky_cpu_kinds: list[str] = []
+        if status_path.exists():
+            try:
+                import json as _json
+                info = _json.loads(status_path.read_text())
+                sticky_cpu_kinds = info.get("sticky_cpu", [])
+            except Exception:
+                pass
+
+        degraded = bool(sticky_cpu_kinds) or not alive
+        return {
+            "status": "ok" if not degraded else "degraded",
+            "running": alive,
+            "device": device,
+            "sticky_cpu": sticky_cpu_kinds if sticky_cpu_kinds else None,
+            "socket_exists": SOCK_PATH.exists() if hasattr(SOCK_PATH, "exists") else None,
+        }
+    except Exception as e:
+        return {
+            "status": "degraded",
+            "running": False,
+            "error": f"{type(e).__name__}: {e}",
+        }
+
+
+# ---------------------------------------------------------------------------
 # Health payload — surfaces per-subsystem degradation so MCP
 # clients can diagnose "search quality is bad" without digging through logs.
 # Reads state written by F05 (_llm_last_error), F06 (_reranker_last_error),
@@ -575,7 +646,16 @@ def _build_health_payload() -> dict:
     except ImportError:
         vectors_err = None
 
+    # Model server — is the subprocess alive? Which device? OOM degradation?
+    model_server_info = _build_model_server_health()
+
+    # Encoding gate / PE — module-level degradation counter.
+    with _encoding_gate_error_lock:
+        eg_err = _encoding_gate_last_error
+        eg_count = _encoding_gate_degradation_count
+
     return {
+        "model_server": model_server_info,
         "reranker": {
             "status": "ok" if reranker_err is None else "degraded",
             "last_error": reranker_err,
@@ -588,6 +668,11 @@ def _build_health_payload() -> dict:
         "vectors": {
             "status": "ok" if vectors_err is None else "degraded",
             "last_error": vectors_err,
+        },
+        "encoding_gate": {
+            "status": "ok" if eg_err is None else "degraded",
+            "last_error": eg_err,
+            "degradation_count": eg_count,
         },
     }
 
@@ -1123,20 +1208,38 @@ def truememory_configure(
 @mcp.tool()
 @_tracked("tool_status")
 def truememory_status(status_id: int = 0) -> str:
-    """Check the progress of a tier-switch re-embedding operation.
+    """Check system health and the progress of a tier-switch re-embedding.
+
+    Returns a JSON object with:
+      - ``rebuild``: tier-switch re-embedding progress (if any).
+      - ``degradation``: per-subsystem health — model server, reranker,
+        HyDE LLM, encoding gate, and sqlite-vec. Each entry has a
+        ``status`` of ``"ok"`` or ``"degraded"`` plus diagnostic detail.
+
+    When everything is healthy every subsystem shows ``"ok"``.
+    When a component silently degrades (reranker OOM, HyDE outage,
+    model server down), the corresponding entry shows ``"degraded"``
+    with the last error so users can diagnose reduced search quality.
 
     Args:
         status_id: The status ID returned by truememory_configure when
                    a re-embedding was started. Pass 0 (default) to get
                    the most recent rebuild status.
     """
+    result: dict = {}
+
+    # Rebuild progress (existing behavior).
     try:
         from truememory.tier_switch.manager import RebuildManager
         manager = RebuildManager.get_instance()
-        status = manager.get_status(status_id)
-        return json.dumps(status, indent=2, default=str)
+        result["rebuild"] = manager.get_status(status_id)
     except Exception as e:
-        return json.dumps({"error": f"{type(e).__name__}: {e}"})
+        result["rebuild"] = {"error": f"{type(e).__name__}: {e}"}
+
+    # Degradation section (issue #592).
+    result["degradation"] = _build_health_payload()
+
+    return json.dumps(result, indent=2, default=str)
 
 
 @mcp.tool()

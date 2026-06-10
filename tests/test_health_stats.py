@@ -46,6 +46,9 @@ def server(monkeypatch, tmp_path):
     ms._clear_all_llm_errors()
     ms._clear_reranker_error()
     ms._current_llm_provider_name = None
+    ms.clear_encoding_gate_error()
+    with ms._encoding_gate_error_lock:
+        ms._encoding_gate_degradation_count = 0
     # F08 state lives in engine module
     import truememory.engine as engine
     monkeypatch.setattr(engine, "_vectors_load_error", None)
@@ -53,6 +56,9 @@ def server(monkeypatch, tmp_path):
     ms._clear_all_llm_errors()
     ms._clear_reranker_error()
     ms._current_llm_provider_name = None
+    ms.clear_encoding_gate_error()
+    with ms._encoding_gate_error_lock:
+        ms._encoding_gate_degradation_count = 0
     monkeypatch.setattr(engine, "_vectors_load_error", None)
 
 
@@ -63,7 +69,9 @@ def server(monkeypatch, tmp_path):
 
 def test_health_has_three_subsystems(server):
     health = server._build_health_payload()
-    assert set(health.keys()) == {"reranker", "hyde_llm", "vectors"}
+    assert {"reranker", "hyde_llm", "vectors", "model_server", "encoding_gate"}.issubset(
+        set(health.keys())
+    )
     for sub in health.values():
         assert "status" in sub
         assert sub["status"] in ("ok", "degraded")

@@ -182,7 +182,20 @@ class ModelServer:
             "make CPU permanent.",
             kind, kind,
         )
+        self._write_status_file()
         return True
+
+    def _write_status_file(self) -> None:
+        """Persist sticky-CPU state so truememory_status can read it (issue #592)."""
+        try:
+            status_path = Path.home() / ".truememory" / "model_server.status"
+            status_path.write_text(json.dumps({
+                "sticky_cpu": sorted(self._sticky_cpu),
+                "pid": os.getpid(),
+                "updated": time.time(),
+            }))
+        except Exception:
+            pass  # best-effort; don't crash the server
 
     def _embed_device(self) -> str | None:
         """Device for embed model loads: sticky-CPU > TRUEMEMORY_DEVICE >
