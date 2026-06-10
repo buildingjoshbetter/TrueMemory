@@ -17,7 +17,6 @@
 #
 # Environment overrides:
 #   TRUEMEMORY_PY=3.12         # pin a specific Python (default: 3.12)
-#   TRUEMEMORY_EXTRAS=          # (deprecated — gpu extras are now installed by default)
 #   TRUEMEMORY_SOURCE=...      # install from a local path or git URL instead of PyPI
 #                            # (useful for testing: TRUEMEMORY_SOURCE=/path/to/truememory)
 #   TRUEMEMORY_SKIP_SETUP=1    # skip the Claude auto-config step
@@ -47,17 +46,12 @@ main() {
   set -eu
 
   TRUEMEMORY_PY="${TRUEMEMORY_PY:-3.12}"
-  TRUEMEMORY_EXTRAS="${TRUEMEMORY_EXTRAS:-}"
   TRUEMEMORY_SOURCE="${TRUEMEMORY_SOURCE:-}"
 
   # Defend against hostile env vars (e.g. a malicious "paste this" blog post).
   case "$TRUEMEMORY_PY" in
     ''|*[!0-9.]*)
       die "invalid TRUEMEMORY_PY: '$TRUEMEMORY_PY' (expected digits and dots, e.g. 3.12)" ;;
-  esac
-  case "$TRUEMEMORY_EXTRAS" in
-    *[!a-zA-Z0-9,_-]*)
-      die "invalid TRUEMEMORY_EXTRAS: '$TRUEMEMORY_EXTRAS' (expected names like 'mcp' or 'gpu,mcp')" ;;
   esac
 
   if [ -n "$TRUEMEMORY_SOURCE" ]; then
