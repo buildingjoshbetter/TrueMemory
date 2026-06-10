@@ -44,8 +44,10 @@ def scanner_env(monkeypatch, tmp_path):
     backlog.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(ss, "BACKLOG_DIR", backlog)
 
-    # Patch Path.home() — setenv HOME so Path.home() returns tmp_path
+    # Patch Path.home() — setenv HOME so Path.home() returns tmp_path.
+    # On Windows, Path.home() reads USERPROFILE (not HOME), so set both.
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
 
     # Patch _shared references used inside _scan_stale_sessions
     from truememory.ingest.hooks import _shared
