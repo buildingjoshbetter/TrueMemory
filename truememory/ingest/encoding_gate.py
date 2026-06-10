@@ -251,7 +251,9 @@ class EncodingGate:
             if self._last_search_results:
                 similar = self._last_search_results[0].get("content", "")
             else:
-                results = self._search(fact, limit=1)
+                # Same directive exclusion as the cached path (issue #589,
+                # D-8): similar_memory must never expose directive text.
+                results = [r for r in self._search(fact, limit=1) if not r.get("directive")]
                 if results:
                     similar = results[0].get("content", "")
 
@@ -305,11 +307,14 @@ class EncodingGate:
         if results is None:
             results = self._search(fact, limit=10)
 
-        self._last_search_results = results
-
         # Exclude directives — they are standing instructions, not facts,
         # and should not cause incoming memories to be rejected as redundant.
+        # Filter BEFORE caching: _compute_prediction_error and evaluate()'s
+        # similar_memory both read _last_search_results, and neither may see
+        # directives (issue #589, D-8).
         results = [r for r in results if not r.get("directive")]
+
+        self._last_search_results = results
 
         if not results:
             return 1.0  # Empty memory = maximum novelty
