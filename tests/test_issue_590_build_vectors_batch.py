@@ -8,7 +8,7 @@ proceed.
 from __future__ import annotations
 
 import sqlite3
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -19,16 +19,21 @@ import pytest
 # ---------------------------------------------------------------------------
 
 def _make_mock_model():
-    """Mock embedding model that produces distinct 256-d vectors per input."""
+    """Return a mock embedding model that produces deterministic 256-d vectors.
+
+    Uses a text-seeded RNG so identical texts get identical vectors —
+    enough for nearest-neighbour search to return the correct result.
+    """
     mock = MagicMock()
+
     def _encode(texts, **kw):
         vecs = []
         for t in texts:
             rng = np.random.RandomState(hash(t) % (2**31))
-            vecs.append(rng.rand(256).astype(np.float32))
+            vecs.append(rng.randn(256).astype(np.float32))
         return np.array(vecs)
+
     mock.encode = _encode
-    mock.dim = 256
     return mock
 
 
@@ -40,13 +45,8 @@ def _make_server(monkeypatch, tmp_path):
     db_path = tmp_path / "memories.db"
     monkeypatch.setenv("TRUEMEMORY_DB", str(db_path))
     monkeypatch.setenv("TRUEMEMORY_EMBED_MODEL", "edge")
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))
-    import truememory.vector_search as vs
     import truememory.mcp_server as ms
 
-    monkeypatch.setattr(vs, "get_model", _make_mock_model)
-    monkeypatch.setattr(vs, "_EMBED_DIM", 256)
     monkeypatch.setattr(ms, "_TRUEMEMORY_DIR", home / ".truememory")
     monkeypatch.setattr(ms, "_CONFIG_PATH", home / ".truememory" / "config.json")
     monkeypatch.setattr(ms, "_DB_PATH", str(db_path))
@@ -83,8 +83,10 @@ class _CommitCountingConn:
 
 @pytest.fixture
 def server(monkeypatch, tmp_path):
-    ms, _db = _make_server(monkeypatch, tmp_path)
-    yield ms
+    mock_model = _make_mock_model()
+    with patch("truememory.vector_search.get_model", return_value=mock_model):
+        ms, _db = _make_server(monkeypatch, tmp_path)
+        yield ms
     if ms._memory is not None:
         try:
             ms._memory.close()
