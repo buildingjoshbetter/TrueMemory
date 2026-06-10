@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "truememory": {
+      "command": "/path/to/python",
+      "args": ["-m", "truememory.mcp_server"]
+    }
+  }
+}

@@ -115,7 +115,7 @@ def _retry_backoff(attempt: int) -> float:
 @dataclass
 class LLMConfig:
     """Configuration for an LLM backend."""
-    provider: str = "auto"       # auto, ollama, openrouter, anthropic, openai
+    provider: str = "auto"       # auto, ollama, openrouter, anthropic, openai, groq
     model: str = ""              # Model name (auto-detected if empty)
     base_url: str = ""           # API base URL
     api_key: str = ""            # API key
@@ -158,6 +158,14 @@ def hydrate_config(config: LLMConfig) -> LLMConfig:
             config.base_url = "https://api.openai.com/v1"
         if not config.model:
             config.model = "gpt-4o-mini"
+
+    elif provider == "groq":
+        if not config.api_key:
+            config.api_key = os.environ.get("GROQ_API_KEY", "")
+        if not config.base_url:
+            config.base_url = "https://api.groq.com/openai/v1"
+        if not config.model:
+            config.model = "llama-3.3-70b-versatile"
 
     elif provider == "ollama":
         if not config.base_url:
@@ -210,12 +218,18 @@ def auto_detect() -> LLMConfig:
         log.info("Auto-detected Anthropic API key")
         return hydrate_config(LLMConfig(provider="anthropic"))
 
+    # 5. Groq (OpenAI-compatible, fast inference)
+    if os.environ.get("GROQ_API_KEY", ""):
+        log.info("Auto-detected Groq API key")
+        return hydrate_config(LLMConfig(provider="groq"))
+
     raise RuntimeError(
         "No LLM backend found for fact extraction. Options:\n"
         "  1. Run Ollama locally: ollama serve && ollama pull qwen2.5:7b-instruct\n"
         "  2. Install Claude Code (provides `claude` CLI + subscription auth)\n"
         "  3. Set OPENROUTER_API_KEY environment variable\n"
-        "  4. Set ANTHROPIC_API_KEY environment variable"
+        "  4. Set ANTHROPIC_API_KEY environment variable\n"
+        "  5. Set GROQ_API_KEY environment variable"
     )
 
 

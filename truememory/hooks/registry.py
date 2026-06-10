@@ -19,6 +19,7 @@ STATE_FILE = Path.home() / ".truememory" / "integrations.json"
 
 def _get_all_adapters() -> list[CLIAdapter]:
     """Return instances of all known CLI adapters."""
+    from truememory.hooks.adapters.antigravity import AntigravityAdapter
     from truememory.hooks.adapters.claude import ClaudeAdapter
     from truememory.hooks.adapters.chatgpt import ChatGPTAdapter
     from truememory.hooks.adapters.codex import CodexAdapter
@@ -28,6 +29,7 @@ def _get_all_adapters() -> list[CLIAdapter]:
     from truememory.hooks.adapters.hermes import HermesAdapter
     from truememory.hooks.adapters.openclaw import OpenClawAdapter
     return [
+        AntigravityAdapter(),
         ClaudeAdapter(),
         ChatGPTAdapter(),
         CodexAdapter(),

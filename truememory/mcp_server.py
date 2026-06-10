@@ -398,6 +398,29 @@ def _build_openai_llm(api_key: str):
     return _openai_llm
 
 
+def _build_groq_llm(api_key: str):
+    import httpx
+
+    def _groq_llm(prompt: str) -> str:
+        resp = httpx.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "max_tokens": 500,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+
+    return _groq_llm
+
+
 # Provider table — builders are looked up dynamically via module-level name
 # so tests can monkeypatch ``_build_anthropic_llm`` etc. without having to
 # reimport the module or mutate a frozen tuple of captured references.
@@ -405,6 +428,7 @@ _LLM_PROVIDERS = (
     ("anthropic", "ANTHROPIC_API_KEY", "anthropic_api_key", "_build_anthropic_llm"),
     ("openrouter", "OPENROUTER_API_KEY", "openrouter_api_key", "_build_openrouter_llm"),
     ("openai", "OPENAI_API_KEY", "openai_api_key", "_build_openai_llm"),
+    ("groq", "GROQ_API_KEY", "groq_api_key", "_build_groq_llm"),
 )
 
 
@@ -467,6 +491,139 @@ def _get_llm_fn():
         _cached_llm_fn = _build_llm_fn()
         _cached_llm_fn_built = True
         return _cached_llm_fn
+
+
+# ---------------------------------------------------------------------------
+# DeepSearch model selection — allows overriding the LLM used for deep search
+# ---------------------------------------------------------------------------
+
+_cached_deepsearch_llm_fn = None
+_cached_deepsearch_llm_fn_built = False
+_deepsearch_cache_lock = threading.Lock()
+
+
+def _build_deepsearch_llm_fn():
+    """Build an LLM function using deepsearch-specific config if present.
+
+    Checks ``deepsearch_provider`` and ``deepsearch_model`` in the persistent
+    config.  If ``deepsearch_provider`` is set, builds a dedicated LLM
+    function for that provider/model pair.  Otherwise returns None, signalling
+    the caller to fall back to ``_get_llm_fn()``.
+    """
+    config = _load_config()
+    ds_provider = config.get("deepsearch_provider", "").strip().lower()
+    ds_model = config.get("deepsearch_model", "").strip()
+
+    if not ds_provider:
+        return None  # No override — caller should use default
+
+    # Map provider to builder + key resolution
+    _DS_BUILDERS = {
+        "anthropic": ("_build_anthropic_llm", "ANTHROPIC_API_KEY", "anthropic_api_key"),
+        "openrouter": ("_build_openrouter_llm", "OPENROUTER_API_KEY", "openrouter_api_key"),
+        "openai": ("_build_openai_llm", "OPENAI_API_KEY", "openai_api_key"),
+        "groq": ("_build_groq_llm", "GROQ_API_KEY", "groq_api_key"),
+    }
+
+    spec = _DS_BUILDERS.get(ds_provider)
+    if not spec:
+        log.warning("deepsearch_provider %r not recognized; falling back to default", ds_provider)
+        return None
+
+    builder_name, env_var, config_key = spec
+    api_key = os.environ.get(env_var) or config.get(config_key)
+    if not api_key:
+        log.warning("deepsearch_provider=%s but no API key found; falling back to default", ds_provider)
+        return None
+
+    builder = globals()[builder_name]
+    try:
+        base_fn = builder(api_key)
+    except Exception as e:
+        log.warning("Failed to build deepsearch LLM (%s): %s", ds_provider, e)
+        return None
+
+    if not ds_model:
+        return base_fn
+
+    # Wrap to override the model in the request
+    import httpx
+
+    def _deepsearch_llm(prompt: str) -> str:
+        if ds_provider == "anthropic":
+            import anthropic
+            from truememory.ingest.models import sanitize_model_params
+            client = anthropic.Anthropic(api_key=api_key, timeout=30.0)
+            params = sanitize_model_params(ds_model, {
+                "model": ds_model,
+                "max_tokens": 500,
+                "temperature": 0.3,
+                "messages": [{"role": "user", "content": prompt}],
+            })
+            resp = client.messages.create(**params)
+            return resp.content[0].text
+        else:
+            # OpenAI-compatible providers (openrouter, openai, groq)
+            base_urls = {
+                "openrouter": "https://openrouter.ai/api/v1/chat/completions",
+                "openai": "https://api.openai.com/v1/chat/completions",
+                "groq": "https://api.groq.com/openai/v1/chat/completions",
+            }
+            url = base_urls[ds_provider]
+            resp = httpx.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": ds_model,
+                    "max_tokens": 500,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"]
+
+    return _deepsearch_llm
+
+
+def _get_deepsearch_llm_fn():
+    """Return a deepsearch-specific LLM fn if configured, else fall back to default.
+
+    Cached after first build, like ``_get_llm_fn()``.
+    """
+    global _cached_deepsearch_llm_fn, _cached_deepsearch_llm_fn_built
+    if _cached_deepsearch_llm_fn_built:
+        return _cached_deepsearch_llm_fn
+    with _deepsearch_cache_lock:
+        if _cached_deepsearch_llm_fn_built:
+            return _cached_deepsearch_llm_fn
+        fn = _build_deepsearch_llm_fn()
+        if fn is not None:
+            _cached_deepsearch_llm_fn = fn
+            _cached_deepsearch_llm_fn_built = True
+            return fn
+        # No override — use the default
+        _cached_deepsearch_llm_fn_built = True
+        _cached_deepsearch_llm_fn = None
+        return None
+
+
+def _resolve_deepsearch_llm():
+    """Resolve the LLM function for deep search queries.
+
+    Returns the deepsearch-specific override if configured, otherwise
+    falls back to the standard ``_get_llm_fn()`` (only for Pro tier).
+    """
+    ds_fn = _get_deepsearch_llm_fn()
+    if ds_fn is not None:
+        return ds_fn
+    # Fall back to default behavior: Pro tier only
+    if _load_config().get("tier", "edge") == "pro":
+        return _get_llm_fn()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -792,7 +949,7 @@ def truememory_search_deep(
     _touch_search_time()
     limit = max(1, min(limit, 200))
     _set_reranker(_DEEP_RERANKER)
-    llm_fn = _get_llm_fn() if _load_config().get("tier", "edge") == "pro" else None
+    llm_fn = _resolve_deepsearch_llm()
     uid = user_id or None
     if not query_list:
         return json.dumps([])
@@ -917,7 +1074,7 @@ def truememory_configure(
         api_key: API key for HyDE query expansion (required for Pro,
                  optional for Edge / Base).  Supported providers:
                  anthropic, openrouter, openai.
-        api_provider: Required if api_key is provided. One of: "anthropic", "openrouter", "openai".
+        api_provider: Required if api_key is provided. One of: "anthropic", "openrouter", "openai", "groq".
         email: User's email for updates and support (optional).
     """
     global _memory
@@ -939,13 +1096,13 @@ def truememory_configure(
     # Validate API key + provider pairing
     if api_key and not api_provider:
         return json.dumps({
-            "error": "api_provider is required when api_key is provided. Use: anthropic, openrouter, or openai",
+            "error": "api_provider is required when api_key is provided. Use: anthropic, openrouter, openai, or groq",
         })
     if api_provider:
         api_provider = api_provider.lower().strip()
-        if api_provider not in ("anthropic", "openrouter", "openai"):
+        if api_provider not in ("anthropic", "openrouter", "openai", "groq"):
             return json.dumps({
-                "error": "api_provider must be one of: anthropic, openrouter, openai",
+                "error": "api_provider must be one of: anthropic, openrouter, openai, groq",
             })
 
     # Save to persistent config (tier change deferred to _finalize_rebuild)
@@ -985,6 +1142,11 @@ def truememory_configure(
         with _llm_cache_lock:
             _cached_llm_fn = None
             _cached_llm_fn_built = False
+        # Also invalidate deepsearch LLM cache
+        global _cached_deepsearch_llm_fn, _cached_deepsearch_llm_fn_built
+        with _deepsearch_cache_lock:
+            _cached_deepsearch_llm_fn = None
+            _cached_deepsearch_llm_fn_built = False
         # Clear stored LLM errors for the provider we just re-keyed
         _clear_llm_error(api_provider)
 
