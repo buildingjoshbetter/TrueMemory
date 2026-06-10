@@ -10,7 +10,6 @@ Covers:
 
 from truememory.ingest.extractor import (
     ALLOWED_CATEGORIES,
-    ExtractedFact,
     _extract_user_lines,
     _normalize_quotes,
     _parse_extraction_response,
