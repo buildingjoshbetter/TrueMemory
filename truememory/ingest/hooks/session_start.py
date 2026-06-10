@@ -439,14 +439,54 @@ def _scan_stale_sessions() -> None:
             pass
 
 
+def _run_maintenance_background() -> None:
+    """Spawn backlog drain + stale-session scan in a detached subprocess.
+
+    Uses ``Popen(start_new_session=True)`` so the child survives hook exit
+    (daemon threads die when the hook process exits — issue #557).
+    stdout/stderr are redirected to a log file to avoid blocking.
+    """
+    import subprocess
+
+    _log_dir = Path.home() / ".truememory" / "logs"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _log_path = _log_dir / "session_maintenance.log"
+
+    # Inline script that imports and runs the two maintenance functions.
+    # Kept minimal to avoid shell-quoting issues.
+    script = (
+        "from truememory.ingest.hooks.session_start import _drain_backlog, _scan_stale_sessions; "
+        "_drain_backlog(); "
+        "_scan_stale_sessions()"
+    )
+
+    try:
+        log_file = open(_log_path, "a", encoding="utf-8")
+        try:
+            subprocess.Popen(
+                [sys.executable, "-c", script],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                env={**os.environ, "TRUEMEMORY_MAINTENANCE_CHILD": "1"},
+            )
+        finally:
+            log_file.close()
+    except Exception as exc:
+        log.debug("Failed to spawn background maintenance: %s", exc)
+        # Fall back to synchronous drain so work isn't silently lost.
+        _drain_backlog()
+        _scan_stale_sessions()
+
+
 def main():
     if os.environ.get("TRUEMEMORY_EXTRACTION"):
         return
 
     args = _parse_args()
 
-    _drain_backlog()
-    _scan_stale_sessions()
+    _run_maintenance_background()
 
     try:
         input_data = json.load(sys.stdin)
