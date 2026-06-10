@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -374,79 +375,96 @@ def test_issue_589_gate_still_sees_real_facts():
 
 
 def test_issue_589_directive_full_lifecycle(tmp_path):
+    """Embeddings use the house stub (``vector_search.get_model`` patched to a
+    deterministic MagicMock, as in test_issue_493_cascade_delete.py /
+    test_issue_462_delete_cascade.py) so the test is embedder-agnostic: it
+    behaves identically on the no-network CI gate (where the real model cannot
+    load and ``engine.add`` would degrade to storing without an embedding) and
+    on dev machines with cached models."""
+    import numpy as np
+
     from truememory import Memory
 
-    m = Memory(path=str(tmp_path / "life.db"))
-    try:
-        stored = m.add("always sign commits with GPG", directive=True)
-        mid = stored["id"]
-        m.add("user prefers vim keybindings")
+    fake_embedding = np.random.rand(256).astype(np.float32)
+    mock_model = MagicMock()
+    mock_model.encode = lambda texts, **kw: np.array([fake_embedding] * len(texts))
 
-        # Search returns the directive flagged.
-        results = m._engine.search("sign commits GPG", limit=5, _skip_reranker=True)
-        hit = next((r for r in results if r.get("id") == mid), None)
-        assert hit is not None, f"directive not returned by search: {results}"
-        assert hit.get("directive") is True, (
-            "search results must carry the directive flag (WIP propagation)"
-        )
-        fact_hits = m._engine.search("vim keybindings", limit=5, _skip_reranker=True)
-        assert fact_hits and all(
-            r.get("directive") is False for r in fact_hits if r.get("id") != mid
-        ), "regular facts must be flagged directive=False"
+    with patch("truememory.vector_search.get_model", return_value=mock_model):
+        m = Memory(path=str(tmp_path / "life.db"))
+        try:
+            stored = m.add("always sign commits with GPG", directive=True)
+            mid = stored["id"]
+            m.add("user prefers vim keybindings")
 
-        # Stats counts it.
-        stats = m._engine.get_stats()
-        assert stats.get("directive_count") == 1, (
-            f"get_stats must report directive_count, got: {stats.keys()}"
-        )
-
-        conn = m._engine.conn
-        # Only the vec0 virtual tables themselves — not their _info/_chunks/
-        # _rowids shadow tables, which hold table-level metadata, not
-        # per-message rows.
-        vec_tables = [
-            r[0]
-            for r in conn.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE name LIKE 'vec_messages%' AND sql LIKE '%USING vec0%'"
-            ).fetchall()
-        ]
-        if m._engine._has_vectors:
-            pre = sum(
-                conn.execute(
-                    f"SELECT COUNT(*) FROM {t} WHERE rowid = ?", (mid,)
-                ).fetchone()[0]
-                for t in vec_tables
+            # Search returns the directive flagged.
+            results = m._engine.search("sign commits GPG", limit=5, _skip_reranker=True)
+            hit = next((r for r in results if r.get("id") == mid), None)
+            assert hit is not None, f"directive not returned by search: {results}"
+            assert hit.get("directive") is True, (
+                "search results must carry the directive flag (WIP propagation)"
             )
-            assert pre >= 1, "directive must be embedded at add time"
-        assert conn.execute(
-            "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'gpg'"
-        ).fetchone()[0] >= 1
+            fact_hits = m._engine.search("vim keybindings", limit=5, _skip_reranker=True)
+            assert fact_hits and all(
+                r.get("directive") is False for r in fact_hits if r.get("id") != mid
+            ), "regular facts must be flagged directive=False"
 
-        # Forget removes messages + FTS + vec rows.
-        assert m.delete(mid) is True
-        assert (
-            conn.execute("SELECT COUNT(*) FROM messages WHERE id = ?", (mid,)).fetchone()[0]
-            == 0
-        )
-        assert (
-            conn.execute(
+            # Stats counts it.
+            stats = m._engine.get_stats()
+            assert stats.get("directive_count") == 1, (
+                f"get_stats must report directive_count, got: {stats.keys()}"
+            )
+
+            conn = m._engine.conn
+            # Only the vec0 virtual tables themselves — not their _info/
+            # _chunks/_rowids shadow tables, which hold table-level metadata,
+            # not per-message rows.
+            vec_tables = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE name LIKE 'vec_messages%' AND sql LIKE '%USING vec0%'"
+                ).fetchall()
+            ]
+            if m._engine._has_vectors:
+                # With the stubbed model, add() embeds deterministically even
+                # on the no-network gate (sqlite-vec is a local pip package).
+                pre = sum(
+                    conn.execute(
+                        f"SELECT COUNT(*) FROM {t} WHERE rowid = ?", (mid,)
+                    ).fetchone()[0]
+                    for t in vec_tables
+                )
+                assert pre >= 1, "directive must be embedded at add time"
+            assert conn.execute(
                 "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'gpg'"
-            ).fetchone()[0]
-            == 0
-        ), "FTS row must be removed on forget"
-        for t in vec_tables:
+            ).fetchone()[0] >= 1
+
+            # Forget removes messages + FTS + vec rows.
+            assert m.delete(mid) is True
             assert (
                 conn.execute(
-                    f"SELECT COUNT(*) FROM {t} WHERE rowid = ?", (mid,)
+                    "SELECT COUNT(*) FROM messages WHERE id = ?", (mid,)
                 ).fetchone()[0]
                 == 0
-            ), f"vec row must be removed from {t} on forget"
+            )
+            assert (
+                conn.execute(
+                    "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'gpg'"
+                ).fetchone()[0]
+                == 0
+            ), "FTS row must be removed on forget"
+            for t in vec_tables:
+                assert (
+                    conn.execute(
+                        f"SELECT COUNT(*) FROM {t} WHERE rowid = ?", (mid,)
+                    ).fetchone()[0]
+                    == 0
+                ), f"vec row must be removed from {t} on forget"
 
-        stats = m._engine.get_stats()
-        assert stats.get("directive_count") == 0
-    finally:
-        m.close()
+            stats = m._engine.get_stats()
+            assert stats.get("directive_count") == 0
+        finally:
+            m.close()
 
 
 # ---------------------------------------------------------------------------
