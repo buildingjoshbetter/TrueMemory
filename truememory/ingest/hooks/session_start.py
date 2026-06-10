@@ -324,13 +324,32 @@ def _cleanup_extracted_markers() -> None:
                  removed, _EXTRACTED_MARKER_MAX_AGE // 86400)
 
 
+def _read_scan_watermark(scan_fd: int) -> float:
+    """Read the watermark timestamp stored in the scan marker file.
+
+    Returns the stored timestamp, or 0.0 if the file is empty / corrupt.
+    """
+    try:
+        os.lseek(scan_fd, 0, os.SEEK_SET)
+        raw = os.read(scan_fd, 64)
+        if raw:
+            return float(raw.strip())
+    except (OSError, ValueError):
+        pass
+    return 0.0
+
+
 def _scan_stale_sessions() -> None:
     """Find transcripts from recent sessions that were never extracted.
 
-    Runs at most once per _SCAN_INTERVAL. Scans Claude Code's project
-    directories for session transcripts modified in the last 24 hours
-    that have no corresponding extraction marker. Skips extraction noise
-    transcripts (identified by sentinel tag or legacy prompt prefixes).
+    Runs at most once per _SCAN_INTERVAL.  Uses a watermark-based approach:
+    the marker file stores the timestamp of the last successful scan.
+    Only transcripts modified *after* that watermark are checked, making the
+    scanner O(new) instead of O(all).  On first run (no watermark) it falls
+    back to a 24-hour lookback window.
+
+    Uses ``os.scandir()`` instead of ``Path.iterdir()`` to piggy-back on
+    the DirEntry stat cache and avoid redundant syscalls.
     """
     import time
     import re
@@ -344,26 +363,28 @@ def _scan_stale_sessions() -> None:
         return
 
     try:
+        now = time.time()
         try:
-            # Read the marker content to determine last scan time.  On first
-            # run O_CREAT creates an empty file — we must NOT skip the scan
-            # just because the file now exists with a recent mtime (issue #579).
-            raw = os.read(scan_fd, 64).decode("utf-8", errors="replace").strip()
-            if raw:
-                last_scan = float(raw)
-                if time.time() - last_scan < _SCAN_INTERVAL:
-                    return
+            # Read watermark *before* the interval gate — an empty file
+            # (first run, or O_CREAT just created it) must not short-circuit.
+            watermark = _read_scan_watermark(scan_fd)
+            if watermark > 0 and (now - watermark) < _SCAN_INTERVAL:
+                return
+        except OSError:
+            return
+
+        # Fall back to 24-hour lookback when no previous watermark exists
+        # (first scan or corrupted marker).
+        cutoff = watermark if watermark > 0 else (now - 86400)
+
+        # Write the new watermark (current time) — even if no files are
+        # queued, the mtime update gates the next scan interval.
+        try:
             os.lseek(scan_fd, 0, os.SEEK_SET)
             os.ftruncate(scan_fd, 0)
-            os.write(scan_fd, str(time.time()).encode("utf-8"))
-        except (OSError, ValueError):
-            # ValueError covers corrupted/non-numeric content — scan anyway.
-            try:
-                os.lseek(scan_fd, 0, os.SEEK_SET)
-                os.ftruncate(scan_fd, 0)
-                os.write(scan_fd, str(time.time()).encode("utf-8"))
-            except OSError:
-                pass
+            os.write(scan_fd, str(now).encode("utf-8"))
+        except OSError:
+            return
 
         claude_dir = Path.home() / ".claude" / "projects"
         if not claude_dir.exists():
@@ -373,23 +394,31 @@ def _scan_stale_sessions() -> None:
         from truememory.ingest.hooks.stop import _queue_to_backlog
 
         uuid_re = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
-        cutoff = time.time() - 86400
         queued = 0
         skipped_noise = 0
 
-        for project_dir in claude_dir.iterdir():
-            if not project_dir.is_dir():
+        try:
+            project_entries = os.scandir(str(claude_dir))
+        except OSError:
+            return
+
+        for proj_entry in project_entries:
+            if not proj_entry.is_dir(follow_symlinks=False):
                 continue
-            for transcript in project_dir.iterdir():
-                if transcript.suffix != ".jsonl":
+            try:
+                file_entries = os.scandir(proj_entry.path)
+            except OSError:
+                continue
+            for entry in file_entries:
+                if not entry.name.endswith(".jsonl"):
                     continue
-                if not transcript.is_file():
+                if not entry.is_file(follow_symlinks=False):
                     continue
-                session_id = transcript.stem
+                session_id = entry.name[:-6]  # strip .jsonl
                 if not uuid_re.match(session_id):
                     continue
                 try:
-                    stat = transcript.stat()
+                    stat = entry.stat()
                     if stat.st_mtime < cutoff:
                         continue
                     if stat.st_size < 5000:
@@ -405,6 +434,7 @@ def _scan_stale_sessions() -> None:
                 if marker.exists():
                     continue
 
+                transcript = Path(entry.path)
                 if _is_extraction_transcript(transcript):
                     try:
                         mark_session_extracted(session_id, str(transcript))
