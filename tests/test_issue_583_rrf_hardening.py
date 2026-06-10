@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 
-import pytest
 
 from truememory.hybrid import reciprocal_rank_fusion
 
