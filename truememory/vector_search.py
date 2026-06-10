@@ -551,11 +551,22 @@ def _encode_with_mps_fallback(model, texts, **kwargs):
     return encode_with_mps_fallback(model, texts, **kwargs)
 
 
+_BUILD_VECTORS_TXN_BATCH = 100
+"""Number of embedding batches to accumulate before committing.
+
+Each embedding batch is ``_get_batch_size()`` messages (100 on CPU, 16 on
+MPS).  Every ``_BUILD_VECTORS_TXN_BATCH`` of those batches we commit the
+transaction and release the DB write lock so other writers (MCP servers,
+ingest pipeline) can proceed.
+"""
+
+
 def build_vectors(
     conn: sqlite3.Connection,
     messages: list[dict] | None = None,
     *,
     table_name: str | None = None,
+    txn_batch: int | None = None,
 ) -> int:
     """
     Embed messages and store their vectors in a vector table.
@@ -568,12 +579,19 @@ def build_vectors(
     (Base/Pro tier) to keep GPU memory under ~4GB on 8GB machines.
     MPS cache is flushed between batches to prevent memory accumulation.
 
+    The write transaction is committed every *txn_batch* embedding batches
+    (default ``_BUILD_VECTORS_TXN_BATCH`` = 100) so that the DB write lock
+    is not held for the entire re-embedding run.  This lets other writers
+    (MCP servers, ingest pipeline) make progress between commits.
+
     Args:
         conn:       Open database connection with sqlite-vec already loaded
                     (call :func:`init_vec_table` first).
         messages:   Optional pre-fetched list of message dicts.
         table_name: Target vector table. Defaults to the active table for
                     the current tier group.
+        txn_batch:  Number of embedding batches per commit.  Defaults to
+                    ``_BUILD_VECTORS_TXN_BATCH``.
 
     Returns:
         Number of vectors inserted.
@@ -589,10 +607,13 @@ def build_vectors(
 
     tbl = table_name or _active_vec_table(conn)
     conn.execute(f"DELETE FROM {tbl}")
+    conn.commit()
 
     model = get_model()
     batch_size = _get_batch_size()
+    commit_every = txn_batch if txn_batch is not None else _BUILD_VECTORS_TXN_BATCH
     total = 0
+    batches_since_commit = 0
 
     try:
         import torch
@@ -615,10 +636,18 @@ def build_vectors(
             )
 
             total += len(batch)
+            batches_since_commit += 1
             del embeddings
             _flush_mps_cache()
 
-    conn.commit()
+            if batches_since_commit >= commit_every:
+                conn.commit()
+                batches_since_commit = 0
+
+    # Final commit for any remaining rows since last batch commit.
+    if batches_since_commit > 0:
+        conn.commit()
+
     _write_embedder_metadata(conn)
     return total
 
