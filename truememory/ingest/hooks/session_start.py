@@ -39,6 +39,11 @@ MEMORY_LIMIT = int(os.environ.get("TRUEMEMORY_RECALL_LIMIT", "25"))
 # Max directives force-injected at session start. Uncapped injection let a
 # large directive set consume unbounded context (issue #589, D-4).
 DIRECTIVE_LIMIT = int(os.environ.get("TRUEMEMORY_DIRECTIVE_LIMIT", "50"))
+# Per-memory character cap and total payload budget (issue #578).
+# Memories exceeding the per-entry cap are sliced on a word boundary and
+# suffixed with a pointer so the agent can fetch the full text on demand.
+RECALL_MEMORY_CHARS = int(os.environ.get("TRUEMEMORY_RECALL_MEMORY_CHARS", "500"))
+RECALL_BUDGET_CHARS = int(os.environ.get("TRUEMEMORY_RECALL_BUDGET_CHARS", "8192"))
 ONBOARDED_MARKER = Path.home() / ".truememory" / ".onboarded"
 BACKLOG_DIR = Path.home() / ".truememory" / "backlog"
 _DRAIN_CAP = 3
@@ -500,6 +505,66 @@ def _load_directives(memory, user_id: str = "") -> list[dict]:
         return []
 
 
+def _truncate_memory(content: str, memory_id, max_chars: int = 0) -> str:
+    """Truncate *content* to *max_chars* on a word boundary.
+
+    If the content is already within the limit it is returned unchanged.
+    Otherwise it is sliced to the last whitespace boundary before *max_chars*
+    and a pointer suffix is appended so the agent can retrieve the full text.
+    """
+    if max_chars <= 0:
+        max_chars = RECALL_MEMORY_CHARS
+    if len(content) <= max_chars:
+        return content
+    # Slice to the last space at or before the limit
+    cut = content[:max_chars]
+    last_space = cut.rfind(" ")
+    if last_space > 0:
+        cut = cut[:last_space]
+    suffix = f" [truncated, id={memory_id} — use truememory_get]"
+    return cut.rstrip() + suffix
+
+
+def _apply_budget(
+    memory_lines: list[tuple[str, float]],
+    directive_block: str,
+    budget: int = 0,
+) -> list[str]:
+    """Enforce a total character budget on the additionalContext payload.
+
+    *memory_lines* is a list of ``(formatted_line, score)`` tuples.
+    *directive_block* is the already-formatted directive XML (exempt from
+    truncation but counted against the budget).
+
+    Returns the list of formatted memory lines that fit within *budget*.
+    Lowest-score entries are dropped first.
+    """
+    if budget <= 0:
+        budget = RECALL_BUDGET_CHARS
+    # Directive block is mandatory — subtract its size from the available budget.
+    available = budget - len(directive_block)
+    if available <= 0:
+        return []
+    # The memory block has a fixed header/footer that wraps the lines.  Account
+    # for a generous estimate so we don't exceed the budget by the wrapper text.
+    _WRAPPER_OVERHEAD = 300  # header lines + closing tag
+    available = max(0, available - _WRAPPER_OVERHEAD)
+
+    # Sort by score ascending so we can drop cheapest first.
+    indexed = list(enumerate(memory_lines))
+    indexed.sort(key=lambda t: t[1][1])  # sort by score
+
+    drop = set()
+    total = sum(len(line) for line, _score in memory_lines)
+    for idx, (line, _score) in indexed:
+        if total <= available:
+            break
+        total -= len(line)
+        drop.add(idx)
+
+    return [line for i, (line, _score) in enumerate(memory_lines) if i not in drop]
+
+
 def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> str:
     """Search TrueMemory and format relevant memories for injection."""
     try:
@@ -598,19 +663,30 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> s
             continue
 
     if all_results:
-        lines = [
-            "<truememory-context>",
-            "## TrueMemory — What You Know About This User",
-            "These are facts from TrueMemory (the primary long-horizon memory system).",
-            "Use these to answer user questions. Search TrueMemory for more if needed.",
-            "",
-        ]
+        # -- Issue #578: per-memory truncation + total payload budget ----------
+        directive_block = parts[0] if parts else ""
+        memory_lines: list[tuple[str, float]] = []
         for r in all_results[:MEMORY_LIMIT]:
             content = r.get("content", "").strip()
-            if content:
-                lines.append(f"- {content}")
-        lines.append("</truememory-context>")
-        parts.append("\n".join(lines))
+            if not content:
+                continue
+            truncated = _truncate_memory(content, r.get("id", "?"))
+            score = r.get("score", 0.0)
+            memory_lines.append((f"- {truncated}", score))
+
+        kept = _apply_budget(memory_lines, directive_block)
+
+        if kept:
+            lines = [
+                "<truememory-context>",
+                "## TrueMemory — What You Know About This User",
+                "These are facts from TrueMemory (the primary long-horizon memory system).",
+                "Use these to answer user questions. Search TrueMemory for more if needed.",
+                "",
+            ]
+            lines.extend(kept)
+            lines.append("</truememory-context>")
+            parts.append("\n".join(lines))
 
     return "\n\n".join(parts) if parts else ""
 
