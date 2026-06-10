@@ -13,6 +13,7 @@ Covers:
 from __future__ import annotations
 
 import io
+import os
 import subprocess
 import sys
 
@@ -42,7 +43,7 @@ class TestSpawnStaleScan:
         assert captured["cmd"] == [
             sys.executable, "-m", "truememory.ingest.hooks.session_start", "--scan-stale",
         ]
-        assert captured["kwargs"]["start_new_session"] is True
+        assert captured["kwargs"]["start_new_session"] is hasattr(os, "setsid")
         assert captured["kwargs"]["stdin"] == subprocess.DEVNULL
 
     def test_spawn_failure_does_not_raise(self, monkeypatch):
