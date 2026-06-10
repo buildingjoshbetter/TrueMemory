@@ -213,6 +213,7 @@ def clean_results(
             "timestamp": r.get("timestamp", ""),
             "category": r.get("category", ""),
             "modality": r.get("modality", ""),
+            "directive": r.get("directive", False),
             "score": score,
             "source": r.get("source", "agentic"),
         })

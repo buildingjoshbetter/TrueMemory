@@ -672,6 +672,7 @@ class TrueMemoryEngine:
             "recipient": recipient,
             "timestamp": timestamp,
             "category": category,
+            "directive": directive,
         }
 
     def _maybe_auto_consolidate(self) -> None:
@@ -1925,6 +1926,7 @@ class TrueMemoryEngine:
                 "timestamp": r.get("timestamp", ""),
                 "category": r.get("category", ""),
                 "modality": r.get("modality", ""),
+                "directive": r.get("directive", False),
                 "score": score,
                 "source": r.get("source", source_label),
             })
@@ -2269,6 +2271,7 @@ class TrueMemoryEngine:
                 "timestamp": r.get("timestamp", ""),
                 "category": r.get("category", ""),
                 "modality": r.get("modality", ""),
+                "directive": r.get("directive", False),
                 "score": r.get("score", 0),
                 "source": "fts",
             })
@@ -2288,6 +2291,10 @@ class TrueMemoryEngine:
         if self.conn:
             try:
                 stats["message_count"] = get_message_count(self.conn)
+                dc = self.conn.execute(
+                    "SELECT COUNT(*) FROM messages WHERE directive = 1"
+                ).fetchone()
+                stats["directive_count"] = dc[0] if dc else 0
             except Exception:
                 logger.debug("Failed to get message count in get_stats()", exc_info=True)
 

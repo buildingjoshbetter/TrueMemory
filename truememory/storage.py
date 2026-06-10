@@ -197,6 +197,7 @@ CREATE INDEX IF NOT EXISTS idx_summaries_entity ON summaries(entity);
 CREATE INDEX IF NOT EXISTS idx_summaries_period ON summaries(period);
 CREATE INDEX IF NOT EXISTS idx_entity_relationships_a ON entity_relationships(entity_a);
 CREATE INDEX IF NOT EXISTS idx_landmark_events_timestamp ON landmark_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_messages_directive ON messages(directive);
 
 -- Vector cache registry (tier-switch: tracks per-tier-group vector table state)
 CREATE TABLE IF NOT EXISTS vector_cache_registry (
@@ -700,7 +701,7 @@ def update_message(conn: sqlite3.Connection, msg_id: int, **fields) -> bool:
     Returns:
         True if the row was updated, False if ID not found.
     """
-    allowed = {"content", "sender", "recipient", "timestamp", "category", "modality"}
+    allowed = {"content", "sender", "recipient", "timestamp", "category", "modality", "directive"}
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return False

@@ -307,6 +307,10 @@ class EncodingGate:
 
         self._last_search_results = results
 
+        # Exclude directives — they are standing instructions, not facts,
+        # and should not cause incoming memories to be rejected as redundant.
+        results = [r for r in results if not r.get("directive")]
+
         if not results:
             return 1.0  # Empty memory = maximum novelty
 

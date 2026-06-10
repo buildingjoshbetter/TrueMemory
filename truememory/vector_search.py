@@ -675,7 +675,7 @@ def search_vector(
         f"""
         SELECT v.rowid, v.distance,
                m.content, m.sender, m.recipient,
-               m.timestamp, m.category, m.modality
+               m.timestamp, m.category, m.modality, m.directive
         FROM (
             SELECT rowid, distance
             FROM {tbl}
@@ -701,6 +701,7 @@ def search_vector(
                 "timestamp": row[5],
                 "category": row[6],
                 "modality": row[7],
+                "directive": bool(row[8]),
                 "score": round(score, 6),
             }
         )
@@ -729,7 +730,7 @@ def search_vector_raw(
         f"""
         SELECT v.rowid, v.distance,
                m.content, m.sender, m.recipient,
-               m.timestamp, m.category, m.modality
+               m.timestamp, m.category, m.modality, m.directive
         FROM (
             SELECT rowid, distance
             FROM {tbl}
@@ -755,6 +756,7 @@ def search_vector_raw(
                 "timestamp": row[5],
                 "category": row[6],
                 "modality": row[7],
+                "directive": bool(row[8]),
                 "score": round(cos_sim, 6),
             }
         )
@@ -946,7 +948,7 @@ def search_vector_separation(
         f"""
         SELECT v.rowid, v.distance,
                m.content, m.sender, m.recipient,
-               m.timestamp, m.category, m.modality
+               m.timestamp, m.category, m.modality, m.directive
         FROM (
             SELECT rowid, distance
             FROM {sep_tbl}
@@ -970,6 +972,7 @@ def search_vector_separation(
             "timestamp": row[5],
             "category": row[6],
             "modality": row[7],
+            "directive": bool(row[8]),
             "score": round(score, 6),
         })
 

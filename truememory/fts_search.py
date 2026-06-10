@@ -78,7 +78,8 @@ def _rows_to_results(rows: list[tuple]) -> list[dict]:
             "timestamp": row[4],
             "category": row[5],
             "modality": row[6],
-            "raw_score": row[7],
+            "directive": bool(row[7]),
+            "raw_score": row[8],
             "score": 0.0,  # placeholder, filled by _normalize_scores
         }
         for row in rows
@@ -88,7 +89,7 @@ def _rows_to_results(rows: list[tuple]) -> list[dict]:
 _FTS_SELECT = """
     SELECT
         m.id, m.content, m.sender, m.recipient, m.timestamp,
-        m.category, m.modality,
+        m.category, m.modality, m.directive,
         messages_fts.rank AS bm25_score
     FROM messages_fts
     JOIN messages m ON m.id = messages_fts.rowid
