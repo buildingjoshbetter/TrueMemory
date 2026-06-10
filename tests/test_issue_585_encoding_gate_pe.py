@@ -1,7 +1,6 @@
 """Tests for issue #585: encoding gate PE degradation and contradiction bypass."""
 
-import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 
 class MockMemory:
@@ -85,7 +84,7 @@ def test_pe_unavailable_full_evaluate_passes():
         side_effect=RuntimeError("model not found"),
     ):
         # First evaluate triggers model load failure
-        decision = gate.evaluate("User likes Python over JavaScript", "preference")
+        gate.evaluate("User likes Python over JavaScript", "preference")
 
     # Gate should have degraded open
     assert gate._pe_available is False
