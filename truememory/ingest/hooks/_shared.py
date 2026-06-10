@@ -370,7 +370,7 @@ def set_recall_cache(context: str, db_path: str, user_id: str = "") -> None:
         }
         tmp = RECALL_CACHE_PATH.with_suffix(".tmp")
         tmp.write_text(json.dumps(existing), encoding="utf-8")
-        tmp.rename(RECALL_CACHE_PATH)
+        os.replace(tmp, RECALL_CACHE_PATH)
     except OSError:
         pass
 
@@ -394,7 +394,7 @@ def invalidate_recall_cache(db_path: str = "", user_id: str = "") -> None:
             if data:
                 tmp = RECALL_CACHE_PATH.with_suffix(".tmp")
                 tmp.write_text(json.dumps(data), encoding="utf-8")
-                tmp.rename(RECALL_CACHE_PATH)
+                os.replace(tmp, RECALL_CACHE_PATH)
             else:
                 RECALL_CACHE_PATH.unlink(missing_ok=True)
     except (OSError, json.JSONDecodeError, TypeError):
@@ -406,8 +406,13 @@ def invalidate_recall_cache(db_path: str = "", user_id: str = "") -> None:
 
 
 def _recall_cache_key(db_path: str, user_id: str = "") -> str:
-    """Deterministic cache key from db_path and user_id."""
-    return f"{db_path or 'default'}:{user_id or ''}"
+    """Deterministic cache key from db_path and user_id.
+
+    Normalizes db_path via PurePosixPath so the same logical path produces
+    the same key on both Unix (``/a.db``) and Windows (``\\a.db``).
+    """
+    normalized = str(Path(db_path).as_posix()) if db_path else "default"
+    return f"{normalized}:{user_id or ''}"
 
 
 def consume_recall_injected(session_id: str, within_seconds: float = _RECALL_DEBOUNCE_SECONDS) -> bool:
