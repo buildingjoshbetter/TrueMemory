@@ -58,14 +58,14 @@ class TestSpawnStaleScan:
 
 
 class TestMainDoesNotCallScanDirectly:
-    """main() must use _spawn_stale_scan, never _scan_stale_sessions directly."""
+    """main() must use _run_maintenance_background, never _scan_stale_sessions directly."""
 
-    def test_main_calls_spawn_not_scan(self, monkeypatch):
-        """main() must call _spawn_stale_scan (background), not
+    def test_main_calls_maintenance_not_scan(self, monkeypatch):
+        """main() must call _run_maintenance_background (background), not
         _scan_stale_sessions (synchronous)."""
-        calls = {"spawn": 0, "scan": 0}
+        calls = {"maintenance": 0, "scan": 0}
 
-        monkeypatch.setattr(ss, "_spawn_stale_scan", lambda: calls.__setitem__("spawn", calls["spawn"] + 1))
+        monkeypatch.setattr(ss, "_run_maintenance_background", lambda: calls.__setitem__("maintenance", calls["maintenance"] + 1))
         monkeypatch.setattr(ss, "_scan_stale_sessions", lambda: calls.__setitem__("scan", calls["scan"] + 1))
         monkeypatch.setattr(ss, "_drain_backlog", lambda: None)
         monkeypatch.setattr(ss, "_is_first_run", lambda: True)
@@ -77,7 +77,7 @@ class TestMainDoesNotCallScanDirectly:
 
         ss.main()
 
-        assert calls["spawn"] == 1, "main() should call _spawn_stale_scan"
+        assert calls["maintenance"] == 1, "main() should call _run_maintenance_background"
         assert calls["scan"] == 0, "main() should NOT call _scan_stale_sessions directly"
 
 
