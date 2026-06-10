@@ -129,6 +129,7 @@ def search_hybrid(
     limit: int = 10,
     fts_weight: float = 1.0,
     vec_weight: float = 1.0,
+    include_directives: bool = False,
 ) -> list[dict]:
     """
     Hybrid search combining FTS5 keyword search, Model2Vec completion vectors,
@@ -189,8 +190,8 @@ def search_hybrid(
     _q_emb = encode_with_mps_fallback(_q_model, [query])[0]
     _q_blob = serialize_f32(_q_emb)
 
-    fts_results = search_fts(conn, query, limit=_CANDIDATE_POOL)
-    vec_results = search_vector(conn, query, limit=_CANDIDATE_POOL, _query_blob=_q_blob)
+    fts_results = search_fts(conn, query, limit=_CANDIDATE_POOL, include_directives=include_directives)
+    vec_results = search_vector(conn, query, limit=_CANDIDATE_POOL, _query_blob=_q_blob, include_directives=include_directives)
 
     sep_results: list[dict] = []
     if _has_sep:
@@ -204,7 +205,7 @@ def search_hybrid(
             ).fetchone()
             sender_count = unique_senders_row[0] if unique_senders_row else 0
             if sender_count > 5:
-                sep_results = search_vector_separation(conn, query, limit=_CANDIDATE_POOL, _query_blob=_q_blob)
+                sep_results = search_vector_separation(conn, query, limit=_CANDIDATE_POOL, _query_blob=_q_blob, include_directives=include_directives)
         except Exception:
             pass
 

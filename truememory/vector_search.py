@@ -632,6 +632,7 @@ def search_vector(
     query: str,
     limit: int = 10,
     _query_blob: bytes | None = None,
+    include_directives: bool = False,
 ) -> list[dict]:
     """
     Search for messages by vector similarity.
@@ -670,6 +671,11 @@ def search_vector(
 
     query_blob = _query_blob
 
+    # Over-fetch when excluding directives so we still return enough results
+    # after filtering.  sqlite-vec MATCH doesn't support WHERE on joined
+    # columns, so we post-filter instead.
+    fetch_limit = limit * 2 if not include_directives else limit
+
     tbl = _active_vec_table(conn)
     rows = conn.execute(
         f"""
@@ -684,11 +690,15 @@ def search_vector(
         JOIN messages m ON m.id = v.rowid
         ORDER BY v.distance
         """,
-        (query_blob, limit),
+        (query_blob, fetch_limit),
     ).fetchall()
 
     results: list[dict] = []
     for row in rows:
+        # Exclude directives by default
+        if not include_directives and row[8]:
+            continue
+
         distance = row[1]
         score = 1.0 / (1.0 + distance)
 
@@ -706,13 +716,14 @@ def search_vector(
             }
         )
 
-    return results
+    return results[:limit]
 
 
 def search_vector_raw(
     conn: sqlite3.Connection,
     query: str,
     limit: int = 5,
+    include_directives: bool = False,
 ) -> list[dict]:
     """Search by vector similarity, returning cosine similarity scores.
 
@@ -724,6 +735,8 @@ def search_vector_raw(
     model = get_model()
     query_embedding = _encode_with_mps_fallback(model, [query])[0]
     query_blob = serialize_f32(query_embedding)
+
+    fetch_limit = limit * 2 if not include_directives else limit
 
     tbl = _active_vec_table(conn)
     rows = conn.execute(
@@ -739,11 +752,14 @@ def search_vector_raw(
         JOIN messages m ON m.id = v.rowid
         ORDER BY v.distance
         """,
-        (query_blob, limit),
+        (query_blob, fetch_limit),
     ).fetchall()
 
     results: list[dict] = []
     for row in rows:
+        if not include_directives and row[8]:
+            continue
+
         distance = row[1]
         cos_sim = max(0.0, min(1.0, 1.0 - distance))
 
@@ -761,7 +777,7 @@ def search_vector_raw(
             }
         )
 
-    return results
+    return results[:limit]
 
 
 # ---------------------------------------------------------------------------
@@ -907,6 +923,7 @@ def search_vector_separation(
     sender: str | None = None,
     limit: int = 10,
     _query_blob: bytes | None = None,
+    include_directives: bool = False,
 ) -> list[dict]:
     """
     Search using separation embeddings.
@@ -943,6 +960,8 @@ def search_vector_separation(
         query_embedding = _encode_with_mps_fallback(model, [query])[0]
         query_blob = serialize_f32(query_embedding)
 
+    fetch_limit = limit * 2 if not include_directives else limit
+
     sep_tbl = _active_sep_table(conn)
     rows = conn.execute(
         f"""
@@ -957,11 +976,14 @@ def search_vector_separation(
         JOIN messages m ON m.id = v.rowid
         ORDER BY v.distance
         """,
-        (query_blob, limit),
+        (query_blob, fetch_limit),
     ).fetchall()
 
     results: list[dict] = []
     for row in rows:
+        if not include_directives and row[8]:
+            continue
+
         distance = row[1]
         score = 1.0 / (1.0 + distance)
         results.append({
@@ -976,7 +998,7 @@ def search_vector_separation(
             "score": round(score, 6),
         })
 
-    return results
+    return results[:limit]
 
 
 # ---------------------------------------------------------------------------

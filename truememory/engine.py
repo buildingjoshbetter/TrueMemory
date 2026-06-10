@@ -1636,7 +1636,7 @@ class TrueMemoryEngine:
         except Exception:
             return None
 
-    def search(self, query: str, limit: int = 10, _skip_surprise_boost: bool = False, _skip_reranker: bool = False, _skip_salience_guard: bool = False) -> list[dict]:
+    def search(self, query: str, limit: int = 10, _skip_surprise_boost: bool = False, _skip_reranker: bool = False, _skip_salience_guard: bool = False, include_directives: bool = False) -> list[dict]:
         """
         Main search pipeline.
 
@@ -1691,6 +1691,7 @@ class TrueMemoryEngine:
                 results = search_hybrid(
                     self.conn, query, limit=limit * 3,
                     fts_weight=fts_w, vec_weight=vec_w,
+                    include_directives=include_directives,
                 )
                 source_label = "hybrid"
             except Exception:
@@ -1699,7 +1700,7 @@ class TrueMemoryEngine:
 
         if not results:
             try:
-                results = search_fts(self.conn, query, limit=limit * 3)
+                results = search_fts(self.conn, query, limit=limit * 3, include_directives=include_directives)
                 source_label = "fts"
                 # Normalize FTS results to match the hybrid output shape.
                 for r in results:
@@ -1921,6 +1922,10 @@ class TrueMemoryEngine:
         seen_content: set = set()
 
         for r in results:
+            # Exclude directives unless explicitly requested (#588)
+            if not include_directives and r.get("directive"):
+                continue
+
             content = r.get("content", "")
             rid = r.get("id")
 
@@ -1975,6 +1980,7 @@ class TrueMemoryEngine:
         reranker_device: str | None = None,
         max_per_session: int = 0,
         use_llm_reranker: bool = False,
+        include_directives: bool = False,
     ) -> list[dict]:
         """
         Agentic retrieval with sufficiency checking and multi-query generation.
@@ -2023,7 +2029,7 @@ class TrueMemoryEngine:
             candidate_pool = max(limit * 8, 100)  # Large pool for reranking
         else:
             candidate_pool = limit * 3
-        primary_results = self.search(query, limit=candidate_pool, _skip_surprise_boost=True, _skip_reranker=True, _skip_salience_guard=True)
+        primary_results = self.search(query, limit=candidate_pool, _skip_surprise_boost=True, _skip_reranker=True, _skip_salience_guard=True, include_directives=include_directives)
 
         # If HyDE available, run a parallel search and fuse with RRF
         if use_hyde and self._has_hyde and self._has_hybrid and llm_fn:
@@ -2162,8 +2168,7 @@ class TrueMemoryEngine:
             existing_ids = {r.get("id") for r in primary_results if r.get("id")}
             for rq in refined_queries:
                 try:
-                    rq_results = self.search(rq, limit=limit, _skip_surprise_boost=True, _skip_reranker=True)
-                    # Normalize refined-query scores to [0, 1]
+                    rq_results = self.search(rq, limit=limit, _skip_surprise_boost=True, _skip_reranker=True, include_directives=include_directives)
                     normalize_scores(rq_results)
                     for rr in rq_results:
                         rid = rr.get("id")

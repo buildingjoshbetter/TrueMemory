@@ -121,6 +121,7 @@ class Memory:
         query: str,
         user_id: str | None = None,
         limit: int = 10,
+        include_directives: bool = False,
     ) -> list[dict]:
         """Search memories using the full 6-layer pipeline.
 
@@ -128,11 +129,15 @@ class Memory:
             query:   Natural-language search string.
             user_id: Filter results to this user (optional).
             limit:   Max results.
+            include_directives: If True, include directive rows in results.
 
         Returns:
             List of result dicts sorted by relevance.
         """
-        results = self._engine.search(query, limit=limit * 3 if user_id else limit)
+        results = self._engine.search(
+            query, limit=limit * 3 if user_id else limit,
+            include_directives=include_directives,
+        )
 
         if user_id:
             results = [r for r in results if r.get("sender", "") == user_id]
@@ -171,6 +176,7 @@ class Memory:
         user_id: str | None = None,
         limit: int = 10,
         llm_fn=None,
+        include_directives: bool = False,
     ) -> list[dict]:
         """Agentic multi-round search (slower, higher accuracy).
 
@@ -179,12 +185,14 @@ class Memory:
             user_id: Filter results to this user (optional).
             limit:   Max results.
             llm_fn:  Callable for HyDE / query refinement (optional).
+            include_directives: If True, include directive rows in results.
 
         Returns:
             List of result dicts sorted by relevance.
         """
         results = self._engine.search_agentic(
             query, limit=limit * 3 if user_id else limit, llm_fn=llm_fn,
+            include_directives=include_directives,
         )
 
         if user_id:

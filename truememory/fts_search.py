@@ -104,6 +104,7 @@ def search_fts(
     conn: sqlite3.Connection,
     query: str,
     limit: int = 10,
+    include_directives: bool = False,
 ) -> list[dict]:
     """
     Search messages using FTS5 with BM25 ranking.
@@ -117,6 +118,7 @@ def search_fts(
         conn:  Open database connection (must have messages_fts table).
         query: Search query -- plain English or FTS5 syntax.
         limit: Maximum number of results to return.
+        include_directives: If False (default), exclude directive=1 rows.
 
     Returns:
         List of result dicts ordered by relevance (best first).
@@ -126,7 +128,8 @@ def search_fts(
     if not query or not query.strip():
         return []
 
-    sql = f"{_FTS_SELECT} WHERE messages_fts MATCH ? ORDER BY messages_fts.rank LIMIT ?"
+    directive_filter = "" if include_directives else " AND (m.directive = 0 OR m.directive IS NULL)"
+    sql = f"{_FTS_SELECT} WHERE messages_fts MATCH ?{directive_filter} ORDER BY messages_fts.rank LIMIT ?"
     safe = _build_safe_query(query)
     if not safe:
         return []
@@ -145,6 +148,7 @@ def search_fts_by_sender(
     query: str,
     sender: str,
     limit: int = 10,
+    include_directives: bool = False,
 ) -> list[dict]:
     """
     Search within a specific sender's messages only.
@@ -157,6 +161,7 @@ def search_fts_by_sender(
         query:  Search query.
         sender: Sender name to restrict results to (case-sensitive).
         limit:  Maximum number of results.
+        include_directives: If False (default), exclude directive=1 rows.
 
     Returns:
         List of result dicts filtered to *sender*, ordered by relevance.
@@ -164,9 +169,10 @@ def search_fts_by_sender(
     if not query or not query.strip():
         return []
 
+    directive_filter = "" if include_directives else " AND (m.directive = 0 OR m.directive IS NULL)"
     sql = (
         f"{_FTS_SELECT}"
-        " WHERE messages_fts MATCH ? AND m.sender = ?"
+        f" WHERE messages_fts MATCH ? AND m.sender = ?{directive_filter}"
         " ORDER BY messages_fts.rank LIMIT ?"
     )
 
@@ -189,6 +195,7 @@ def search_fts_in_range(
     after: str | None = None,
     before: str | None = None,
     limit: int = 10,
+    include_directives: bool = False,
 ) -> list[dict]:
     """
     Search with timestamp filtering.
@@ -205,6 +212,7 @@ def search_fts_in_range(
         after:  Inclusive lower bound timestamp (e.g. ``"2025-06-01"``).
         before: Inclusive upper bound timestamp (e.g. ``"2025-07-01"``).
         limit:  Maximum number of results to return after filtering.
+        include_directives: If False (default), exclude directive=1 rows.
 
     Returns:
         List of result dicts within the time range, ordered by relevance.
@@ -216,9 +224,10 @@ def search_fts_in_range(
     # enough results.
     candidate_limit = min(max(limit * 10, 100), 1000)
 
+    directive_filter = "" if include_directives else " AND (m.directive = 0 OR m.directive IS NULL)"
     sql = (
         f"{_FTS_SELECT}"
-        " WHERE messages_fts MATCH ?"
+        f" WHERE messages_fts MATCH ?{directive_filter}"
         " ORDER BY messages_fts.rank LIMIT ?"
     )
 
@@ -254,14 +263,16 @@ def search_fts_in_range(
 
 
 def _fts_search(conn: sqlite3.Connection, fts_query: str,
-                limit: int = 20) -> list[dict]:
+                limit: int = 20,
+                include_directives: bool = False) -> list[dict]:
     """Run an FTS5 search and return result dicts."""
+    directive_filter = "" if include_directives else " AND (m.directive = 0 OR m.directive IS NULL)"
     sql = (
         "SELECT m.id, m.content, m.sender, m.recipient, m.timestamp, "
         "       m.category, m.modality, messages_fts.rank AS score "
         "FROM messages_fts "
         "JOIN messages m ON m.id = messages_fts.rowid "
-        "WHERE messages_fts MATCH ? "
+        f"WHERE messages_fts MATCH ?{directive_filter} "
         "ORDER BY messages_fts.rank LIMIT ?"
     )
     try:
