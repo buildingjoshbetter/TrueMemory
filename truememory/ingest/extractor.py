@@ -349,7 +349,7 @@ def _parse_extraction_response(response: str, max_facts: int) -> list[ExtractedF
             continue
         facts.append(ExtractedFact(
             content=content,
-            category=str(item.get("category", "general")),
+            category=_validate_category(str(item.get("category", "general"))),
             confidence=str(item.get("confidence", "medium")),
             source_role=str(item.get("source_role", "user")),
         ))
@@ -450,7 +450,7 @@ def _salvage_partial_json(text: str) -> list[ExtractedFact]:
                 if isinstance(content, str) and content.strip():
                     facts.append(ExtractedFact(
                         content=content.strip(),
-                        category=str(item.get("category", "general")),
+                        category=_validate_category(str(item.get("category", "general"))),
                         confidence=str(item.get("confidence", "medium")),
                         source_role=str(item.get("source_role", "user")),
                     ))
@@ -464,6 +464,57 @@ def _salvage_partial_json(text: str) -> list[ExtractedFact]:
     return facts
 
 
+# ---------------------------------------------------------------------------
+# Allowed categories — shared by both LLM and heuristic extractors.
+# Any extracted fact whose category is not in this set gets remapped to
+# "general" so downstream code never sees arbitrary strings.
+# ---------------------------------------------------------------------------
+ALLOWED_CATEGORIES: frozenset[str] = frozenset({
+    "personal", "preference", "decision", "correction", "temporal",
+    "technical", "relationship", "activity", "event", "general",
+})
+
+
+def _validate_category(raw: str) -> str:
+    """Return *raw* if it is an allowed category, else ``"general"``."""
+    normed = raw.strip().lower()
+    return normed if normed in ALLOWED_CATEGORIES else "general"
+
+
+def _normalize_quotes(text: str) -> str:
+    r"""Replace smart/curly quotes with straight ASCII equivalents.
+
+    LLM-produced or copy-pasted transcripts often contain Unicode curly
+    quotes (‘ ’ “ ”) which break regex character
+    classes that only list the ASCII ``'`` and ``"``.
+    """
+    table = str.maketrans({
+        "‘": "'",  # left single curly quote
+        "’": "'",  # right single curly quote / apostrophe
+        "“": '"',  # left double curly quote
+        "”": '"',  # right double curly quote
+    })
+    return text.translate(table)
+
+
+def _extract_user_lines(transcript: str) -> str:
+    """Return only user-role lines from a formatted transcript.
+
+    The formatted transcript (produced by :func:`format_for_extraction`)
+    uses the pattern ``User: ...`` / ``Assistant: ...`` separated by blank
+    lines.  We keep only lines that belong to a ``User:`` block so the
+    heuristic extractor never fires on the assistant's own text (which
+    would produce spurious facts like "I'm an AI assistant").
+    """
+    blocks = transcript.split("\n\n")
+    user_blocks: list[str] = []
+    for block in blocks:
+        stripped = block.strip()
+        if stripped.startswith("User:") or stripped.startswith("user:"):
+            user_blocks.append(stripped)
+    return "\n\n".join(user_blocks)
+
+
 def extract_facts_simple(transcript: str) -> list[ExtractedFact]:
     """
     Extract facts without an LLM — regex/heuristic fallback.
@@ -475,7 +526,17 @@ def extract_facts_simple(transcript: str) -> list[ExtractedFact]:
     - "I am/I'm [X]" patterns (personal facts)
     - "I prefer/like/hate [X]" patterns (preferences)
     - "My [X] is [Y]" patterns (personal facts)
+    - Corrections ("actually", "no, it's", "that's wrong")
+    - Temporal facts (dates, deadlines, schedules)
+    - Technical context (using X, stack is Y, configured Z)
     - Statements with proper nouns and verbs (decisions, events)
+
+    Changes vs. prior version (issue #586):
+    1. Only user-role lines are searched (assistant text is filtered out).
+    2. All patterns use ``re.IGNORECASE`` — no manual case alternations.
+    3. Smart/curly quotes are normalized to straight quotes before matching.
+    4. Three new category groups: correction, temporal, technical.
+    5. Every extracted category is validated against ``ALLOWED_CATEGORIES``.
 
     SECURITY: This is the no-LLM extraction entrypoint, but the facts it
     produces are interpolated verbatim into downstream LLM prompts (e.g. the
@@ -486,53 +547,81 @@ def extract_facts_simple(transcript: str) -> list[ExtractedFact]:
     :func:`_neutralize_delimiters` for the same reason the LLM extractor does:
     untrusted content must never be able to forge a trust-boundary delimiter.
     """
-    facts = []
+    # --- Pre-processing --------------------------------------------------
+    # 1. Role-scope: only extract from user lines.
+    transcript = _extract_user_lines(transcript)
+    # 2. Normalize smart quotes so patterns with ASCII quotes still match.
+    transcript = _normalize_quotes(transcript)
 
-    # Personal identity patterns
-    for pattern, category in [
-        (r"(?:I am|I'm|i am|i'm)\s+(?:a\s+)?(.{3,60}?)(?:\.|,|!|\n|$)", "personal"),
-        (r"(?:my name is|i'm called|call me)\s+(\w+)", "personal"),
-        (r"(?:I live|i live|I'm from|i'm from|I'm in|i'm in)\s+(.{3,40}?)(?:\.|,|!|\n|$)", "personal"),
-        (r"(?:I work|i work)\s+(?:at|for|as)\s+(.{3,40}?)(?:\.|,|!|\n|$)", "personal"),
-    ]:
-        for match in re.finditer(pattern, transcript):
+    facts: list[ExtractedFact] = []
+
+    # Helper — all finditer calls go through here so IGNORECASE is applied
+    # uniformly and category validation happens in one place.
+    def _scan(
+        pattern: str,
+        text: str,
+        category: str,
+        confidence: str = "low",
+    ) -> None:
+        validated_cat = _validate_category(category)
+        for match in re.finditer(pattern, text, re.IGNORECASE):
             facts.append(ExtractedFact(
                 content=_neutralize_delimiters(match.group(0).strip().rstrip(".,!")),
-                category=category,
-                confidence="medium",
+                category=validated_cat,
+                confidence=confidence,
                 source_role="user",
             ))
 
-    # Preference patterns
-    for pattern in [
-        r"(?:I prefer|i prefer|I like|i like|I love|i love)\s+(.{3,60}?)(?:\.|,|!|\n|$)",
-        r"(?:I hate|i hate|I dislike|i dislike|I avoid|i avoid)\s+(.{3,60}?)(?:\.|,|!|\n|$)",
-        r"(?:I always|i always|I never|i never|I usually|i usually)\s+(.{3,60}?)(?:\.|,|!|\n|$)",
+    # --- Personal identity patterns (medium confidence) ------------------
+    for pat, cat in [
+        (r"(?:I am|I'm)\s+(?:a\s+)?(.{3,60}?)(?:\.|,|!|\n|$)", "personal"),
+        (r"(?:my name is|I'm called|call me)\s+(\w+)", "personal"),
+        (r"(?:I live|I'm from|I'm in)\s+(.{3,40}?)(?:\.|,|!|\n|$)", "personal"),
+        (r"(?:I work)\s+(?:at|for|as)\s+(.{3,40}?)(?:\.|,|!|\n|$)", "personal"),
     ]:
-        for match in re.finditer(pattern, transcript):
-            facts.append(ExtractedFact(
-                content=_neutralize_delimiters(match.group(0).strip().rstrip(".,!")),
-                category="preference",
-                confidence="low",
-                source_role="user",
-            ))
+        _scan(pat, transcript, cat, confidence="medium")
 
-    # Activity/project state patterns
-    for pattern, category in [
-        (r"(?:I'm working on|i'm working on|I am working on|working on)\s+(.{3,60}?)(?:\.|,|!|\n|$)", "activity"),
-        (r"(?:I'm building|i'm building|I am building|we're building)\s+(.{3,60}?)(?:\.|,|!|\n|$)", "activity"),
-        (r"(?:I started|i started|I just started|I began|we started)\s+(.{3,60}?)(?:\.|,|!|\n|$)", "event"),
-        (r"(?:I finished|i finished|I completed|I just finished|we shipped)\s+(.{3,60}?)(?:\.|,|!|\n|$)", "event"),
-        (r"(?:I moved|i moved|I switched|I changed|I transitioned)\s+(?:to|from)\s+(.{3,60}?)(?:\.|,|!|\n|$)", "event"),
-        (r"(?:I hired|i hired|I fired|we hired|we brought on)\s+(.{3,60}?)(?:\.|,|!|\n|$)", "relationship"),
-        (r"(?:I decided|i decided|we decided|I chose|we chose)\s+(.{3,60}?)(?:\.|,|!|\n|$)", "decision"),
+    # --- Preference patterns ---------------------------------------------
+    for pat in [
+        r"(?:I prefer|I like|I love)\s+(.{3,60}?)(?:\.|,|!|\n|$)",
+        r"(?:I hate|I dislike|I avoid)\s+(.{3,60}?)(?:\.|,|!|\n|$)",
+        r"(?:I always|I never|I usually)\s+(.{3,60}?)(?:\.|,|!|\n|$)",
     ]:
-        for match in re.finditer(pattern, transcript):
-            facts.append(ExtractedFact(
-                content=_neutralize_delimiters(match.group(0).strip().rstrip(".,!")),
-                category=category,
-                confidence="low",
-                source_role="user",
-            ))
+        _scan(pat, transcript, "preference")
+
+    # --- Correction patterns (new — issue #586) --------------------------
+    for pat in [
+        r"(?:actually,?\s+|no,?\s+it's\s+|that's wrong,?\s+|that's not right,?\s+|correction:\s+)(.{3,80}?)(?:\.|,|!|\n|$)",
+        r"(?:I meant|I mean|let me correct)\s+(.{3,80}?)(?:\.|,|!|\n|$)",
+    ]:
+        _scan(pat, transcript, "correction")
+
+    # --- Temporal patterns (new — issue #586) ----------------------------
+    for pat in [
+        r"(?:by|before|after|on|until|deadline is)\s+(?:january|february|march|april|may|june|july|august|september|october|november|december|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\b.{0,60}?(?:\.|,|!|\n|$)",
+        r"(?:next week|next month|next year|tomorrow|yesterday|last week|last month)\s+(.{3,60}?)(?:\.|,|!|\n|$)",
+        r"(?:I'm planning|I plan to|scheduled for|due on|due by)\s+(.{3,60}?)(?:\.|,|!|\n|$)",
+    ]:
+        _scan(pat, transcript, "temporal")
+
+    # --- Technical context patterns (new — issue #586) -------------------
+    for pat in [
+        r"(?:I use|I'm using|we use|we're using|our stack is|stack is)\s+(.{3,60}?)(?:\.|,|!|\n|$)",
+        r"(?:I configured|I set up|we configured|we deployed|we run)\s+(.{3,60}?)(?:\.|,|!|\n|$)",
+        r"(?:the architecture|our architecture|we chose|I chose)\s+(.{3,60}?)(?:\.|,|!|\n|$)",
+    ]:
+        _scan(pat, transcript, "technical")
+
+    # --- Activity / project state patterns -------------------------------
+    for pat, cat in [
+        (r"(?:I'm working on|I am working on|working on)\s+(.{3,60}?)(?:\.|,|!|\n|$)", "activity"),
+        (r"(?:I'm building|I am building|we're building)\s+(.{3,60}?)(?:\.|,|!|\n|$)", "activity"),
+        (r"(?:I started|I just started|I began|we started)\s+(.{3,60}?)(?:\.|,|!|\n|$)", "event"),
+        (r"(?:I finished|I completed|I just finished|we shipped)\s+(.{3,60}?)(?:\.|,|!|\n|$)", "event"),
+        (r"(?:I moved|I switched|I changed|I transitioned)\s+(?:to|from)\s+(.{3,60}?)(?:\.|,|!|\n|$)", "event"),
+        (r"(?:I hired|I fired|we hired|we brought on)\s+(.{3,60}?)(?:\.|,|!|\n|$)", "relationship"),
+        (r"(?:I decided|we decided|I chose|we chose)\s+(.{3,60}?)(?:\.|,|!|\n|$)", "decision"),
+    ]:
+        _scan(pat, transcript, cat)
 
     return facts
