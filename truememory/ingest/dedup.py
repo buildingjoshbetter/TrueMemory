@@ -106,6 +106,10 @@ def check_duplicate(
         log.warning("Dedup search failed: %s", e)
         return DedupDecision(action=DedupAction.ADD, fact=fact, reason="search failed, defaulting to add")
 
+    # Guard: directives are sacred standing instructions — never UPDATE or
+    # SKIP against them.  Filter them out so dedup treats them as invisible.
+    results = [r for r in results if not r.get("directive", False)]
+
     if not results:
         return DedupDecision(action=DedupAction.ADD, fact=fact, reason="no existing memories")
 
