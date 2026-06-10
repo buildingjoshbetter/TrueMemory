@@ -37,8 +37,11 @@ Dependencies:
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections import defaultdict
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -79,29 +82,35 @@ def reciprocal_rank_fusion(
         return []
 
     # Accumulate scores and keep the best copy of each document.
-    scores: dict[int, float] = defaultdict(float)
-    best_doc: dict[int, dict] = {}
+    # Keys are normalised to str so id=0 (falsy int) is never collapsed
+    # and mixed int/str IDs referring to the same logical doc merge correctly.
+    scores: dict[str, float] = defaultdict(float)
+    best_doc: dict[str, dict] = {}
 
     for result_list in non_empty:
         for rank_0, doc in enumerate(result_list):
-            doc_id = doc["id"]
+            doc_id = doc.get("id")
+            if doc_id is None:
+                continue  # skip docs with no id
+            key = str(doc_id)
             rank_1 = rank_0 + 1  # RRF uses 1-based ranks
-            scores[doc_id] += 1.0 / (k + rank_1)
+            scores[key] += 1.0 / (k + rank_1)
 
             # Keep the copy with the most fields (or the first seen).
-            if doc_id not in best_doc or len(doc) > len(best_doc[doc_id]):
-                best_doc[doc_id] = doc
+            if key not in best_doc or len(doc) > len(best_doc[key]):
+                best_doc[key] = doc
 
     # Build fused result list.
     fused: list[dict] = []
-    for doc_id, rrf_score in scores.items():
-        entry = dict(best_doc[doc_id])  # shallow copy
+    for key, rrf_score in scores.items():
+        entry = dict(best_doc[key])  # shallow copy
         entry["rrf_score"] = round(rrf_score, 8)
         entry["score"] = entry["rrf_score"]
         fused.append(entry)
 
-    # Sort by RRF score descending (tie-break by id for determinism).
-    fused.sort(key=lambda d: (-d["rrf_score"], d["id"]))
+    # Sort by RRF score descending; tie-break by str(id) for determinism
+    # (str comparison is type-stable even when original IDs are mixed types).
+    fused.sort(key=lambda d: (-d["rrf_score"], str(d.get("id", ""))))
     return fused
 
 
@@ -202,57 +211,70 @@ def search_hybrid(
     # ------------------------------------------------------------------
     # 2. Build rank maps for provenance tracking.
     # ------------------------------------------------------------------
-    fts_ranks: dict[int, int] = {
-        doc["id"]: rank + 1 for rank, doc in enumerate(fts_results)
+    # Use str keys so id=0 is never treated as falsy / collapsed.
+    fts_ranks: dict[str, int] = {
+        str(doc["id"]): rank + 1 for rank, doc in enumerate(fts_results)
+        if doc.get("id") is not None
     }
-    vec_ranks: dict[int, int] = {
-        doc["id"]: rank + 1 for rank, doc in enumerate(vec_results)
+    vec_ranks: dict[str, int] = {
+        str(doc["id"]): rank + 1 for rank, doc in enumerate(vec_results)
+        if doc.get("id") is not None
     }
-    sep_ranks: dict[int, int] = {
-        doc["id"]: rank + 1 for rank, doc in enumerate(sep_results)
+    sep_ranks: dict[str, int] = {
+        str(doc["id"]): rank + 1 for rank, doc in enumerate(sep_results)
+        if doc.get("id") is not None
     } if sep_results else {}
 
     # ------------------------------------------------------------------
     # 3. 3-list weighted RRF fusion.
     # ------------------------------------------------------------------
     k = 60
-    scores: dict[int, float] = defaultdict(float)
-    best_doc: dict[int, dict] = {}
+    scores: dict[str, float] = defaultdict(float)
+    best_doc: dict[str, dict] = {}
 
     for rank_0, doc in enumerate(fts_results):
-        doc_id = doc["id"]
-        scores[doc_id] += fts_weight * (1.0 / (k + rank_0 + 1))
-        if doc_id not in best_doc or len(doc) > len(best_doc[doc_id]):
-            best_doc[doc_id] = doc
+        doc_id = doc.get("id")
+        if doc_id is None:
+            continue
+        key = str(doc_id)
+        scores[key] += fts_weight * (1.0 / (k + rank_0 + 1))
+        if key not in best_doc or len(doc) > len(best_doc[key]):
+            best_doc[key] = doc
 
     for rank_0, doc in enumerate(vec_results):
-        doc_id = doc["id"]
-        scores[doc_id] += vec_weight * (1.0 / (k + rank_0 + 1))
-        if doc_id not in best_doc or len(doc) > len(best_doc[doc_id]):
-            best_doc[doc_id] = doc
+        doc_id = doc.get("id")
+        if doc_id is None:
+            continue
+        key = str(doc_id)
+        scores[key] += vec_weight * (1.0 / (k + rank_0 + 1))
+        if key not in best_doc or len(doc) > len(best_doc[key]):
+            best_doc[key] = doc
 
     sep_weight = vec_weight * 0.8  # slightly lower weight for separation
     for rank_0, doc in enumerate(sep_results):
-        doc_id = doc["id"]
-        scores[doc_id] += sep_weight * (1.0 / (k + rank_0 + 1))
-        if doc_id not in best_doc or len(doc) > len(best_doc[doc_id]):
-            best_doc[doc_id] = doc
+        doc_id = doc.get("id")
+        if doc_id is None:
+            continue
+        key = str(doc_id)
+        scores[key] += sep_weight * (1.0 / (k + rank_0 + 1))
+        if key not in best_doc or len(doc) > len(best_doc[key]):
+            best_doc[key] = doc
 
     # ------------------------------------------------------------------
     # 4. Assemble results with provenance metadata.
     # ------------------------------------------------------------------
     fused: list[dict] = []
-    for doc_id, rrf_score in scores.items():
-        entry = dict(best_doc[doc_id])  # shallow copy
+    for key, rrf_score in scores.items():
+        entry = dict(best_doc[key])  # shallow copy
 
-        in_fts = doc_id in fts_ranks
-        in_vec = doc_id in vec_ranks
-        in_sep = doc_id in sep_ranks
+        in_fts = key in fts_ranks
+        in_vec = key in vec_ranks
+        in_sep = key in sep_ranks
 
         entry["rrf_score"] = round(rrf_score, 8)
         entry["score"] = entry["rrf_score"]
-        entry["fts_rank"] = fts_ranks.get(doc_id)
-        entry["vec_rank"] = vec_ranks.get(doc_id)
+        entry["fts_rank"] = fts_ranks.get(key)
+        entry["vec_rank"] = vec_ranks.get(key)
 
         sources = []
         if in_fts:
@@ -265,7 +287,8 @@ def search_hybrid(
 
         fused.append(entry)
 
-    # Sort by RRF score descending (tie-break by id for determinism).
-    fused.sort(key=lambda d: (-d["rrf_score"], d["id"]))
+    # Sort by RRF score descending; tie-break by str(id) for determinism
+    # (str comparison is type-stable even when original IDs are mixed types).
+    fused.sort(key=lambda d: (-d["rrf_score"], str(d.get("id", ""))))
 
     return fused[:limit]

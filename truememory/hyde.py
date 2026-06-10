@@ -163,10 +163,14 @@ def hyde_search(
         return original_results[:limit]
 
     # Search with hypothetical document
-    hyde_results = search_hybrid(
-        conn, hyp_doc, limit=candidate_pool,
-        fts_weight=fts_weight, vec_weight=vec_weight,
-    )
+    try:
+        hyde_results = search_hybrid(
+            conn, hyp_doc, limit=candidate_pool,
+            fts_weight=fts_weight, vec_weight=vec_weight,
+        )
+    except Exception as e:
+        log.warning("HyDE fusion failed (search with hypothetical doc): %s", e)
+        return original_results[:limit]
 
     # Tag sources
     for r in original_results:
@@ -175,7 +179,11 @@ def hyde_search(
         r["source"] = r.get("source", "hybrid") + "+hyde"
 
     # Fuse with RRF
-    fused = reciprocal_rank_fusion([original_results, hyde_results])
+    try:
+        fused = reciprocal_rank_fusion([original_results, hyde_results])
+    except Exception as e:
+        log.warning("HyDE RRF fusion failed, returning original results: %s", e)
+        return original_results[:limit]
     return fused[:limit]
 
 
@@ -229,7 +237,7 @@ def hyde_multi_search(
             )
             all_result_lists.append(hyde_results)
         except Exception as e:
-            log.debug("HyDE hybrid search failed for hypothetical doc: %s", e)
+            log.warning("HyDE hybrid search failed for hypothetical doc: %s", e)
 
     if len(all_result_lists) == 1:
         return original_results[:limit]
