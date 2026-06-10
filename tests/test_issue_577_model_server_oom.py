@@ -221,8 +221,8 @@ class TestIssue577StickyCpuOom:
         model = MagicMock()
         model.encode = encode
         model.to = lambda device: to_calls.append(device)
-        server._embed_model = model
-        server._embed_tier = ""
+        from truememory.model_server import _EmbedState
+        server._embed_state = _EmbedState(model=model, tier="", model_id="model2vec")
 
         req = {"op": "embed", "texts": ["a", "b"], "tier": ""}
         with caplog.at_level("ERROR", logger="truememory.model_server"):
@@ -264,8 +264,8 @@ class TestIssue577StickyCpuOom:
 
         model = MagicMock()
         model.encode = encode
-        server._embed_model = model
-        server._embed_tier = ""
+        from truememory.model_server import _EmbedState
+        server._embed_state = _EmbedState(model=model, tier="", model_id="model2vec")
 
         results: list[dict] = []
         t = threading.Thread(
@@ -300,8 +300,8 @@ class TestIssue577StickyCpuOom:
         model.encode = MagicMock(
             side_effect=RuntimeError("CUDA error: device-side assert triggered")
         )
-        server._embed_model = model
-        server._embed_tier = ""
+        from truememory.model_server import _EmbedState
+        server._embed_state = _EmbedState(model=model, tier="", model_id="model2vec")
 
         with pytest.raises(RuntimeError, match="CUDA"):
             server.handle_request({"op": "embed", "texts": ["a", "b"], "tier": ""})
@@ -392,8 +392,8 @@ class TestIssue577FastLane:
                 "fast lane must not use the locked main model while a batch runs"
             )
         )
-        server._embed_model = main_model
-        server._embed_tier = ""
+        from truememory.model_server import _EmbedState
+        server._embed_state = _EmbedState(model=main_model, tier="", model_id="model2vec")
 
         fast_calls: list[list[str]] = []
 
@@ -434,13 +434,14 @@ class TestIssue577FastLane:
             server._lock.release()
 
     def test_issue_577_fast_lane_model_dim_parity(self, monkeypatch):
-        """Panel round 1, item 3/4: the fast-lane encoder's (model_id, dim)
-        must equal the main path's — including under sticky-CPU degradation
-        and global tier drift — and must DECLINE (fall through) for custom
-        models where parity cannot be guaranteed. Stubs at the loader level
-        (_build_embed_model) so the real parity/resolution logic runs."""
+        """Panel rounds 1-2, items 3/4: the fast-lane encoder's
+        (model_id, dim) must equal the main path's — including under
+        sticky-CPU degradation and global tier drift — and must DECLINE
+        (fall through) when no snapshot exists for the tier or the model is
+        custom. Stubs at the loader level (_build_embed_model) so the real
+        parity logic runs."""
         import truememory.vector_search as vs
-        from truememory.model_server import ModelServer
+        from truememory.model_server import ModelServer, _EmbedState
 
         built: list[tuple] = []
 
@@ -467,16 +468,26 @@ class TestIssue577FastLane:
         server._sticky_cpu.add("embed")  # simulate sticky-CPU degradation
         monkeypatch.setattr(vs, "EMBEDDING_MODEL", "base")
 
+        # No snapshot yet: the fast lane must DECLINE (round 2 semantics —
+        # the one-time load happens exactly once, on the main path).
+        assert server._lock.acquire(timeout=1)
+        try:
+            assert server._handle_fast_embed(["q"], "") is None, (
+                "fast lane must decline when no main model is loaded yet"
+            )
+        finally:
+            server._lock.release()
+
         # Main path loads for tier="" -> resolves via the global ("base"
-        # -> qwen3_256) and records the actual loaded identity.
+        # -> qwen3_256) and records the loaded identity in the snapshot.
         resp = server.handle_request({"op": "embed", "texts": ["a", "b"], "tier": ""})
         assert resp["ok"] is True
-        assert server._embed_model_id == "qwen3_256"
+        assert server._embed_state.model_id == "qwen3_256"
         assert built[-1] == ("qwen3_256", "cpu"), "sticky degradation must load on CPU"
 
         # Global drift AFTER the main load: a fresh tier="" resolution would
         # now pick model2vec — a DIFFERENT vector space. The fast lane must
-        # follow the main path's actual loaded identity instead.
+        # follow the snapshot's actual loaded identity instead.
         monkeypatch.setattr(vs, "EMBEDDING_MODEL", "edge")
 
         assert server._lock.acquire(timeout=1)  # force the contended branch
@@ -485,21 +496,24 @@ class TestIssue577FastLane:
         finally:
             server._lock.release()
         assert result is not None and result["ok"] is True
-        assert server._fast_model_id == server._embed_model_id == "qwen3_256", (
+        assert server._fast_model_id == server._embed_state.model_id == "qwen3_256", (
             "fast-lane encoder drifted from the main path's loaded model — "
             "single-text embeddings would silently mismatch the vec table"
         )
         assert built[-1] == ("qwen3_256", "cpu")
 
-        main_dim = server._embed_model.encode(["x"]).shape[1]
+        main_dim = server._embed_state.model.encode(["x"]).shape[1]
         fast_dim = server._fast_encoder.encode(["x"]).shape[1]
         assert main_dim == fast_dim, "fast-lane embeddings in a different space"
 
         # Custom model: dim is re-read from config.json at build time, so
         # parity cannot be guaranteed -> the fast lane must decline and the
         # request must fall through to the main (locked) path.
-        server._embed_model_id = "acme/custom-encoder"
-        server._embed_tier = "custom"
+        server._embed_state = _EmbedState(
+            model=FakeModel("acme/custom-encoder", "cpu"),
+            tier="custom",
+            model_id="acme/custom-encoder",
+        )
         assert server._lock.acquire(timeout=1)
         try:
             assert server._handle_fast_embed(["q"], "custom") is None, (
@@ -509,10 +523,24 @@ class TestIssue577FastLane:
         finally:
             server._lock.release()
 
+        # Allowlist honesty (round 2 item 5): ids without an explicit
+        # _build_embed_model branch (minilm/bge-small legacy fall-through)
+        # must also decline.
+        server._embed_state = _EmbedState(
+            model=FakeModel("minilm", "cpu"), tier="", model_id="minilm",
+        )
+        assert server._lock.acquire(timeout=1)
+        try:
+            assert server._handle_fast_embed(["q"], "") is None, (
+                "minilm has no explicit builder branch — fast lane must decline"
+            )
+        finally:
+            server._lock.release()
+
     def test_issue_577_fast_lane_no_global_mutation(self, monkeypatch):
-        """Panel round 1, item 2: the fast lane resolves the model id as a
-        PURE READ — it must never call set_embedding_model, which
-        force-unloads vector_search's model singleton and rewrites
+        """Panel rounds 1-2, item 2: the fast lane never resolves tiers at
+        all — it must never call set_embedding_model, which force-unloads
+        vector_search's model singleton and rewrites
         EMBEDDING_MODEL/_embedding_dim while the main path may be
         mid-encode."""
         import truememory.vector_search as vs
@@ -534,7 +562,15 @@ class TestIssue577FastLane:
         monkeypatch.setattr(vs, "EMBEDDING_MODEL", "edge")
 
         server = ModelServer()
-        assert server._lock.acquire(timeout=1)  # force the contended branch
+        # Arm the snapshot via a main-path load (the historical mutating
+        # sync happens exactly here, under the lock).
+        resp = server.handle_request({"op": "embed", "texts": ["a", "b"], "tier": "base"})
+        assert resp["ok"] is True
+        assert calls == ["base"]
+        calls.clear()
+
+        # Contended fast lane: serves from the snapshot, zero mutation.
+        assert server._lock.acquire(timeout=1)
         try:
             result = server._handle_fast_embed(["q"], "base")
         finally:
@@ -546,12 +582,108 @@ class TestIssue577FastLane:
         )
         assert vs.EMBEDDING_MODEL == "edge"
 
-        # The main (locked) path keeps its historical set_embedding_model
-        # sync — only the fast lane is mutation-free.
-        server2 = ModelServer()
-        resp = server2.handle_request({"op": "embed", "texts": ["a", "b"], "tier": "base"})
-        assert resp["ok"] is True
-        assert calls == ["base"]
+    def test_issue_577_fast_lane_concurrent_tier_load_parity(self, monkeypatch):
+        """Panel round 2, item 6: interleave a main-path tier load (blocked
+        mid-build, holding the global lock) with a fast-lane single-text in
+        another thread, plus a mid-load global drift. The single-text result
+        must be parity (same model id as the main load) or an explicit
+        decline that falls through to the main path — never a fresh
+        resolution into a different vector space. Loader-level stub;
+        3 threads total."""
+        import truememory.vector_search as vs
+        from truememory.model_server import ModelServer
+
+        built: list[tuple] = []
+        build_started = threading.Event()
+        release_build = threading.Event()
+
+        class FakeModel:
+            def __init__(self, model_id):
+                self.model_id = model_id
+                self.marker = float(abs(hash(model_id)) % 997)
+
+            def encode(self, texts, **kwargs):
+                return np.full((len(texts), 8), self.marker, dtype=np.float32)
+
+        def fake_build(model_id, device):
+            built.append((model_id, device, threading.current_thread().name))
+            if threading.current_thread().name == "main-loader":
+                build_started.set()
+                assert release_build.wait(10), "test deadlock: build never released"
+            return FakeModel(model_id)
+
+        monkeypatch.setattr(
+            ModelServer, "_build_embed_model", staticmethod(fake_build)
+        )
+        monkeypatch.setattr(vs, "EMBEDDING_MODEL", "base")
+
+        server = ModelServer()
+        results_a: list[dict] = []
+        results_b: list[dict] = []
+
+        ta = threading.Thread(
+            name="main-loader",
+            target=lambda: results_a.append(
+                server.handle_request({"op": "embed", "texts": ["a", "b"], "tier": ""})
+            ),
+            daemon=True,
+        )
+        ta.start()
+        assert build_started.wait(10)  # A is mid-load, holding the lock
+
+        # Global drift WHILE the load is in flight: a fresh tier=""
+        # resolution would now pick model2vec instead of qwen3_256.
+        monkeypatch.setattr(vs, "EMBEDDING_MODEL", "edge")
+
+        tb = threading.Thread(
+            name="fast-lane",
+            target=lambda: results_b.append(
+                server.handle_request({"op": "embed", "texts": ["hook q"], "tier": ""})
+            ),
+            daemon=True,
+        )
+        tb.start()
+        tb.join(2)
+        # Correct behavior: B declined (no snapshot yet) and is blocked
+        # behind the main load — it must NOT have answered from a freshly
+        # resolved (drifted) model.
+        release_build.set()
+        ta.join(10)
+        tb.join(10)
+        assert not ta.is_alive() and not tb.is_alive()
+        assert results_a and results_a[0]["ok"] is True
+        assert results_b and results_b[0]["ok"] is True
+
+        # Every encoder built during the interleaving resolved to the SAME
+        # model id — no vector-space fork.
+        ids = {m for (m, _d, _t) in built}
+        assert ids == {"qwen3_256"}, (
+            f"vector-space fork during concurrent tier load: built {ids}"
+        )
+        assert results_a[0]["vectors"][0, 0] == results_b[0]["vectors"][0, 0], (
+            "single-text vectors in a different space than the batch vectors"
+        )
+
+        # Phase 2: with the snapshot armed and the lock held by a batch,
+        # the contended fast lane serves from the snapshot identity.
+        results_c: list[dict] = []
+        assert server._lock.acquire(timeout=1)
+        try:
+            tc = threading.Thread(
+                name="fast-lane-2",
+                target=lambda: results_c.append(
+                    server.handle_request({"op": "embed", "texts": ["q2"], "tier": ""})
+                ),
+                daemon=True,
+            )
+            tc.start()
+            tc.join(5)
+            assert not tc.is_alive(), "fast lane blocked despite armed snapshot"
+        finally:
+            server._lock.release()
+        assert results_c and results_c[0]["ok"] is True
+        assert results_c[0]["vectors"][0, 0] == results_a[0]["vectors"][0, 0]
+        assert server._fast_model_id == "qwen3_256"
 
     def test_issue_577_single_text_uses_main_path_when_idle(self, monkeypatch):
         """With no contention the fast lane uses the main model (no extra
@@ -563,8 +695,8 @@ class TestIssue577FastLane:
         main_model.encode = MagicMock(
             return_value=np.ones((1, 4), dtype=np.float32)
         )
-        server._embed_model = main_model
-        server._embed_tier = ""
+        from truememory.model_server import _EmbedState
+        server._embed_state = _EmbedState(model=main_model, tier="", model_id="model2vec")
 
         resp = server.handle_request({"op": "embed", "texts": ["q"], "tier": ""})
         assert resp["ok"] is True

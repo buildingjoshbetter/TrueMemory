@@ -130,8 +130,10 @@ class TestIssue459MPSOOMFallback:
         mock_model = MagicMock()
         mock_model.encode = mock_encode
 
-        server._embed_model = mock_model
-        server._embed_tier = ""
+        # Issue #577 (panel round 2): the server now stores the loaded model
+        # as one immutable _EmbedState snapshot; inject via the snapshot.
+        from truememory.model_server import _EmbedState
+        server._embed_state = _EmbedState(model=mock_model, tier="", model_id="model2vec")
 
         request = {"op": "embed", "texts": ["hello", "world", "test"], "tier": ""}
         response = server.handle_request(request)
@@ -153,8 +155,10 @@ class TestIssue459MPSOOMFallback:
         mock_model = MagicMock()
         mock_model.encode = mock_encode
 
-        server._embed_model = mock_model
-        server._embed_tier = ""
+        # Issue #577 (panel round 2): the server now stores the loaded model
+        # as one immutable _EmbedState snapshot; inject via the snapshot.
+        from truememory.model_server import _EmbedState
+        server._embed_state = _EmbedState(model=mock_model, tier="", model_id="model2vec")
 
         request = {"op": "embed", "texts": ["hello"], "tier": ""}
         with pytest.raises(RuntimeError, match="CUDA"):

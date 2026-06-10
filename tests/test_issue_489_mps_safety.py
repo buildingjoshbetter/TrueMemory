@@ -126,18 +126,28 @@ class TestModelServerMpsRestore(unittest.TestCase):
         import inspect
         from truememory import model_server
         handler_source = inspect.getsource(model_server.ModelServer.handle_request)
-        cpu_idx = handler_source.find('model.to("cpu")')
-        mps_idx = handler_source.find('model.to("mps")')
-        self.assertGreater(cpu_idx, -1, "Should have model.to('cpu')")
-        self.assertEqual(
-            mps_idx, -1,
-            "model.to('mps') re-promotion must NOT exist — sticky-CPU "
-            "degradation (issue #577) replaces the H4 restore behavior",
+        recovery_source = inspect.getsource(
+            model_server.ModelServer._recover_embed_oom_locked
         )
-        self.assertIn(
-            "_mark_sticky_cpu", handler_source,
-            "OOM recovery must mark the model sticky-CPU (issue #577)",
-        )
+        fast_source = inspect.getsource(model_server.ModelServer._handle_fast_embed)
+        # All embed OOM recovery is routed through the single helper
+        # (issue #577 panel round 2) — both the batch path and the fast lane.
+        self.assertIn("_recover_embed_oom_locked", handler_source)
+        self.assertIn("_recover_embed_oom_locked", fast_source)
+        self.assertIn('model.to("cpu")', recovery_source,
+                      "recovery must move the model to CPU")
+        self.assertIn("_mark_sticky_cpu", recovery_source,
+                      "OOM recovery must mark the model sticky-CPU (issue #577)")
+        for src_name, src in (
+            ("handle_request", handler_source),
+            ("_recover_embed_oom_locked", recovery_source),
+            ("_handle_fast_embed", fast_source),
+        ):
+            self.assertNotIn(
+                'model.to("mps")', src,
+                f"model.to('mps') re-promotion must NOT exist in {src_name} — "
+                "sticky-CPU degradation (issue #577) replaces the H4 restore",
+            )
 
 
 if __name__ == "__main__":
