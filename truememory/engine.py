@@ -1636,7 +1636,7 @@ class TrueMemoryEngine:
         except Exception:
             return None
 
-    def search(self, query: str, limit: int = 10, _skip_surprise_boost: bool = False, _skip_reranker: bool = False) -> list[dict]:
+    def search(self, query: str, limit: int = 10, _skip_surprise_boost: bool = False, _skip_reranker: bool = False, _skip_salience_guard: bool = False) -> list[dict]:
         """
         Main search pipeline.
 
@@ -1858,7 +1858,10 @@ class TrueMemoryEngine:
                 logger.debug("Consolidated search failed in search()", exc_info=True)
 
         # ── 7. Salience guard with mode-aware threshold (A5) ──────────────
-        if self._has_salience and results:
+        # Skipped when called from search_agentic() which applies its own
+        # salience guard after entity boosting to avoid filtering out
+        # low-salience entity-matched rows before the boost can rescue them.
+        if self._has_salience and results and not _skip_salience_guard:
             try:
                 _sal_override = os.environ.get("TRUEMEMORY_MIN_SALIENCE")
                 if _sal_override is not None:
@@ -2003,7 +2006,7 @@ class TrueMemoryEngine:
             candidate_pool = max(limit * 8, 100)  # Large pool for reranking
         else:
             candidate_pool = limit * 3
-        primary_results = self.search(query, limit=candidate_pool, _skip_surprise_boost=True, _skip_reranker=True)
+        primary_results = self.search(query, limit=candidate_pool, _skip_surprise_boost=True, _skip_reranker=True, _skip_salience_guard=True)
 
         # If HyDE available, run a parallel search and fuse with RRF
         if use_hyde and self._has_hyde and self._has_hybrid and llm_fn:
@@ -2056,6 +2059,10 @@ class TrueMemoryEngine:
         # Strategy: BOOST existing primary results that also appear in entity
         # search (overlap = strong signal), and add genuinely new results at
         # a competitive score level so they can displace weak primary results.
+        #
+        # Fix #582: Use _entity_boosted flag to ensure boost is applied
+        # exactly once.  The flag is checked before boosting and set after,
+        # so repeated calls (e.g. from refined-query merges) are idempotent.
         try:
             entity_results = self._entity_focused_search(query, limit * 2)
             if entity_results and primary_results:
@@ -2064,8 +2071,9 @@ class TrueMemoryEngine:
                 # Boost primary results that overlap with entity search
                 for pr in primary_results:
                     pid = pr.get("id")
-                    if pid and pid in entity_ids:
+                    if pid and pid in entity_ids and not pr.get("_entity_boosted"):
                         pr["score"] = pr.get("score", pr.get("rrf_score", 0)) * 1.5
+                        pr["_entity_boosted"] = True
                         if "entity_boost" not in pr.get("source", ""):
                             pr["source"] = pr.get("source", "") + "+entity_boost"
 
@@ -2085,6 +2093,7 @@ class TrueMemoryEngine:
                     if eid and eid not in existing_ids:
                         er["score"] = median_score * 0.9
                         er["source"] = er.get("source", "") + "+entity_new"
+                        er["_entity_boosted"] = True
                         primary_results.append(er)
                         existing_ids.add(eid)
                         added += 1
@@ -2097,6 +2106,32 @@ class TrueMemoryEngine:
                 )
         except Exception:
             logger.debug("Entity-focused search failed in search_agentic()", exc_info=True)
+
+        # ── Salience guard (deferred from search() for #582) ─────────────
+        # Applied HERE instead of inside search() so that entity-boosted
+        # rows survive the salience floor.  Entity-matched rows (flagged
+        # with _entity_boosted) are exempt from the salience floor to
+        # prevent the guard from discarding low-salience entity evidence.
+        if self._has_salience and primary_results:
+            try:
+                _sal_override = os.environ.get("TRUEMEMORY_MIN_SALIENCE")
+                if _sal_override is not None:
+                    try:
+                        min_sal = float(_sal_override)
+                    except (ValueError, TypeError):
+                        min_sal = 0.05
+                else:
+                    min_sal = 0.05
+                primary_results = apply_salience_guard(
+                    primary_results, query, conn=self.conn,
+                    min_salience=min_sal,
+                    entity_rescue_ids=frozenset(
+                        r.get("id") for r in primary_results
+                        if r.get("_entity_boosted") and r.get("id")
+                    ),
+                )
+            except Exception:
+                logger.debug("Salience guard failed in search_agentic()", exc_info=True)
 
         # ── Sufficiency check ─────────────────────────────────────────────
         is_sufficient = self._check_sufficiency(primary_results[:5])

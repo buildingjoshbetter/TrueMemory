@@ -354,20 +354,26 @@ def detect_entities(query: str, conn: sqlite3.Connection | None = None) -> list[
 def filter_by_salience(
     results: list[dict],
     min_salience: float = 0.10,
+    entity_rescue_ids: frozenset[int] | None = None,
 ) -> list[dict]:
     """
     Remove low-salience noise from search results.
 
     Each result gets a ``salience`` score added to its dict. Results below
-    ``min_salience`` are removed entirely.
+    ``min_salience`` are removed entirely, **unless** their ``id`` is in
+    *entity_rescue_ids* (entity-boosted rows that should survive regardless
+    of raw salience; see #582).
 
     Args:
-        results:      List of message dicts from search.
-        min_salience: Minimum salience score to keep (default 0.10).
+        results:            List of message dicts from search.
+        min_salience:       Minimum salience score to keep (default 0.10).
+        entity_rescue_ids:  Optional frozenset of message IDs exempt from
+                            the salience floor.
 
     Returns:
         Filtered list with ``salience`` scores attached.
     """
+    _rescue = entity_rescue_ids or frozenset()
     filtered = []
     for r in results:
         salience = compute_message_salience(
@@ -375,7 +381,7 @@ def filter_by_salience(
             r.get("modality", ""),
         )
         r["salience"] = salience
-        if salience >= min_salience:
+        if salience >= min_salience or r.get("id") in _rescue:
             filtered.append(r)
     return filtered
 
@@ -484,6 +490,7 @@ def apply_salience_guard(
     query: str,
     conn: sqlite3.Connection | None = None,
     min_salience: float = 0.10,
+    entity_rescue_ids: frozenset[int] | None = None,
 ) -> list[dict]:
     """
     Main entry point for the L4 Salience Guard.
@@ -494,18 +501,25 @@ def apply_salience_guard(
     2. **Entity boosting**: Promote results relevant to queried entities
        (runs first so entity-relevant results are not prematurely discarded).
     3. **Salience filtering**: Remove low-value noise (``"ok"``, ``"lol"``).
+       Results whose ``id`` is in *entity_rescue_ids* are exempt from the
+       salience floor so that entity-matched rows survive even when their
+       raw salience is below the threshold (#582).
     4. **Return**: Re-ranked results with ``salience`` and ``entity_boost``
        scores attached for downstream inspection.
 
     Args:
-        results:      List of message dicts from any search layer (FTS5, hybrid,
-                      temporal, etc.).
-        query:        The original natural language query.
-        conn:         Optional database connection for dynamic entity lookup.
-                      If not provided, uses hardcoded entity list.
-        min_salience: Minimum salience threshold for filtering (default 0.10).
-                      Lower values (e.g. 0.15) allow more results through for
-                      broad/diffuse queries.
+        results:            List of message dicts from any search layer (FTS5,
+                            hybrid, temporal, etc.).
+        query:              The original natural language query.
+        conn:               Optional database connection for dynamic entity lookup.
+                            If not provided, uses hardcoded entity list.
+        min_salience:       Minimum salience threshold for filtering (default 0.10).
+                            Lower values (e.g. 0.15) allow more results through for
+                            broad/diffuse queries.
+        entity_rescue_ids:  Optional frozenset of message IDs that should be
+                            exempt from the salience floor (already entity-boosted
+                            upstream).  Introduced by #582 to prevent the guard
+                            from discarding low-salience entity evidence.
 
     Returns:
         Re-ranked, filtered list of message dicts.
@@ -522,7 +536,11 @@ def apply_salience_guard(
     if entities:
         results = filter_by_entity(results, entities)
 
-    # Step 3: Filter low-salience noise (runs AFTER entity boosting)
-    results = filter_by_salience(results, min_salience=min_salience)
+    # Step 3: Filter low-salience noise (runs AFTER entity boosting).
+    # Entity-rescued rows bypass the floor (#582).
+    _rescue = entity_rescue_ids or frozenset()
+    results = filter_by_salience(
+        results, min_salience=min_salience, entity_rescue_ids=_rescue,
+    )
 
     return results
