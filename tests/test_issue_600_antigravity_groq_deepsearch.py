@@ -174,7 +174,7 @@ def test_groq_auto_detect(monkeypatch):
 
 def test_groq_routes_through_openai_compat():
     """Groq provider routes through _complete_openai_compat (not anthropic)."""
-    from truememory.ingest.models import LLMConfig, complete
+    from truememory.ingest.models import LLMConfig
 
     cfg = LLMConfig(provider="groq", model="test-model", api_key="gsk_test",
                     base_url="https://api.groq.com/openai/v1")
