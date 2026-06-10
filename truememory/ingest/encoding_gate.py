@@ -143,6 +143,43 @@ _CATEGORY_THRESHOLD_OVERRIDE = {
     "activity": -0.02,
 }
 
+# Patterns that indicate contradictions or corrections — these memories
+# are critical for accuracy and must always pass the gate regardless of
+# PE score or gate threshold (#585).
+_CONTRADICTION_MARKERS = (
+    "actually,",
+    "actually ",
+    "correction:",
+    "correction -",
+    "no longer ",
+    "not anymore",
+    "changed to ",
+    "switched to ",
+    "moved to ",
+    "used to be ",
+    "instead of ",
+    "wrong about ",
+    "was wrong",
+    "is wrong",
+    "not true",
+    "isn't true",
+    "that's incorrect",
+    "that is incorrect",
+)
+
+
+def _is_contradiction(fact: str, category: str = "") -> bool:
+    """Return True if the fact looks like a contradiction or correction."""
+    cat = (category or "").strip().lower()
+    if cat == "correction":
+        return True
+    lower = fact.lower().strip()
+    # Check for "not X but Y" pattern
+    if " not " in lower and " but " in lower:
+        return True
+    return any(lower.startswith(m) or (f" {m}" if not m.endswith(" ") else f" {m}") in lower
+               for m in _CONTRADICTION_MARKERS)
+
 
 class EncodingGate:
     """
@@ -197,6 +234,8 @@ class EncodingGate:
         self._norm = total if total > 0 else 1.0
         self._last_search_results: list[dict] = []
         self._embed_model = None
+        self._pe_available: bool = True   # assume available until first failure
+        self._pe_degradation_count: int = 0  # track PE failures for status (#585)
         self._batch_scores: list[float] = []
         self._batch_novelties: list[float] = []
         self._batch_saliences: list[float] = []
@@ -207,7 +246,16 @@ class EncodingGate:
         Pass a candidate fact through the encoding gate.
 
         Returns an EncodingDecision with the full signal breakdown.
+
+        Degradation policy (#585):
+        - If the PE model is unavailable, the gate degrades OPEN (pass
+          everything) rather than silently dropping memories.
+        - Contradictions and corrections always pass regardless of score.
         """
+        # Contradiction bypass: corrections are critical for memory accuracy
+        # and must never be dropped by the gate (#585).
+        is_contradiction = _is_contradiction(fact, category)
+
         novelty = self._compute_novelty(fact)
         salience = self._compute_salience(fact, category)
         pred_error = self._compute_prediction_error(fact)
@@ -220,18 +268,32 @@ class EncodingGate:
         )
         score = max(0.0, min(1.0, raw / self._norm))
 
-        # Salience floor: reject messages the salience scorer considers
-        # pure noise, regardless of how novel or surprising they are.
-        # Prevents high-novelty off-topic chatter from passing the gate.
-        floored = salience < self.salience_floor
-        if floored:
-            should_encode = False
+        # PE degradation: if the PE model is dead, open the gate and let
+        # everything through rather than silently dropping facts (#585).
+        if not self._pe_available:
+            should_encode = True
+            floored = False
+            reason = self._explain(novelty, salience, pred_error, score, True, False)
+            reason = reason.replace("ENCODE", "ENCODE(pe-degraded)", 1)
+        # Contradiction/correction bypass: always encode (#585).
+        elif is_contradiction:
+            should_encode = True
+            floored = salience < self.salience_floor
+            reason = self._explain(novelty, salience, pred_error, score, True, floored)
+            reason = reason.replace("ENCODE", "ENCODE(contradiction-bypass)", 1)
         else:
-            cat = (category or "").strip().lower()
-            effective_threshold = self.threshold + _CATEGORY_THRESHOLD_OVERRIDE.get(cat, 0.0)
-            effective_threshold = max(0.10, effective_threshold)
-            should_encode = score >= effective_threshold
-        reason = self._explain(novelty, salience, pred_error, score, should_encode, floored)
+            # Salience floor: reject messages the salience scorer considers
+            # pure noise, regardless of how novel or surprising they are.
+            # Prevents high-novelty off-topic chatter from passing the gate.
+            floored = salience < self.salience_floor
+            if floored:
+                should_encode = False
+            else:
+                cat = (category or "").strip().lower()
+                effective_threshold = self.threshold + _CATEGORY_THRESHOLD_OVERRIDE.get(cat, 0.0)
+                effective_threshold = max(0.10, effective_threshold)
+                should_encode = score >= effective_threshold
+            reason = self._explain(novelty, salience, pred_error, score, should_encode, floored)
 
         verdict = "ENCODE" if should_encode else "SKIP"
         log.debug(
@@ -429,7 +491,15 @@ class EncodingGate:
             try:
                 from truememory.vector_search import get_model
                 self._embed_model = get_model()
-            except Exception:
+            except Exception as e:
+                # PE model failed to load — degrade open (#585)
+                if self._pe_available:
+                    log.warning(
+                        "PE model failed to load: %s — gate will degrade OPEN "
+                        "(all facts pass until model recovers)", e,
+                    )
+                self._pe_available = False
+                self._pe_degradation_count += 1
                 return 0.0
         model = self._embed_model
 
@@ -467,6 +537,13 @@ class EncodingGate:
 
         except Exception as e:
             log.debug("PE embedding scorer failed: %s", e)
+            # Runtime encode failure — mark PE as degraded (#585)
+            if self._pe_available:
+                log.warning(
+                    "PE scorer crashed at runtime: %s — gate will degrade OPEN", e,
+                )
+            self._pe_available = False
+            self._pe_degradation_count += 1
             return 0.0
 
     # ------------------------------------------------------------------
@@ -551,13 +628,17 @@ class EncodingGate:
             _stats(self._batch_pes),
         )
 
-        return {
+        summary: dict = {
             "evaluated": n,
             "passed": passed,
             "blocked": blocked,
             "score_min": min(self._batch_scores),
             "score_max": max(self._batch_scores),
         }
+        if self._pe_degradation_count > 0:
+            summary["pe_degradation_count"] = self._pe_degradation_count
+            summary["pe_available"] = self._pe_available
+        return summary
 
     def reset_batch(self):
         """Clear the batch-level caches (call between transcripts)."""
