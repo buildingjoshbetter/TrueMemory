@@ -39,21 +39,19 @@ class TestPlatformDetection:
 
     def test_use_unix_false_when_af_unix_missing(self):
         """Simulate Windows: remove AF_UNIX -> _USE_UNIX would be False."""
-        # Re-evaluate the expression used in _platform.py
         import sys
-        result = hasattr(socket, "AF_UNIX") and sys.platform != "win32"
-        # On this POSIX host it should be True
-        assert result is True
+        if sys.platform == "win32":
+            # On actual Windows, AF_UNIX is absent — verify _USE_UNIX is False
+            from truememory._platform import _USE_UNIX
+            assert _USE_UNIX is False
+        else:
+            # On POSIX, verify the expression evaluates correctly
+            result = hasattr(socket, "AF_UNIX") and sys.platform != "win32"
+            assert result is True
 
-        # Simulate absence of AF_UNIX
-        with patch.object(socket, "AF_UNIX", new=None, create=False):
-            # hasattr still returns True when attr exists but is None,
-            # so simulate actual absence via delattr
-            pass
-
-        # Direct expression test: sys.platform == "win32" -> False
-        result_win = hasattr(socket, "AF_UNIX") and "win32" != "win32"
-        assert result_win is False
+            # Simulate Windows platform string
+            result_win = hasattr(socket, "AF_UNIX") and "win32" != "win32"
+            assert result_win is False
 
     def test_loopback_host_is_localhost(self):
         from truememory._platform import _LOOPBACK_HOST
@@ -151,6 +149,7 @@ class TestClientSocketDispatch:
             token_file.write_text(secrets.token_bytes(32).hex())
             assert mc._server_ready() is True
 
+    @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="AF_UNIX not available (Windows)")
     def test_connect_uses_af_unix_when_use_unix_true(self):
         """On POSIX, _connect creates an AF_UNIX socket."""
         from truememory import model_client as mc
