@@ -8,10 +8,59 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from typing import Sequence
 
 from truememory.fts_search import search_fts, search_fts_by_sender
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Score normalization (issue #584)
+# ---------------------------------------------------------------------------
+
+def normalize_scores(results: list[dict], *, key: str = "score") -> list[dict]:
+    """Min-max normalize *key* to [0, 1] in place.
+
+    If all scores are equal (or the list has <= 1 element), every score is
+    set to 0.5 so downstream ranking treats them as neutral.
+
+    Returns *results* for chaining.
+    """
+    if len(results) <= 1:
+        for r in results:
+            r[key] = 0.5
+        return results
+
+    scores = [r.get(key, 0) for r in results]
+    lo, hi = min(scores), max(scores)
+    span = hi - lo
+    if span == 0:
+        for r in results:
+            r[key] = 0.5
+        return results
+
+    for r in results:
+        r[key] = (r.get(key, 0) - lo) / span
+    return results
+
+
+def normalize_supplement_scores(
+    primary: list[dict],
+    *supplements: Sequence[list[dict]],
+    key: str = "score",
+) -> None:
+    """Normalize each source list independently to [0, 1].
+
+    ``primary`` is normalized first. Each supplement list is then
+    independently normalized so every source competes fairly in the
+    merged pool.  The lists are mutated in place.
+    """
+    normalize_scores(primary, key=key)
+    for supp in supplements:
+        if supp:
+            normalize_scores(supp, key=key)
+
 
 QUERY_STOP_WORDS = frozenset({
     "what", "did", "does", "do", "how", "where", "when", "who",

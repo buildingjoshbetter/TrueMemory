@@ -285,26 +285,41 @@ def search_clustered(
     from truememory.vector_search import _active_vec_table
     _vec_tbl = _active_vec_table(conn)
 
+    # Batch-fetch all embeddings in one query (issue #584) instead of
+    # one SELECT per message.  Chunk into groups of 500 to stay within
+    # SQLite's parameter limits.
+    _CHUNK = 500
+    emb_map: dict[int, np.ndarray] = {}
+    all_msg_ids = [msg[0] for msg in messages]
+    for chunk_start in range(0, len(all_msg_ids), _CHUNK):
+        chunk = all_msg_ids[chunk_start : chunk_start + _CHUNK]
+        ph = ",".join("?" * len(chunk))
+        try:
+            rows = conn.execute(
+                f"SELECT rowid, embedding FROM {_vec_tbl} WHERE rowid IN ({ph})",
+                chunk,
+            ).fetchall()
+            for rid, blob in rows:
+                dim = len(blob) // 4
+                emb_map[rid] = np.array(
+                    struct.unpack(f"{dim}f", blob), dtype=np.float32
+                )
+        except Exception:
+            logger.debug("Batch embedding fetch failed for chunk", exc_info=True)
+
+    # Pre-compute query norm once
+    _query_norm = np.linalg.norm(query_vec) + 1e-9
+
     # Score each message by vector similarity to query
     results = []
     for msg in messages:
         msg_id = msg[0]
-        # Get embedding
-        try:
-            emb_row = conn.execute(
-                f"SELECT embedding FROM {_vec_tbl} WHERE rowid = ?", (msg_id,)
-            ).fetchone()
-            if emb_row:
-                dim = len(emb_row[0]) // 4
-                msg_vec = np.array(
-                    struct.unpack(f"{dim}f", emb_row[0]), dtype=np.float32
-                )
-                sim = float(np.dot(query_vec, msg_vec) / (
-                    np.linalg.norm(query_vec) * np.linalg.norm(msg_vec) + 1e-9
-                ))
-            else:
-                sim = 0.0
-        except Exception:
+        msg_vec = emb_map.get(msg_id)
+        if msg_vec is not None:
+            sim = float(np.dot(query_vec, msg_vec) / (
+                _query_norm * (np.linalg.norm(msg_vec) + 1e-9)
+            ))
+        else:
             sim = 0.0
 
         results.append({
