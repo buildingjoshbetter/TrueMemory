@@ -1,32 +1,9 @@
 <p align="center">
-  <img src="assets/hero-banner-dark.svg" alt="TrueMemory" width="800">
+  <img src="assets/charts/hero-banner.png" alt="TrueMemory" width="800">
 </p>
 
 <p align="center">
   <em>The memory your AI should have had from the start.</em>
-</p>
-
-<p align="center">
-  <a href="./README.md"><img alt="English" src="https://img.shields.io/badge/English-d9d9d9"></a>
-  <a href="./i18n/README.zh-CN.md"><img alt="简体中文" src="https://img.shields.io/badge/简体中文-d9d9d9"></a>
-  <a href="./i18n/README.hi.md"><img alt="हिन्दी" src="https://img.shields.io/badge/हिन्दी-d9d9d9"></a>
-  <a href="./i18n/README.es.md"><img alt="Español" src="https://img.shields.io/badge/Español-d9d9d9"></a>
-  <a href="./i18n/README.fr.md"><img alt="Français" src="https://img.shields.io/badge/Français-d9d9d9"></a>
-  <a href="./i18n/README.ar.md"><img alt="العربية" src="https://img.shields.io/badge/العربية-d9d9d9"></a>
-  <a href="./i18n/README.bn.md"><img alt="বাংলা" src="https://img.shields.io/badge/বাংলা-d9d9d9"></a>
-  <a href="./i18n/README.pt-BR.md"><img alt="Português" src="https://img.shields.io/badge/Português-d9d9d9"></a>
-  <a href="./i18n/README.ru.md"><img alt="Русский" src="https://img.shields.io/badge/Русский-d9d9d9"></a>
-  <a href="./i18n/README.ja.md"><img alt="日本語" src="https://img.shields.io/badge/日本語-d9d9d9"></a>
-  <a href="./i18n/README.ko.md"><img alt="한국어" src="https://img.shields.io/badge/한국어-d9d9d9"></a>
-  <a href="./i18n/README.de.md"><img alt="Deutsch" src="https://img.shields.io/badge/Deutsch-d9d9d9"></a>
-  <a href="./i18n/README.id.md"><img alt="Bahasa Indonesia" src="https://img.shields.io/badge/Indonesia-d9d9d9"></a>
-  <a href="./i18n/README.vi.md"><img alt="Tiếng Việt" src="https://img.shields.io/badge/Tiếng Việt-d9d9d9"></a>
-  <a href="./i18n/README.tr.md"><img alt="Türkçe" src="https://img.shields.io/badge/Türkçe-d9d9d9"></a>
-  <a href="./i18n/README.it.md"><img alt="Italiano" src="https://img.shields.io/badge/Italiano-d9d9d9"></a>
-  <a href="./i18n/README.th.md"><img alt="ไทย" src="https://img.shields.io/badge/ไทย-d9d9d9"></a>
-  <a href="./i18n/README.pl.md"><img alt="Polski" src="https://img.shields.io/badge/Polski-d9d9d9"></a>
-  <a href="./i18n/README.uk.md"><img alt="Українська" src="https://img.shields.io/badge/Українська-d9d9d9"></a>
-  <a href="./i18n/README.nl.md"><img alt="Nederlands" src="https://img.shields.io/badge/Nederlands-d9d9d9"></a>
 </p>
 
 <p align="center">
@@ -60,7 +37,7 @@
 
 **It works without you thinking about it.** TrueMemory automatically captures memories from your conversations and automatically injects the right ones into your next session. You never have to store or search for anything manually. It just happens.
 
-**It's 100% local.** One SQLite file on your machine. Nothing leaves your device. No cloud, no API keys needed. Your data is yours.
+**It's 100% local.** One SQLite file on your machine. Your memories never leave your device. No cloud, no API keys needed. Your data is yours. (Anonymous usage telemetry is the only exception — never memory content — and one env var turns it off. [Details](#faq).)
 
 > **Without TrueMemory:** "What framework are we using?" Asked for the 12th time this week. Your agent starts every session with amnesia. It doesn't know your name, your stack, or anything you told it yesterday.
 >
@@ -75,7 +52,7 @@
 | System | LoCoMo | LongMemEval | Local-first | Auto-capture | License |
 |--------|--------|-------------|:-----------:|:------------:|---------|
 | **TrueMemory Pro** | **93.0%** | **92.0%** | ✅ | ✅ | AGPL-3.0 |
-| **TrueMemory Base** | **87.7%** | **84.1%** | ✅ | ✅ | AGPL-3.0 |
+| **TrueMemory Base** | **92.0%** | **84.1%** | ✅ | ✅ | AGPL-3.0 |
 | Mem0 | 61.4% | — | Partial | ❌ | Apache-2.0 |
 | Supermemory | 65.4% | — | ❌ | ❌ | Cloud API |
 | MemOS | 75.8% | — | ✅ | ❌ | Apache-2.0 |
@@ -111,6 +88,8 @@ irm https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install
 </details>
 
 That's it. TrueMemory remembers your conversations automatically from here. Need help? [Join our Discord](https://discord.gg/ZJ74JB2gVW).
+
+> If TrueMemory saves you time, [a ⭐ helps other devs find it](https://github.com/buildingjoshbetter/TrueMemory).
 
 ### For developers (Python library)
 
@@ -257,9 +236,13 @@ Anonymous usage telemetry (tool calls, session counts, platform info) is on by d
 
 ## Get Started in 60 Seconds
 
+For Claude Code, Claude CLI, Cursor, Codex CLI, or Gemini CLI:
+
 ```bash
-pip install truememory
+curl -LsSf https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install.sh | sh
 ```
+
+Using it as a Python library instead? `pip install truememory`
 
 Questions? [Join our Discord](https://discord.gg/ZJ74JB2gVW) or [open a Discussion](https://github.com/buildingjoshbetter/TrueMemory/discussions). If TrueMemory saves you time, [give us a ⭐](https://github.com/buildingjoshbetter/TrueMemory)
 
@@ -284,16 +267,16 @@ Questions? [Join our Discord](https://discord.gg/ZJ74JB2gVW) or [open a Discussi
 
 ## Research
 
-TrueMemory is backed by a peer-reviewed research paper on retrieval-centered agent memory.
+TrueMemory is backed by a research paper (arXiv preprint) on retrieval-centered agent memory.
 
 **[Storage Is Not Memory: A Retrieval-Centered Architecture for Agent Recall](https://arxiv.org/abs/2605.04897)** (arXiv 2605.04897)
 
 ```bibtex
-@article{sauronlabs2025storage,
+@article{sauronlabs2026storage,
   title   = {Storage Is Not Memory: A Retrieval-Centered Architecture for Agent Recall},
   author  = {Sauron Labs},
   journal = {arXiv preprint arXiv:2605.04897},
-  year    = {2025},
+  year    = {2026},
   url     = {https://arxiv.org/abs/2605.04897}
 }
 ```
@@ -306,10 +289,16 @@ TrueMemory is backed by a peer-reviewed research paper on retrieval-centered age
 - Follow [@Building_Josh](https://x.com/Building_Josh) on X for updates
 - Follow [@Sauron_Labs](https://x.com/Sauron_Labs) for company news
 - [Open a Discussion](https://github.com/buildingjoshbetter/TrueMemory/discussions) for questions or ideas
-- Read the paper on [arXiv](https://arxiv.org/abs/2605.04897) · [Google Scholar](https://scholar.google.com/citations?user=YOUR_ID) · [Semantic Scholar](https://www.semanticscholar.org/)
+- Read the paper on [arXiv](https://arxiv.org/abs/2605.04897)
 - Visit [truememory.net](https://truememory.net) · [sauronlabs.ai](https://sauronlabs.ai)
 
 If TrueMemory saves you time, [give us a ⭐](https://github.com/buildingjoshbetter/TrueMemory)
+
+---
+
+## Translations
+
+Read this in: [简体中文](./i18n/README.zh-CN.md) · [हिन्दी](./i18n/README.hi.md) · [Español](./i18n/README.es.md) · [Français](./i18n/README.fr.md) · [العربية](./i18n/README.ar.md) · [বাংলা](./i18n/README.bn.md) · [Português](./i18n/README.pt-BR.md) · [Русский](./i18n/README.ru.md) · [日本語](./i18n/README.ja.md) · [한국어](./i18n/README.ko.md) · [Deutsch](./i18n/README.de.md) · [Bahasa Indonesia](./i18n/README.id.md) · [Tiếng Việt](./i18n/README.vi.md) · [Türkçe](./i18n/README.tr.md) · [Italiano](./i18n/README.it.md) · [ไทย](./i18n/README.th.md) · [Polski](./i18n/README.pl.md) · [Українська](./i18n/README.uk.md) · [Nederlands](./i18n/README.nl.md)
 
 ---
 
