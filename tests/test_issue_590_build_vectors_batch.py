@@ -13,6 +13,14 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
+try:
+    import sqlite_vec  # noqa: F401
+    _HAS_VEC = True
+except ImportError:
+    _HAS_VEC = False
+
+pytestmark = pytest.mark.skipif(not _HAS_VEC, reason="sqlite-vec not available")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
