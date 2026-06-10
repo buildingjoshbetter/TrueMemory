@@ -8,7 +8,6 @@ Covers:
 """
 
 import sqlite3
-import pytest
 
 from truememory.storage import create_db, insert_message
 from truememory.consolidation import (
@@ -74,7 +73,7 @@ class TestInformalCorrectionDetection:
         conn = _make_db()
         _add(conn, "Actually the deadline is next Friday.",
              "2026-02-01T00:00:00")
-        contradictions = detect_contradictions(conn)
+        detect_contradictions(conn)
         facts = conn.execute("SELECT fact FROM fact_timeline").fetchall()
         assert any("deadline" in f[0].lower() for f in facts)
 
@@ -306,7 +305,7 @@ class TestNoFalsePositives:
         conn = _make_db()
         _add(conn, "I actually like pizza a lot.")
         detect_contradictions(conn)
-        facts = conn.execute("SELECT fact FROM fact_timeline").fetchall()
+        conn.execute("SELECT fact FROM fact_timeline").fetchall()
         # The pattern may or may not match here; the key is it does
         # not produce contradictions with no prior fact
         contradictions = detect_contradictions(conn)
