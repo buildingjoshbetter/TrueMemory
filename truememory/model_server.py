@@ -117,6 +117,10 @@ class ModelServer:
         self._reranker = None
         self._reranker_name: str | None = None
         self._lock = threading.Lock()
+        # Issue #577: idle-tracking gets its own lock so the single-text
+        # fast lane (and the idle checker) never block on the global
+        # request lock while a batch encode is in flight.
+        self._activity_lock = threading.Lock()
         self._last_activity = time.time()
         self._running = True
         self._embed_timestamps: list[float] = []
@@ -124,11 +128,43 @@ class ModelServer:
         self._throttler_active = False
         self._token: bytes | None = None  # HMAC token for TCP transport
         self._bound_port: int | None = None  # TCP port (Windows only)
+        # Issue #577: models that hit an MPS OOM are degraded to CPU for the
+        # lifetime of this server process ("embed" / "rerank"). Mutated only
+        # while holding self._lock; read lock-free (string membership).
+        self._sticky_cpu: set[str] = set()
 
-    def _get_embed_model(self, tier: str):
-        if self._embed_model is not None and self._embed_tier == tier:
-            return self._embed_model
+    def _mark_sticky_cpu(self, kind: str) -> bool:
+        """Permanently degrade *kind* ("embed"/"rerank") to CPU after an
+        MPS OOM (issue #577). Re-promoting to MPS after recovery guaranteed
+        the next OOM (the pool never drops below the watermark cap), so the
+        degradation is sticky for the server's lifetime.
 
+        Caller must hold ``self._lock``. Returns True on the first marking
+        (which is logged loudly, once).
+        """
+        if kind in self._sticky_cpu:
+            return False
+        self._sticky_cpu.add(kind)
+        log.error(
+            "MPS OOM in the %s path — degrading the %s model to CPU for the "
+            "lifetime of this model server (no MPS re-promotion). Restart "
+            "the server to try MPS again, or set TRUEMEMORY_DEVICE=cpu to "
+            "make CPU permanent.",
+            kind, kind,
+        )
+        return True
+
+    def _embed_device(self) -> str | None:
+        """Device for embed model loads: sticky-CPU > TRUEMEMORY_DEVICE >
+        framework auto-selection (None)."""
+        if "embed" in self._sticky_cpu:
+            return "cpu"
+        from truememory.mps_utils import resolve_device
+        return resolve_device(None)
+
+    @staticmethod
+    def _resolve_embed_model_id(tier: str) -> str:
+        """Resolve a tier name to the internal embedding model ID."""
         from truememory.vector_search import EMBEDDING_MODEL, set_embedding_model
 
         if tier and tier != EMBEDDING_MODEL:
@@ -148,23 +184,29 @@ class ModelServer:
             except (ValueError, ImportError) as e:
                 log.warning("Custom tier resolution failed (%s); falling back to model2vec.", e)
                 model_id = "model2vec"
+        return model_id
 
+    @staticmethod
+    def _build_embed_model(model_id: str, device: str | None):
+        """Construct an embedding model. ``device=None`` lets the framework
+        pick (SentenceTransformer auto-selects; model2vec is CPU-only)."""
         if model_id == "model2vec":
             from model2vec import StaticModel
-            self._embed_model = StaticModel.from_pretrained(
+            return StaticModel.from_pretrained(
                 "minishlab/potion-base-8M", force_download=False
             )
-        elif model_id == "qwen3_256":
+        if model_id == "qwen3_256":
             from sentence_transformers import SentenceTransformer
             mkwargs = {}
             if sys.platform == "darwin":
                 mkwargs["attn_implementation"] = "eager"
-            self._embed_model = SentenceTransformer(
+            return SentenceTransformer(
                 "Qwen/Qwen3-Embedding-0.6B",
                 truncate_dim=256,
                 model_kwargs=mkwargs or None,
+                device=device,
             )
-        elif model_id not in ("model2vec", "minilm", "bge-small", "qwen3_256"):
+        if model_id not in ("model2vec", "minilm", "bge-small", "qwen3_256"):
             # Custom model: require explicit opt-in for arbitrary downloads
             if os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "").strip() != "1":
                 log.warning(
@@ -174,24 +216,29 @@ class ModelServer:
                     model_id,
                 )
                 from model2vec import StaticModel
-                self._embed_model = StaticModel.from_pretrained(
+                return StaticModel.from_pretrained(
                     "minishlab/potion-base-8M", force_download=False
                 )
-            else:
-                from sentence_transformers import SentenceTransformer
-                from truememory.tier_config import resolve_custom_tier
-                cfg = resolve_custom_tier()
-                custom_dim = cfg["embed_dim"]
-                self._embed_model = SentenceTransformer(
-                    model_id, truncate_dim=custom_dim,
-                    trust_remote_code=False,
-                )
-        else:
-            from model2vec import StaticModel
-            self._embed_model = StaticModel.from_pretrained(
-                "minishlab/potion-base-8M", force_download=False
+            from sentence_transformers import SentenceTransformer
+            from truememory.tier_config import resolve_custom_tier
+            cfg = resolve_custom_tier()
+            custom_dim = cfg["embed_dim"]
+            return SentenceTransformer(
+                model_id, truncate_dim=custom_dim,
+                trust_remote_code=False,
+                device=device,
             )
+        from model2vec import StaticModel
+        return StaticModel.from_pretrained(
+            "minishlab/potion-base-8M", force_download=False
+        )
 
+    def _get_embed_model(self, tier: str):
+        if self._embed_model is not None and self._embed_tier == tier:
+            return self._embed_model
+
+        model_id = self._resolve_embed_model_id(tier)
+        self._embed_model = self._build_embed_model(model_id, self._embed_device())
         self._embed_tier = tier
         log.info("Loaded embedding model for tier=%s", tier)
         return self._embed_model
@@ -204,15 +251,11 @@ class ModelServer:
             return self._reranker
 
         from sentence_transformers import CrossEncoder
-        device = "cpu"
-        try:
-            import torch
-            if torch.cuda.is_available():
-                device = "cuda:0"
-            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                device = "mps"
-        except ImportError:
-            pass
+        from truememory.mps_utils import auto_detect_device, resolve_device
+        if "rerank" in self._sticky_cpu:
+            device = "cpu"
+        else:
+            device = resolve_device(auto_detect_device())
 
         self._reranker = CrossEncoder(name, device=device)
         self._reranker_name = name
@@ -220,7 +263,7 @@ class ModelServer:
         return self._reranker
 
     def handle_request(self, request: dict) -> dict:
-        with self._lock:
+        with self._activity_lock:
             self._last_activity = time.time()
         op = request.get("op")
 
@@ -250,6 +293,7 @@ class ModelServer:
                 self._throttler.before_batch()
 
             encode_start = time.time()
+            oom = False
             with self._lock:
                 model = self._get_embed_model(tier)
                 try:
@@ -258,17 +302,24 @@ class ModelServer:
                     from truememory.mps_utils import is_mps_oom, flush_mps_cache
                     if not is_mps_oom(exc):
                         raise
-                    log.warning("MPS OOM during encoding — flushing cache and retrying on CPU")
+                    # Issue #577: sticky-CPU degradation. The device move
+                    # happens under the lock (transitions must not race other
+                    # encodes) but the expensive full re-encode runs OUTSIDE
+                    # the lock so other clients are not starved for 23-112s.
+                    # The model is never re-promoted to MPS: the old
+                    # re-promotion left the MPS pool above its watermark cap
+                    # and guaranteed the next OOM (retry storms).
+                    self._mark_sticky_cpu("embed")
                     flush_mps_cache()
                     if hasattr(model, "to"):
                         model.to("cpu")
-                    vectors = model.encode(texts, show_progress_bar=False)
-                    try:
-                        import torch
-                        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                            model.to("mps")
-                    except Exception:
-                        pass
+                    oom = True
+            if oom:
+                log.warning(
+                    "MPS OOM during encoding — retrying on CPU outside the "
+                    "request lock"
+                )
+                vectors = model.encode(texts, show_progress_bar=False)
             encode_time = time.time() - encode_start
 
             if self._throttler_active and self._throttler:
@@ -286,8 +337,31 @@ class ModelServer:
         if op == "rerank":
             pairs = request["pairs"]
             model_name = request.get("model_name")
+            oom = False
             with self._lock:
                 reranker = self._get_reranker(model_name)
+                try:
+                    scores = reranker.predict(
+                        pairs, batch_size=64, show_progress_bar=False
+                    )
+                except RuntimeError as exc:
+                    from truememory.mps_utils import is_mps_oom, flush_mps_cache
+                    if not is_mps_oom(exc):
+                        raise
+                    # Issue #577: the rerank path previously had NO OOM
+                    # handler — a raw MPS OOM reached the client (3/3 rerank
+                    # deaths in the baseline probe). Same sticky-CPU policy
+                    # as embed: drop the MPS-loaded model and reload on CPU.
+                    self._mark_sticky_cpu("rerank")
+                    flush_mps_cache()
+                    self._reranker = None
+                    self._reranker_name = None
+                    oom = True
+            if oom:
+                with self._lock:
+                    reranker = self._get_reranker(model_name)  # sticky → CPU
+                # Retry outside the lock — rerank batches are the expensive
+                # part; other clients must not starve behind the recovery.
                 scores = reranker.predict(
                     pairs, batch_size=64, show_progress_bar=False
                 )
@@ -302,13 +376,21 @@ class ModelServer:
         except ImportError:
             log.warning("Cannot import DynamicThrottler — running without throttling")
             return
-        device = "cpu"
-        try:
-            import torch
-            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                device = "mps"
-        except ImportError:
-            pass
+        # Issue #577: honor sticky-CPU degradation and TRUEMEMORY_DEVICE in
+        # the throttler's device pick (it tunes MPS-specific behavior).
+        if "embed" in self._sticky_cpu:
+            device = "cpu"
+        else:
+            from truememory.mps_utils import resolve_device
+            device = resolve_device(None)
+            if device is None:
+                device = "cpu"
+                try:
+                    import torch
+                    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                        device = "mps"
+                except ImportError:
+                    pass
         self._throttler = DynamicThrottler(device=device)
         self._throttler_active = True
         log.info(
@@ -406,7 +488,7 @@ class ModelServer:
             time.sleep(60)
             if not self._running:
                 break
-            with self._lock:
+            with self._activity_lock:
                 last = self._last_activity
             elapsed = time.time() - last
             if elapsed >= IDLE_TIMEOUT:

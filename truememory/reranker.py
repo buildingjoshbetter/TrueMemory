@@ -221,16 +221,10 @@ def get_reranker(model_name: str | None = None, device: str | None = None):
         from sentence_transformers import CrossEncoder
 
         if device is None:
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    device = "cuda:0"
-                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                    device = "mps"
-                else:
-                    device = "cpu"
-            except ImportError:
-                device = "cpu"
+            # Issue #577: honor TRUEMEMORY_DEVICE (cpu|mps|cuda|auto) before
+            # auto-detection. An explicit device= parameter wins over the env.
+            from truememory.mps_utils import auto_detect_device, resolve_device
+            device = resolve_device(auto_detect_device())
 
         _model = CrossEncoder(name, device=device)
         _model_name = name

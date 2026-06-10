@@ -11,6 +11,12 @@ All TrueMemory environment variables and their defaults.
 | `TRUEMEMORY_EMBED_MODEL` | `edge` | Embedding model tier (`edge`, `base`, `pro`) |
 | `TRUEMEMORY_USER_ID` | `""` | Default user ID for hook-based ingestion |
 
+## Model Server
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TRUEMEMORY_DEVICE` | `auto` | Inference device for embedding and reranker models: `cpu`, `mps`, `cuda`, or `auto`. Honored by the shared model server (embed + rerank), the local-fallback reranker, and the adaptive throttler. `cpu` is the escape hatch for MPS out-of-memory retry storms on memory-constrained Macs. If the requested accelerator is unavailable (or the value is invalid), a warning is logged and auto-detection (`cuda` → `mps` → `cpu`) is used. Note: the model server reads this at startup — after changing the value, restart the server (it exits on its own after the idle timeout, 300s by default). After an MPS OOM the affected model is degraded to CPU for the server's lifetime regardless of this setting. |
+
 ## Encoding Gate
 
 | Variable | Default | Description |
