@@ -24,11 +24,14 @@ Dependencies:
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import struct
 from collections import defaultdict
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
