@@ -614,7 +614,14 @@ def _apply_budget(
 
 
 def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> str:
-    """Search TrueMemory and format relevant memories for injection."""
+    """Search TrueMemory and format relevant memories for injection.
+
+    Uses a file-based cache (issue #559): after running the 5 search
+    queries, results are cached with a timestamp. Subsequent calls within
+    the TTL (default 5 min, env TRUEMEMORY_RECALL_CACHE_TTL) return the
+    cached context instead of re-querying the full search pipeline.
+    Directives are always loaded fresh (cheap SQL, not cached).
+    """
     try:
         from truememory import Memory
     except ImportError:
@@ -635,7 +642,8 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> s
     db = db_path or None
     memory = Memory(path=db) if db else Memory()
 
-    # Load directives first — these are always injected
+    # Load directives first — these are always injected (cheap SQL query,
+    # not cached since they change infrequently and the query is fast).
     directives = _load_directives(memory, user_id=user_id)
     directive_ids = {d["id"] for d in directives}
 
@@ -662,6 +670,14 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> s
                 )
         dir_lines.append("</truememory-directives>")
         parts.append("\n".join(dir_lines))
+
+    # --- Issue #559: cache-TTL for the 5 recall queries ---
+    from truememory.ingest.hooks._shared import get_recall_cache, set_recall_cache
+
+    cached = get_recall_cache(db_path or "", user_id)
+    if cached is not None:
+        parts.append(cached)
+        return "\n\n".join(parts) if parts else ""
 
     queries = [
         "user preferences favorites likes dislikes",
@@ -710,6 +726,7 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> s
         except Exception:
             continue
 
+    recall_context = ""
     if all_results:
         # -- Issue #578: per-memory truncation + total payload budget ----------
         directive_block = parts[0] if parts else ""
@@ -734,7 +751,11 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> s
             ]
             lines.extend(kept)
             lines.append("</truememory-context>")
-            parts.append("\n".join(lines))
+            recall_context = "\n".join(lines)
+            parts.append(recall_context)
+
+    # Cache the recall portion (not directives) for subsequent calls
+    set_recall_cache(recall_context if all_results else "", db_path or "", user_id)
 
     return "\n\n".join(parts) if parts else ""
 

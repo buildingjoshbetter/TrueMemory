@@ -18,6 +18,14 @@ log = logging.getLogger(__name__)
 EXTRACTED_DIR = Path.home() / ".truememory" / "extracted"
 BACKLOG_DIR = Path.home() / ".truememory" / "backlog"
 RECALL_MARKER_DIR = Path.home() / ".truememory" / "recall_markers"
+RECALL_CACHE_PATH = Path.home() / ".truememory" / "recall_cache.json"
+
+# How long cached recall results remain valid (seconds).  Default 5 min.
+# Set TRUEMEMORY_RECALL_CACHE_TTL=0 to disable caching entirely.
+try:
+    RECALL_CACHE_TTL = float(os.environ.get("TRUEMEMORY_RECALL_CACHE_TTL", "300"))
+except ValueError:
+    RECALL_CACHE_TTL = 300.0
 
 _BUDGET_FILE = Path.home() / ".truememory" / ".extraction_budget"
 _MAX_EXTRACTIONS_PER_HOUR = int(os.environ.get("TRUEMEMORY_MAX_EXTRACTIONS_PER_HOUR", "20"))
@@ -309,6 +317,97 @@ def mark_recall_injected(session_id: str) -> None:
         (RECALL_MARKER_DIR / safe_id).write_text(str(time.time()), encoding="utf-8")
     except OSError:
         pass
+
+
+def get_recall_cache(db_path: str, user_id: str = "") -> str | None:
+    """Return cached recall context if it exists and is within the TTL.
+
+    Returns the cached context string, or None if the cache is missing,
+    stale, or disabled. Cache key is (db_path, user_id) so multi-DB and
+    multi-user setups get separate caches.
+    """
+    if RECALL_CACHE_TTL <= 0:
+        return None
+    try:
+        if not RECALL_CACHE_PATH.exists():
+            return None
+        data = json.loads(RECALL_CACHE_PATH.read_text(encoding="utf-8"))
+        key = _recall_cache_key(db_path, user_id)
+        entry = data.get(key)
+        if entry is None:
+            return None
+        ts = entry.get("timestamp", 0)
+        if (time.time() - ts) >= RECALL_CACHE_TTL:
+            return None
+        return entry.get("context")
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def set_recall_cache(context: str, db_path: str, user_id: str = "") -> None:
+    """Write recall results to the cache file with a timestamp.
+
+    Preserves entries for other (db_path, user_id) combinations so
+    multi-DB setups coexist in a single cache file.
+    """
+    if RECALL_CACHE_TTL <= 0:
+        return
+    try:
+        RECALL_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # Read existing entries (best-effort)
+        existing: dict = {}
+        try:
+            if RECALL_CACHE_PATH.exists():
+                existing = json.loads(RECALL_CACHE_PATH.read_text(encoding="utf-8"))
+                if not isinstance(existing, dict):
+                    existing = {}
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+        key = _recall_cache_key(db_path, user_id)
+        existing[key] = {
+            "timestamp": time.time(),
+            "context": context,
+        }
+        tmp = RECALL_CACHE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(existing), encoding="utf-8")
+        tmp.rename(RECALL_CACHE_PATH)
+    except OSError:
+        pass
+
+
+def invalidate_recall_cache(db_path: str = "", user_id: str = "") -> None:
+    """Delete the recall cache, called when new memories are stored.
+
+    If db_path is provided, only the matching entry is removed; otherwise
+    the entire cache file is deleted (safest default).
+    """
+    try:
+        if not RECALL_CACHE_PATH.exists():
+            return
+        if not db_path:
+            RECALL_CACHE_PATH.unlink(missing_ok=True)
+            return
+        data = json.loads(RECALL_CACHE_PATH.read_text(encoding="utf-8"))
+        key = _recall_cache_key(db_path, user_id)
+        if key in data:
+            del data[key]
+            if data:
+                tmp = RECALL_CACHE_PATH.with_suffix(".tmp")
+                tmp.write_text(json.dumps(data), encoding="utf-8")
+                tmp.rename(RECALL_CACHE_PATH)
+            else:
+                RECALL_CACHE_PATH.unlink(missing_ok=True)
+    except (OSError, json.JSONDecodeError, TypeError):
+        # Best-effort: nuke the file on any error
+        try:
+            RECALL_CACHE_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _recall_cache_key(db_path: str, user_id: str = "") -> str:
+    """Deterministic cache key from db_path and user_id."""
+    return f"{db_path or 'default'}:{user_id or ''}"
 
 
 def consume_recall_injected(session_id: str, within_seconds: float = _RECALL_DEBOUNCE_SECONDS) -> bool:

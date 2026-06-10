@@ -673,6 +673,13 @@ def truememory_store(
     except (json.JSONDecodeError, ValueError):
         meta = None
     result = m.add(content=content, user_id=user_id or None, metadata=meta, directive=directive)
+    # Issue #559: invalidate recall cache so the next session start picks up
+    # the newly stored memory instead of serving stale cached results.
+    try:
+        from truememory.ingest.hooks._shared import invalidate_recall_cache
+        invalidate_recall_cache()
+    except Exception:
+        pass
     return json.dumps(result, indent=2)
 
 

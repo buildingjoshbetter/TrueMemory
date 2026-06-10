@@ -107,6 +107,13 @@ class Memory:
         )
         result["user_id"] = user_id or ""
         result["created_at"] = now
+        # Issue #559: invalidate recall cache so the next hook invocation
+        # picks up newly stored memories instead of serving stale results.
+        try:
+            from truememory.ingest.hooks._shared import invalidate_recall_cache
+            invalidate_recall_cache()
+        except Exception:
+            pass
         return result
 
     def search(

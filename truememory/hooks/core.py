@@ -398,7 +398,21 @@ def recall_memories(
 
     Returns a formatted string suitable for additionalContext injection,
     or empty string if no memories found.
+
+    Uses a file-based cache (issue #559): after running the 5 search
+    queries, results are cached with a timestamp. Subsequent calls within
+    the TTL (default 5 min, env TRUEMEMORY_RECALL_CACHE_TTL) return the
+    cached context instead of re-querying the full search pipeline.
     """
+    # --- Issue #559: check cache first ---
+    try:
+        from truememory.ingest.hooks._shared import get_recall_cache, set_recall_cache
+        cached = get_recall_cache(db_path or "", user_id)
+        if cached is not None:
+            return cached
+    except Exception:
+        pass
+
     try:
         from truememory import Memory
     except ImportError:
@@ -472,7 +486,15 @@ def recall_memories(
             lines.append(f"- {content}")
 
     lines.append("</truememory-context>")
-    return "\n".join(lines)
+    context = "\n".join(lines)
+
+    # Cache results for subsequent calls (issue #559)
+    try:
+        set_recall_cache(context, db_path or "", user_id)
+    except Exception:
+        pass
+
+    return context
 
 
 def buffer_message(session_id: str, prompt: str) -> None:
