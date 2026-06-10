@@ -403,12 +403,21 @@ def test_issue_589_directive_full_lifecycle(tmp_path):
             # only two rows, so we fall back to a raw FTS probe when vectors
             # are missing.
             if m._engine._has_vectors:
-                results = m._engine.search("sign commits GPG", limit=5, _skip_reranker=True)
+                results = m._engine.search(
+                    "sign commits GPG", limit=5,
+                    _skip_reranker=True, include_directives=True,
+                )
                 hit = next((r for r in results if r.get("id") == mid), None)
                 assert hit is not None, f"directive not returned by search: {results}"
                 assert hit.get("directive") is True, (
                     "search results must carry the directive flag (WIP propagation)"
                 )
+                default_results = m._engine.search(
+                    "sign commits GPG", limit=5, _skip_reranker=True,
+                )
+                assert all(
+                    r.get("directive") is not True for r in default_results
+                ), "default search must exclude directive rows"
                 fact_hits = m._engine.search("vim keybindings", limit=5, _skip_reranker=True)
                 assert fact_hits and all(
                     r.get("directive") is False for r in fact_hits if r.get("id") != mid
