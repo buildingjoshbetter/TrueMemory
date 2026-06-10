@@ -45,6 +45,7 @@ _DRAIN_CAP = 3
 _SCAN_MARKER = Path.home() / ".truememory" / ".last_stale_scan"
 _SCAN_INTERVAL = 900  # 15 minutes
 _SCAN_CAP = 3  # max sessions to queue per scan
+_EXTRACTED_MARKER_MAX_AGE = int(os.environ.get("TRUEMEMORY_EXTRACTED_MARKER_MAX_AGE_DAYS", "30")) * 86400
 
 _EXTRACTION_SENTINEL = "[[TRUEMEMORY_INTERNAL_EXTRACTION]]"
 _EXTRACTION_LEGACY_PREFIXES = (
@@ -287,6 +288,37 @@ def _is_extraction_transcript(transcript_path: Path) -> bool:
     return False
 
 
+def _cleanup_extracted_markers() -> None:
+    """Remove extracted/ marker files older than _EXTRACTED_MARKER_MAX_AGE.
+
+    The extraction pipeline writes one marker file per processed transcript.
+    Without periodic cleanup these grow unboundedly (54K+ files observed in
+    prod), causing slow directory listings and inode exhaustion (issue #579).
+    """
+    import time as _time
+
+    from truememory.ingest.hooks._shared import EXTRACTED_DIR
+
+    if not EXTRACTED_DIR.exists():
+        return
+
+    cutoff = _time.time() - _EXTRACTED_MARKER_MAX_AGE
+    removed = 0
+    try:
+        for marker in EXTRACTED_DIR.iterdir():
+            try:
+                if marker.stat().st_mtime < cutoff:
+                    marker.unlink()
+                    removed += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    if removed > 0:
+        log.info("Extracted marker cleanup: removed %d markers older than %d days",
+                 removed, _EXTRACTED_MARKER_MAX_AGE // 86400)
+
+
 def _scan_stale_sessions() -> None:
     """Find transcripts from recent sessions that were never extracted.
 
@@ -308,14 +340,25 @@ def _scan_stale_sessions() -> None:
 
     try:
         try:
-            if _SCAN_MARKER.exists():
-                if time.time() - _SCAN_MARKER.stat().st_mtime < _SCAN_INTERVAL:
+            # Read the marker content to determine last scan time.  On first
+            # run O_CREAT creates an empty file — we must NOT skip the scan
+            # just because the file now exists with a recent mtime (issue #579).
+            raw = os.read(scan_fd, 64).decode("utf-8", errors="replace").strip()
+            if raw:
+                last_scan = float(raw)
+                if time.time() - last_scan < _SCAN_INTERVAL:
                     return
             os.lseek(scan_fd, 0, os.SEEK_SET)
             os.ftruncate(scan_fd, 0)
             os.write(scan_fd, str(time.time()).encode("utf-8"))
-        except OSError:
-            return
+        except (OSError, ValueError):
+            # ValueError covers corrupted/non-numeric content — scan anyway.
+            try:
+                os.lseek(scan_fd, 0, os.SEEK_SET)
+                os.ftruncate(scan_fd, 0)
+                os.write(scan_fd, str(time.time()).encode("utf-8"))
+            except OSError:
+                pass
 
         claude_dir = Path.home() / ".claude" / "projects"
         if not claude_dir.exists():
@@ -379,6 +422,11 @@ def _scan_stale_sessions() -> None:
             log.info("Stale session scanner: queued %d unextracted sessions", queued)
         if skipped_noise > 0:
             log.info("Stale session scanner: skipped %d extraction noise transcripts", skipped_noise)
+
+        # Piggyback on the scan window to prune stale extracted/ markers
+        # (issue #579). Runs at most once per _SCAN_INTERVAL alongside the
+        # stale-session scan so it adds no extra scheduling overhead.
+        _cleanup_extracted_markers()
     finally:
         try:
             os.close(scan_fd)
