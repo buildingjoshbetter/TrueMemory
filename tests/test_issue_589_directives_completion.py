@@ -419,7 +419,7 @@ def test_issue_589_directive_full_lifecycle(tmp_path):
                 # stages that may drop results in a tiny corpus).
                 from truememory.fts_search import search_fts
 
-                results = search_fts(m._engine.conn, "sign commits GPG", limit=5)
+                results = search_fts(m._engine.conn, "sign commits GPG", limit=5, include_directives=True)
                 hit = next((r for r in results if r.get("id") == mid), None)
                 assert hit is not None, (
                     f"directive not returned by FTS search (FTS-only mode): {results}"
