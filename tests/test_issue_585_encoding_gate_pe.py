@@ -151,7 +151,11 @@ def test_non_contradiction_can_be_blocked():
     from truememory.ingest.encoding_gate import EncodingGate
 
     gate = EncodingGate(memory=MockMemoryWithContent(), threshold=0.99)
-    decision = gate.evaluate("The weather is nice today", "general")
+    # Mock PE computation so the gate doesn't try to load the real model.
+    # Return a low PE value — this keeps _pe_available=True so the gate
+    # uses its normal threshold logic instead of degrading open.
+    with patch.object(gate, "_compute_prediction_error", return_value=0.1):
+        decision = gate.evaluate("The weather is nice today", "general")
     # With threshold=0.99, normal facts should be blocked
     assert decision.should_encode is False
 
@@ -188,8 +192,10 @@ def test_pe_degradation_in_batch_summary():
     gate._pe_available = False
     gate._pe_degradation_count = 3
 
-    # Run an evaluate so batch has data
-    gate.evaluate("Some fact", "personal")
+    # Mock PE computation so evaluate() doesn't try to load the real model
+    # and inadvertently change _pe_degradation_count.
+    with patch.object(gate, "_compute_prediction_error", return_value=0.0):
+        gate.evaluate("Some fact", "personal")
 
     summary = gate.log_batch_summary()
     assert summary["pe_degradation_count"] == 3
