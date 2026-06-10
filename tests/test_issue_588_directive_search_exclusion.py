@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import sqlite3
 
-import pytest
 
 from truememory.storage import create_db, insert_message
 from truememory.fts_search import search_fts, search_fts_by_sender, search_fts_in_range
