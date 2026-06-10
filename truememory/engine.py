@@ -1837,8 +1837,25 @@ class TrueMemoryEngine:
                 contradiction_results = search_contradictions(self.conn, query)
                 if contradiction_results:
                     existing_ids = {r["id"] for r in results}
+                    # Score contradictions competitively so they survive
+                    # the top-K slice and reach the reranker (#581).
+                    max_existing = max(
+                        (r.get("score", r.get("rrf_score", 0)) for r in results),
+                        default=0.01,
+                    )
                     for cr in contradiction_results:
                         cr["source"] = cr.get("source", "contradiction")
+                        # Ensure 'content' key exists so the salience
+                        # guard can score the row (#581 bug-1).
+                        if "content" not in cr:
+                            cr["content"] = cr.get(
+                                "current_fact",
+                                cr.get("text", cr.get("memory", "")),
+                            )
+                        # Assign a competitive score so contradictions
+                        # are not sliced off before reranking (#581 bug-2).
+                        if "score" not in cr:
+                            cr["score"] = max_existing * 0.8
                         if cr.get("id") and cr["id"] not in existing_ids:
                             results.append(cr)
                             existing_ids.add(cr["id"])

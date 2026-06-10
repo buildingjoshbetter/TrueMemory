@@ -370,8 +370,18 @@ def filter_by_salience(
     """
     filtered = []
     for r in results:
+        # Resolve content from whichever key the row carries.
+        # Standard rows use 'content'; contradiction supplements may
+        # carry 'current_fact', 'text', or 'memory' instead (#581).
+        _content = (
+            r.get("content")
+            or r.get("current_fact")
+            or r.get("text")
+            or r.get("memory")
+            or ""
+        )
         salience = compute_message_salience(
-            r.get("content", ""),
+            _content,
             r.get("modality", ""),
         )
         r["salience"] = salience
