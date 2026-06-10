@@ -35,7 +35,30 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 
-MEMORY_LIMIT = int(os.environ.get("TRUEMEMORY_RECALL_LIMIT", "25"))
+_BASE_MEMORY_LIMIT = int(os.environ.get("TRUEMEMORY_RECALL_LIMIT", "25"))
+
+# Issue #396: search intensity scales the recall limit at session start.
+# Standard = 25, Enhanced/Max = 35.
+_INTENSITY_MEMORY_LIMITS = {
+    "standard": _BASE_MEMORY_LIMIT,
+    "enhanced": 35,
+    "max": 35,
+}
+
+
+def _get_search_intensity() -> str:
+    """Read search_intensity from persistent config (default: standard)."""
+    try:
+        config_path = Path.home() / ".truememory" / "config.json"
+        if config_path.exists():
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            return config.get("search_intensity", "standard")
+    except Exception:
+        pass
+    return "standard"
+
+
+MEMORY_LIMIT = _BASE_MEMORY_LIMIT  # module-level default; overridden in main()
 # Max directives force-injected at session start. Uncapped injection let a
 # large directive set consume unbounded context (issue #589, D-4).
 DIRECTIVE_LIMIT = int(os.environ.get("TRUEMEMORY_DIRECTIVE_LIMIT", "50"))
@@ -554,6 +577,11 @@ def main():
         input_data = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
         input_data = {}
+
+    # Issue #396: scale recall limit based on search intensity
+    global MEMORY_LIMIT
+    intensity = _get_search_intensity()
+    MEMORY_LIMIT = _INTENSITY_MEMORY_LIMITS.get(intensity, _BASE_MEMORY_LIMIT)
 
     try:
         if _is_first_run():

@@ -635,6 +635,22 @@ def _resolve_deepsearch_llm():
 _SEARCH_INTERNAL_LIMIT = 100   # Benchmark sweet spot
 _DEEP_INTERNAL_LIMIT = 500     # Beyond benchmark — maximum recall
 
+# ---------------------------------------------------------------------------
+# Memory-intensity configuration (issue #396)
+# ---------------------------------------------------------------------------
+
+_VALID_INTENSITIES = ("standard", "enhanced", "max")
+
+
+def _get_search_intensity() -> str:
+    """Return the configured search intensity (default: standard)."""
+    return _load_config().get("search_intensity", "standard")
+
+
+def _get_store_intensity() -> str:
+    """Return the configured store intensity (default: standard)."""
+    return _load_config().get("store_intensity", "standard")
+
 # Tiered rerankers: standard search resolves per-tier via _current_reranker()
 # so Base / Pro get gte-reranker-modernbert-base (paper §2.0). The deep
 # reranker is tier-independent by design — it's a "maximum recall" escape
@@ -1104,6 +1120,8 @@ def truememory_stats() -> str:
     stats["version"] = __version__
     stats["tier"] = config.get("tier", "edge")
     stats["tier_configured"] = "tier" in config
+    stats["search_intensity"] = config.get("search_intensity", "standard")
+    stats["store_intensity"] = config.get("store_intensity", "standard")
     stats["health"] = _build_health_payload()
     stats["rss_mb"] = round(_get_rss_mb(), 1)
     if _MAX_RSS_MB:
@@ -1157,6 +1175,8 @@ def truememory_configure(
     api_key: str = "",
     api_provider: str = "",
     email: str = "",
+    search_intensity: str = "",
+    store_intensity: str = "",
 ) -> str:
     """Configure TrueMemory. Call this once during first-time setup,
     or again to change tier or update API keys.
@@ -1168,6 +1188,16 @@ def truememory_configure(
                  anthropic, openrouter, openai.
         api_provider: Required if api_key is provided. One of: "anthropic", "openrouter", "openai", "groq".
         email: User's email for updates and support (optional).
+        search_intensity: How aggressively to search memories.
+            "standard" (default) = recall at session start + on recall-intent.
+            "enhanced" = more results at session start + proactive recall every ~5th prompt.
+            "max" = every prompt gets a memory search.
+            Empty string = no change (preserves current setting).
+        store_intensity: How aggressively to store memories.
+            "standard" (default) = AI calls truememory_store + session-end pipeline.
+            "enhanced" = standard + per-exchange evaluator (heuristic + encoding gate).
+            "max" = every exchange evaluated regardless of depth.
+            Empty string = no change (preserves current setting).
     """
     global _memory
     tier = tier.lower().strip()
@@ -1181,6 +1211,16 @@ def truememory_configure(
             resolve_custom_tier()  # raises ValueError on missing env vars
         except ValueError as e:
             return json.dumps({"error": str(e)})
+
+    # Validate intensity settings (issue #396)
+    if search_intensity and search_intensity not in _VALID_INTENSITIES:
+        return json.dumps({
+            "error": f"search_intensity must be one of: {', '.join(_VALID_INTENSITIES)}",
+        })
+    if store_intensity and store_intensity not in _VALID_INTENSITIES:
+        return json.dumps({
+            "error": f"store_intensity must be one of: {', '.join(_VALID_INTENSITIES)}",
+        })
 
     if api_key and len(api_key) > 4096:
         return json.dumps({"error": "api_key exceeds maximum length of 4096 characters"})
@@ -1213,6 +1253,12 @@ def truememory_configure(
             telemetry.identify(email.strip(), {"tier": tier})
         except Exception:
             pass
+
+    # Persist intensity settings (issue #396). Empty string = no change.
+    if search_intensity:
+        config["search_intensity"] = search_intensity
+    if store_intensity:
+        config["store_intensity"] = store_intensity
 
     # Track tier change for telemetry dashboard
     try:
@@ -1324,6 +1370,11 @@ def truememory_configure(
     if api_key:
         result["api_key_saved"] = f"{api_provider} key stored"
 
+    # Report intensity settings (issue #396)
+    effective_config = _load_config()
+    result["search_intensity"] = effective_config.get("search_intensity", "standard")
+    result["store_intensity"] = effective_config.get("store_intensity", "standard")
+
     # Check if HyDE search is available — HyDE is Pro-only (M8 / #505).
     # Non-Pro tiers never use HyDE regardless of API key presence.
     has_key = bool(
@@ -1360,6 +1411,11 @@ def truememory_configure(
         "  Recalling: At the start of each session, I'll search your memories\n"
         "             for relevant context. You can also ask me directly:\n"
         "             \"Do you remember...?\" or \"What do you know about...?\"\n"
+        "\n"
+        "  Memory intensity: You can tune how aggressively TrueMemory searches\n"
+        "             and stores using search_intensity and store_intensity.\n"
+        "             Options: standard (default), enhanced, max.\n"
+        "             Example: truememory_configure(tier=\"base\", search_intensity=\"enhanced\")\n"
         "\n"
         "  Examples to try:\n"
         "    - \"I prefer dark mode and TypeScript\"\n"

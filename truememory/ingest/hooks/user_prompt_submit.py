@@ -123,6 +123,216 @@ _CODE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------------------
+# Issue #396: Memory Intensity — per-exchange evaluator + proactive recall
+# ---------------------------------------------------------------------------
+
+# Storable content heuristics for per-exchange evaluator
+_STORABLE_RE = re.compile(
+    r'\b(?:'
+    r'(?:i|my|we)\s+(?:prefer|like|dislike|hate|love|use|always|never|want)\b'
+    r'|(?:i|my)\s+(?:name|email|phone|address|birthday|age|job|role|team)\s+(?:is|are)\b'
+    r"|(?:i(?:'m|\s+am)\s+)"
+    r'|(?:we|i)\s+(?:decided|agreed|committed|chose|picked)\b'
+    r'|(?:actually|no|wrong|correction|not\s+right|instead)\b'
+    r'|(?:remember\s+(?:that|this|to))\b'
+    r'|(?:from\s+now\s+on|always\s+do|never\s+do|every\s+session)\b'
+    r'|(?:my\s+(?:favorite|preferred|usual|default))\b'
+    r')',
+    re.IGNORECASE,
+)
+
+# Prompt counter file for proactive recall scheduling
+_PROMPT_COUNTER_DIR = Path(os.environ.get(
+    "TRUEMEMORY_BUFFER_DIR",
+    str(Path.home() / ".truememory" / "buffers"),
+))
+
+
+def _get_intensity_config() -> tuple[str, str]:
+    """Read search_intensity and store_intensity from persistent config."""
+    try:
+        config_path = Path.home() / ".truememory" / "config.json"
+        if config_path.exists():
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            return (
+                config.get("search_intensity", "standard"),
+                config.get("store_intensity", "standard"),
+            )
+    except Exception:
+        pass
+    return ("standard", "standard")
+
+
+def _get_prompt_count(session_id: str) -> int:
+    """Read the prompt counter for a session."""
+    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "unknown"
+    counter_file = _PROMPT_COUNTER_DIR / f"{safe_id}.count"
+    try:
+        if counter_file.exists():
+            return int(counter_file.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        pass
+    return 0
+
+
+def _increment_prompt_count(session_id: str) -> int:
+    """Increment and return the prompt counter for a session."""
+    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "unknown"
+    counter_file = _PROMPT_COUNTER_DIR / f"{safe_id}.count"
+    count = _get_prompt_count(session_id) + 1
+    try:
+        _PROMPT_COUNTER_DIR.mkdir(parents=True, exist_ok=True)
+        counter_file.write_text(str(count), encoding="utf-8")
+    except OSError:
+        pass
+    return count
+
+
+def _detect_storable_content(prompt: str) -> bool:
+    """Fast heuristic: does the prompt contain content worth storing?"""
+    if len(prompt) < 15 or len(prompt) > 2000:
+        return False
+    if _CODE_RE.search(prompt):
+        return False
+    return bool(_STORABLE_RE.search(prompt))
+
+
+def _check_conversation_depth(session_id: str, prompt: str, window: int = 5) -> bool:
+    """Check if recent exchanges show thematic depth (keyword overlap).
+
+    Reads the last `window` buffer entries and checks if the current prompt
+    shares significant keywords with them, suggesting a sustained topic
+    worth capturing.
+    """
+    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "unknown"
+    buffer_file = _PROMPT_COUNTER_DIR.parent / "buffers" / f"{safe_id}.jsonl"
+    if not buffer_file.exists():
+        buffer_file = Path(os.environ.get(
+            "TRUEMEMORY_BUFFER_DIR",
+            str(Path.home() / ".truememory" / "buffers"),
+        )) / f"{safe_id}.jsonl"
+    if not buffer_file.exists():
+        return False
+
+    try:
+        recent_words: set[str] = set()
+        lines = buffer_file.read_text(encoding="utf-8").strip().splitlines()
+        for line in lines[-window:]:
+            try:
+                entry = json.loads(line)
+                content = entry.get("content", "")
+                words = {w.lower() for w in re.findall(r'\b\w{4,}\b', content)}
+                recent_words.update(words)
+            except (json.JSONDecodeError, KeyError):
+                continue
+
+        prompt_words = {w.lower() for w in re.findall(r'\b\w{4,}\b', prompt)}
+        overlap = prompt_words & recent_words
+        # At least 3 shared meaningful words suggests thematic depth
+        return len(overlap) >= 3
+    except Exception:
+        return False
+
+
+def _try_per_exchange_store(prompt: str, session_id: str, user_id: str, db_path: str, store_intensity: str) -> None:
+    """Per-exchange evaluator: detect storable content and store via encoding gate.
+
+    Enhanced: only stores if conversation has depth (keyword overlap).
+    Max: stores on every exchange that passes heuristics + gate.
+    """
+    if store_intensity == "standard":
+        return
+
+    if not _detect_storable_content(prompt):
+        return
+
+    # Enhanced: require conversation depth; Max: skip depth check
+    if store_intensity == "enhanced" and not _check_conversation_depth(session_id, prompt):
+        return
+
+    # Novelty check: quick search to avoid dupes
+    try:
+        from truememory.client import Memory
+        m = Memory(path=db_path or None)
+        existing = m.search(prompt, user_id=user_id or None, limit=3)
+        if existing:
+            for r in existing:
+                score = r.get("score", 0.0)
+                if score > 0.85:
+                    return  # Too similar to existing memory
+    except Exception:
+        return  # If search fails, skip storing
+
+    # Run through encoding gate
+    try:
+        from truememory.ingest.encoding_gate import EncodingGate
+        gate = EncodingGate(memory=m, user_id=user_id or "")
+        decision = gate.evaluate(prompt)
+        if not decision.passed:
+            return
+
+        # Store the content
+        m.add(content=prompt, user_id=user_id or None)
+    except Exception:
+        pass  # Never crash the hook
+
+
+def _try_proactive_recall(prompt: str, user_id: str, db_path: str, session_id: str, search_intensity: str, prompt_count: int) -> str | None:
+    """Proactive recall based on search intensity.
+
+    Enhanced: recall every ~5th prompt (8 results).
+    Max: every prompt gets a memory search (10 results).
+    Standard: handled by existing _try_auto_recall (recall-intent only).
+    """
+    if search_intensity == "standard":
+        return None
+
+    # Dedup: skip if session_start already injected recall for this session
+    try:
+        from truememory.ingest.hooks._shared import consume_recall_injected
+        if session_id and consume_recall_injected(session_id):
+            return None
+    except Exception:
+        pass
+
+    if search_intensity == "enhanced":
+        # Every 5th prompt
+        if prompt_count % 5 != 0:
+            return None
+        limit = 8
+    else:  # max
+        limit = 10
+
+    # Skip code-heavy prompts
+    if _CODE_RE.search(prompt):
+        return None
+
+    try:
+        try:
+            from truememory.ingest.hooks._shared import get_recall_deadline
+            from truememory.model_client import set_request_timeout
+            set_request_timeout(get_recall_deadline())
+        except Exception:
+            pass
+        from truememory.client import Memory
+        m = Memory(path=db_path or None)
+        results = m.search(prompt, user_id=user_id or None, limit=limit)
+        if not results:
+            return None
+        lines = []
+        for r in results[:limit]:
+            content = r.get("content", "")[:200]
+            lines.append(f"- {content}")
+        return (
+            "<truememory-recall>\n"
+            "Proactive memory recall:\n"
+            + "\n".join(lines)
+            + "\n</truememory-recall>"
+        )
+    except Exception:
+        return None
+
 
 def _detect_recall(prompt: str) -> bool:
     if len(prompt) < 10 or len(prompt) > 500:
@@ -252,6 +462,12 @@ def main():
 
     _try_capture_email(prompt)
 
+    # Issue #396: read intensity settings
+    search_intensity, store_intensity = _get_intensity_config()
+
+    # Issue #396: track prompt count for proactive recall scheduling
+    prompt_count = _increment_prompt_count(session_id)
+
     transcript_path = input_data.get("transcript_path", "")
     if transcript_path and Path(transcript_path).exists():
         try:
@@ -275,7 +491,23 @@ def main():
         except Exception:
             pass
 
-    recall_context = _try_auto_recall(prompt, args.user, args.db, session_id)
+    # Issue #396: per-exchange store for enhanced/max store intensity
+    try:
+        _try_per_exchange_store(prompt, session_id, args.user, args.db, store_intensity)
+    except Exception:
+        pass  # Never crash the hook
+
+    # Issue #396: proactive recall for enhanced/max search intensity
+    recall_context = None
+    if search_intensity != "standard":
+        recall_context = _try_proactive_recall(
+            prompt, args.user, args.db, session_id, search_intensity, prompt_count,
+        )
+
+    # Fall back to standard recall-intent detection
+    if not recall_context:
+        recall_context = _try_auto_recall(prompt, args.user, args.db, session_id)
+
     if recall_context:
         print(json.dumps({"additionalContext": recall_context}))
 

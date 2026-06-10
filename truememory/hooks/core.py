@@ -23,7 +23,31 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 
-MEMORY_LIMIT = int(os.environ.get("TRUEMEMORY_RECALL_LIMIT", "25"))
+_BASE_MEMORY_LIMIT = int(os.environ.get("TRUEMEMORY_RECALL_LIMIT", "25"))
+
+# Issue #396: search intensity scales the recall limit.
+# Standard = 25, Enhanced/Max = 35.
+_INTENSITY_MEMORY_LIMITS = {
+    "standard": _BASE_MEMORY_LIMIT,
+    "enhanced": 35,
+    "max": 35,
+}
+
+
+def _get_search_intensity() -> str:
+    """Read search_intensity from persistent config (default: standard)."""
+    try:
+        import json as _json
+        config_path = Path.home() / ".truememory" / "config.json"
+        if config_path.exists():
+            config = _json.loads(config_path.read_text(encoding="utf-8"))
+            return config.get("search_intensity", "standard")
+    except Exception:
+        pass
+    return "standard"
+
+
+MEMORY_LIMIT = _BASE_MEMORY_LIMIT  # module-level default; callers use recall_memories()
 
 BUFFER_DIR = Path(os.environ.get(
     "TRUEMEMORY_BUFFER_DIR",
@@ -418,7 +442,12 @@ def recall_memories(
     except ImportError:
         return ""
 
-    limit = memory_limit or MEMORY_LIMIT
+    # Issue #396: scale recall limit based on search intensity
+    if memory_limit:
+        limit = memory_limit
+    else:
+        intensity = _get_search_intensity()
+        limit = _INTENSITY_MEMORY_LIMITS.get(intensity, _BASE_MEMORY_LIMIT)
     db = db_path or None
     memory = Memory(path=db) if db else Memory()
 
