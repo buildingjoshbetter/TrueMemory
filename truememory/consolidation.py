@@ -230,6 +230,68 @@ _CHANGE_PATTERNS = [
         ),
         "type": "schedule_change",
     },
+    # ── Informal / conversational contradiction patterns (#580) ──────
+    # "actually X" — speaker corrects a previous statement
+    {
+        "category": "correction",
+        "pattern": re.compile(
+            r"(?:^|[.!?]\s+)(?:actually|correction:?|update:?)\s+"
+            r"(.{5,80}?)(?:[.,!?]|$)",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+        "type": "informal_correction",
+    },
+    # "not X anymore" / "no longer X"
+    {
+        "category": "correction",
+        "pattern": re.compile(
+            r"(?:not\s+(.{3,40}?)\s+anymore|no\s+longer\s+(.{3,40}?))(?:[.,!?\s]|$)",
+            re.IGNORECASE,
+        ),
+        "type": "negation_change",
+    },
+    # "X is wrong" / "X is incorrect" / "that's wrong" / "that's incorrect"
+    {
+        "category": "correction",
+        "pattern": re.compile(
+            r"(?:(?:that(?:'s|\s+is)|this\s+is|it(?:'s|\s+is))\s+"
+            r"(?:wrong|incorrect|inaccurate|outdated|not\s+(?:right|correct|true)))",
+            re.IGNORECASE,
+        ),
+        "type": "invalidation",
+    },
+    # "changed my mind about X" / "I was wrong about X"
+    {
+        "category": "correction",
+        "pattern": re.compile(
+            r"(?:changed?\s+(?:my|our)\s+mind\s+about"
+            r"|(?:I|we)\s+(?:was|were)\s+wrong\s+about"
+            r"|turns?\s+out)\s+"
+            r"(.{3,60}?)(?:[.,!?]|$)",
+            re.IGNORECASE,
+        ),
+        "type": "retraction",
+    },
+    # "scratch that" / "forget what I said" / "disregard" / "never mind"
+    {
+        "category": "correction",
+        "pattern": re.compile(
+            r"(?:scratch\s+that|forget\s+(?:what\s+I\s+said|that)|disregard"
+            r"|never\s*mind(?:\s+(?:about|that))?)",
+            re.IGNORECASE,
+        ),
+        "type": "retraction",
+    },
+    # "replaced X with Y"
+    {
+        "category": "technology",
+        "pattern": re.compile(
+            r"replaced?\s+([A-Z][\w\s.+-]{2,25}?)\s+"
+            r"(?:with|by)\s+([A-Z][\w\s.+-]{2,25}?)(?:[.,!?\s]|$)",
+            re.IGNORECASE,
+        ),
+        "type": "explicit_change",
+    },
 ]
 
 # Known subject normalization: maps keyword fragments to canonical subjects.
@@ -514,6 +576,150 @@ def _compute_contradictions(all_msgs: list[dict]) -> tuple[list[tuple], list[tup
                         (fact_val, timestamp, msg_id, new_local_id)
                     )
 
+                elif pattern_def["type"] == "informal_correction" and groups:
+                    # "actually X", "correction: X", "update: X"
+                    fact_val = groups[0].strip()
+                    if (len(fact_val) < _MIN_FACT_LEN
+                            or len(fact_val) > _MAX_FACT_LEN):
+                        continue
+                    subject = _normalize_subject(fact_val, content)
+                    entity_context = ""
+                    nearby_nouns = re.findall(
+                        r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b',
+                        content[:100],
+                    )
+                    common_words = {"The", "This", "That", "We", "They",
+                                    "Our", "My", "But", "And", "Just", "Not",
+                                    "Actually", "Correction", "Update"}
+                    entities = [n for n in nearby_nouns
+                                if n not in common_words and len(n) > 2]
+                    if entities:
+                        entity_context = entities[0].lower()
+
+                    new_local_id = next_local_id
+                    next_local_id += 1
+                    insert_rows.append((
+                        new_local_id, subject, fact_val, msg_id,
+                        timestamp, entity_context, timestamp,
+                    ))
+
+                    if subject in fact_history and fact_history[subject]:
+                        prev = fact_history[subject][-1]
+                        supersede_updates.append(
+                            (prev[3], new_local_id, timestamp)
+                        )
+                        contradictions.append({
+                            "subject": subject,
+                            "old_fact": prev[0],
+                            "new_fact": fact_val,
+                            "old_timestamp": prev[1],
+                            "new_timestamp": timestamp,
+                            "source_message_id": msg_id,
+                        })
+
+                    fact_history[subject].append(
+                        (fact_val, timestamp, msg_id, new_local_id)
+                    )
+
+                elif pattern_def["type"] == "negation_change":
+                    # "not X anymore" / "no longer X" — two capture groups
+                    fact_val = (groups[0] or groups[1] or "").strip()
+                    if (len(fact_val) < _MIN_FACT_LEN
+                            or len(fact_val) > _MAX_FACT_LEN):
+                        continue
+                    subject = _normalize_subject(fact_val, content)
+
+                    new_local_id = next_local_id
+                    next_local_id += 1
+                    insert_rows.append((
+                        new_local_id, subject, f"no longer {fact_val}",
+                        msg_id, timestamp, "", timestamp,
+                    ))
+
+                    if subject in fact_history and fact_history[subject]:
+                        prev = fact_history[subject][-1]
+                        supersede_updates.append(
+                            (prev[3], new_local_id, timestamp)
+                        )
+                        contradictions.append({
+                            "subject": subject,
+                            "old_fact": prev[0],
+                            "new_fact": f"no longer {fact_val}",
+                            "old_timestamp": prev[1],
+                            "new_timestamp": timestamp,
+                            "source_message_id": msg_id,
+                        })
+
+                    fact_history[subject].append(
+                        (f"no longer {fact_val}", timestamp, msg_id,
+                         new_local_id)
+                    )
+
+                elif pattern_def["type"] == "invalidation":
+                    # "that's wrong" / "that's incorrect" — no capture
+                    # group, just records the event as a contradiction
+                    # signal on the message itself.
+                    new_local_id = next_local_id
+                    next_local_id += 1
+                    insert_rows.append((
+                        new_local_id, "_invalidation",
+                        match.group(0).strip(), msg_id,
+                        timestamp, "", timestamp,
+                    ))
+                    fact_history["_invalidation"].append(
+                        (match.group(0).strip(), timestamp, msg_id,
+                         new_local_id)
+                    )
+
+                elif pattern_def["type"] == "retraction" and groups:
+                    # "changed my mind about X", "I was wrong about X",
+                    # "turns out X"
+                    fact_val = groups[0].strip()
+                    if (len(fact_val) < _MIN_FACT_LEN
+                            or len(fact_val) > _MAX_FACT_LEN):
+                        continue
+                    subject = _normalize_subject(fact_val, content)
+
+                    new_local_id = next_local_id
+                    next_local_id += 1
+                    insert_rows.append((
+                        new_local_id, subject, fact_val, msg_id,
+                        timestamp, "", timestamp,
+                    ))
+
+                    if subject in fact_history and fact_history[subject]:
+                        prev = fact_history[subject][-1]
+                        supersede_updates.append(
+                            (prev[3], new_local_id, timestamp)
+                        )
+                        contradictions.append({
+                            "subject": subject,
+                            "old_fact": prev[0],
+                            "new_fact": fact_val,
+                            "old_timestamp": prev[1],
+                            "new_timestamp": timestamp,
+                            "source_message_id": msg_id,
+                        })
+
+                    fact_history[subject].append(
+                        (fact_val, timestamp, msg_id, new_local_id)
+                    )
+
+                elif pattern_def["type"] == "retraction" and not groups:
+                    # "scratch that", "forget what I said", "disregard",
+                    # "never mind" — no capture group
+                    new_local_id = next_local_id
+                    next_local_id += 1
+                    insert_rows.append((
+                        new_local_id, "_retraction",
+                        match.group(0).strip(), msg_id,
+                        timestamp, "", timestamp,
+                    ))
+                    fact_history["_retraction"].append(
+                        (match.group(0).strip(), timestamp, msg_id,
+                         new_local_id)
+                    )
+
     return insert_rows, supersede_updates, contradictions
 
 
@@ -531,6 +737,10 @@ def detect_contradictions(conn: sqlite3.Connection) -> list[dict]:
     - **Location changes**: ``"moved to"``, ``"new office"``.
     - **Status changes**: ``"quit"``, ``"hired"``, ``"started"``.
     - **Schedule changes**: ``"switched to mornings"``, ``"back to mornings"``.
+    - **Informal corrections**: ``"actually X"``, ``"correction: X"``.
+    - **Negation changes**: ``"not X anymore"``, ``"no longer X"``.
+    - **Invalidations**: ``"that's wrong"``, ``"that's incorrect"``.
+    - **Retractions**: ``"changed my mind about X"``, ``"scratch that"``.
 
     For each detected change, a record is inserted into ``fact_timeline``
     with the subject, fact value, source message, and timestamp.  When a
@@ -586,7 +796,7 @@ def detect_contradictions(conn: sqlite3.Connection) -> list[dict]:
             old_db_id = local_to_db[old_local]
             new_db_id = local_to_db[new_local]
             conn.execute(
-                "UPDATE fact_timeline SET superseded_by = ? WHERE id = ?",
+                "UPDATE fact_timeline SET superseded_by = ?, status = 'superseded' WHERE id = ?",
                 (new_db_id, old_db_id),
             )
             conn.execute(
@@ -879,13 +1089,14 @@ def search_contradictions(conn: sqlite3.Connection,
 
         # Also check if query words appear in the fact values themselves
         facts = conn.execute(
-            "SELECT id, fact, timestamp, superseded_by, source_message_id "
+            "SELECT id, fact, timestamp, superseded_by, source_message_id, "
+            "       COALESCE(status, 'active') "
             "FROM fact_timeline WHERE subject = ? ORDER BY timestamp",
             (subject,),
         ).fetchall()
 
         fact_match = sum(
-            1 for _, fact, _, _, _ in facts
+            1 for _, fact, _, _, _, _ in facts
             for w in query_words
             if w in fact.lower()
         )
@@ -898,18 +1109,27 @@ def search_contradictions(conn: sqlite3.Connection,
                     "timestamp": r[2],
                     "superseded": r[3] is not None,
                     "source_message_id": r[4],
+                    "status": r[5],
                 }
                 for r in facts
             ]
 
             # Current fact = the one NOT superseded (or the latest one)
-            current = [h for h in history if not h["superseded"]]
+            current = [h for h in history
+                        if not h["superseded"]
+                        and h.get("status", "active") != "superseded"]
             if current:
                 latest = current[-1]
             elif history:
                 latest = history[-1]
             else:
                 continue
+
+            # Penalise relevance when the latest fact is superseded
+            # (still retrievable, but ranked lower).
+            relevance = match_score + fact_match
+            if latest.get("status") == "superseded" or latest.get("superseded"):
+                relevance *= 0.5
 
             results.append({
                 "id": latest["source_message_id"],
@@ -918,7 +1138,7 @@ def search_contradictions(conn: sqlite3.Connection,
                 "current_timestamp": latest["timestamp"],
                 "source_message_id": latest["source_message_id"],
                 "history": history,
-                "relevance": match_score + fact_match,
+                "relevance": relevance,
             })
 
     # Sort by relevance

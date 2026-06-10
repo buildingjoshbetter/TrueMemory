@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS fact_timeline (
     entity_scope TEXT DEFAULT '',
     valid_from TEXT DEFAULT '',
     valid_to TEXT DEFAULT '',
+    status TEXT DEFAULT 'active',
     FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
@@ -397,6 +398,16 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
             )
     except sqlite3.OperationalError:
         log.warning("Could not ensure directive index on %s", db_path, exc_info=True)
+
+    # Migrate fact_timeline: add status column for existing databases (#580).
+    try:
+        ft_cols = {row[1] for row in conn.execute("PRAGMA table_info(fact_timeline)").fetchall()}
+        if ft_cols and "status" not in ft_cols:
+            conn.execute("ALTER TABLE fact_timeline ADD COLUMN status TEXT DEFAULT 'active'")
+            log.info("Migrated fact_timeline: added status column")
+    except Exception:
+        log.debug("fact_timeline status migration skipped", exc_info=True)
+
     conn.commit()
     return conn
 
