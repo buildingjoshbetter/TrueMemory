@@ -1,14 +1,10 @@
 """Tests for issue #557: _drain_backlog() runs async in background subprocess."""
 
-import json
-import os
 import subprocess
 import sys
 import time
-from pathlib import Path
 from unittest import mock
 
-import pytest
 
 
 def test_maintenance_spawns_background_subprocess(tmp_path, monkeypatch):
