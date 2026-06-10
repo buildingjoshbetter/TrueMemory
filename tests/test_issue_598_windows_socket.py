@@ -76,7 +76,6 @@ class TestServerTCPFallback:
         port_path = tmp_path / "model_server.port"
         token_path = tmp_path / "model_server.token"
         pid_path = tmp_path / "model_server.pid"
-        sock_path = tmp_path / "model.sock"
 
         started = threading.Event()
         bound_port = []
@@ -316,8 +315,14 @@ class TestServerHandleClient:
             with patch("truememory.model_server._USE_UNIX", False):
                 srv.handle_client(server_sock)
 
-            data = client_sock.recv(1)
-            assert data == b"", "Connection closed when server has no token"
+            # Server drops the connection on bad auth — this manifests as
+            # either empty recv (clean close) or ConnectionResetError
+            # depending on OS timing.
+            try:
+                data = client_sock.recv(1)
+                assert data == b"", "Connection closed when server has no token"
+            except ConnectionResetError:
+                pass  # Also a valid rejection: server reset the connection
         finally:
             client_sock.close()
 
