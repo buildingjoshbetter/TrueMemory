@@ -1,5 +1,6 @@
 """Tests for issue #557: _drain_backlog() runs async in background subprocess."""
 
+import os
 import subprocess
 import sys
 import time
@@ -34,7 +35,7 @@ def test_maintenance_spawns_background_subprocess(tmp_path, monkeypatch):
     assert "_drain_backlog" in script
     assert "_scan_stale_sessions" in script
     # Must detach from parent session group so it survives hook exit.
-    assert spawned["kwargs"].get("start_new_session") is True
+    assert spawned["kwargs"].get("start_new_session") is hasattr(os, "setsid")
     # stdout/stderr must be redirected (not inherited) to avoid blocking.
     assert spawned["kwargs"].get("stdin") == subprocess.DEVNULL
     assert spawned["kwargs"]["stdout"] is not None
