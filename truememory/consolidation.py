@@ -311,6 +311,212 @@ def build_entity_timelines(conn: sqlite3.Connection) -> dict:
     return dict(timelines)
 
 
+def _compute_contradictions(all_msgs: list[dict]) -> tuple[list[tuple], list[tuple], list[dict]]:
+    """Compute contradiction facts entirely in memory (no DB access).
+
+    This is the expensive phase: regex scanning every message against every
+    change pattern.  Factored out of :func:`detect_contradictions` so it can
+    run OUTSIDE the write transaction (#591).
+
+    Returns:
+        ``(insert_rows, supersede_updates, contradictions)``
+
+        *insert_rows* — list of tuples
+        ``(local_id, subject, fact, source_message_id, timestamp,
+        entity_scope, valid_from)`` ready for bulk INSERT.
+
+        *supersede_updates* — list of ``(superseded_local_id,
+        superseding_local_id, valid_to_timestamp)`` pairs expressed with
+        local (in-memory) IDs so the caller can translate to real DB IDs
+        after inserting.
+
+        *contradictions* — the user-facing list of contradiction dicts.
+    """
+    # Local auto-increment for in-memory IDs (translated to real DB IDs
+    # after the bulk INSERT).
+    next_local_id = 1
+    # subject -> [(fact_value, timestamp, msg_id, local_id)]
+    fact_history: dict[str, list[tuple]] = defaultdict(list)
+    contradictions: list[dict] = []
+    insert_rows: list[tuple] = []
+    supersede_updates: list[tuple] = []  # (old_local_id, new_local_id, valid_to)
+
+    for msg in all_msgs:
+        content = msg["content"]
+        timestamp = msg["timestamp"]
+        msg_id = msg["id"]
+
+        for pattern_def in _CHANGE_PATTERNS:
+            matches = pattern_def["pattern"].finditer(content)
+
+            for match in matches:
+                groups = match.groups()
+
+                if pattern_def["type"] == "explicit_change" and len(groups) >= 2:
+                    old_val = groups[0].strip()
+                    new_val = groups[1].strip()
+                    subject = _normalize_subject(old_val, content)
+
+                    entity_context = ""
+                    nearby_nouns = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', content[:100])
+                    common_words = {"The", "This", "That", "We", "They", "Our", "My", "But", "And", "Just", "Not"}
+                    entities = [n for n in nearby_nouns if n not in common_words and len(n) > 2]
+                    if entities:
+                        entity_context = entities[0].lower()
+
+                    # Record the old fact if not already tracked
+                    if subject not in fact_history or not fact_history[subject]:
+                        old_local_id = next_local_id
+                        next_local_id += 1
+                        insert_rows.append((
+                            old_local_id, subject, old_val, msg_id,
+                            timestamp, entity_context, timestamp,
+                        ))
+                        fact_history[subject].append(
+                            (old_val, timestamp, msg_id, old_local_id)
+                        )
+
+                    # Record the new fact and supersede the old
+                    new_local_id = next_local_id
+                    next_local_id += 1
+                    insert_rows.append((
+                        new_local_id, subject, new_val, msg_id,
+                        timestamp, entity_context, timestamp,
+                    ))
+
+                    if fact_history[subject]:
+                        prev = fact_history[subject][-1]
+                        supersede_updates.append(
+                            (prev[3], new_local_id, timestamp)
+                        )
+
+                    fact_history[subject].append(
+                        (new_val, timestamp, msg_id, new_local_id)
+                    )
+
+                    contradictions.append({
+                        "subject": subject,
+                        "old_fact": old_val,
+                        "new_fact": new_val,
+                        "old_timestamp": fact_history[subject][-2][1]
+                        if len(fact_history[subject]) >= 2 else "",
+                        "new_timestamp": timestamp,
+                        "source_message_id": msg_id,
+                    })
+
+                elif pattern_def["type"] == "pricing" and len(groups) >= 2:
+                    price = groups[0].strip()
+                    unit = groups[1].strip()
+
+                    entity_context = ""
+                    nearby_nouns = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', content)
+                    common_words = {"The", "This", "That", "We", "They", "Our", "My", "But", "And", "Just", "Not"}
+                    entities = [n for n in nearby_nouns if n not in common_words and len(n) > 2]
+                    if entities:
+                        entity_context = entities[0].lower()
+
+                    subject = f"pricing_{entity_context}_{unit}" if entity_context else f"pricing_{unit}"
+
+                    new_local_id = next_local_id
+                    next_local_id += 1
+                    insert_rows.append((
+                        new_local_id, subject, price, msg_id,
+                        timestamp, entity_context, timestamp,
+                    ))
+
+                    if subject in fact_history and fact_history[subject]:
+                        prev = fact_history[subject][-1]
+                        if prev[0] != price:
+                            supersede_updates.append(
+                                (prev[3], new_local_id, timestamp)
+                            )
+                            contradictions.append({
+                                "subject": subject,
+                                "old_fact": prev[0],
+                                "new_fact": price,
+                                "old_timestamp": prev[1],
+                                "new_timestamp": timestamp,
+                                "source_message_id": msg_id,
+                            })
+
+                    fact_history[subject].append(
+                        (price, timestamp, msg_id, new_local_id)
+                    )
+
+                elif pattern_def["type"] in ("location_change",
+                                              "schedule_change"):
+                    if groups:
+                        fact_val = groups[0].strip()
+                        if (len(fact_val) < _MIN_FACT_LEN
+                                or len(fact_val) > _MAX_FACT_LEN):
+                            continue
+
+                        subject = _normalize_subject(fact_val, content)
+
+                        entity_context = ""
+                        nearby_nouns = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', content[:100])
+                        common_words = {"The", "This", "That", "We", "They", "Our", "My", "But", "And", "Just", "Not"}
+                        entities = [n for n in nearby_nouns if n not in common_words and len(n) > 2]
+                        if entities:
+                            entity_context = entities[0].lower()
+
+                        new_local_id = next_local_id
+                        next_local_id += 1
+                        insert_rows.append((
+                            new_local_id, subject, fact_val, msg_id,
+                            timestamp, entity_context, timestamp,
+                        ))
+
+                        if (subject in fact_history
+                                and fact_history[subject]):
+                            prev = fact_history[subject][-1]
+                            if prev[0].lower() != fact_val.lower():
+                                supersede_updates.append(
+                                    (prev[3], new_local_id, timestamp)
+                                )
+                                contradictions.append({
+                                    "subject": subject,
+                                    "old_fact": prev[0],
+                                    "new_fact": fact_val,
+                                    "old_timestamp": prev[1],
+                                    "new_timestamp": timestamp,
+                                    "source_message_id": msg_id,
+                                })
+
+                        fact_history[subject].append(
+                            (fact_val, timestamp, msg_id, new_local_id)
+                        )
+
+                elif pattern_def["type"] == "status_change" and groups:
+                    person = groups[0].strip()
+                    if (len(person) < _MIN_FACT_LEN
+                            or len(person) > _MAX_FACT_LEN):
+                        continue
+
+                    verb_match = re.search(
+                        r"(quit|left|started|joined|hired|fired|"
+                        r"resigned|promoted)",
+                        content, re.IGNORECASE,
+                    )
+                    verb = verb_match.group(1).lower() if verb_match else "changed"
+
+                    subject = f"status_{person.lower()}"
+                    fact_val = f"{person} {verb}"
+                    entity_context = person.lower()
+
+                    new_local_id = next_local_id
+                    next_local_id += 1
+                    insert_rows.append((
+                        new_local_id, subject, fact_val, msg_id,
+                        timestamp, entity_context, timestamp,
+                    ))
+                    fact_history[subject].append(
+                        (fact_val, timestamp, msg_id, new_local_id)
+                    )
+
+    return insert_rows, supersede_updates, contradictions
+
+
 def detect_contradictions(conn: sqlite3.Connection) -> list[dict]:
     """
     Find facts that changed over time (contradictions).
@@ -331,226 +537,73 @@ def detect_contradictions(conn: sqlite3.Connection) -> list[dict]:
     newer fact supersedes an older one, the older record's
     ``superseded_by`` column is updated.
 
+    The implementation follows a three-phase pattern (#591) so that
+    expensive regex computation does NOT hold the SQLite write lock:
+
+    1. **Read** messages (short read, or no transaction).
+    2. **Compute** contradictions entirely in memory
+       (:func:`_compute_contradictions`).
+    3. **Write** results in one short, atomic transaction.
+
     Returns:
         List of contradiction records, each a dict with ``subject``,
         ``old_fact``, ``new_fact``, ``old_timestamp``, ``new_timestamp``,
         ``source_message_id``.
     """
+    # --- Phase 1: read ---------------------------------------------------
     all_msgs = _get_all_messages_chrono(conn)
 
-    # Clear existing fact_timeline for a clean rebuild
-    conn.execute("DELETE FROM fact_timeline")
+    # --- Phase 2: compute (no transaction held) --------------------------
+    insert_rows, supersede_updates, contradictions = _compute_contradictions(
+        all_msgs,
+    )
 
-    # Track facts by subject: subject -> [(fact_value, timestamp, msg_id, db_id)]
-    fact_history: dict[str, list[tuple]] = defaultdict(list)
-    contradictions: list[dict] = []
+    # --- Phase 3: write (short atomic transaction) -----------------------
+    # Same manual-transaction pattern used by build_summaries (#401).
+    if conn.in_transaction:
+        conn.commit()
+    prev_isolation = conn.isolation_level
+    try:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM fact_timeline")
 
-    for msg in all_msgs:
-        content = msg["content"]
-        timestamp = msg["timestamp"]
-        msg_id = msg["id"]
+        # Bulk-insert all fact rows and build local_id -> real_db_id map.
+        local_to_db: dict[int, int] = {}
+        for row in insert_rows:
+            local_id = row[0]
+            cursor = conn.execute(
+                "INSERT INTO fact_timeline "
+                "(subject, fact, source_message_id, timestamp, "
+                " entity_scope, valid_from) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                row[1:],
+            )
+            local_to_db[local_id] = cursor.lastrowid
 
-        for pattern_def in _CHANGE_PATTERNS:
-            matches = pattern_def["pattern"].finditer(content)
+        # Apply supersession updates using real DB IDs.
+        for old_local, new_local, valid_to in supersede_updates:
+            old_db_id = local_to_db[old_local]
+            new_db_id = local_to_db[new_local]
+            conn.execute(
+                "UPDATE fact_timeline SET superseded_by = ? WHERE id = ?",
+                (new_db_id, old_db_id),
+            )
+            conn.execute(
+                "UPDATE fact_timeline SET valid_to = ? WHERE id = ?",
+                (valid_to, old_db_id),
+            )
 
-            for match in matches:
-                groups = match.groups()
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.isolation_level = prev_isolation
 
-                if pattern_def["type"] == "explicit_change" and len(groups) >= 2:
-                    old_val = groups[0].strip()
-                    new_val = groups[1].strip()
-                    subject = _normalize_subject(old_val, content)
-
-                    # Try to extract entity context
-                    entity_context = ""
-                    nearby_nouns = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', content[:100])
-                    common_words = {"The", "This", "That", "We", "They", "Our", "My", "But", "And", "Just", "Not"}
-                    entities = [n for n in nearby_nouns if n not in common_words and len(n) > 2]
-                    if entities:
-                        entity_context = entities[0].lower()
-
-                    # Record the old fact if not already tracked
-                    if subject not in fact_history or not fact_history[subject]:
-                        cursor = conn.execute(
-                            "INSERT INTO fact_timeline "
-                            "(subject, fact, source_message_id, timestamp, entity_scope, valid_from) "
-                            "VALUES (?, ?, ?, ?, ?, ?)",
-                            (subject, old_val, msg_id, timestamp, entity_context, timestamp),
-                        )
-                        old_db_id = cursor.lastrowid
-                        fact_history[subject].append(
-                            (old_val, timestamp, msg_id, old_db_id)
-                        )
-
-                    # Record the new fact and supersede the old
-                    cursor = conn.execute(
-                        "INSERT INTO fact_timeline "
-                        "(subject, fact, source_message_id, timestamp, entity_scope, valid_from) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        (subject, new_val, msg_id, timestamp, entity_context, timestamp),
-                    )
-                    new_db_id = cursor.lastrowid
-
-                    # Update the previous fact's superseded_by and valid_to
-                    if fact_history[subject]:
-                        prev = fact_history[subject][-1]
-                        conn.execute(
-                            "UPDATE fact_timeline SET superseded_by = ? "
-                            "WHERE id = ?",
-                            (new_db_id, prev[3]),
-                        )
-                        conn.execute(
-                            "UPDATE fact_timeline SET valid_to = ? WHERE id = ?",
-                            (timestamp, prev[3]),
-                        )
-
-                    fact_history[subject].append(
-                        (new_val, timestamp, msg_id, new_db_id)
-                    )
-
-                    contradictions.append({
-                        "subject": subject,
-                        "old_fact": old_val,
-                        "new_fact": new_val,
-                        "old_timestamp": fact_history[subject][-2][1]
-                        if len(fact_history[subject]) >= 2 else "",
-                        "new_timestamp": timestamp,
-                        "source_message_id": msg_id,
-                    })
-
-                elif pattern_def["type"] == "pricing" and len(groups) >= 2:
-                    price = groups[0].strip()
-                    unit = groups[1].strip()
-
-                    # Extract entity context (company/product name) from surrounding text
-                    entity_context = ""
-                    # Look for proper nouns near the price
-                    nearby_nouns = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', content)
-                    common_words = {"The", "This", "That", "We", "They", "Our", "My", "But", "And", "Just", "Not"}
-                    entities = [n for n in nearby_nouns if n not in common_words and len(n) > 2]
-                    if entities:
-                        entity_context = entities[0].lower()
-
-                    subject = f"pricing_{entity_context}_{unit}" if entity_context else f"pricing_{unit}"
-
-                    cursor = conn.execute(
-                        "INSERT INTO fact_timeline "
-                        "(subject, fact, source_message_id, timestamp, entity_scope, valid_from) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        (subject, price, msg_id, timestamp, entity_context, timestamp),
-                    )
-                    new_db_id = cursor.lastrowid
-
-                    # Check if this contradicts a previous pricing fact
-                    if subject in fact_history and fact_history[subject]:
-                        prev = fact_history[subject][-1]
-                        if prev[0] != price:
-                            conn.execute(
-                                "UPDATE fact_timeline SET superseded_by = ? "
-                                "WHERE id = ?",
-                                (new_db_id, prev[3]),
-                            )
-                            conn.execute(
-                                "UPDATE fact_timeline SET valid_to = ? WHERE id = ?",
-                                (timestamp, prev[3]),
-                            )
-                            contradictions.append({
-                                "subject": subject,
-                                "old_fact": prev[0],
-                                "new_fact": price,
-                                "old_timestamp": prev[1],
-                                "new_timestamp": timestamp,
-                                "source_message_id": msg_id,
-                            })
-
-                    fact_history[subject].append(
-                        (price, timestamp, msg_id, new_db_id)
-                    )
-
-                elif pattern_def["type"] in ("location_change",
-                                              "schedule_change"):
-                    if groups:
-                        fact_val = groups[0].strip()
-                        if (len(fact_val) < _MIN_FACT_LEN
-                                or len(fact_val) > _MAX_FACT_LEN):
-                            continue
-
-                        subject = _normalize_subject(fact_val, content)
-
-                        # Try to extract entity context
-                        entity_context = ""
-                        nearby_nouns = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', content[:100])
-                        common_words = {"The", "This", "That", "We", "They", "Our", "My", "But", "And", "Just", "Not"}
-                        entities = [n for n in nearby_nouns if n not in common_words and len(n) > 2]
-                        if entities:
-                            entity_context = entities[0].lower()
-
-                        cursor = conn.execute(
-                            "INSERT INTO fact_timeline "
-                            "(subject, fact, source_message_id, timestamp, entity_scope, valid_from) "
-                            "VALUES (?, ?, ?, ?, ?, ?)",
-                            (subject, fact_val, msg_id, timestamp, entity_context, timestamp),
-                        )
-                        new_db_id = cursor.lastrowid
-
-                        # Check for contradiction with previous fact on
-                        # same subject
-                        if (subject in fact_history
-                                and fact_history[subject]):
-                            prev = fact_history[subject][-1]
-                            if prev[0].lower() != fact_val.lower():
-                                conn.execute(
-                                    "UPDATE fact_timeline "
-                                    "SET superseded_by = ? WHERE id = ?",
-                                    (new_db_id, prev[3]),
-                                )
-                                conn.execute(
-                                    "UPDATE fact_timeline SET valid_to = ? WHERE id = ?",
-                                    (timestamp, prev[3]),
-                                )
-                                contradictions.append({
-                                    "subject": subject,
-                                    "old_fact": prev[0],
-                                    "new_fact": fact_val,
-                                    "old_timestamp": prev[1],
-                                    "new_timestamp": timestamp,
-                                    "source_message_id": msg_id,
-                                })
-
-                        fact_history[subject].append(
-                            (fact_val, timestamp, msg_id, new_db_id)
-                        )
-
-                elif pattern_def["type"] == "status_change" and groups:
-                    person = groups[0].strip()
-                    if (len(person) < _MIN_FACT_LEN
-                            or len(person) > _MAX_FACT_LEN):
-                        continue
-
-                    # Extract the verb
-                    verb_match = re.search(
-                        r"(quit|left|started|joined|hired|fired|"
-                        r"resigned|promoted)",
-                        content, re.IGNORECASE,
-                    )
-                    verb = verb_match.group(1).lower() if verb_match else "changed"
-
-                    subject = f"status_{person.lower()}"
-                    fact_val = f"{person} {verb}"
-                    entity_context = person.lower()
-
-                    cursor = conn.execute(
-                        "INSERT INTO fact_timeline "
-                        "(subject, fact, source_message_id, timestamp, entity_scope, valid_from) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        (subject, fact_val, msg_id, timestamp, entity_context, timestamp),
-                    )
-                    new_db_id = cursor.lastrowid
-                    fact_history[subject].append(
-                        (fact_val, timestamp, msg_id, new_db_id)
-                    )
-
-    conn.commit()
     return contradictions
 
 
@@ -1154,20 +1207,23 @@ def build_entity_summary_sheets(conn):
     return count
 
 
-def build_structured_facts(conn):
-    """
-    Extract structured facts (team roster, locations, key events) and store
-    as searchable summary records. Enables aggregation queries.
-    """
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc).isoformat()
-    count = 0
+def _compute_structured_facts(all_msgs: list[dict]) -> list[tuple]:
+    """Compute structured fact rows entirely in memory (no DB access).
 
-    all_msgs = _get_all_messages_chrono(conn)
+    Factored out of :func:`build_structured_facts` so the expensive regex
+    scanning runs OUTSIDE the write transaction (#591).
+
+    Returns:
+        List of row tuples ready for INSERT into the ``summaries`` table:
+        ``(period, start_date, end_date, entity, summary, key_facts_json,
+        message_ids_json, created_at)``.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    rows: list[tuple] = []
 
     # --- Team roster extraction ---
-    team_members = set()
-    team_roles = {}
+    team_members: set[str] = set()
+    team_roles: dict[str, str] = {}
     role_patterns = re.compile(
         r'(\w+(?:\s+\w+)?)\s+(?:is|as)\s+(?:our\s+)?(?:the\s+)?'
         r'(CTO|CEO|COO|CFO|VP|lead|manager|engineer|designer|intern|cofounder|co-founder)',
@@ -1183,8 +1239,10 @@ def build_structured_facts(conn):
                 team_members.add(name)
                 team_roles[name] = role
 
-    # Also add all senders as potential team/contact members
-    hire_pattern = re.compile(r'(?:hired|brought on|recruited|onboarded)\s+(\w+(?:\s+\w+)?)', re.IGNORECASE)
+    hire_pattern = re.compile(
+        r'(?:hired|brought on|recruited|onboarded)\s+(\w+(?:\s+\w+)?)',
+        re.IGNORECASE,
+    )
     for msg in all_msgs:
         matches = hire_pattern.finditer(msg["content"])
         for m in matches:
@@ -1194,21 +1252,25 @@ def build_structured_facts(conn):
 
     if team_members:
         roster_text = "Team Roster:\n" + "\n".join(
-            f"  {name}: {team_roles.get(name, 'member')}" for name in sorted(team_members)
+            f"  {name}: {team_roles.get(name, 'member')}"
+            for name in sorted(team_members)
         )
-        conn.execute(
-            "INSERT INTO summaries "
-            "(period, start_date, end_date, entity, summary, key_facts, message_ids, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            ("structured_fact", "", "", "", roster_text, json.dumps(list(team_members)), "[]", now)
-        )
-        count += 1
+        rows.append((
+            "structured_fact", "", "", "", roster_text,
+            json.dumps(list(team_members)), "[]", now,
+        ))
 
     # --- Location extraction ---
-    locations = set()
+    locations: set[str] = set()
     location_patterns = [
-        re.compile(r'(?:office|headquarters|hq)\s+(?:at|in|is)\s+(.+?)(?:[.,!?]|$)', re.IGNORECASE),
-        re.compile(r'(?:moved|relocated|based)\s+(?:to|in)\s+(.+?)(?:[.,!?]|$)', re.IGNORECASE),
+        re.compile(
+            r'(?:office|headquarters|hq)\s+(?:at|in|is)\s+(.+?)(?:[.,!?]|$)',
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r'(?:moved|relocated|based)\s+(?:to|in)\s+(.+?)(?:[.,!?]|$)',
+            re.IGNORECASE,
+        ),
     ]
 
     for msg in all_msgs:
@@ -1220,14 +1282,61 @@ def build_structured_facts(conn):
                     locations.add(loc)
 
     if locations:
-        location_text = "Known Locations:\n" + "\n".join(f"  {loc}" for loc in sorted(locations))
-        conn.execute(
-            "INSERT INTO summaries "
-            "(period, start_date, end_date, entity, summary, key_facts, message_ids, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            ("structured_fact", "", "", "", location_text, json.dumps(list(locations)), "[]", now)
+        location_text = "Known Locations:\n" + "\n".join(
+            f"  {loc}" for loc in sorted(locations)
         )
-        count += 1
+        rows.append((
+            "structured_fact", "", "", "", location_text,
+            json.dumps(list(locations)), "[]", now,
+        ))
 
-    conn.commit()
-    return count
+    return rows
+
+
+def build_structured_facts(conn):
+    """
+    Extract structured facts (team roster, locations, key events) and store
+    as searchable summary records. Enables aggregation queries.
+
+    The implementation follows a three-phase pattern (#591) so that
+    expensive regex computation does NOT hold the SQLite write lock:
+
+    1. **Read** messages (short read, or no transaction).
+    2. **Compute** structured facts entirely in memory
+       (:func:`_compute_structured_facts`).
+    3. **Write** results in one short, atomic transaction.
+    """
+    # --- Phase 1: read ---------------------------------------------------
+    all_msgs = _get_all_messages_chrono(conn)
+
+    # --- Phase 2: compute (no transaction held) --------------------------
+    rows = _compute_structured_facts(all_msgs)
+
+    # --- Phase 3: write (short atomic transaction) -----------------------
+    if conn.in_transaction:
+        conn.commit()
+    prev_isolation = conn.isolation_level
+    try:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        # Remove old structured_fact rows (don't touch other summary types).
+        conn.execute("DELETE FROM summaries WHERE period = 'structured_fact'")
+        if rows:
+            conn.executemany(
+                "INSERT INTO summaries "
+                "(period, start_date, end_date, entity, summary, "
+                " key_facts, message_ids, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.isolation_level = prev_isolation
+
+    return len(rows)
