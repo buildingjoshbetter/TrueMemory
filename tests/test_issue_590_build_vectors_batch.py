@@ -13,13 +13,21 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-try:
-    import sqlite_vec  # noqa: F401
-    _HAS_VEC = True
-except ImportError:
-    _HAS_VEC = False
+def _can_load_vec() -> bool:
+    """Check if sqlite-vec can actually be loaded (not just importable)."""
+    try:
+        import sqlite_vec
+        conn = sqlite3.connect(":memory:")
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.close()
+        return True
+    except Exception:
+        return False
 
-pytestmark = pytest.mark.skipif(not _HAS_VEC, reason="sqlite-vec not available")
+_HAS_VEC = _can_load_vec()
+
+pytestmark = pytest.mark.skipif(not _HAS_VEC, reason="sqlite-vec cannot load")
 
 
 # ---------------------------------------------------------------------------
