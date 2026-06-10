@@ -99,6 +99,7 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--user", default=os.environ.get("TRUEMEMORY_USER_ID", ""))
     p.add_argument("--db", default=os.environ.get("TRUEMEMORY_DB_PATH", ""))
+    p.add_argument("--scan-stale", action="store_true", help=argparse.SUPPRESS)
     args, _ = p.parse_known_args()
     return args
 
@@ -482,8 +483,6 @@ def _run_maintenance_background() -> None:
     _log_dir.mkdir(parents=True, exist_ok=True)
     _log_path = _log_dir / "session_maintenance.log"
 
-    # Inline script that imports and runs the two maintenance functions.
-    # Kept minimal to avoid shell-quoting issues.
     script = (
         "from truememory.ingest.hooks.session_start import _drain_backlog, _scan_stale_sessions; "
         "_drain_backlog(); "
@@ -498,16 +497,44 @@ def _run_maintenance_background() -> None:
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
-                start_new_session=True,
+                start_new_session=hasattr(os, "setsid"),
                 env={**os.environ, "TRUEMEMORY_MAINTENANCE_CHILD": "1"},
             )
         finally:
             log_file.close()
     except Exception as exc:
         log.debug("Failed to spawn background maintenance: %s", exc)
-        # Fall back to synchronous drain so work isn't silently lost.
         _drain_backlog()
         _scan_stale_sessions()
+
+
+def _spawn_stale_scan() -> None:
+    """Launch _scan_stale_sessions() in a detached background process.
+
+    Uses ``Popen(start_new_session=True)`` so the scan does not block
+    SessionStart.  The subprocess re-enters this module with ``--scan-stale``
+    and performs the scan independently (issue #558).
+    """
+    import subprocess
+
+    cmd = [sys.executable, "-m", "truememory.ingest.hooks.session_start", "--scan-stale"]
+    try:
+        _log_dir = Path.home() / ".truememory" / "logs"
+        _log_dir.mkdir(parents=True, exist_ok=True)
+        _log_file = open(_log_dir / "stale_scan.log", "a", encoding="utf-8")
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=_log_file,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=hasattr(os, "setsid"),
+            )
+        finally:
+            _log_file.close()
+        log.debug("Spawned stale-session scanner (pid=%d)", proc.pid)
+    except Exception as e:
+        log.debug("Failed to spawn stale-session scanner: %s", e)
 
 
 def main():
@@ -515,6 +542,11 @@ def main():
         return
 
     args = _parse_args()
+
+    # --scan-stale: background-only entry point (issue #558).
+    if args.scan_stale:
+        _scan_stale_sessions()
+        return
 
     _run_maintenance_background()
 
