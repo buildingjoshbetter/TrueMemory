@@ -31,6 +31,48 @@ from truememory.storage import _row_to_dict, _SELECT_COLS
 
 
 # ---------------------------------------------------------------------------
+# Date-boundary helpers (used by temporal.py and fts_search.py)
+# ---------------------------------------------------------------------------
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _validate_iso_date(value: str | None) -> str | None:
+    """Return *value* unchanged if it looks like ``YYYY-MM-DD``, else ``None``.
+
+    Guards against ``None``, empty strings, and malformed dates before they
+    are concatenated into SQL parameters or comparison strings.
+    """
+    if not value or not isinstance(value, str):
+        return None
+    value = value.strip()
+    if _ISO_DATE_RE.match(value):
+        return value
+    # Also accept full ISO timestamps (YYYY-MM-DDTHH:MM:SS…)
+    if len(value) >= 10 and _ISO_DATE_RE.match(value[:10]):
+        return value
+    return None
+
+
+def _exclusive_upper_bound(date_str: str) -> str:
+    """Convert a date-only ``YYYY-MM-DD`` into the *next* day for ``< ?`` comparisons.
+
+    If the input already contains a time component, return it as-is (the
+    caller is expected to use ``<`` instead of ``<=``).
+
+    >>> _exclusive_upper_bound("2025-06-15")
+    '2025-06-16'
+    >>> _exclusive_upper_bound("2025-12-31")
+    '2026-01-01'
+    """
+    if len(date_str) == 10:  # "YYYY-MM-DD"
+        dt = datetime.fromisoformat(date_str)
+        return (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+    # Full timestamp — return as-is; the caller should use strict `<`.
+    return date_str
+
+
+# ---------------------------------------------------------------------------
 # Month name mapping
 # ---------------------------------------------------------------------------
 
@@ -512,11 +554,13 @@ def search_temporal(
     if not intent["has_temporal"]:
         return results[:limit]
 
-    after = intent["after"]
-    before = intent["before"]
+    after = _validate_iso_date(intent["after"])
+    before = _validate_iso_date(intent["before"])
 
     # --- Filter by time window ---
     if after or before:
+        # Compute exclusive upper bound once (next day for date-only strings).
+        before_excl = _exclusive_upper_bound(before) if before else None
         filtered = []
         for r in results:
             ts = r.get("timestamp", "")
@@ -524,7 +568,7 @@ def search_temporal(
                 continue
             if after and ts < after:
                 continue
-            if before and ts > before + "T23:59:59":
+            if before_excl and ts >= before_excl:
                 continue
             filtered.append(r)
         results = filtered
@@ -569,7 +613,10 @@ def get_timeline(
         entity: If provided, restrict to messages where the entity is
                 either the sender or the recipient (case-insensitive).
         after:  Inclusive lower bound timestamp (ISO string).
-        before: Inclusive upper bound timestamp (ISO string).
+        before: Exclusive upper bound date (ISO string).  For a date-only
+                value the bound is the start of the *next* day so that
+                events on ``before`` are included but midnight of the next
+                day is not.
 
     Returns:
         List of message dicts in chronological order.
@@ -577,17 +624,17 @@ def get_timeline(
     clauses: list[str] = []
     params: list[str] = []
 
+    after = _validate_iso_date(after)
+    before = _validate_iso_date(before)
+
     if after is not None:
         clauses.append("timestamp >= ?")
         params.append(after)
     if before is not None:
-        # Include the full day for date-only bounds
-        if len(before) == 10:  # "YYYY-MM-DD"
-            clauses.append("timestamp <= ?")
-            params.append(before + "T23:59:59")
-        else:
-            clauses.append("timestamp <= ?")
-            params.append(before)
+        # Exclusive upper bound: use '<' with the next day so that events
+        # on `before` are included but midnight of `before+1` is not.
+        clauses.append("timestamp < ?")
+        params.append(_exclusive_upper_bound(before))
     if entity is not None:
         entity_lower = entity.lower()
         clauses.append("(LOWER(sender) = ? OR LOWER(recipient) = ?)")
