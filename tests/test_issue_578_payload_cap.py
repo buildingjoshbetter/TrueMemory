@@ -1,13 +1,10 @@
 """Tests for issue #578 — per-memory truncation + total payload budget."""
 
-import os
-import pytest
 
 from truememory.ingest.hooks.session_start import (
     _truncate_memory,
     _apply_budget,
     RECALL_MEMORY_CHARS,
-    RECALL_BUDGET_CHARS,
 )
 
 
