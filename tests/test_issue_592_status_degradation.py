@@ -56,7 +56,12 @@ class TestStatusIncludesDegradation:
             srv._encoding_gate_last_error = None
             srv._encoding_gate_degradation_count = 0
 
-        result = _call_status()
+        # Mock vector load error to None — sqlite-vec may not be available
+        # on all CI platforms (e.g. macOS runners).
+        with patch(
+            "truememory.engine.get_vectors_load_error", return_value=None,
+        ):
+            result = _call_status()
         deg = result["degradation"]
 
         assert deg["reranker"]["status"] == "ok"
