@@ -96,7 +96,7 @@ def _resolve_model_name(name: str) -> str:
     Raises:
         ValueError: if *name* refers to a model removed in v0.4.0.
     """
-    lowered = name.lower()
+    lowered = name.strip().lower()
     if lowered in _REMOVED_MODELS:
         raise ValueError(
             f"Embedding model {name!r} was removed in TrueMemory v0.4.0. "
@@ -109,7 +109,26 @@ def _resolve_model_name(name: str) -> str:
         except ValueError:
             logger.warning("Custom tier resolution failed; falling back to model2vec.")
             return "model2vec"
-    return _TIER_ALIASES.get(lowered, name)
+    # Known public tier (edge/base/pro, case-insensitively normalized e.g.
+    # "PRO" -> "pro") or known internal model name -> resolve directly.
+    if lowered in _TIER_ALIASES:
+        return _TIER_ALIASES[lowered]
+    if lowered in _MODEL_DIMS:
+        return lowered
+    # M-88 (#640): an unknown/garbage tier string must NOT be silently treated
+    # as a custom HuggingFace model id (which, with CUSTOM_ALLOW_DOWNLOAD=1,
+    # triggers an arbitrary model download). Only honour a value that clearly
+    # looks like a HF repo id (contains "/"); otherwise fall back to a safe
+    # default and log so the misconfiguration is visible.
+    if "/" in lowered:
+        return name
+    logger.warning(
+        "Unknown tier/model %r is not a known tier (edge/base/pro/custom) or "
+        "model name and is not a HuggingFace repo id; falling back to "
+        "model2vec (edge).",
+        name,
+    )
+    return "model2vec"
 
 
 def resolve_tier() -> str:

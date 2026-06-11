@@ -61,6 +61,13 @@ _config_cache_time: float = 0.0
 _config_write_lock = threading.Lock()
 
 
+class _ConfigShapeError(ValueError):
+    """Config parsed as valid JSON but the top-level value is not an object
+    (M-25b / #640). Routed to the same corrupt-rename recovery as a parse
+    error so a hand-edited ``null`` / ``"x"`` / ``[..]`` never bricks the
+    server at import or per-tool."""
+
+
 def _load_config() -> dict:
     """Load persistent config from ~/.truememory/config.json.
 
@@ -91,7 +98,17 @@ def _load_config() -> dict:
         _config_cache_time = now
         return {}
     try:
-        result = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+        # encoding="utf-8-sig" transparently strips a leading UTF-8 BOM
+        # (M-87 / #640): editors that prepend a BOM otherwise made json.loads
+        # raise JSONDecodeError, renaming an otherwise-valid config away.
+        result = json.loads(_CONFIG_PATH.read_text(encoding="utf-8-sig"))
+        if not isinstance(result, dict):
+            # Valid JSON but wrong shape (null / "x" / [..]). Treat exactly
+            # like a parse error: rename to a .corrupt backup and fall back to
+            # an empty config so the server never hard-bricks (M-25b / #640).
+            raise _ConfigShapeError(
+                f"top-level JSON value is {type(result).__name__}, expected object"
+            )
         try:
             _config_cache_mtime = _CONFIG_PATH.stat().st_mtime
         except OSError:
@@ -99,17 +116,21 @@ def _load_config() -> dict:
         _config_cache = result
         _config_cache_time = now
         return result.copy()
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, _ConfigShapeError) as e:
         # .with_suffix would replace ".json"; we want to APPEND to preserve
         # the origin filename in the backup so users can find it easily.
         backup = _CONFIG_PATH.parent / f"{_CONFIG_PATH.name}.corrupt.{int(time.time())}"
+        if isinstance(e, json.JSONDecodeError):
+            _reason = f"JSON parse error at line {e.lineno} col {e.colno}"
+        else:
+            _reason = str(e)
         try:
             _CONFIG_PATH.rename(backup)
             print(
-                f"truememory: config.json is corrupt (JSON parse error at "
-                f"line {e.lineno} col {e.colno}). Saved corrupt file to "
-                f"{backup} — your API keys may be recoverable from there. "
-                f"Run `truememory-mcp --setup` to recreate the config.",
+                f"truememory: config.json is corrupt ({_reason}). "
+                f"Saved corrupt file to {backup} — your API keys may be "
+                f"recoverable from there. Run `truememory-mcp --setup` to "
+                f"recreate the config.",
                 file=sys.stderr,
             )
         except OSError:
@@ -197,8 +218,13 @@ def _save_config(config: dict) -> None:
 # EMBEDDING_MODEL. If we import truememory.client first, the env var isn't
 # set yet and it defaults to "edge"/model2vec regardless of configured tier.
 _startup_config = _load_config()
-if "tier" in _startup_config:
-    os.environ["TRUEMEMORY_EMBED_MODEL"] = _startup_config["tier"]
+_startup_tier = _startup_config.get("tier")
+# os.environ values must be str; a non-str tier (e.g. config edited to
+# {"tier": 3} or null) would raise TypeError at import and hard-brick the
+# server. Only set the env var when the tier is a non-empty string (M-25a /
+# #640); otherwise leave it unset so downstream resolvers fall back to Edge.
+if isinstance(_startup_tier, str) and _startup_tier.strip():
+    os.environ["TRUEMEMORY_EMBED_MODEL"] = _startup_tier
 
 from truememory import __version__  # noqa: E402
 from truememory.client import Memory  # noqa: E402
@@ -511,8 +537,11 @@ def _build_deepsearch_llm_fn():
     the caller to fall back to ``_get_llm_fn()``.
     """
     config = _load_config()
-    ds_provider = config.get("deepsearch_provider", "").strip().lower()
-    ds_model = config.get("deepsearch_model", "").strip()
+    # (config.get(k) or "") tolerates an explicit ``null`` value, which a
+    # missing default would not catch — None.strip() would otherwise crash
+    # every deep search (M-25d / #640).
+    ds_provider = (config.get("deepsearch_provider") or "").strip().lower()
+    ds_model = (config.get("deepsearch_model") or "").strip()
 
     if not ds_provider:
         return None  # No override — caller should use default

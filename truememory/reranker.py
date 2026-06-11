@@ -102,11 +102,16 @@ def _resolve_tier_from_env_and_config() -> str:
         import json
         cfg_path = Path.home() / ".truememory" / "config.json"
         if cfg_path.exists():
-            data = json.loads(cfg_path.read_text(encoding="utf-8"))
-            tier = (data.get("tier") or "").strip().lower()
-            if tier in _KNOWN_TIERS:
-                return tier
-    except (json.JSONDecodeError, OSError) as e:
+            # utf-8-sig strips a leading BOM (#640). isinstance guard: a
+            # valid-JSON non-object config (null / "x" / [..]) would make
+            # data.get raise AttributeError, crashing lazy tier resolution
+            # (M-25c / #640) — treat it as malformed and fall back to Edge.
+            data = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+            if isinstance(data, dict):
+                tier = (data.get("tier") or "").strip().lower()
+                if tier in _KNOWN_TIERS:
+                    return tier
+    except (json.JSONDecodeError, OSError, AttributeError, TypeError) as e:
         # Previously a bare `except Exception: pass`
         # that hid corrupt config.json exactly like mcp_server._load_config
         # did. Log a warning so the user knows the fallback fired — the MCP

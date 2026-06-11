@@ -364,7 +364,12 @@ class RebuildManager:
         config = {}
         if config_path.exists():
             try:
-                config = json.loads(config_path.read_text())
+                # utf-8-sig tolerates a BOM; isinstance guard discards a
+                # valid-JSON non-object config so the tier write starts from a
+                # clean dict instead of crashing on config["tier"] (#640).
+                loaded = json.loads(config_path.read_text(encoding="utf-8-sig"))
+                if isinstance(loaded, dict):
+                    config = loaded
             except (json.JSONDecodeError, OSError):
                 pass
 
