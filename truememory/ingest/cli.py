@@ -348,11 +348,12 @@ def _cascade_next() -> None:
                     cmd.extend(["--user", data["user_id"]])
                 if data.get("db_path"):
                     cmd.extend(["--db", data["db_path"]])
+                from truememory import _platform
                 proc = _sp.Popen(
                     cmd,
                     stdout=_sp.DEVNULL,
                     stderr=_sp.DEVNULL,
-                    start_new_session=hasattr(os, 'setsid'),
+                    **_platform.spawn_kwargs(),
                 )
                 register_spawned_pid(proc.pid)
                 record_stale_processing_pid(claimed_path, proc.pid)

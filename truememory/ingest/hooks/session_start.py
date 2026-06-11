@@ -27,6 +27,8 @@ import os
 import sys
 from pathlib import Path
 
+from truememory import _platform
+
 try:
     import fcntl
     _HAS_FCNTL = True
@@ -332,7 +334,7 @@ def _drain_backlog() -> None:
                         stdout=_log_file,
                         stderr=subprocess.STDOUT,
                         stdin=subprocess.DEVNULL,
-                        start_new_session=hasattr(os, 'setsid'),
+                        **_platform.spawn_kwargs(),
                     )
                 finally:
                     _log_file.close()
@@ -639,8 +641,8 @@ def _run_maintenance_background() -> None:
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
-                start_new_session=hasattr(os, "setsid"),
                 env={**os.environ, "TRUEMEMORY_MAINTENANCE_CHILD": "1"},
+                **_platform.spawn_kwargs(),
             )
         finally:
             log_file.close()
@@ -673,7 +675,7 @@ def _spawn_stale_scan() -> None:
                 stdout=_log_file,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
-                start_new_session=hasattr(os, "setsid"),
+                **_platform.spawn_kwargs(),
             )
         finally:
             _log_file.close()

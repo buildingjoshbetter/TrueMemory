@@ -802,6 +802,38 @@ class ModelServer:
                 f2.write(text)
             tmp.unlink(missing_ok=True)
 
+    @staticmethod
+    def _restrict_acl_windows(path: Path) -> None:
+        """Best-effort: restrict *path*'s ACL to the current user (Windows).
+
+        ``os.open(..., 0o600)`` does not restrict Windows ACLs, so a TCP
+        fallback token written with mode 0o600 can still be world-readable.
+        Use ``icacls`` to remove inherited ACEs and grant only the current
+        user full control. On any failure, warn (mirroring the config.json
+        permission warning) rather than crash — the loopback bind + HMAC
+        still gate access, this only hardens the at-rest token file.
+        """
+        user = os.environ.get("USERNAME")
+        if not user:
+            return
+        try:
+            import subprocess
+            subprocess.run(
+                ["icacls", str(path), "/inheritance:r",
+                 "/grant:r", f"{user}:F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+            )
+        except Exception:
+            print(
+                "truememory: warning — could not restrict ACL on "
+                f"{path}; the model-server HMAC token may be readable by "
+                "other local users on this machine. On a shared machine, "
+                "ensure ~/.truememory is not world-readable.",
+                file=sys.stderr,
+            )
+
     def _acquire_bind_lock(self):
         """Take an exclusive lock BEFORE binding (issue #646, M-20).
 
@@ -852,6 +884,13 @@ class ModelServer:
             self._token = secrets.token_bytes(_HMAC_TOKEN_BYTES)
             self._atomic_write_text(TOKEN_PATH, self._token.hex(), mode=0o600)
             self._atomic_write_text(PORT_PATH, str(self._bound_port), mode=0o600)
+            # M-80: the 0o600 mode above is a no-op on Windows — os.open only
+            # honors the read-only bit, so the HMAC token can be world-readable
+            # to other local users. Restrict the ACL to the current user via
+            # icacls; warn (mirroring the config.json perm warning) if that
+            # fails so a shared-machine operator is not silently exposed.
+            if sys.platform == "win32":
+                self._restrict_acl_windows(TOKEN_PATH)
             transport_desc = f"tcp={_LOOPBACK_HOST}:{self._bound_port}"
         # PID written only AFTER a successful bind — never advertises a
         # not-yet-listening server (M-20). We own the artifacts from here.
