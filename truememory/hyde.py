@@ -127,6 +127,7 @@ def hyde_search(
     candidate_pool: int = 30,
     fts_weight: float = 1.0,
     vec_weight: float = 1.0,
+    include_directives: bool = False,
 ) -> list[dict]:
     """
     Search with both original query and HyDE-enhanced embedding.
@@ -153,6 +154,7 @@ def hyde_search(
     original_results = search_hybrid(
         conn, query, limit=candidate_pool,
         fts_weight=fts_weight, vec_weight=vec_weight,
+        include_directives=include_directives,
     )
 
     # Generate hypothetical document
@@ -167,6 +169,7 @@ def hyde_search(
         hyde_results = search_hybrid(
             conn, hyp_doc, limit=candidate_pool,
             fts_weight=fts_weight, vec_weight=vec_weight,
+            include_directives=include_directives,
         )
     except Exception as e:
         log.warning("HyDE fusion failed (search with hypothetical doc): %s", e)

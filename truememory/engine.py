@@ -646,8 +646,11 @@ class TrueMemoryEngine:
                 except Exception:
                     logger.warning("Failed to store embedding for message %s during add()", new_id, exc_info=True)
 
-            # Incrementally update entity profile
-            if self._has_personality and sender:
+            # Incrementally update entity profile.
+            # Skip for directives (#637 M-08): directive content must never
+            # pollute entity_profiles / style vectors, or it would surface via
+            # the personality `profile` / `style_vec` supplement sources.
+            if self._has_personality and sender and not directive:
                 try:
                     from truememory.personality import update_entity_profile_incremental
                     update_entity_profile_incremental(self.conn, sender, content, recipient)
@@ -655,7 +658,7 @@ class TrueMemoryEngine:
                     logger.debug("Failed to update entity profile for %s during add()", sender, exc_info=True)
 
             # Store pre-computed style vector (DB write only, computation happened outside lock)
-            if pre_style_vec is not None:
+            if pre_style_vec is not None and not directive:
                 try:
                     _update_style_vec(self.conn, sender, content, _pre_computed_vec=pre_style_vec)
                 except Exception:
@@ -1750,12 +1753,14 @@ class TrueMemoryEngine:
                             self.conn, query,
                             hybrid_results=results,
                             limit=limit * 2,
+                            include_directives=include_directives,
                         )
                     else:
                         temporal_results = search_temporal(
                             self.conn, query,
                             fts_results=results,
                             limit=limit * 2,
+                            include_directives=include_directives,
                         )
                     if temporal_results:
                         # Tag new results with temporal source and merge.
@@ -1791,6 +1796,7 @@ class TrueMemoryEngine:
                                 after=intent["after"],
                                 before=intent["before"],
                                 limit=limit,
+                                include_directives=include_directives,
                             )
                             if range_results:
                                 existing_ids = {r.get("id") for r in results if r.get("id")}
@@ -1823,7 +1829,14 @@ class TrueMemoryEngine:
         # profile results (score=1.0) dominate factual queries.
         if self._has_personality and _has_personality_intent(query):
             try:
-                personality_results = search_personality(self.conn, query, limit=5)
+                # Only forward include_directives when explicitly enabled so
+                # we stay compatible with callers/mocks using the older
+                # 3-arg signature (the default-False path already excludes
+                # directives via search_personality's own candidate filter).
+                _pers_kwargs = {"include_directives": True} if include_directives else {}
+                personality_results = search_personality(
+                    self.conn, query, limit=5, **_pers_kwargs,
+                )
                 if personality_results:
                     existing_ids = {r.get("id") for r in results if r.get("id")}
                     max_existing = max(
@@ -2095,6 +2108,7 @@ class TrueMemoryEngine:
             try:
                 hyde_results = hyde_search(
                     self.conn, query, llm_fn=llm_fn, limit=candidate_pool,
+                    include_directives=include_directives,
                 )
                 if hyde_results:
                     from truememory.hybrid import reciprocal_rank_fusion
@@ -2120,6 +2134,7 @@ class TrueMemoryEngine:
             try:
                 cluster_results = search_clustered(
                     self.conn, query, limit=limit, top_clusters=3,
+                    include_directives=include_directives,
                 )
                 if cluster_results and primary_results:
                     # Normalize cluster scores to [0, 1] independently
@@ -2320,7 +2335,8 @@ class TrueMemoryEngine:
                         )
                     except Exception:
                         logger.debug("LLM reranking failed in search_agentic()", exc_info=True)
-                return self._clean_results(final_results, limit, max_per_session=max_per_session)
+                return self._clean_results(final_results, limit, max_per_session=max_per_session,
+                                           include_directives=include_directives)
             except Exception:
                 logger.warning("Cross-encoder rerank failed in search_agentic()", exc_info=True)
 
@@ -2336,7 +2352,8 @@ class TrueMemoryEngine:
             except Exception:
                 logger.debug("LLM reranking (standalone) failed in search_agentic()", exc_info=True)
 
-        return self._clean_results(primary_results, limit, max_per_session=max_per_session)
+        return self._clean_results(primary_results, limit, max_per_session=max_per_session,
+                                   include_directives=include_directives)
 
     # ── L5 surprise rerank boost (MEMORIST-L5 wiring, 2026-04-24) ──────
     # Multiplies the reranked `score` field by (1 + α · surprise) for
@@ -2388,9 +2405,11 @@ class TrueMemoryEngine:
         from truememory.agentic_search import entity_focused_search
         return entity_focused_search(self.conn, query, limit)
 
-    def _clean_results(self, results: list[dict], limit: int, max_per_session: int = 0) -> list[dict]:
+    def _clean_results(self, results: list[dict], limit: int, max_per_session: int = 0,
+                       include_directives: bool = False) -> list[dict]:
         from truememory.agentic_search import clean_results
-        return clean_results(results, limit, max_per_session)
+        return clean_results(results, limit, max_per_session,
+                             include_directives=include_directives)
 
     def _scent_trail(self, query: str, results: list[dict], limit: int) -> list[dict]:
         from truememory.search_quality import scent_trail

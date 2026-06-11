@@ -158,11 +158,20 @@ def _get_all_messages(conn: sqlite3.Connection) -> list[dict]:
     ]
 
 
-def _get_messages_by_sender(conn: sqlite3.Connection, sender: str) -> list[dict]:
-    """Fetch all messages for a specific sender, ordered by timestamp."""
+def _get_messages_by_sender(conn: sqlite3.Connection, sender: str,
+                            include_directives: bool = False) -> list[dict]:
+    """Fetch all messages for a specific sender, ordered by timestamp.
+
+    Directives (directive=1) are excluded by default so they never leak into
+    personality / style-vec retrieval; pass include_directives=True to keep them.
+    """
+    directive_filter = (
+        "" if include_directives
+        else " AND (directive = 0 OR directive IS NULL)"
+    )
     rows = conn.execute(
-        "SELECT id, content, sender, recipient, timestamp, category, modality "
-        "FROM messages WHERE LOWER(sender) = LOWER(?) ORDER BY timestamp",
+        "SELECT id, content, sender, recipient, timestamp, category, modality, directive "
+        f"FROM messages WHERE LOWER(sender) = LOWER(?){directive_filter} ORDER BY timestamp",
         (sender,),
     ).fetchall()
     return [
@@ -170,6 +179,7 @@ def _get_messages_by_sender(conn: sqlite3.Connection, sender: str) -> list[dict]
             "id": r[0], "content": r[1], "sender": r[2],
             "recipient": r[3], "timestamp": r[4],
             "category": r[5], "modality": r[6],
+            "directive": bool(r[7]),
         }
         for r in rows
     ]
@@ -676,7 +686,8 @@ def extract_preferences(conn: sqlite3.Connection,
 
 
 def search_personality(conn: sqlite3.Connection, query: str,
-                       limit: int = 10) -> list[dict]:
+                       limit: int = 10,
+                       include_directives: bool = False) -> list[dict]:
     """
     Search for personality-relevant information.
 
@@ -738,7 +749,8 @@ def search_personality(conn: sqlite3.Connection, query: str,
 
     if fts_terms:
         fts_query = _build_safe_fts_query(fts_terms)
-        candidate_msgs = _fts_search(conn, fts_query, limit=limit * 3)
+        candidate_msgs = _fts_search(conn, fts_query, limit=limit * 3,
+                                     include_directives=include_directives)
 
     # Fallback: direct query word search
     if not candidate_msgs:
@@ -749,11 +761,14 @@ def search_personality(conn: sqlite3.Connection, query: str,
                                                     "they", "have", "been"}]
         if query_words:
             fts_query = _build_safe_fts_query(query_words)
-            candidate_msgs = _fts_search(conn, fts_query, limit=limit * 3)
+            candidate_msgs = _fts_search(conn, fts_query, limit=limit * 3,
+                                         include_directives=include_directives)
 
     # If we have a target entity and no FTS results, get their messages directly
     if not candidate_msgs and target_entity:
-        candidate_msgs = _get_messages_by_sender(conn, target_entity)[:limit * 3]
+        candidate_msgs = _get_messages_by_sender(
+            conn, target_entity, include_directives=include_directives
+        )[:limit * 3]
 
     # ---- Step 4: score candidates using style vectors ----
     _use_style_vec = False
@@ -801,6 +816,7 @@ def search_personality(conn: sqlite3.Connection, query: str,
                 "source": "style_vec",
                 "aspect": detected_aspect,
                 "score": vec_score,
+                "directive": bool(msg.get("directive", False)),
             })
 
         scored.sort(key=lambda r: r["score"], reverse=True)
@@ -822,6 +838,7 @@ def search_personality(conn: sqlite3.Connection, query: str,
                 "source": "fts",
                 "aspect": detected_aspect,
                 "score": r.get("score", 0.0),
+                "directive": bool(r.get("directive", False)),
             })
 
     # ---- Step 5: add profile data ----
@@ -884,6 +901,7 @@ def search_personality(conn: sqlite3.Connection, query: str,
                     "source": "profile",
                     "aspect": detected_aspect,
                     "score": 1.0,
+                    "directive": False,
                 })
 
     return results[:limit]
