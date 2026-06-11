@@ -486,6 +486,14 @@ def _scan_stale_sessions() -> None:
         except OSError:
             return
 
+        # SRE-03 (#694): prune old extracted/ markers here — gated by the scan
+        # interval (so it runs at most once per _SCAN_INTERVAL) but BEFORE the
+        # claude_dir early-return below. Previously cleanup ran only at the very
+        # end of this function, so when ~/.claude/projects was missing (or any
+        # other early return fired) markers were never pruned and grew unbounded
+        # (54K+ observed in prod). Marker cleanup doesn't need claude_dir.
+        _cleanup_extracted_markers()
+
         # Fall back to 24-hour lookback when no previous watermark exists
         # (first scan or corrupted marker).
         cutoff = watermark if watermark > 0 else (now - 86400)
@@ -606,11 +614,9 @@ def _scan_stale_sessions() -> None:
             _commit_watermark(oldest_deferred_mtime)
         else:
             _commit_watermark(now)
-
-        # Piggyback on the scan window to prune stale extracted/ markers
-        # (issue #579). Runs at most once per _SCAN_INTERVAL alongside the
-        # stale-session scan so it adds no extra scheduling overhead.
-        _cleanup_extracted_markers()
+        # NOTE: extracted/ marker pruning now runs earlier (right after the
+        # interval gate, before the claude_dir early-return) so it can't be
+        # skipped when there's nothing to scan (SRE-03 / #694).
     finally:
         try:
             os.close(scan_fd)
