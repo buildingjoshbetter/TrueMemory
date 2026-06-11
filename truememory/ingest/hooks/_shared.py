@@ -9,6 +9,7 @@ import sys
 import time
 
 from truememory import _platform
+from truememory._platform import _env_int
 
 try:
     import fcntl
@@ -31,7 +32,7 @@ except ValueError:
     RECALL_CACHE_TTL = 300.0
 
 _BUDGET_FILE = Path.home() / ".truememory" / ".extraction_budget"
-_MAX_EXTRACTIONS_PER_HOUR = int(os.environ.get("TRUEMEMORY_MAX_EXTRACTIONS_PER_HOUR", "20"))
+_MAX_EXTRACTIONS_PER_HOUR = _env_int("TRUEMEMORY_MAX_EXTRACTIONS_PER_HOUR", 20, lo=0)
 
 _STALE_PROCESSING_THRESHOLD = 1800  # 30 minutes
 

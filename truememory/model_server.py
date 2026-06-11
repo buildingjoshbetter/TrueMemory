@@ -60,7 +60,7 @@ from pathlib import Path  # noqa: E402
 
 import numpy as np  # noqa: E402
 
-from truememory._platform import _LOOPBACK_HOST, _USE_UNIX, pid_is_alive  # noqa: E402
+from truememory._platform import _LOOPBACK_HOST, _USE_UNIX, _env_int, pid_is_alive  # noqa: E402
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ SOCK_PATH = _TRUEMEMORY_DIR / "model.sock"
 PID_PATH = _TRUEMEMORY_DIR / "model_server.pid"
 PORT_PATH = _TRUEMEMORY_DIR / "model_server.port"
 TOKEN_PATH = _TRUEMEMORY_DIR / "model_server.token"
-IDLE_TIMEOUT = int(os.environ.get("TRUEMEMORY_MODEL_SERVER_IDLE", "300"))
+IDLE_TIMEOUT = _env_int("TRUEMEMORY_MODEL_SERVER_IDLE", 300, lo=0)
 
 LOCK_PATH = _TRUEMEMORY_DIR / "model_server.lock"
 

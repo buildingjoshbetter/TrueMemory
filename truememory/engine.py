@@ -41,6 +41,7 @@ from truememory.storage import (
     insert_message, delete_message, update_message, get_message,
 )
 from truememory.fts_search import search_fts
+from truememory._platform import _env_int
 
 logger = logging.getLogger(__name__)
 
@@ -359,8 +360,8 @@ class TrueMemoryEngine:
 
         # Auto-consolidation: run L5 consolidation every N adds (#498)
         self._adds_since_consolidation = 0
-        self._auto_consolidate_threshold = int(
-            os.environ.get("TRUEMEMORY_AUTO_CONSOLIDATE_EVERY", "25")
+        self._auto_consolidate_threshold = _env_int(
+            "TRUEMEMORY_AUTO_CONSOLIDATE_EVERY", 25, lo=1
         )
         self._consolidation_thread: threading.Thread | None = None
 

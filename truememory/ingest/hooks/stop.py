@@ -26,6 +26,8 @@ import sys
 import time
 from pathlib import Path
 
+from truememory._platform import _env_int
+
 log = logging.getLogger(__name__)
 
 def _safe_float_env(name: str, default: float) -> float:
@@ -68,10 +70,11 @@ BACKLOG_DIR = Path(os.environ.get(
 # (multi-session close, session-restart loop) would otherwise load N
 # embedding models at once — ~600MB RSS each on Pro, easy OOM on laptops.
 # Unified env var across stop.py and hooks/core.py.
-SPAWN_CAP = int(os.environ.get(
-    "TRUEMEMORY_SPAWN_CAP",
-    os.environ.get("TRUEMEMORY_INGEST_SPAWN_CAP", "2"),
-))
+# Crash-safe + clamped (issue #639): a garbage value in either knob must not
+# crash the Stop hook at import, and a zero/negative cap must not disable
+# spawning entirely. Resolve the legacy alias first, then the primary.
+_SPAWN_CAP_DEFAULT = _env_int("TRUEMEMORY_INGEST_SPAWN_CAP", 2, lo=1)
+SPAWN_CAP = _env_int("TRUEMEMORY_SPAWN_CAP", _SPAWN_CAP_DEFAULT, lo=1)
 
 
 def _sanitize_session_id(session_id: str) -> str:

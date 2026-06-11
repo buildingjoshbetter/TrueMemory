@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from truememory._platform import _env_int
 from truememory.storage import _deserialize_metadata, select_message_cols
 
 if TYPE_CHECKING:
@@ -687,7 +688,7 @@ def init_vec_table(
 # ---------------------------------------------------------------------------
 
 _BATCH_SIZE_CPU = 100
-_BATCH_SIZE_MPS = int(os.environ.get("TRUEMEMORY_MPS_BATCH_SIZE", "16"))
+_BATCH_SIZE_MPS = _env_int("TRUEMEMORY_MPS_BATCH_SIZE", 16, lo=1)
 
 
 def _get_batch_size() -> int:

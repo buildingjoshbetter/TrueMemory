@@ -30,6 +30,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from truememory._platform import _env_int
+
 # Optional: fcntl isn't available on Windows, so we gracefully degrade
 try:
     import fcntl
@@ -45,9 +47,9 @@ BUFFER_DIR = Path(os.environ.get(
 ))
 
 # Delete buffer files older than this many days
-RETENTION_DAYS = int(os.environ.get("TRUEMEMORY_BUFFER_RETENTION_DAYS", "7"))
+RETENTION_DAYS = _env_int("TRUEMEMORY_BUFFER_RETENTION_DAYS", 7, lo=0)
 # Max size per buffer file (bytes) before we rotate
-MAX_BUFFER_SIZE = int(os.environ.get("TRUEMEMORY_BUFFER_MAX_BYTES", str(10 * 1024 * 1024)))
+MAX_BUFFER_SIZE = _env_int("TRUEMEMORY_BUFFER_MAX_BYTES", 10 * 1024 * 1024, lo=1)
 
 
 def _safe_session_id_local(session_id: str) -> str:
