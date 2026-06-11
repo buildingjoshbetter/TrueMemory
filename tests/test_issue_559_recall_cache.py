@@ -143,9 +143,13 @@ class TestMultiDB:
 
     def test_default_key(self, isolated_cache):
         # Key now carries intensity:budget:producer too (issue #645). The
-        # db:user prefix is preserved as the leading segment.
+        # db:user prefix is preserved as the leading segment. db_path is
+        # normalized via resolve().as_posix() (cross-platform — on Windows
+        # "/a.db" resolves to a drive-anchored path), so derive the expected
+        # prefix from the same normalizer rather than hardcoding the Unix form.
         assert _shared._recall_cache_key("", "").startswith("default:")
-        assert _shared._recall_cache_key("/a.db", "alice").startswith("/a.db:alice:")
+        norm = _shared._normalize_db_path("/a.db")
+        assert _shared._recall_cache_key("/a.db", "alice").startswith(f"{norm}:alice:")
 
 
 class TestTTLDisabled:
