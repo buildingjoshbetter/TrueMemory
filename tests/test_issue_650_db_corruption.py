@@ -155,7 +155,10 @@ def test_newest_backup_returns_latest(tmp_path):
 @pytest.mark.skipif(
     sys.platform == "win32", reason="chmod semantics differ on Windows"
 )
-@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses dir permissions")
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root bypasses dir permissions",
+)
 def test_readonly_dir_raises_error_naming_directory(tmp_path):
     ro_dir = tmp_path / "readonly"
     ro_dir.mkdir()
