@@ -313,7 +313,10 @@ class EncodingGate:
             else:
                 # Same directive exclusion as the cached path (issue #589,
                 # D-8): similar_memory must never expose directive text.
-                results = [r for r in self._search(fact, limit=1) if not r.get("directive")]
+                # PERF-03 (#690): only .content is read here (never ranked
+                # order), so skip the cross-encoder — paying a per-fact reranker
+                # (a cold-subprocess model load) for context text is wasteful.
+                results = [r for r in self._search(fact, limit=1, skip_reranker=True) if not r.get("directive")]
                 if results:
                     similar = results[0].get("content", "")
 
