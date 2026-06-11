@@ -217,6 +217,31 @@ def _load_config() -> dict:
         return {}
 
 
+def _replace_with_retry(
+    src: str, dst: str, *, attempts: int = 10, delay: float = 0.03,
+) -> None:
+    """``os.replace`` that tolerates Windows replace-while-open semantics (#641).
+
+    POSIX lets you rename a temp file over a path that another process has open;
+    the first attempt succeeds and we return immediately. Windows raises
+    ``PermissionError(13)`` (sharing violation) if the destination is currently
+    held open by any handle — and a lock-LESS reader (``_load_config`` just
+    opens + reads config.json without the cross-process write lock) can hold
+    that handle during our replace. So on ``PermissionError`` we retry with a
+    short backoff before giving up; the reader's handle is transient and closes
+    within a few milliseconds. The caller's ``except BaseException`` still
+    cleans up the temp file if every attempt fails.
+    """
+    for i in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(delay)
+
+
 def _save_config(config: dict) -> None:
     """Save config to ~/.truememory/config.json.
 
@@ -250,7 +275,7 @@ def _save_config(config: dict) -> None:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2)
             os.chmod(tmp_path, 0o600)
-            os.replace(tmp_path, str(_CONFIG_PATH))
+            _replace_with_retry(tmp_path, str(_CONFIG_PATH))
         except BaseException:
             # Clean up the temp file on failure — original config survives
             try:
