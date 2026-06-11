@@ -532,8 +532,85 @@ class TrueMemoryEngine:
                         exc_info=True,
                     )
 
+            # MEMORIST-L4 migration: purge legacy entity_profile summary rows.
+            # M-84: previously this only ran in the deprecated open() path, so
+            # production (which uses _ensure_connection) never purged them.
+            self._purge_legacy_entity_profile_summaries()
+
             self.ready = True
             self._maybe_startup_consolidate()
+
+    def _purge_legacy_entity_profile_summaries(self) -> None:
+        """Delete legacy ``period='entity_profile'`` summary rows once.
+
+        As of 2026-04-24 build_entity_summary_sheets is disabled by default,
+        but existing databases may contain entity_profile rows that
+        search_consolidated still surfaces. Removing them gives the measured
+        +5.3pt L4 lift on upgrade. Idempotent (guarded by a metadata flag) and
+        skipped when the user re-enables sheets via TRUEMEMORY_ENTITY_SHEETS=1.
+        """
+        if self.conn is None:
+            return
+        try:
+            tables = {
+                row[0]
+                for row in self.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+        except Exception:
+            return
+
+        if "summaries" not in tables:
+            return
+
+        if "metadata" in tables:
+            try:
+                _row = self.conn.execute(
+                    "SELECT value FROM metadata WHERE key = ?",
+                    ("l4_entity_profile_migration_done",),
+                ).fetchone()
+                if _row is not None and _row[0] == "1":
+                    return
+            except Exception:
+                pass
+
+        if os.environ.get("TRUEMEMORY_ENTITY_SHEETS", "").strip().lower() in {
+            "1", "true", "yes", "on"
+        }:
+            return
+
+        try:
+            cur = self.conn.execute(
+                "DELETE FROM summaries WHERE period = 'entity_profile'"
+            )
+            deleted = cur.rowcount
+            cur.close()
+            if deleted > 0:
+                self.conn.commit()
+                logger.info(
+                    "MEMORIST-L4 migration: purged %d legacy entity_profile "
+                    "summary rows (disabled by default; set "
+                    "TRUEMEMORY_ENTITY_SHEETS=1 to re-enable)",
+                    deleted,
+                )
+            if "metadata" in tables:
+                try:
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO metadata (key, value) "
+                        "VALUES (?, ?)",
+                        ("l4_entity_profile_migration_done", "1"),
+                    )
+                    self.conn.commit()
+                except Exception:
+                    logger.debug("failed to record l4 migration flag", exc_info=True)
+        except Exception:
+            logger.warning(
+                "MEMORIST-L4 entity_profile migration failed; legacy rows may "
+                "remain. Set TRUEMEMORY_ENTITY_SHEETS=1 to revert to legacy "
+                "behavior if this is blocking.",
+                exc_info=True,
+            )
 
     def _maybe_startup_consolidate(self) -> None:
         """Trigger background consolidation on startup if data looks stale."""
@@ -1173,79 +1250,10 @@ class TrueMemoryEngine:
         }
 
         # ── MEMORIST-L4 migration: purge legacy entity_profile summary rows ─
-        # As of 2026-04-24, build_entity_summary_sheets is disabled by
-        # default (see consolidate() step 12). Existing v0.5.0 databases
-        # may contain `period='entity_profile'` rows that continue to be
-        # surfaced by search_consolidated (no period filter). Delete them
-        # once on open() so upgraders get the research's measured +5.3pt
-        # lift on day one rather than after their next consolidation run.
-        # Idempotent — re-running is a cheap no-op.
-        #
-        # Skipped if the user explicitly re-enables via
-        # TRUEMEMORY_ENTITY_SHEETS=1 (the next consolidate() will rewrite
-        # these rows, so deleting them here is pointless).
-        # Skip if migration flag already set (idempotency + perf:
-        # avoids a full-table scan of `summaries` on every open()).
-        if "metadata" in tables:
-            try:
-                _cur = self.conn.execute(
-                    "SELECT value FROM metadata WHERE key = ?",
-                    ("l4_entity_profile_migration_done",),
-                )
-                _row = _cur.fetchone()
-                _cur.close()
-                _migration_done = _row is not None and _row[0] == "1"
-            except Exception:
-                _migration_done = False
-        else:
-            _migration_done = False
-
-        _entity_sheets_re_enabled = (
-            os.environ.get("TRUEMEMORY_ENTITY_SHEETS", "")
-            .strip().lower() in {"1", "true", "yes", "on"}
-        )
-
-        if (
-            "summaries" in tables
-            and not _migration_done
-            and not _entity_sheets_re_enabled
-        ):
-            try:
-                cur = self.conn.execute(
-                    "DELETE FROM summaries WHERE period = 'entity_profile'"
-                )
-                deleted = cur.rowcount
-                cur.close()
-                if deleted > 0:
-                    self.conn.commit()
-                    logger.info(
-                        "MEMORIST-L4 migration: purged %d legacy "
-                        "entity_profile summary rows (disabled by default; "
-                        "set TRUEMEMORY_ENTITY_SHEETS=1 to re-enable)",
-                        deleted,
-                    )
-                # Record the migration as done so subsequent opens skip
-                # the scan (even if 0 rows were deleted).
-                if "metadata" in tables:
-                    try:
-                        self.conn.execute(
-                            "INSERT OR REPLACE INTO metadata (key, value) "
-                            "VALUES (?, ?)",
-                            ("l4_entity_profile_migration_done", "1"),
-                        )
-                        self.conn.commit()
-                    except Exception:
-                        logger.debug(
-                            "failed to record l4 migration flag",
-                            exc_info=True,
-                        )
-            except Exception:
-                logger.warning(
-                    "MEMORIST-L4 entity_profile migration failed; "
-                    "legacy rows may remain. Set TRUEMEMORY_ENTITY_SHEETS=1 "
-                    "to revert to legacy behavior if this is blocking.",
-                    exc_info=True,
-                )
+        # Shared with _ensure_connection (M-84): the purge logic lives in one
+        # idempotent helper so both the production path and this deprecated
+        # open() path behave identically.
+        self._purge_legacy_entity_profile_summaries()
 
         # Style vector hash migration: Python's hash() was replaced with a
         # stable hashlib-based hash in v0.6.3. Existing style vectors were

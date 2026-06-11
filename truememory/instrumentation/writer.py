@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 from truememory.instrumentation.log import dlog
+from truememory.storage import DEFAULT_BUSY_TIMEOUT_MS
 
 _DEFAULT_INSTRUMENTATION_DB = Path.home() / ".truememory" / "instrumentation.db"
 
@@ -52,10 +53,14 @@ def _get_connection() -> sqlite3.Connection:
             return _conn
         db_path = _resolve_db_path()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(db_path, timeout=5.0, check_same_thread=False)
+        conn = sqlite3.connect(
+            db_path,
+            timeout=DEFAULT_BUSY_TIMEOUT_MS / 1000.0,
+            check_same_thread=False,
+        )
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA wal_autocheckpoint=1000")
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS telemetry (

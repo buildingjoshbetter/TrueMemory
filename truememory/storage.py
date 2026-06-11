@@ -251,6 +251,61 @@ CREATE INDEX IF NOT EXISTS idx_rebuild_status_active
 DEFAULT_BUSY_TIMEOUT_MS = 10_000
 
 
+class DatabaseOpenError(sqlite3.DatabaseError):
+    """Raised by :func:`create_db` with an actionable, user-facing message.
+
+    Subclasses ``sqlite3.DatabaseError`` so existing ``except DatabaseError``
+    callers still catch it, but the message tells the user exactly what to do
+    (restore from a named backup, fix directory permissions, or restart all
+    TrueMemory processes) instead of surfacing a raw "database disk image is
+    malformed" / "disk I/O error" string.
+    """
+
+
+def _check_dir_writable(db_path: str | Path) -> None:
+    """Preflight: WAL needs to create ``-wal``/``-shm`` in the DB directory.
+
+    A read-only directory yields a misleading raw error deep in the first
+    write (M-57). Catch it early and name the directory.
+    """
+    import os
+
+    if str(db_path) == ":memory:":
+        return
+    db_dir = Path(str(db_path)).parent
+    if not db_dir:
+        db_dir = Path(".")
+    if db_dir.exists() and not os.access(db_dir, os.W_OK):
+        raise DatabaseOpenError(
+            f"TrueMemory database directory is not writable: {db_dir}\n"
+            "SQLite WAL mode must create -wal/-shm files alongside the "
+            "database. Fix the directory permissions (e.g. "
+            f"`chmod u+w {db_dir}`) and retry."
+        )
+
+
+def _integrity_message(db_path: str | Path, raw: str) -> str:
+    """Build an actionable corruption message naming the newest backup."""
+    backup = newest_backup(db_path)
+    lines = [
+        f"TrueMemory database appears corrupt: {db_path}",
+        f"  (sqlite reported: {raw})",
+    ]
+    if backup is not None:
+        lines.append(
+            f"Restore from the most recent pre-migration backup:\n"
+            f"  cp '{backup}' '{db_path}'\n"
+            "(also copy the matching -wal/-shm files if present, after "
+            "stopping all TrueMemory processes)."
+        )
+    else:
+        lines.append(
+            "No pre-migration backup was found next to the database. "
+            "Restore from your own backup if you have one."
+        )
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Database creation
 # ---------------------------------------------------------------------------
@@ -267,10 +322,79 @@ _EXPECTED_COLUMNS = {
 }
 
 
+# How many pre-migration backups to keep per database file. Older ones are
+# pruned (M-24). Without this the degraded-legacy path re-backed-up on every
+# hook open (4+ per session) with zero rotation, filling the disk.
+_MAX_PRE_MIGRATION_BACKUPS = 3
+
+# Marker file written next to the DB once a migration has been attempted and
+# failed. Its presence means "do NOT re-back-up this DB on every open" — a DB
+# that keeps failing migration would otherwise accumulate unbounded backups
+# (M-24). The migration itself is still retried (it is additive/transactional),
+# but the expensive 3-file backup is skipped.
+_MIGRATION_FAILED_MARKER_SUFFIX = ".migration-failed"
+
+
+def _backup_glob_prefix(db_path: Path) -> str:
+    return f"{db_path.name}.backup-pre-migration-"
+
+
+def _prune_old_backups(db_path: Path, keep: int = _MAX_PRE_MIGRATION_BACKUPS) -> None:
+    """Keep only the newest ``keep`` pre-migration backups for ``db_path``.
+
+    Each backup is a set of up to three files (the base copy plus optional
+    ``-wal``/``-shm`` siblings). We rank by the base file's mtime and delete
+    the whole set for anything beyond the newest ``keep``.
+    """
+    try:
+        parent = db_path.parent if str(db_path.parent) else Path(".")
+        prefix = _backup_glob_prefix(db_path)
+        # Base backups only (exclude the -wal/-shm siblings from the ranking).
+        bases = [
+            p for p in parent.glob(f"{prefix}*")
+            if not p.name.endswith("-wal") and not p.name.endswith("-shm")
+        ]
+        if len(bases) <= keep:
+            return
+        bases.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for stale in bases[keep:]:
+            for ext in ("", "-wal", "-shm"):
+                sibling = Path(f"{stale}{ext}")
+                try:
+                    if sibling.exists():
+                        sibling.unlink()
+                except OSError:
+                    pass
+            log.info("Pruned old pre-migration backup: %s", stale)
+    except Exception:
+        log.debug("Backup pruning skipped", exc_info=True)
+
+
+def newest_backup(db_path: str | Path) -> Path | None:
+    """Return the newest pre-migration backup for ``db_path``, or None.
+
+    Used to point users at a restore candidate when corruption is detected.
+    """
+    db_path = Path(str(db_path))
+    try:
+        parent = db_path.parent if str(db_path.parent) else Path(".")
+        prefix = _backup_glob_prefix(db_path)
+        bases = [
+            p for p in parent.glob(f"{prefix}*")
+            if not p.name.endswith("-wal") and not p.name.endswith("-shm")
+        ]
+        if not bases:
+            return None
+        return max(bases, key=lambda p: p.stat().st_mtime)
+    except Exception:
+        return None
+
+
 def _backup_database(db_path: Path) -> Path | None:
     """Create a complete backup of the database including WAL/SHM files.
 
-    Returns the backup path on success, None on failure.
+    Rotates old backups so the degraded-legacy re-backup path cannot fill the
+    disk (M-24). Returns the backup path on success, None on failure.
     """
     import shutil
     import uuid
@@ -288,6 +412,7 @@ def _backup_database(db_path: Path) -> Path | None:
             if wal_path.exists():
                 shutil.copy2(str(wal_path), str(backup) + ext)
         log.info("Legacy DB backup created: %s", backup)
+        _prune_old_backups(db_path)
         return backup
     except Exception as e:
         log.warning("Could not back up database before migration: %s", e)
@@ -318,7 +443,19 @@ def _migrate_messages_schema(conn: sqlite3.Connection, db_path: str | Path) -> N
     if not missing:
         return
 
+    _marker = Path(f"{db_path}{_MIGRATION_FAILED_MARKER_SUFFIX}")
+    _skip_backup = False
     if str(db_path) != ":memory:":
+        # If a previous migration attempt failed, a marker exists. Do NOT
+        # re-back-up on every open — that is the disk-fill bug (M-24). The
+        # migration is still retried below (additive/transactional), but we
+        # skip the expensive 3-file backup.
+        try:
+            _skip_backup = _marker.exists()
+        except OSError:
+            _skip_backup = False
+
+    if str(db_path) != ":memory:" and not _skip_backup:
         backup = _backup_database(Path(str(db_path)))
         if backup is None:
             # Do NOT skip the migration: an unmigrated DB is unusable by
@@ -343,12 +480,31 @@ def _migrate_messages_schema(conn: sqlite3.Connection, db_path: str | Path) -> N
             conn.execute(f"ALTER TABLE messages ADD COLUMN {col} {typedef}")
             log.info("Migrated legacy DB: added column messages.%s", col)
         conn.execute("COMMIT")
+        # Success — clear any stale "migration failed" marker so a future
+        # legitimate schema bump can take a fresh backup.
+        if str(db_path) != ":memory:":
+            try:
+                if _marker.exists():
+                    _marker.unlink()
+            except OSError:
+                pass
     except Exception as e:
         try:
             conn.execute("ROLLBACK")
         except Exception:
             pass
         log.warning("Legacy migration failed and was rolled back: %s", e)
+        # Write a marker so the next open does NOT re-back-up this DB (M-24).
+        # A DB that keeps failing migration would otherwise accumulate one
+        # 3-file backup per hook open (4+ per session) until the disk fills.
+        if str(db_path) != ":memory:":
+            try:
+                _marker.write_text(
+                    f"migration attempted and failed at {int(time.time())}: {e}\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
 
 
 def create_db(db_path: str | Path) -> sqlite3.Connection:
@@ -370,13 +526,63 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
         An open ``sqlite3.Connection`` with row_factory left at default
         (callers choose their own access pattern).
     """
+    # M-57: preflight directory writability before SQLite produces a
+    # misleading raw error on the first WAL write.
+    _check_dir_writable(db_path)
+
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA cache_size=-64000")
-    conn.execute("PRAGMA mmap_size=268435456")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-64000")
+        conn.execute("PRAGMA mmap_size=268435456")
+
+        # M-55: cheap integrity check at open. quick_check(1) returns the
+        # single string "ok" on a healthy DB; anything else means corruption.
+        if str(db_path) != ":memory:":
+            try:
+                qc = conn.execute("PRAGMA quick_check(1)").fetchone()
+            except sqlite3.DatabaseError as e:
+                # "disk I/O error" here is the classic stale-WAL case (M-56):
+                # the -wal file was deleted/truncated while connections were
+                # live. The fix is to stop every process, not to restore.
+                msg = str(e).lower()
+                if "disk i/o error" in msg or "i/o error" in msg:
+                    raise DatabaseOpenError(
+                        "TrueMemory could not open the database due to a disk "
+                        f"I/O error: {db_path}\n"
+                        "This usually means the SQLite WAL file is "
+                        "inconsistent (e.g. a -wal/-shm file was removed while "
+                        "a connection was still open). Close ALL TrueMemory "
+                        "processes (hooks, MCP server, CLI) and retry."
+                    ) from e
+                raise DatabaseOpenError(_integrity_message(db_path, str(e))) from e
+            if qc is not None and qc[0] != "ok":
+                raise DatabaseOpenError(_integrity_message(db_path, str(qc[0])))
+    except DatabaseOpenError:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
+    except sqlite3.DatabaseError as e:
+        # Corruption can also surface from the journal_mode pragma itself.
+        try:
+            conn.close()
+        except Exception:
+            pass
+        msg = str(e).lower()
+        if "disk i/o error" in msg or "i/o error" in msg:
+            raise DatabaseOpenError(
+                "TrueMemory could not open the database due to a disk I/O "
+                f"error: {db_path}\n"
+                "The SQLite WAL file is likely inconsistent. Close ALL "
+                "TrueMemory processes (hooks, MCP server, CLI) and retry."
+            ) from e
+        raise DatabaseOpenError(_integrity_message(db_path, str(e))) from e
+
     _migrate_messages_schema(conn, db_path)
     conn.executescript(_SCHEMA_SQL)
     # The directive index lives outside _SCHEMA_SQL on purpose: if a legacy
