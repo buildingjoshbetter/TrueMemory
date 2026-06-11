@@ -61,6 +61,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
+# Shared correction/update marker vocabulary (issue #649) — single source
+# of truth used by BOTH this gate and the dedup stage so the two never
+# disagree about what counts as a correction.
+from truememory.ingest.markers import (
+    UPDATE_MARKERS as _CONTRADICTION_MARKERS,  # noqa: F401  (exported; shared vocab)
+    has_update_markers as _has_update_markers,
+)
+
 log = logging.getLogger(__name__)
 
 
@@ -146,30 +154,21 @@ _CATEGORY_THRESHOLD_OVERRIDE = {
 # Patterns that indicate contradictions or corrections — these memories
 # are critical for accuracy and must always pass the gate regardless of
 # PE score or gate threshold (#585).
-_CONTRADICTION_MARKERS = (
-    "actually,",
-    "actually ",
-    "correction:",
-    "correction -",
-    "no longer ",
-    "not anymore",
-    "changed to ",
-    "switched to ",
-    "moved to ",
-    "used to be ",
-    "instead of ",
-    "wrong about ",
-    "was wrong",
-    "is wrong",
-    "not true",
-    "isn't true",
-    "that's incorrect",
-    "that is incorrect",
-)
+#
+# The marker vocabulary is SHARED with the dedup stage (issue #649): the
+# gate and dedup must agree on what counts as a correction, otherwise a
+# correction passes the gate but is then SKIPped by dedup before LLM
+# arbitration. The single source of truth lives in
+# ``truememory.ingest.markers`` (imported at module top as
+# ``_CONTRADICTION_MARKERS`` / ``_has_update_markers``).
 
 
 def _is_contradiction(fact: str, category: str = "") -> bool:
-    """Return True if the fact looks like a contradiction or correction."""
+    """Return True if the fact looks like a contradiction or correction.
+
+    Uses the SAME shared marker vocabulary as dedup (#649) so the two
+    stages never disagree.
+    """
     cat = (category or "").strip().lower()
     if cat == "correction":
         return True
@@ -177,8 +176,7 @@ def _is_contradiction(fact: str, category: str = "") -> bool:
     # Check for "not X but Y" pattern
     if " not " in lower and " but " in lower:
         return True
-    return any(lower.startswith(m) or (f" {m}" if not m.endswith(" ") else f" {m}") in lower
-               for m in _CONTRADICTION_MARKERS)
+    return _has_update_markers(fact)
 
 
 class EncodingGate:

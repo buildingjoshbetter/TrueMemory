@@ -28,55 +28,26 @@ from dataclasses import dataclass
 from enum import Enum
 
 from truememory.ingest.extractor import _find_first_balanced
+from truememory.ingest.markers import (
+    UPDATE_MARKER_PATTERNS as _UPDATE_MARKER_PATTERNS,  # noqa: F401  (re-exported)
+    has_update_markers as _has_update_markers,
+)
 from truememory.ingest.models import LLMConfig, LLMError, complete
 
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Update-marker detection (issue #576)
+# Update-marker detection (issues #576, #649)
 # ---------------------------------------------------------------------------
-# Patterns that signal a genuine fact *update* rather than a duplicate.
-# When a high-similarity candidate contains these markers, the dedup
-# pipeline should treat it as UPDATE (or delegate to LLM), never SKIP.
+# The marker vocabulary that signals a genuine fact *update* (rather than a
+# duplicate) is now SHARED with the encoding gate via
+# ``truememory.ingest.markers``. Before #649 the gate and dedup kept
+# divergent lists, so corrections that the gate recognised ("Correction:",
+# "that's incorrect", ...) were not recognised by dedup and got SKIPped at
+# high similarity before LLM arbitration ever ran.
 #
-# The list is intentionally broad — false positives are cheap (we pay one
-# LLM call or update an existing memory), but false negatives silently
-# drop real updates.
-
-_UPDATE_MARKER_PATTERNS: list[re.Pattern[str]] = [
-    # Explicit change language
-    re.compile(r"\bchanged?\s+(?:to|from)\b", re.IGNORECASE),
-    re.compile(r"\bnow\s+(?:is|uses?|prefers?|lives?|works?|takes?|runs?|has)\b", re.IGNORECASE),
-    re.compile(r"\bupdated?\b", re.IGNORECASE),
-    re.compile(r"\bno\s+longer\b", re.IGNORECASE),
-    re.compile(r"\bnot\s+anymore\b", re.IGNORECASE),
-    re.compile(r"\bswitched\s+(?:to|from)\b", re.IGNORECASE),
-    re.compile(r"\binstead\s+of\b", re.IGNORECASE),
-    re.compile(r"\bmoved\s+to\b", re.IGNORECASE),
-    re.compile(r"\breplaced\b", re.IGNORECASE),
-    re.compile(r"\bwas\b.*\bnow\b", re.IGNORECASE),
-    re.compile(r"\bformerly\b", re.IGNORECASE),
-    re.compile(r"\bpreviously\b", re.IGNORECASE),
-    re.compile(r"\bused\s+to\b", re.IGNORECASE),
-    re.compile(r"\bactually\b", re.IGNORECASE),
-    # Number-change patterns  ("5mg to 10mg", "6.5% -> 6.25%")
-    re.compile(r"\d[\d.]*[%a-zA-Z]*\s*(?:to|->|-->|=>|→)\s*\d[\d.]*", re.IGNORECASE),
-    # Date-change patterns  ("since 2024", "as of March")
-    re.compile(r"\b(?:since|as\s+of|starting|effective)\s+\w+", re.IGNORECASE),
-]
-
-
-def _has_update_markers(content: str) -> bool:
-    """Return True if *content* contains language suggesting a fact update.
-
-    This is the marker gate for issue #576: high-similarity candidates
-    that contain update markers should be routed to UPDATE (or LLM
-    arbitration), not silently SKIPped.
-    """
-    for pattern in _UPDATE_MARKER_PATTERNS:
-        if pattern.search(content):
-            return True
-    return False
+# ``_UPDATE_MARKER_PATTERNS`` / ``_has_update_markers`` are re-exported here
+# (unchanged names) for backward compatibility with existing callers/tests.
 
 
 class DedupAction(Enum):
@@ -112,12 +83,27 @@ If "update", also provide the merged/updated content that combines the best of b
 Return JSON: {{"action": "add|update|skip", "reason": "brief explanation", "merged": "updated content if action=update, else empty"}}"""
 
 
+def _is_correction(fact: str, category: str = "") -> bool:
+    """Return True if this fact is a correction that must reach arbitration.
+
+    A correction is either explicitly categorized ``correction`` by the
+    extractor, or carries shared update-marker language (#649). Corrections
+    must never be silently SKIPped as near-duplicates — they are routed to
+    LLM arbitration (or the heuristic update path) so the old fact can be
+    superseded.
+    """
+    if (category or "").strip().lower() == "correction":
+        return True
+    return _has_update_markers(fact)
+
+
 def check_duplicate(
     fact: str,
     memory,
     user_id: str = "",
     config: LLMConfig | None = None,
     similarity_threshold: float = 0.15,
+    category: str = "",
 ) -> DedupDecision:
     """
     Check if a fact duplicates an existing memory.
@@ -173,20 +159,23 @@ def check_duplicate(
     top_is_cosine = top.get("score_space", "cosine") == "cosine"
 
     # Very high similarity — likely near-exact duplicate.
-    # BUT: if the new fact contains update markers (issue #576), it may be
-    # a genuine fact change that just happens to embed close to the old
-    # version.  Route those to LLM arbitration (if available) or the
-    # heuristic path rather than silently dropping them.
+    # BUT: if the new fact is a correction (issues #576, #649) — either an
+    # extractor-categorized ``correction`` or carrying shared update-marker
+    # language — it may be a genuine fact change that just happens to embed
+    # close to the old version. Route those to LLM arbitration (if
+    # available) or the heuristic path rather than silently dropping them.
     if top_is_cosine and top_score > 0.92:
-        if _has_update_markers(fact):
+        if _is_correction(fact, category):
             log.debug(
-                "High-similarity candidate (%.2f) has update markers — "
-                "routing to arbitration instead of SKIP",
-                top_score,
+                "High-similarity candidate (%.2f) is a correction "
+                "(category=%r) — routing to arbitration instead of SKIP",
+                top_score, category,
             )
             if config:
                 return _llm_dedup(fact, top_content, top_id, config)
-            return _heuristic_dedup(fact, top_content, top_id, top_score)
+            return _heuristic_dedup(
+                fact, top_content, top_id, top_score, is_correction=True
+            )
         return DedupDecision(
             action=DedupAction.SKIP,
             fact=fact,
@@ -299,10 +288,27 @@ def _heuristic_dedup(
     existing: str,
     existing_id: int | None,
     similarity: float,
+    is_correction: bool = False,
 ) -> DedupDecision:
-    """Heuristic dedup when no LLM is available."""
+    """Heuristic dedup when no LLM is available.
+
+    ``is_correction`` (#649): when the caller has already determined this
+    fact is a correction (by category or shared update markers), it must
+    never be SKIPped as a duplicate — it supersedes the existing memory,
+    so route it to UPDATE.
+    """
     fact_norm = fact.lower().strip()
     existing_norm = existing.lower().strip()
+
+    # Corrections supersede the existing memory — never drop them (#649).
+    if is_correction:
+        return DedupDecision(
+            action=DedupAction.UPDATE,
+            fact=fact,
+            existing_id=existing_id,
+            existing_content=existing,
+            reason="correction supersedes existing memory",
+        )
 
     # Substring containment — one is a subset of the other
     if fact_norm in existing_norm:

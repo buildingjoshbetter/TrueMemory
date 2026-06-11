@@ -51,6 +51,22 @@ try:
 except ImportError:  # pragma: no cover — Windows path
     _HAS_FCNTL = False
 
+# Cross-platform PID liveness — reuse the shared helper so the lock and the
+# rest of truememory agree on what "alive" means (#649, M-31). Fall back to
+# a local os.kill probe if _platform is unavailable (older install).
+try:
+    from truememory._platform import pid_is_alive as _pid_is_alive
+except ImportError:  # pragma: no cover — defensive
+    def _pid_is_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+            return True
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+
+
 _LOCK_PATH = Path(os.environ.get(
     "TRUEMEMORY_INGEST_LOCK",
     str(Path.home() / ".truememory" / "ingest.lock"),
@@ -60,27 +76,51 @@ _LOCK_PATH = Path(os.environ.get(
 _LOCK_TTL_SECONDS = 3600
 
 
-def _is_lock_stale(lock_path: Path) -> bool:
-    """Check if a lock file is stale (dead PID or expired TTL)."""
+def _read_lock_pid(lock_path: Path) -> int | None:
+    """Read the holder PID from the lock file, or None if unreadable/garbage."""
     try:
         content = lock_path.read_text(encoding="utf-8").strip()
-        if not content:
-            return True
-        pid = int(content)
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return True
-        except PermissionError:
-            pass
-    except (OSError, ValueError):
-        pass
-    try:
-        age = time.time() - lock_path.stat().st_mtime
-        if age > _LOCK_TTL_SECONDS:
-            return True
     except OSError:
-        pass
+        return None
+    if not content:
+        return None
+    try:
+        return int(content)
+    except ValueError:
+        return None
+
+
+def _is_lock_stale(lock_path: Path) -> bool:
+    """Check if a lock file is stale and therefore safe to steal.
+
+    A lock is stale ONLY when its holder is gone (#649, M-31):
+
+    - The PID is unreadable / garbage (no live holder we can attribute it
+      to), OR
+    - The recorded PID is DEAD.
+
+    Critically, the TTL is **only** consulted when the holder PID is dead.
+    The previous implementation stole the lock once ``mtime`` exceeded the
+    TTL even when the holder process was alive and still flocking the
+    inode — producing two simultaneous holders and a dedup TOCTOU. A live
+    holder is NEVER stale here regardless of age; long-running ingests
+    heartbeat the mtime, but liveness — not age — is the authority.
+    """
+    pid = _read_lock_pid(lock_path)
+    if pid is None:
+        # No attributable holder. Fall back to TTL so a corrupt/empty lock
+        # left by a crash mid-write doesn't wedge ingestion forever.
+        try:
+            age = time.time() - lock_path.stat().st_mtime
+            return age > _LOCK_TTL_SECONDS
+        except OSError:
+            # Path vanished (someone else reclaimed it) — treat as stale.
+            return True
+
+    if not _pid_is_alive(pid):
+        return True
+
+    # Holder is alive — NOT stale, regardless of mtime age.
     return False
 
 
@@ -100,8 +140,21 @@ def _dedup_store_lock():
     (no fcntl) we skip locking and rely on ``busy_timeout`` + the embedding
     similarity check as best-effort protection.
 
-    The lock file contains the holder's PID. On acquisition, stale locks
-    from dead processes or locks older than 1 hour are automatically stolen.
+    Locking discipline (#649, M-31). ``flock`` is the authority on
+    mutual exclusion, NOT the PID/mtime bookkeeping:
+
+    - We never unlink a path that may still be flocked by a live holder.
+      A dead holder's flock is already released by the kernel, so our
+      blocking ``flock(LOCK_EX)`` simply succeeds — no manual TTL steal is
+      needed, and a TTL-driven unlink of a live holder's path (the old bug)
+      would split the lock across two inodes and give two simultaneous
+      holders.
+    - After acquiring the flock we verify the path still resolves to the
+      same inode as our open fd. If a previous holder unlinked/replaced the
+      path while we waited, we are holding a stale inode; we drop it and
+      retry against the live path.
+    - The PID is written purely for diagnostics (and to let an operator see
+      who holds it). mtime is refreshed on acquire as a heartbeat.
     """
     if not _HAS_FCNTL:
         yield
@@ -113,27 +166,23 @@ def _dedup_store_lock():
         yield
         return
 
-    if _LOCK_PATH.exists() and _is_lock_stale(_LOCK_PATH):
-        log.info("Removing stale ingest lock file %s", _LOCK_PATH)
-        try:
-            _LOCK_PATH.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    try:
-        lock_fd = os.open(str(_LOCK_PATH), os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError as e:
-        log.debug("Could not open ingest lock file %s: %s", _LOCK_PATH, e)
+    lock_fd = _acquire_flock(_LOCK_PATH)
+    if lock_fd is None:
+        # Could not open/lock the path at all — degrade open rather than
+        # block ingestion. busy_timeout remains as best-effort protection.
         yield
         return
 
     try:
+        # Heartbeat + diagnostics: record our PID and refresh mtime so a
+        # long-running ingest is never mistaken for a crashed holder.
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        except OSError as e:
-            log.debug("flock acquire failed: %s", e)
-        os.write(lock_fd, f"{os.getpid()}\n".encode())
-        os.ftruncate(lock_fd, os.lseek(lock_fd, 0, os.SEEK_CUR))
+            os.ftruncate(lock_fd, 0)
+            os.lseek(lock_fd, 0, os.SEEK_SET)
+            os.write(lock_fd, f"{os.getpid()}\n".encode())
+            os.fsync(lock_fd)
+        except OSError:
+            pass
         try:
             yield
         finally:
@@ -146,6 +195,59 @@ def _dedup_store_lock():
             os.close(lock_fd)
         except OSError:
             pass
+
+
+def _acquire_flock(lock_path: Path, _max_retries: int = 5) -> int | None:
+    """Open *lock_path* and acquire an exclusive flock, returning the fd.
+
+    Guards against the unlink-while-held race (#649, M-31): after the
+    blocking ``flock`` returns, the path is re-stat'd and compared to the
+    locked fd's inode. If they diverge (the path was replaced while we
+    waited), the held inode is stale — we release it and retry against the
+    current path. Returns ``None`` if locking is impossible.
+    """
+    for _ in range(_max_retries):
+        try:
+            lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError as e:
+            log.debug("Could not open ingest lock file %s: %s", lock_path, e)
+            return None
+
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        except OSError as e:
+            log.debug("flock acquire failed: %s", e)
+            # Cannot enforce mutual exclusion — caller degrades open.
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+            return None
+
+        # Verify the path still points at the inode we locked. If a prior
+        # holder unlinked/replaced it while we waited, we hold a dead inode.
+        try:
+            fd_ino = os.fstat(lock_fd).st_ino
+            path_ino = os.stat(str(lock_path)).st_ino
+        except OSError:
+            path_ino = None
+            fd_ino = -1
+
+        if path_ino == fd_ino:
+            return lock_fd
+
+        # Stale inode (path was replaced under us) — drop and retry.
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(lock_fd)
+        except OSError:
+            pass
+
+    log.debug("Gave up acquiring ingest flock after %d retries", _max_retries)
+    return None
 
 
 def _set_busy_timeout(memory, timeout_ms: int | None = None) -> None:
@@ -365,6 +467,7 @@ class IngestionPipeline:
                     self.memory,
                     user_id=self.user_id,
                     config=self.llm_config if self.use_llm_dedup else None,
+                    category=fact.category,
                 )
                 trace_entry["dedup"] = {
                     "action": dedup.action.value,
@@ -488,6 +591,7 @@ class IngestionPipeline:
                     self.memory,
                     user_id=self.user_id,
                     config=self.llm_config if self.use_llm_dedup else None,
+                    category=fact.category,
                 )
 
                 if dedup.action == DedupAction.ADD:

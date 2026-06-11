@@ -33,6 +33,7 @@ import json
 import re
 import sqlite3
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from truememory.fts_search import _build_safe_fts_query, _fts_search
@@ -41,6 +42,61 @@ from truememory.fts_search import _build_safe_fts_query, _fts_search
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+@contextmanager
+def _consolidation_write(conn: sqlite3.Connection, name: str):
+    """Run a consolidation write phase without leaking the caller's txn.
+
+    The phase-3 writes in ``detect_contradictions`` /
+    ``build_structured_facts`` used to do::
+
+        if conn.in_transaction:
+            conn.commit()              # <-- commits the CALLER's writes!
+        prev = conn.isolation_level
+        conn.isolation_level = None    # <-- mutates shared connection state
+        conn.execute("BEGIN IMMEDIATE")
+        ...
+
+    That ``conn.commit()`` silently committed whatever the caller had
+    in-flight — including writes the caller intended to roll back — which
+    was the leaked-transaction root cause behind a live lock incident
+    (#649, M-32). The ``isolation_level`` mutation also leaked connection
+    state on the error path.
+
+    Instead we wrap the write in a SAVEPOINT. A SAVEPOINT:
+
+    - nests inside the caller's transaction WITHOUT committing it (so a
+      caller who later rolls back loses our rows too — correct, our rows
+      describe their uncommitted state);
+    - works whether or not a transaction is already open (pysqlite opens
+      one implicitly if needed);
+    - rolls back ONLY our own statements on error (``ROLLBACK TO``), never
+      the caller's earlier work;
+    - never touches ``isolation_level``.
+
+    The expensive compute still happens OUTSIDE this context (issue #591),
+    so the SAVEPOINT — like the old ``BEGIN IMMEDIATE`` — only spans the
+    short DELETE+rewrite.
+    """
+    sp = f"consolidation_{name}"
+    conn.execute(f"SAVEPOINT {sp}")
+    try:
+        yield
+    except BaseException:
+        try:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+        except Exception:
+            pass
+        # Always release so we don't leave a dangling savepoint on the
+        # caller's transaction.
+        try:
+            conn.execute(f"RELEASE SAVEPOINT {sp}")
+        except Exception:
+            pass
+        raise
+    else:
+        conn.execute(f"RELEASE SAVEPOINT {sp}")
+
 
 def _get_all_messages_chrono(conn: sqlite3.Connection) -> list[dict]:
     """Fetch all messages ordered by timestamp."""
@@ -763,19 +819,21 @@ def detect_contradictions(conn: sqlite3.Connection) -> list[dict]:
     # --- Phase 1: read ---------------------------------------------------
     all_msgs = _get_all_messages_chrono(conn)
 
-    # --- Phase 2: compute (no transaction held) --------------------------
+    # --- Phase 2: compute (no transaction held, #591) --------------------
     insert_rows, supersede_updates, contradictions = _compute_contradictions(
         all_msgs,
     )
 
-    # --- Phase 3: write (short atomic transaction) -----------------------
-    # Same manual-transaction pattern used by build_summaries (#401).
-    if conn.in_transaction:
-        conn.commit()
-    prev_isolation = conn.isolation_level
-    try:
-        conn.isolation_level = None
-        conn.execute("BEGIN IMMEDIATE")
+    # --- Phase 3: write (short SAVEPOINT, #649 M-32) ---------------------
+    # We wrap the write in a SAVEPOINT instead of committing the caller's
+    # transaction + driving our own BEGIN IMMEDIATE. The old code's
+    # ``conn.commit()`` silently committed the caller's in-flight (possibly
+    # to-be-rolled-back) writes — the leaked-transaction root cause behind a
+    # live lock incident — and its ``isolation_level`` mutation leaked
+    # connection state. The SAVEPOINT nests in whatever the caller already
+    # has open, rolls back only our own rows on error, and never touches
+    # isolation_level. See :func:`_consolidation_write`.
+    with _consolidation_write(conn, "contradictions"):
         conn.execute("DELETE FROM fact_timeline")
 
         # Bulk-insert all fact rows and build local_id -> real_db_id map.
@@ -803,16 +861,6 @@ def detect_contradictions(conn: sqlite3.Connection) -> list[dict]:
                 "UPDATE fact_timeline SET valid_to = ? WHERE id = ?",
                 (valid_to, old_db_id),
             )
-
-        conn.execute("COMMIT")
-    except Exception:
-        try:
-            conn.execute("ROLLBACK")
-        except Exception:
-            pass
-        raise
-    finally:
-        conn.isolation_level = prev_isolation
 
     return contradictions
 
@@ -1529,16 +1577,14 @@ def build_structured_facts(conn):
     # --- Phase 1: read ---------------------------------------------------
     all_msgs = _get_all_messages_chrono(conn)
 
-    # --- Phase 2: compute (no transaction held) --------------------------
+    # --- Phase 2: compute (no transaction held, #591) --------------------
     rows = _compute_structured_facts(all_msgs)
 
-    # --- Phase 3: write (short atomic transaction) -----------------------
-    if conn.in_transaction:
-        conn.commit()
-    prev_isolation = conn.isolation_level
-    try:
-        conn.isolation_level = None
-        conn.execute("BEGIN IMMEDIATE")
+    # --- Phase 3: write (short SAVEPOINT, #649 M-32) ---------------------
+    # SAVEPOINT instead of committing the caller's transaction — same
+    # leaked-transaction fix as detect_contradictions. See
+    # :func:`_consolidation_write`.
+    with _consolidation_write(conn, "structured_facts"):
         # Remove old structured_fact rows (don't touch other summary types).
         conn.execute("DELETE FROM summaries WHERE period = 'structured_fact'")
         if rows:
@@ -1549,14 +1595,5 @@ def build_structured_facts(conn):
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
-        conn.execute("COMMIT")
-    except Exception:
-        try:
-            conn.execute("ROLLBACK")
-        except Exception:
-            pass
-        raise
-    finally:
-        conn.isolation_level = prev_isolation
 
     return len(rows)
