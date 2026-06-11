@@ -273,7 +273,8 @@ def _increment_prompt_count(session_id: str) -> int:
     safe_id = _safe_session_id_local(session_id)
     counter_file = _PROMPT_COUNTER_DIR / f"{safe_id}.count"
     try:
-        _PROMPT_COUNTER_DIR.mkdir(parents=True, exist_ok=True)
+        from truememory.ingest.hooks._shared import _secure_mkdir
+        _secure_mkdir(_PROMPT_COUNTER_DIR)  # S1-2 (#688): owner-only dir + ~/.truememory root 0700
     except OSError:
         pass
 

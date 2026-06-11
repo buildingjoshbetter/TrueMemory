@@ -121,17 +121,25 @@ def _safe_session_id(session_id: str) -> str:
     return "".join(c for c in session_id if c.isalnum() or c in "-_")[:64]
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
+def _atomic_write_text(path: Path, text: str, mode: int = 0o600) -> None:
     """Write ``text`` to ``path`` atomically via tmp file + os.replace.
 
     A reader can never observe a torn / partially-written marker: it sees
     either the old contents or the fully-written new contents. The tmp file
     is unique per-process so concurrent writers do not clobber each other's
     temp file before the rename (issue #644 / M-14).
+
+    The file is created owner-only (``mode``, default 0o600) so cache / marker
+    contents (which can include memory or prompt text) are not world-readable
+    on a multi-user host (S1-2 / #688). No-op on Windows.
     """
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     try:
         tmp.write_text(text, encoding="utf-8")
+        try:
+            os.chmod(tmp, mode)
+        except OSError:
+            pass
         os.replace(tmp, path)
     except OSError:
         try:
@@ -139,6 +147,26 @@ def _atomic_write_text(path: Path, text: str) -> None:
         except OSError:
             pass
         raise
+
+
+_TRUEMEMORY_ROOT = Path.home() / ".truememory"
+
+
+def _secure_mkdir(path: Path) -> None:
+    """``mkdir -p`` *path*, then ensure both it and the ~/.truememory root are
+    owner-only (0700) (S1-2 / #688).
+
+    A hook can be the FIRST process to create ~/.truememory; without this it was
+    left 0755 (world-traversable), exposing the DB / caches under it on a
+    multi-user host even after the dir-level mitigation elsewhere. No-op on
+    Windows (POSIX modes don't apply).
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    for d in (_TRUEMEMORY_ROOT, path):
+        try:
+            d.chmod(0o700)
+        except OSError:
+            pass
 
 
 def should_extract_session(session_id: str, transcript_path: str) -> bool:
@@ -163,7 +191,7 @@ def should_extract_session(session_id: str, transcript_path: str) -> bool:
     if not safe_id:
         return True
 
-    EXTRACTED_DIR.mkdir(parents=True, exist_ok=True)
+    _secure_mkdir(EXTRACTED_DIR)
     marker = EXTRACTED_DIR / safe_id
 
     if not marker.exists():
@@ -236,7 +264,7 @@ def check_extraction_budget() -> bool:
         return True
     fd = -1
     try:
-        _BUDGET_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _secure_mkdir(_BUDGET_FILE.parent)
         fd = os.open(str(_BUDGET_FILE), os.O_RDWR | os.O_CREAT)
         if _HAS_FCNTL:
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -423,7 +451,7 @@ def mark_session_extracted(session_id: str, transcript_path: str, spawned_pid: i
         return
 
     try:
-        EXTRACTED_DIR.mkdir(parents=True, exist_ok=True)
+        _secure_mkdir(EXTRACTED_DIR)
         current_size = Path(transcript_path).stat().st_size
         marker = EXTRACTED_DIR / safe_id
         _atomic_write_text(marker, json.dumps({
@@ -445,7 +473,7 @@ def mark_recall_injected(session_id: str) -> None:
     if not safe_id:
         return
     try:
-        RECALL_MARKER_DIR.mkdir(parents=True, exist_ok=True)
+        _secure_mkdir(RECALL_MARKER_DIR)
         # Opportunistic sweep: markers from sessions that never sent a prompt
         # are never consumed; remove anything well past the debounce window so
         # the dir cannot grow unboundedly (mirrors _prune_old_buffers).
@@ -507,7 +535,7 @@ def set_recall_cache(
     if RECALL_CACHE_TTL <= 0:
         return
     try:
-        RECALL_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _secure_mkdir(RECALL_CACHE_PATH.parent)
         # Read existing entries (best-effort)
         existing: dict = {}
         try:

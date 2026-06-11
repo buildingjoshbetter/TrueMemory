@@ -558,6 +558,16 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
     _check_dir_writable(db_path)
 
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    # S1-2 (#688): the DB file holds every stored memory (PII). Restrict it to
+    # owner-only so it isn't world-readable on a multi-user host. No-op on
+    # Windows (POSIX modes don't apply) and for :memory:.
+    if str(db_path) != ":memory:":
+        for _p in (Path(db_path), Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
+            try:
+                if _p.exists():
+                    os.chmod(_p, 0o600)
+            except OSError:
+                pass
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
