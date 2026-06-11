@@ -1072,6 +1072,46 @@ def delete_message(conn: sqlite3.Connection, msg_id: int) -> bool:
         except sqlite3.OperationalError:
             pass
 
+    # Right-to-be-forgotten (S1-1): summaries / entity_profiles /
+    # entity_style_vectors / entity_relationships are derived AGGREGATES keyed
+    # by entity (not message_id), so a forgotten message's content can survive
+    # verbatim inside them. They aren't reachable by FK cascade. Remove the
+    # involved entities' derived rows (plus any summary that literally lists
+    # this message) so they are rebuilt clean — without the forgotten fact —
+    # on the next consolidation. Bounded to the message's own sender/recipient.
+    try:
+        _row = conn.execute(
+            "SELECT sender, recipient FROM messages WHERE id = ?", (msg_id,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        _row = None
+    _entities = {e for e in (_row or ()) if e}
+
+    # Summaries that explicitly reference this message id (precise).
+    try:
+        conn.execute(
+            "DELETE FROM summaries WHERE id IN ("
+            " SELECT s.id FROM summaries s, json_each(s.message_ids) j"
+            " WHERE CAST(j.value AS INTEGER) = ?)",
+            (msg_id,),
+        )
+    except sqlite3.OperationalError:
+        pass  # no json1 / no summaries table — entity sweep below still covers it
+
+    for _ent in _entities:
+        for _tbl in ("summaries", "entity_profiles", "entity_style_vectors"):
+            try:
+                conn.execute(f"DELETE FROM {_tbl} WHERE entity = ?", (_ent,))
+            except sqlite3.OperationalError:
+                pass
+        try:
+            conn.execute(
+                "DELETE FROM entity_relationships WHERE entity_a = ? OR entity_b = ?",
+                (_ent, _ent),
+            )
+        except sqlite3.OperationalError:
+            pass
+
     cursor = conn.execute("DELETE FROM messages WHERE id = ?", (msg_id,))
     deleted = cursor.rowcount > 0
 
