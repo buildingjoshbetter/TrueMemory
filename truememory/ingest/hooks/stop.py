@@ -140,6 +140,14 @@ def main():
 
     if not transcript_path or not Path(transcript_path).exists():
         return
+    # M-90: transcript_path comes from attacker-influenceable hook stdin.
+    # parse_transcript's plaintext fallback would read ANY readable file into
+    # the memory store, so confirm containment in an allowed transcripts root
+    # (the compact hook already did this; stop/drain previously did not).
+    from truememory.ingest.hooks._shared import is_allowed_transcript
+    if not is_allowed_transcript(transcript_path):
+        log.warning("stop hook: transcript_path %r outside allowed roots; skipping", transcript_path)
+        return
 
     # Pre-flight check: ensure our write directories exist and are writable
     # so we fail early with a clear message instead of silently losing work

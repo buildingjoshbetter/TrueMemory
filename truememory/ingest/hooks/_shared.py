@@ -19,6 +19,53 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Transcript-path allowlist (M-90, shared)
+# ---------------------------------------------------------------------------
+# A hook's stdin and the backlog markers are attacker-influenceable in a
+# local-control scenario. ``parse_transcript`` reads any user-readable file
+# into the memory store via its plaintext fallback, so every code path that
+# feeds a ``transcript_path`` into ingestion must first confirm the path is
+# inside an expected transcripts root. #653/M-90 added this guard to the
+# compact hook only; it is hoisted here so stop.py and the SessionStart
+# backlog drain share the same check.
+
+def _transcript_roots() -> list[Path]:
+    """Directories a ``transcript_path`` is allowed to live under.
+
+    Defaults to Claude Code's ``~/.claude/projects``. An explicit
+    ``TRUEMEMORY_TRANSCRIPT_DIR`` override (tests / non-default installs) is
+    honored when set.
+    """
+    roots = [Path.home() / ".claude" / "projects"]
+    override = os.environ.get("TRUEMEMORY_TRANSCRIPT_DIR", "")
+    if override:
+        roots.insert(0, Path(override))
+    return roots
+
+
+def is_allowed_transcript(transcript_path: str) -> bool:
+    """Return True only if *transcript_path* resolves inside a transcripts root.
+
+    Resolves symlinks (``.resolve()``) and requires containment, so neither a
+    ``..`` escape nor a symlink whose target is outside the root passes.
+    """
+    if not transcript_path:
+        return False
+    try:
+        resolved = Path(transcript_path).resolve()
+    except (OSError, ValueError):
+        return False
+    for root in _transcript_roots():
+        try:
+            if resolved.is_relative_to(root.resolve()):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
 EXTRACTED_DIR = Path.home() / ".truememory" / "extracted"
 BACKLOG_DIR = Path.home() / ".truememory" / "backlog"
 RECALL_MARKER_DIR = Path.home() / ".truememory" / "recall_markers"

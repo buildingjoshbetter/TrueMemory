@@ -251,6 +251,7 @@ def _drain_backlog() -> None:
         record_stale_processing_pid,
         mark_session_extracted,
         _quarantine_marker,
+        is_allowed_transcript,
     )
     cleanup_stale_processing(BACKLOG_DIR)
 
@@ -288,6 +289,13 @@ def _drain_backlog() -> None:
         try:
             transcript = data.get("transcript_path", "")
             if not transcript or not Path(transcript).exists():
+                claimed_path.unlink(missing_ok=True)
+                continue
+            # M-90: a backlog marker's transcript_path is attacker-influenceable;
+            # confirm containment in an allowed transcripts root before parsing
+            # (parse_transcript's plaintext fallback would read any readable file).
+            if not is_allowed_transcript(transcript):
+                log.warning("Drain: transcript_path %r outside allowed roots; dropping marker", transcript)
                 claimed_path.unlink(missing_ok=True)
                 continue
 
