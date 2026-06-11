@@ -456,7 +456,10 @@ def _try_per_exchange_store(prompt: str, session_id: str, user_id: str, db_path:
             # number is untrustworthy, so fall back to the scale-free
             # word-overlap heuristic instead. (#631 makes the vector path
             # emit true cosine, so this stays correct as it lands.)
-            existing = m.search(prompt, user_id=user_id or None, limit=3)
+            # PERF-03 (#690): per-prompt novelty dedup reads only score/content,
+            # never ranked order — skip the cross-encoder (a cold-subprocess
+            # model load on the hot prompt path).
+            existing = m.search(prompt, user_id=user_id or None, limit=3, _skip_reranker=True)
             if existing:
                 for r in existing:
                     score = r.get("score", 0.0)
