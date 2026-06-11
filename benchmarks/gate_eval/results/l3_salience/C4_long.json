@@ -1,0 +1,182 @@
+{
+  "candidate": "C4",
+  "dataset": "long",
+  "cv_scheme": "LOSO",
+  "n_folds": 8,
+  "dataset_meta": {
+    "source": "long_horizon_synthetic.json",
+    "labeler": "keyword_overlap_min3_or_substring_fallback",
+    "n_messages": 750,
+    "n_positive": 89,
+    "positive_rate": 0.11866666666666667,
+    "n_queries_total": 91,
+    "n_queries_with_match": 71,
+    "by_conv": {
+      "Alex Park": {
+        "n": 118,
+        "pos": 89
+      },
+      "Mei Chen": {
+        "n": 121,
+        "pos": 0
+      },
+      "Diego Ramos": {
+        "n": 123,
+        "pos": 0
+      },
+      "Priya Iyer": {
+        "n": 130,
+        "pos": 0
+      },
+      "Sam Beck": {
+        "n": 126,
+        "pos": 0
+      },
+      "Marcus Webb": {
+        "n": 132,
+        "pos": 0
+      }
+    },
+    "restricted_to": "Alex Park"
+  },
+  "per_fold": [
+    {
+      "n": 14,
+      "n_pos": 14,
+      "auc": NaN,
+      "p5": 1.0,
+      "p10": 1.0,
+      "p20": NaN,
+      "p50": NaN,
+      "tau": 0.0,
+      "ece": 0.4804330468117157,
+      "ms_per_msg": 0.040684568895293136,
+      "total_ms": 0.5695839645341039,
+      "fold": 1
+    },
+    {
+      "n": 16,
+      "n_pos": 16,
+      "auc": NaN,
+      "p5": 1.0,
+      "p10": 1.0,
+      "p20": NaN,
+      "p50": NaN,
+      "tau": 0.0,
+      "ece": 0.5044320946584842,
+      "ms_per_msg": 0.03221612496417947,
+      "total_ms": 0.5154579994268715,
+      "fold": 2
+    },
+    {
+      "n": 12,
+      "n_pos": 12,
+      "auc": NaN,
+      "p5": 1.0,
+      "p10": 1.0,
+      "p20": NaN,
+      "p50": NaN,
+      "tau": 0.0,
+      "ece": 0.48338402927352775,
+      "ms_per_msg": 0.03409725225841006,
+      "total_ms": 0.4091670271009207,
+      "fold": 3
+    },
+    {
+      "n": 18,
+      "n_pos": 18,
+      "auc": NaN,
+      "p5": 1.0,
+      "p10": 1.0,
+      "p20": NaN,
+      "p50": NaN,
+      "tau": 0.0,
+      "ece": 0.4851875750314928,
+      "ms_per_msg": 0.03948844581221541,
+      "total_ms": 0.7107920246198773,
+      "fold": 4
+    },
+    {
+      "n": 14,
+      "n_pos": 14,
+      "auc": NaN,
+      "p5": 1.0,
+      "p10": 1.0,
+      "p20": NaN,
+      "p50": NaN,
+      "tau": 0.0,
+      "ece": 0.47522213762234067,
+      "ms_per_msg": 0.03677085624076426,
+      "total_ms": 0.5147919873706996,
+      "fold": 5
+    },
+    {
+      "n": 15,
+      "n_pos": 0,
+      "auc": NaN,
+      "p5": 0.0,
+      "p10": 0.0,
+      "p20": NaN,
+      "p50": NaN,
+      "tau": 0.0,
+      "ece": 0.485655764181649,
+      "ms_per_msg": 0.02957220034052928,
+      "total_ms": 0.44358300510793924,
+      "fold": 6
+    },
+    {
+      "n": 15,
+      "n_pos": 15,
+      "auc": NaN,
+      "p5": 1.0,
+      "p10": 1.0,
+      "p20": NaN,
+      "p50": NaN,
+      "tau": 0.0,
+      "ece": 0.5043930426085831,
+      "ms_per_msg": 0.030772197836389143,
+      "total_ms": 0.46158296754583716,
+      "fold": 7
+    },
+    {
+      "n": 14,
+      "n_pos": 0,
+      "auc": NaN,
+      "p5": 0.0,
+      "p10": 0.0,
+      "p20": NaN,
+      "p50": NaN,
+      "tau": 0.0,
+      "ece": 0.49879923597433495,
+      "ms_per_msg": 0.03322621341794729,
+      "total_ms": 0.4651669878512621,
+      "fold": 8
+    }
+  ],
+  "aggregate": {
+    "auc_mean": NaN,
+    "auc_se": NaN,
+    "auc_ci95": NaN,
+    "p5_mean": 0.75,
+    "p5_se": 0.16366341767699427,
+    "p5_ci95": 0.32078029864690877,
+    "p10_mean": 0.75,
+    "p10_se": 0.16366341767699427,
+    "p10_ci95": 0.32078029864690877,
+    "p20_mean": NaN,
+    "p20_se": NaN,
+    "p20_ci95": NaN,
+    "p50_mean": NaN,
+    "p50_se": NaN,
+    "p50_ci95": NaN,
+    "tau_mean": 0.0,
+    "tau_se": 0.0,
+    "tau_ci95": 0.0,
+    "ece_mean": 0.489688365770266,
+    "ece_se": 0.003981675337645451,
+    "ece_ci95": 0.007804083661785084,
+    "ms_per_msg_mean": 0.034603482470716006,
+    "ms_per_msg_se": 0.0014229317369457047,
+    "ms_per_msg_ci95": 0.002788946204413581
+  }
+}

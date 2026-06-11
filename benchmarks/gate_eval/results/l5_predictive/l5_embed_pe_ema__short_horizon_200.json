@@ -1,0 +1,61 @@
+{
+  "candidate": "l5_embed_pe_ema",
+  "dataset": "short_horizon_200",
+  "alpha_surprise": 0.3,
+  "ingest": {
+    "n_messages": 5882,
+    "wall_s": 0.35,
+    "per_message_ms_avg": 0.043,
+    "per_message_ms_p95": 0.066
+  },
+  "retrieval": {
+    "n_queries": 200,
+    "precision_at_1_pct": 11.0,
+    "precision_at_3_pct": 20.0,
+    "precision_at_10_pct": 25.5,
+    "n_rare_queries": 39,
+    "rare_precision_at_10_pct": 28.21,
+    "wall_s": 3.8,
+    "by_category": {
+      "1": {
+        "recovered": 4,
+        "total": 37,
+        "pct": 10.81
+      },
+      "2": {
+        "recovered": 1,
+        "total": 42,
+        "pct": 2.38
+      },
+      "3": {
+        "recovered": 1,
+        "total": 12,
+        "pct": 8.33
+      },
+      "4": {
+        "recovered": 45,
+        "total": 109,
+        "pct": 41.28
+      }
+    },
+    "by_probe": {}
+  },
+  "calibration": {
+    "n_pairs": 5882,
+    "spearman": 0.4893,
+    "kendall_tau": 0.3501,
+    "oracle_mean": 0.4022,
+    "candidate_mean": 0.2422
+  },
+  "surprise_distribution": {
+    "n": 5882,
+    "mean": 0.2422,
+    "p25": 0.2003,
+    "p50": 0.2373,
+    "p75": 0.2783,
+    "p95": 0.3492,
+    "min": 0.0909,
+    "max": 1.0,
+    "frac_gt_05": 0.0005
+  }
+}

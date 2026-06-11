@@ -1,0 +1,5 @@
+2026-06-07T08:29:20.052Z [browse] Port 34567 (from BROWSE_PORT env) is in use
+Error: [browse] Port 34567 (from BROWSE_PORT env) is in use
+    at findPort (/Users/j/.claude/skills/gstack/browse/src/server.ts:858:15)
+    at async start (/Users/j/.claude/skills/gstack/browse/src/server.ts:1342:22)
+    at processTicksAndRejections (native:7:39)

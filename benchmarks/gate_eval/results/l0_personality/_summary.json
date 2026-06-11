@@ -1,0 +1,477 @@
+{
+  "rows": [
+    {
+      "candidate": "c1_baseline_hand_tuned",
+      "tier": "edge",
+      "human_a_b_acc": 0.2714285714285714,
+      "synthetic_a_b_acc": null,
+      "lift_vs_d0": -0.32857142857142857,
+      "lift_vs_d1": -0.10000000000000003,
+      "slop_gap": null,
+      "intra_consistency": 0.5035714285714286,
+      "speaker_id_acc_human": 0.6,
+      "leakage_fail_rate_human": 0.2,
+      "profile_bytes_avg": 188.6,
+      "profile_readable": true,
+      "null_band_partial_vs_d0": false
+    },
+    {
+      "candidate": "c3_style_embedder_wegmann",
+      "tier": "base",
+      "human_a_b_acc": 0.6,
+      "synthetic_a_b_acc": null,
+      "lift_vs_d0": 0.0,
+      "lift_vs_d1": 0.22857142857142854,
+      "slop_gap": null,
+      "intra_consistency": 1.0,
+      "speaker_id_acc_human": 1.0,
+      "leakage_fail_rate_human": 0.0,
+      "profile_bytes_avg": 3136.0,
+      "profile_readable": true,
+      "null_band_partial_vs_d0": false
+    },
+    {
+      "candidate": "c3c_char_ngram_proxy",
+      "tier": "edge",
+      "human_a_b_acc": 0.6857142857142857,
+      "synthetic_a_b_acc": null,
+      "lift_vs_d0": 0.08571428571428574,
+      "lift_vs_d1": 0.3142857142857143,
+      "slop_gap": null,
+      "intra_consistency": 0.8754872331942263,
+      "speaker_id_acc_human": 1.0,
+      "leakage_fail_rate_human": 0.0,
+      "profile_bytes_avg": 1088.0,
+      "profile_readable": true,
+      "null_band_partial_vs_d0": true
+    },
+    {
+      "candidate": "c5_expanded_keywords",
+      "tier": "edge",
+      "human_a_b_acc": 0.5428571428571428,
+      "synthetic_a_b_acc": null,
+      "lift_vs_d0": -0.05714285714285716,
+      "lift_vs_d1": 0.17142857142857137,
+      "slop_gap": null,
+      "intra_consistency": 0.3646031746031746,
+      "speaker_id_acc_human": 1.0,
+      "leakage_fail_rate_human": 0.0,
+      "profile_bytes_avg": 309.2,
+      "profile_readable": true,
+      "null_band_partial_vs_d0": false
+    },
+    {
+      "candidate": "d0_user_filter_only",
+      "tier": "edge",
+      "human_a_b_acc": 0.6,
+      "synthetic_a_b_acc": null,
+      "lift_vs_d0": 0.0,
+      "lift_vs_d1": 0.22857142857142854,
+      "slop_gap": null,
+      "intra_consistency": 1.0,
+      "speaker_id_acc_human": 1.0,
+      "leakage_fail_rate_human": 0.0,
+      "profile_bytes_avg": 0.0,
+      "profile_readable": true,
+      "null_band_partial_vs_d0": false
+    },
+    {
+      "candidate": "d1_no_l0",
+      "tier": "edge",
+      "human_a_b_acc": 0.37142857142857144,
+      "synthetic_a_b_acc": null,
+      "lift_vs_d0": -0.22857142857142854,
+      "lift_vs_d1": 0.0,
+      "slop_gap": null,
+      "intra_consistency": 1.0,
+      "speaker_id_acc_human": 0.5333333333333333,
+      "leakage_fail_rate_human": 0.6,
+      "profile_bytes_avg": 0.0,
+      "profile_readable": true,
+      "null_band_partial_vs_d0": false
+    }
+  ],
+  "per_query_samples": {
+    "c1_baseline_hand_tuned": [
+      {
+        "query_id": "P1_A_001",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_002",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-2"
+      },
+      {
+        "query_id": "P1_A_003",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_004",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_005",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_B_001",
+        "query_type": "B",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_B_002",
+        "query_type": "B",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_C_001",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_C_002",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_D_001",
+        "query_type": "D",
+        "correct": true,
+        "notes": "0/5 leaked"
+      }
+    ],
+    "d0_user_filter_only": [
+      {
+        "query_id": "P1_A_001",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_002",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_003",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_004",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-0"
+      },
+      {
+        "query_id": "P1_A_005",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-1"
+      },
+      {
+        "query_id": "P1_B_001",
+        "query_type": "B",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_B_002",
+        "query_type": "B",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_C_001",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_C_002",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_D_001",
+        "query_type": "D",
+        "correct": true,
+        "notes": "0/5 leaked"
+      }
+    ],
+    "c3c_char_ngram_proxy": [
+      {
+        "query_id": "P1_A_001",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-1"
+      },
+      {
+        "query_id": "P1_A_002",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-1"
+      },
+      {
+        "query_id": "P1_A_003",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_004",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-1"
+      },
+      {
+        "query_id": "P1_A_005",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_B_001",
+        "query_type": "B",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_B_002",
+        "query_type": "B",
+        "correct": true,
+        "notes": "matched rank-0"
+      },
+      {
+        "query_id": "P1_C_001",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_C_002",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_D_001",
+        "query_type": "D",
+        "correct": true,
+        "notes": "0/5 leaked"
+      }
+    ],
+    "c5_expanded_keywords": [
+      {
+        "query_id": "P1_A_001",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_002",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-0"
+      },
+      {
+        "query_id": "P1_A_003",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-2"
+      },
+      {
+        "query_id": "P1_A_004",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-1"
+      },
+      {
+        "query_id": "P1_A_005",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_B_001",
+        "query_type": "B",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_B_002",
+        "query_type": "B",
+        "correct": true,
+        "notes": "matched rank-0"
+      },
+      {
+        "query_id": "P1_C_001",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_C_002",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_D_001",
+        "query_type": "D",
+        "correct": true,
+        "notes": "0/5 leaked"
+      }
+    ],
+    "c3_style_embedder_wegmann": [
+      {
+        "query_id": "P1_A_001",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_002",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_003",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_004",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-0"
+      },
+      {
+        "query_id": "P1_A_005",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-1"
+      },
+      {
+        "query_id": "P1_B_001",
+        "query_type": "B",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_B_002",
+        "query_type": "B",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_C_001",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_C_002",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_D_001",
+        "query_type": "D",
+        "correct": true,
+        "notes": "0/5 leaked"
+      }
+    ],
+    "d1_no_l0": [
+      {
+        "query_id": "P1_A_001",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_002",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_003",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_004",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-0"
+      },
+      {
+        "query_id": "P1_A_005",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-1"
+      },
+      {
+        "query_id": "P1_B_001",
+        "query_type": "B",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_B_002",
+        "query_type": "B",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_C_001",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_C_002",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_D_001",
+        "query_type": "D",
+        "correct": false,
+        "notes": "3/5 leaked"
+      }
+    ]
+  },
+  "baselines": {
+    "d0_hab": 0.6,
+    "d1_hab": 0.37142857142857144
+  },
+  "thresholds": {
+    "lift_floor": 0.05,
+    "consistency_floor": 0.7,
+    "slop_ceiling": 0.2
+  }
+}

@@ -1,0 +1,845 @@
+{
+  "meta": {
+    "candidate": "c2_llm_abstractive",
+    "dataset": "long_horizon_synthetic",
+    "seed": 42,
+    "k": 10,
+    "ingest_ms": 0.0,
+    "consolidation_wall_clock_s": 0.07,
+    "baseline_storage_bytes": 1593344,
+    "bytes_added_by_consolidation": 0,
+    "storage_multiplier": 1.0,
+    "rows_written": {
+      "summaries": 16,
+      "fact_timeline": 2
+    },
+    "notes": "C2 FALLBACK \u2014 OPENAI_API_KEY unset; ran C1 extractive pipeline",
+    "run_at": "2026-04-23T11:25:13.583837+00:00",
+    "probe_wall_clock_s": 0.28,
+    "ingest_cached": true
+  },
+  "probes": {
+    "generalization": {
+      "n": 51,
+      "n_correct": 50,
+      "accuracy": 0.9804,
+      "per_probe": [
+        {
+          "probe_id": 1000,
+          "covered": 5,
+          "total": 5,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1001,
+          "covered": 5,
+          "total": 5,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1002,
+          "covered": 5,
+          "total": 5,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1003,
+          "covered": 5,
+          "total": 5,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1004,
+          "covered": 4,
+          "total": 5,
+          "fraction": 0.8,
+          "correct": 1
+        },
+        {
+          "probe_id": 1005,
+          "covered": 5,
+          "total": 5,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1006,
+          "covered": 3,
+          "total": 3,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1007,
+          "covered": 3,
+          "total": 3,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1008,
+          "covered": 3,
+          "total": 3,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1009,
+          "covered": 3,
+          "total": 3,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1010,
+          "covered": 2,
+          "total": 3,
+          "fraction": 0.6666666666666666,
+          "correct": 1
+        },
+        {
+          "probe_id": 1011,
+          "covered": 3,
+          "total": 3,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1012,
+          "covered": 1,
+          "total": 3,
+          "fraction": 0.3333333333333333,
+          "correct": 0
+        },
+        {
+          "probe_id": 1013,
+          "covered": 2,
+          "total": 3,
+          "fraction": 0.6666666666666666,
+          "correct": 1
+        },
+        {
+          "probe_id": 1014,
+          "covered": 2,
+          "total": 3,
+          "fraction": 0.6666666666666666,
+          "correct": 1
+        },
+        {
+          "probe_id": 1015,
+          "covered": 2,
+          "total": 3,
+          "fraction": 0.6666666666666666,
+          "correct": 1
+        },
+        {
+          "probe_id": 1016,
+          "covered": 2,
+          "total": 3,
+          "fraction": 0.6666666666666666,
+          "correct": 1
+        },
+        {
+          "probe_id": 1017,
+          "covered": 3,
+          "total": 3,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1018,
+          "covered": 3,
+          "total": 3,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1019,
+          "covered": 3,
+          "total": 3,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1020,
+          "covered": 3,
+          "total": 3,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1021,
+          "covered": 3,
+          "total": 3,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1022,
+          "covered": 3,
+          "total": 3,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1023,
+          "covered": 4,
+          "total": 4,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1024,
+          "covered": 4,
+          "total": 4,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1025,
+          "covered": 3,
+          "total": 3,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1026,
+          "covered": 3,
+          "total": 3,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1027,
+          "covered": 4,
+          "total": 4,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1028,
+          "covered": 5,
+          "total": 5,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1029,
+          "covered": 4,
+          "total": 6,
+          "fraction": 0.6666666666666666,
+          "correct": 1
+        },
+        {
+          "probe_id": 1030,
+          "covered": 5,
+          "total": 6,
+          "fraction": 0.8333333333333334,
+          "correct": 1
+        },
+        {
+          "probe_id": 1031,
+          "covered": 4,
+          "total": 5,
+          "fraction": 0.8,
+          "correct": 1
+        },
+        {
+          "probe_id": 1032,
+          "covered": 5,
+          "total": 6,
+          "fraction": 0.8333333333333334,
+          "correct": 1
+        },
+        {
+          "probe_id": 1033,
+          "covered": 4,
+          "total": 6,
+          "fraction": 0.6666666666666666,
+          "correct": 1
+        },
+        {
+          "probe_id": 1034,
+          "covered": 5,
+          "total": 6,
+          "fraction": 0.8333333333333334,
+          "correct": 1
+        },
+        {
+          "probe_id": 1035,
+          "covered": 5,
+          "total": 7,
+          "fraction": 0.7142857142857143,
+          "correct": 1
+        },
+        {
+          "probe_id": 1036,
+          "covered": 6,
+          "total": 7,
+          "fraction": 0.8571428571428571,
+          "correct": 1
+        },
+        {
+          "probe_id": 1037,
+          "covered": 6,
+          "total": 7,
+          "fraction": 0.8571428571428571,
+          "correct": 1
+        },
+        {
+          "probe_id": 1038,
+          "covered": 6,
+          "total": 7,
+          "fraction": 0.8571428571428571,
+          "correct": 1
+        },
+        {
+          "probe_id": 1039,
+          "covered": 6,
+          "total": 7,
+          "fraction": 0.8571428571428571,
+          "correct": 1
+        },
+        {
+          "probe_id": 1040,
+          "covered": 6,
+          "total": 7,
+          "fraction": 0.8571428571428571,
+          "correct": 1
+        },
+        {
+          "probe_id": 1041,
+          "covered": 2,
+          "total": 2,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1042,
+          "covered": 3,
+          "total": 3,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1043,
+          "covered": 2,
+          "total": 4,
+          "fraction": 0.5,
+          "correct": 1
+        },
+        {
+          "probe_id": 1044,
+          "covered": 2,
+          "total": 2,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1045,
+          "covered": 2,
+          "total": 2,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1046,
+          "covered": 4,
+          "total": 4,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1047,
+          "covered": 4,
+          "total": 4,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1048,
+          "covered": 3,
+          "total": 3,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1049,
+          "covered": 4,
+          "total": 4,
+          "fraction": 1.0,
+          "correct": 1
+        },
+        {
+          "probe_id": 1050,
+          "covered": 2,
+          "total": 2,
+          "fraction": 1.0,
+          "correct": 1
+        }
+      ]
+    },
+    "contradiction": {
+      "n": 31,
+      "n_correct": 19,
+      "accuracy": 0.6129,
+      "per_probe": [
+        {
+          "probe_id": 2000,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2001,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2002,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2003,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2004,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2005,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2006,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2007,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2008,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2009,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2010,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2011,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 1,
+          "correct": 0
+        },
+        {
+          "probe_id": 2012,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 1,
+          "correct": 0
+        },
+        {
+          "probe_id": 2013,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 1,
+          "correct": 0
+        },
+        {
+          "probe_id": 2014,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 1,
+          "correct": 0
+        },
+        {
+          "probe_id": 2015,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 1,
+          "correct": 0
+        },
+        {
+          "probe_id": 2016,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 1,
+          "correct": 0
+        },
+        {
+          "probe_id": 2017,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 1,
+          "correct": 0
+        },
+        {
+          "probe_id": 2018,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 1,
+          "correct": 0
+        },
+        {
+          "probe_id": 2019,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 1,
+          "correct": 0
+        },
+        {
+          "probe_id": 2020,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 1,
+          "correct": 0
+        },
+        {
+          "probe_id": 2021,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2022,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2023,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2024,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2025,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2026,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2027,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2028,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 0,
+          "correct": 1
+        },
+        {
+          "probe_id": 2029,
+          "new_in_top3": 0,
+          "forbidden_in_top1": 0,
+          "correct": 0
+        },
+        {
+          "probe_id": 2030,
+          "new_in_top3": 1,
+          "forbidden_in_top1": 1,
+          "correct": 0
+        }
+      ]
+    },
+    "rehearsal": {
+      "n": 34,
+      "n_correct": 31,
+      "accuracy": 0.9118,
+      "per_probe": [
+        {
+          "probe_id": 3000,
+          "correct": 1,
+          "N": 1
+        },
+        {
+          "probe_id": 3001,
+          "correct": 1,
+          "N": 1
+        },
+        {
+          "probe_id": 3002,
+          "correct": 1,
+          "N": 1
+        },
+        {
+          "probe_id": 3003,
+          "correct": 1,
+          "N": 1
+        },
+        {
+          "probe_id": 3004,
+          "correct": 0,
+          "N": 1
+        },
+        {
+          "probe_id": 3005,
+          "correct": 0,
+          "N": 1
+        },
+        {
+          "probe_id": 3006,
+          "correct": 1,
+          "N": 1
+        },
+        {
+          "probe_id": 3007,
+          "correct": 1,
+          "N": 1
+        },
+        {
+          "probe_id": 3008,
+          "correct": 1,
+          "N": 1
+        },
+        {
+          "probe_id": 3009,
+          "correct": 1,
+          "N": 1
+        },
+        {
+          "probe_id": 3010,
+          "correct": 1,
+          "N": 1
+        },
+        {
+          "probe_id": 3011,
+          "correct": 1,
+          "N": 1
+        },
+        {
+          "probe_id": 3012,
+          "correct": 1,
+          "N": 1
+        },
+        {
+          "probe_id": 3013,
+          "correct": 1,
+          "N": 1
+        },
+        {
+          "probe_id": 3014,
+          "correct": 1,
+          "N": 1
+        },
+        {
+          "probe_id": 3015,
+          "correct": 0,
+          "N": 1
+        },
+        {
+          "probe_id": 3016,
+          "correct": 1,
+          "N": 1
+        },
+        {
+          "probe_id": 3017,
+          "correct": 1,
+          "N": 1
+        },
+        {
+          "probe_id": 3018,
+          "correct": 1,
+          "N": 1
+        },
+        {
+          "probe_id": 3019,
+          "correct": 1,
+          "N": 1
+        },
+        {
+          "probe_id": 3020,
+          "correct": 1,
+          "N": 3
+        },
+        {
+          "probe_id": 3021,
+          "correct": 1,
+          "N": 3
+        },
+        {
+          "probe_id": 3022,
+          "correct": 1,
+          "N": 3
+        },
+        {
+          "probe_id": 3023,
+          "correct": 1,
+          "N": 3
+        },
+        {
+          "probe_id": 3024,
+          "correct": 1,
+          "N": 3
+        },
+        {
+          "probe_id": 3025,
+          "correct": 1,
+          "N": 3
+        },
+        {
+          "probe_id": 3026,
+          "correct": 1,
+          "N": 3
+        },
+        {
+          "probe_id": 3027,
+          "correct": 1,
+          "N": 3
+        },
+        {
+          "probe_id": 3028,
+          "correct": 1,
+          "N": 3
+        },
+        {
+          "probe_id": 3029,
+          "correct": 1,
+          "N": 3
+        },
+        {
+          "probe_id": 3030,
+          "correct": 1,
+          "N": 10
+        },
+        {
+          "probe_id": 3031,
+          "correct": 1,
+          "N": 10
+        },
+        {
+          "probe_id": 3032,
+          "correct": 1,
+          "N": 10
+        },
+        {
+          "probe_id": 3033,
+          "correct": 1,
+          "N": 10
+        }
+      ],
+      "by_N": {
+        "1": {
+          "n": 20,
+          "accuracy": 0.85
+        },
+        "3": {
+          "n": 10,
+          "accuracy": 1.0
+        },
+        "10": {
+          "n": 4,
+          "accuracy": 1.0
+        }
+      }
+    },
+    "near_duplicate": {
+      "n": 15,
+      "n_correct": 10,
+      "accuracy": 0.6667,
+      "per_probe": [
+        {
+          "probe_id": 4000,
+          "correct": 0
+        },
+        {
+          "probe_id": 4001,
+          "correct": 1
+        },
+        {
+          "probe_id": 4002,
+          "correct": 1
+        },
+        {
+          "probe_id": 4003,
+          "correct": 1
+        },
+        {
+          "probe_id": 4004,
+          "correct": 1
+        },
+        {
+          "probe_id": 4005,
+          "correct": 1
+        },
+        {
+          "probe_id": 4006,
+          "correct": 1
+        },
+        {
+          "probe_id": 4007,
+          "correct": 1
+        },
+        {
+          "probe_id": 4008,
+          "correct": 1
+        },
+        {
+          "probe_id": 4009,
+          "correct": 0
+        },
+        {
+          "probe_id": 4010,
+          "correct": 1
+        },
+        {
+          "probe_id": 4011,
+          "correct": 1
+        },
+        {
+          "probe_id": 4012,
+          "correct": 0
+        },
+        {
+          "probe_id": 4013,
+          "correct": 0
+        },
+        {
+          "probe_id": 4014,
+          "correct": 0
+        }
+      ]
+    }
+  },
+  "headline": {
+    "generalization_accuracy": 0.9804,
+    "contradiction_accuracy": 0.6129,
+    "rehearsal_accuracy": 0.9118,
+    "near_duplicate_accuracy": 0.6667,
+    "J_composite_unweighted": 0.6009
+  }
+}

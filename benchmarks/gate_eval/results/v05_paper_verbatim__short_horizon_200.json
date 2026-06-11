@@ -1,0 +1,48 @@
+{
+  "candidate": "v05_paper_verbatim",
+  "dataset": "short_horizon_200",
+  "timestamp": "2026-04-23T09:45:01.197841+00:00",
+  "db_path": "/Users/j/.cache/memorist_dbs/v05_paper_verbatim__short_horizon_200.db",
+  "ingest": {
+    "total_sessions": 10,
+    "total_messages": 5882,
+    "kept": 5882,
+    "dropped": 0,
+    "drop_rate_pct": 0.0,
+    "ingest_wall_clock_s": 1.35,
+    "per_message_ms_avg": 0.23
+  },
+  "retrieval": {
+    "total_qs": 200,
+    "gold_in_topk": 12,
+    "precision_at_k_pct": 6.0,
+    "k": 10,
+    "by_category": {
+      "1": {
+        "recovered": 3,
+        "total": 37,
+        "pct": 8.11
+      },
+      "2": {
+        "recovered": 0,
+        "total": 42,
+        "pct": 0.0
+      },
+      "3": {
+        "recovered": 2,
+        "total": 12,
+        "pct": 16.67
+      },
+      "4": {
+        "recovered": 7,
+        "total": 109,
+        "pct": 6.42
+      }
+    },
+    "wall_clock_s": 0.2
+  },
+  "storage": {
+    "db_size_bytes": 4096,
+    "rows_in_messages": 568
+  }
+}

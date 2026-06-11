@@ -1,0 +1,66 @@
+{
+  "candidate": "l5_none",
+  "dataset": "long_horizon_synthetic",
+  "alpha_surprise": 0.0,
+  "ingest": {
+    "n_messages": 750,
+    "wall_s": 0.01,
+    "per_message_ms_avg": 0.0,
+    "per_message_ms_p95": 0.001
+  },
+  "retrieval": {
+    "n_queries": 91,
+    "precision_at_1_pct": 35.16,
+    "precision_at_3_pct": 45.05,
+    "precision_at_10_pct": 49.45,
+    "n_rare_queries": 0,
+    "rare_precision_at_10_pct": null,
+    "wall_s": 0.22,
+    "by_category": {},
+    "by_probe": {
+      "baseline": {
+        "recovered": 30,
+        "total": 55,
+        "pct": 54.55
+      },
+      "emotional": {
+        "recovered": 13,
+        "total": 18,
+        "pct": 72.22
+      },
+      "rehearsal": {
+        "recovered": 2,
+        "total": 10,
+        "pct": 20.0
+      },
+      "contradiction": {
+        "recovered": 0,
+        "total": 2,
+        "pct": 0.0
+      },
+      "noise": {
+        "recovered": 0,
+        "total": 6,
+        "pct": 0.0
+      }
+    }
+  },
+  "calibration": {
+    "n_pairs": 750,
+    "spearman": 0.1318,
+    "kendall_tau": NaN,
+    "oracle_mean": 0.5192,
+    "candidate_mean": 0.5
+  },
+  "surprise_distribution": {
+    "n": 750,
+    "mean": 0.5,
+    "p25": 0.5,
+    "p50": 0.5,
+    "p75": 0.5,
+    "p95": 0.5,
+    "min": 0.5,
+    "max": 0.5,
+    "frac_gt_05": 0.0
+  }
+}

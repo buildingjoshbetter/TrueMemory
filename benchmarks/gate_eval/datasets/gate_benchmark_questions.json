@@ -1,0 +1,2412 @@
+{
+  "benchmark": "GateLoCoMo",
+  "version": "1.0",
+  "total_questions": 194,
+  "distribution": {
+    "by_conversation": {
+      "conv1": 39,
+      "conv2": 39,
+      "conv3": 39,
+      "conv4": 37,
+      "conv5": 40
+    },
+    "by_difficulty": {
+      "easy": 123,
+      "medium": 59,
+      "hard": 12
+    },
+    "by_category": {
+      "fact": 140,
+      "preference": 8,
+      "decision": 13,
+      "temporal": 15,
+      "emotional": 11,
+      "life_event": 7
+    }
+  },
+  "questions": [
+    {
+      "id": "q_conv1_001",
+      "question": "Where does Alex work now?",
+      "conversation_id": "conv1",
+      "gold_answer": "Alex works at Anthropic as a Senior ML Infrastructure Engineer.",
+      "evidence_messages": [
+        "conv1_s06_010",
+        "conv1_s06_002"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_002",
+      "question": "How much is Alex's base salary at the new job?",
+      "conversation_id": "conv1",
+      "gold_answer": "Alex's base salary at Anthropic is $245k.",
+      "evidence_messages": [
+        "conv1_s06_011"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_003",
+      "question": "What's Alex's total compensation at Anthropic?",
+      "conversation_id": "conv1",
+      "gold_answer": "Alex's total comp is about $380k including RSUs over 4 years.",
+      "evidence_messages": [
+        "conv1_s06_013",
+        "conv1_s06_013"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_004",
+      "question": "Where is Jordan's new apartment?",
+      "conversation_id": "conv1",
+      "gold_answer": "Jordan's apartment is on Balboa St between 6th and 7th Ave in the Inner Richmond neighborhood.",
+      "evidence_messages": [
+        "conv1_s04_030",
+        "conv1_s04_030"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_005",
+      "question": "How much does Jordan pay in rent?",
+      "conversation_id": "conv1",
+      "gold_answer": "Jordan pays $2,400 per month.",
+      "evidence_messages": [
+        "conv1_s04_032"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_006",
+      "question": "What does Priya do for work?",
+      "conversation_id": "conv1",
+      "gold_answer": "Priya is a product designer at Figma.",
+      "evidence_messages": [
+        "conv1_s04_005"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_007",
+      "question": "Where did Alex and Priya go on their first date?",
+      "conversation_id": "conv1",
+      "gold_answer": "They went to a wine bar called Wildhawk in Noe Valley.",
+      "evidence_messages": [
+        "conv1_s04_008"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_008",
+      "question": "What kind of music does Priya like?",
+      "conversation_id": "conv1",
+      "gold_answer": "Priya is into indie music, specifically Japanese Breakfast and Mitski.",
+      "evidence_messages": [
+        "conv1_s04_020"
+      ],
+      "difficulty": "easy",
+      "category": "preference"
+    },
+    {
+      "id": "q_conv1_009",
+      "question": "Where is Alex's new office?",
+      "conversation_id": "conv1",
+      "gold_answer": "Anthropic's office is on Mission St near Embarcadero, about a 20 minute bike ride from Alex's place.",
+      "evidence_messages": [
+        "conv1_s06_023",
+        "conv1_s06_023"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_010",
+      "question": "What trail did Jordan hike at Point Reyes?",
+      "conversation_id": "conv1",
+      "gold_answer": "Jordan did the Tomales Point trail, about 12 miles round trip.",
+      "evidence_messages": [
+        "conv1_s01_007",
+        "conv1_s01_007"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_011",
+      "question": "When did Alex decide to give notice at Stripe?",
+      "conversation_id": "conv1",
+      "gold_answer": "Alex planned to give notice on Monday, with a start date at Anthropic of January 6th.",
+      "evidence_messages": [
+        "conv1_s06_020",
+        "conv1_s06_017"
+      ],
+      "difficulty": "easy",
+      "category": "decision"
+    },
+    {
+      "id": "q_conv1_012",
+      "question": "Is Jordan considering a career change?",
+      "conversation_id": "conv1",
+      "gold_answer": "Yes, Jordan is thinking about switching to product management and applied for an associate PM role at Google.",
+      "evidence_messages": [
+        "conv1_s10_012",
+        "conv1_s10_018"
+      ],
+      "difficulty": "medium",
+      "category": "decision"
+    },
+    {
+      "id": "q_conv1_013",
+      "question": "When did Alex start at Anthropic?",
+      "conversation_id": "conv1",
+      "gold_answer": "Alex's start date was January 6th.",
+      "evidence_messages": [
+        "conv1_s06_017",
+        "conv1_s06_017"
+      ],
+      "difficulty": "easy",
+      "category": "temporal"
+    },
+    {
+      "id": "q_conv1_014",
+      "question": "When did Jordan move into the new apartment?",
+      "conversation_id": "conv1",
+      "gold_answer": "Jordan moved in on December 1st.",
+      "evidence_messages": [
+        "conv1_s04_036"
+      ],
+      "difficulty": "easy",
+      "category": "temporal"
+    },
+    {
+      "id": "q_conv1_015",
+      "question": "How long was Jordan's apartment search?",
+      "conversation_id": "conv1",
+      "gold_answer": "Jordan searched for about two and a half months, since September, viewing about 15 places.",
+      "evidence_messages": [
+        "conv1_s04_038",
+        "conv1_s04_040"
+      ],
+      "difficulty": "medium",
+      "category": "temporal"
+    },
+    {
+      "id": "q_conv1_016",
+      "question": "How was Alex feeling about the career change?",
+      "conversation_id": "conv1",
+      "gold_answer": "Alex was nervous about interviewing but ultimately thrilled about the offer. Alex said they haven't been this excited about anything in a long time.",
+      "evidence_messages": [
+        "conv1_s05_008",
+        "conv1_s06_026"
+      ],
+      "difficulty": "medium",
+      "category": "emotional"
+    },
+    {
+      "id": "q_conv1_017",
+      "question": "Was Alex unhappy at Stripe?",
+      "conversation_id": "conv1",
+      "gold_answer": "Yes, Alex was very unhappy. Alex said the culture had gotten corporate and felt done with the place, especially under manager Derek.",
+      "evidence_messages": [
+        "conv1_s02_012",
+        "conv1_s03_010"
+      ],
+      "difficulty": "medium",
+      "category": "emotional"
+    },
+    {
+      "id": "q_conv1_018",
+      "question": "What was Alex's first project at Anthropic?",
+      "conversation_id": "conv1",
+      "gold_answer": "Alex's first project was building model evaluation infrastructure — benchmarks and monitoring systems.",
+      "evidence_messages": [
+        "conv1_s07_013",
+        "conv1_s07_013"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_019",
+      "question": "Who is Alex's manager at Anthropic and what's their background?",
+      "conversation_id": "conv1",
+      "gold_answer": "Alex's manager is Ava, who previously worked at DeepMind.",
+      "evidence_messages": [
+        "conv1_s07_008",
+        "conv1_s07_008"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_020",
+      "question": "What features does Jordan's apartment have?",
+      "conversation_id": "conv1",
+      "gold_answer": "Jordan's apartment is a corner unit with lots of natural light, hardwood floors, laundry in the building, and a small balcony off the bedroom.",
+      "evidence_messages": [
+        "conv1_s04_034",
+        "conv1_s04_035",
+        "conv1_s04_035"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_021",
+      "question": "What happened with Jordan's heater issue?",
+      "conversation_id": "conv1",
+      "gold_answer": "The heater was broken since Jordan moved in. After emailing the landlord three times and considering filing a city complaint, it was eventually fixed.",
+      "evidence_messages": [
+        "conv1_s05_027",
+        "conv1_s05_029",
+        "conv1_s01_026"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_022",
+      "question": "How did Alex's career trajectory evolve over the conversation?",
+      "conversation_id": "conv1",
+      "gold_answer": "Alex went from being unhappy at Stripe under manager Derek, to actively looking at ML/AI roles, interviewing at Anthropic (with help from Jordan's friend Lisa), getting the offer ($245k base, $380k total), and starting in January as Senior ML Infra Engineer.",
+      "evidence_messages": [
+        "conv1_s02_012",
+        "conv1_s02_022",
+        "conv1_s06_002",
+        "conv1_s06_011",
+        "conv1_s07_013"
+      ],
+      "difficulty": "hard",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_023",
+      "question": "How serious did Alex's relationship with Priya get over time?",
+      "conversation_id": "conv1",
+      "gold_answer": "Alex and Priya matched on Hinge, had a first date at Wildhawk in Noe Valley, started seeing each other every weekend, Priya met Alex's parents, and by session 12 they'd been together about 3 months with Alex calling Priya before parents when sharing the job news.",
+      "evidence_messages": [
+        "conv1_s04_007",
+        "conv1_s09_003",
+        "conv1_s06_030",
+        "conv1_s06_028"
+      ],
+      "difficulty": "hard",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_024",
+      "question": "What career development was Jordan pursuing?",
+      "conversation_id": "conv1",
+      "gold_answer": "Jordan took a Reforge PM course, started exploring product management as a career, applied to a Google PM role on the Cloud team, and got a phone screen interview.",
+      "evidence_messages": [
+        "conv1_s10_016",
+        "conv1_s10_018",
+        "conv1_s12_020"
+      ],
+      "difficulty": "hard",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_025",
+      "question": "What restaurant does Alex think has the best ramen in the city?",
+      "conversation_id": "conv1",
+      "gold_answer": "Alex thinks Mensho on Valencia has the best ramen, particularly praising the chashu and their truffle tonkotsu.",
+      "evidence_messages": [
+        "conv1_s01_017",
+        "conv1_s01_018",
+        "conv1_s01_020"
+      ],
+      "difficulty": "easy",
+      "category": "preference"
+    },
+    {
+      "id": "q_conv1_026",
+      "question": "What's Jordan's opinion of the Richmond neighborhood?",
+      "conversation_id": "conv1",
+      "gold_answer": "Jordan thinks the Richmond is underrated and loves the neighborhood, especially the restaurants on Clement St.",
+      "evidence_messages": [
+        "conv1_s02_035",
+        "conv1_s05_026"
+      ],
+      "difficulty": "medium",
+      "category": "preference"
+    },
+    {
+      "id": "q_conv1_027",
+      "question": "Where does Jordan work?",
+      "conversation_id": "conv1",
+      "gold_answer": "Jordan works at Dropbox.",
+      "evidence_messages": [
+        "conv1_s07_016"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_028",
+      "question": "Who was Derek and why did Alex dislike him?",
+      "conversation_id": "conv1",
+      "gold_answer": "Derek was Alex's manager at Stripe, a PM with no engineering background who came from McKinsey. He called team meetings to criticize performance and used consulting buzzwords.",
+      "evidence_messages": [
+        "conv1_s02_006",
+        "conv1_s02_008",
+        "conv1_s02_010"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_029",
+      "question": "What were the details of Jordan's housewarming party?",
+      "conversation_id": "conv1",
+      "gold_answer": "Jordan planned a housewarming for Saturday the 25th with 15-20 people, featuring a taco bar and asking Alex to bring a JBL speaker.",
+      "evidence_messages": [
+        "conv1_s08_005",
+        "conv1_s08_008",
+        "conv1_s08_011",
+        "conv1_s08_031"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_030",
+      "question": "What trip were Alex and friends planning?",
+      "conversation_id": "conv1",
+      "gold_answer": "Alex and Priya were planning a group cabin trip to Tahoe for Presidents Day weekend, staying in a Truckee cabin that sleeps 8 at $400/night.",
+      "evidence_messages": [
+        "conv1_s11_010",
+        "conv1_s11_016",
+        "conv1_s11_016"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_031",
+      "question": "How did Alex and Priya meet?",
+      "conversation_id": "conv1",
+      "gold_answer": "They matched on the dating app Hinge about two weeks before their first date.",
+      "evidence_messages": [
+        "conv1_s04_007"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_032",
+      "question": "What was Alex's interview process at Anthropic like?",
+      "conversation_id": "conv1",
+      "gold_answer": "It was a full day with five rounds: system design, two coding rounds, behavioral, and a team lunch with the hiring manager.",
+      "evidence_messages": [
+        "conv1_s05_014",
+        "conv1_s05_016"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_033",
+      "question": "Who helped Alex prepare for the Anthropic interview?",
+      "conversation_id": "conv1",
+      "gold_answer": "Jordan's friend Lisa, who works on the research team at Anthropic, sent Alex interview tips about the system design round.",
+      "evidence_messages": [
+        "conv1_s05_021",
+        "conv1_s05_023"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_034",
+      "question": "What hobby is Priya into?",
+      "conversation_id": "conv1",
+      "gold_answer": "Priya is really into rock climbing and offered to take Alex to her gym, Dogpatch Boulders.",
+      "evidence_messages": [
+        "conv1_s04_014",
+        "conv1_s04_017"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_035",
+      "question": "When did Alex join Stripe?",
+      "conversation_id": "conv1",
+      "gold_answer": "Alex joined Stripe in 2022, right after their layoffs.",
+      "evidence_messages": [
+        "conv1_s02_013"
+      ],
+      "difficulty": "easy",
+      "category": "temporal"
+    },
+    {
+      "id": "q_conv1_036",
+      "question": "What was the raise Alex got by switching to Anthropic?",
+      "conversation_id": "conv1",
+      "gold_answer": "It was almost a 40% raise from Stripe.",
+      "evidence_messages": [
+        "conv1_s06_014"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_037",
+      "question": "Where did Alex and Priya go on their second date?",
+      "conversation_id": "conv1",
+      "gold_answer": "They went to Sushi Sato in Japantown.",
+      "evidence_messages": [
+        "conv1_s04_023",
+        "conv1_s04_023"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_038",
+      "question": "What did Priya get promoted to?",
+      "conversation_id": "conv1",
+      "gold_answer": "Priya was promoted to Senior Product Designer at Figma.",
+      "evidence_messages": [
+        "conv1_s12_014",
+        "conv1_s12_014"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv1_039",
+      "question": "Who was confirmed for the Tahoe trip?",
+      "conversation_id": "conv1",
+      "gold_answer": "The confirmed attendees were Alex, Jordan, Priya, Anil (Jordan's coworker), and Mike. Sarah couldn't make it due to a wedding.",
+      "evidence_messages": [
+        "conv1_s12_029",
+        "conv1_s12_030"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_040",
+      "question": "What grad programs is Sam applying to?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam is applying to clinical psychology PhD programs at Berkeley, UCLA, and UCSF.",
+      "evidence_messages": [
+        "conv2_s01_034",
+        "conv2_s01_034"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_041",
+      "question": "What health issue was Maria diagnosed with?",
+      "conversation_id": "conv2",
+      "gold_answer": "Maria was diagnosed with prediabetes based on high glucose levels in routine bloodwork.",
+      "evidence_messages": [
+        "conv2_s02_007",
+        "conv2_s02_007"
+      ],
+      "difficulty": "easy",
+      "category": "life_event"
+    },
+    {
+      "id": "q_conv2_042",
+      "question": "How is Maria managing her prediabetes?",
+      "conversation_id": "conv2",
+      "gold_answer": "Maria follows a meal plan, cuts down on sugar and refined carbs, and walks 2 miles daily with Sam's father along the river trail.",
+      "evidence_messages": [
+        "conv2_s03_022",
+        "conv2_s03_022",
+        "conv2_s05_022",
+        "conv2_s05_022"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_043",
+      "question": "What is Sam's research proposal topic?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam's research proposal is on adolescent PTSD interventions, narrowed down with help from Professor Chen.",
+      "evidence_messages": [
+        "conv2_s06_009",
+        "conv2_s01_035"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_044",
+      "question": "Who is Professor Chen?",
+      "conversation_id": "conv2",
+      "gold_answer": "Professor Chen is Sam's academic advisor who is writing a recommendation letter.",
+      "evidence_messages": [
+        "conv2_s05_016"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_045",
+      "question": "What school is Sam attending?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam attends UC Davis.",
+      "evidence_messages": [
+        "conv2_s03_002",
+        "conv2_s03_002"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_046",
+      "question": "What new hobby did Sam pick up?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam started doing pottery after friend Jake took them to a class at a studio near campus.",
+      "evidence_messages": [
+        "conv2_s04_009",
+        "conv2_s04_009"
+      ],
+      "difficulty": "easy",
+      "category": "life_event"
+    },
+    {
+      "id": "q_conv2_047",
+      "question": "How much did Sam's pottery course cost?",
+      "conversation_id": "conv2",
+      "gold_answer": "The 6-week beginner series was $180 including materials and kiln time, then the intermediate course was $250 with a 15% discount.",
+      "evidence_messages": [
+        "conv2_s04_018",
+        "conv2_s08_017",
+        "conv2_s08_017"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_048",
+      "question": "What happened at Sam's first farmers market?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam and Jake split a booth and sold 6 mugs and 3 bowls, making $180 total on their first weekend.",
+      "evidence_messages": [
+        "conv2_s09_041",
+        "conv2_s09_041"
+      ],
+      "difficulty": "easy",
+      "category": "life_event"
+    },
+    {
+      "id": "q_conv2_049",
+      "question": "What did Sam make Maria for Christmas?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam made a handmade pottery bowl and a little planter.",
+      "evidence_messages": [
+        "conv2_s06_021"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_050",
+      "question": "What school did Sam get into?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam got accepted to UCLA's Clinical Psychology PhD program with full funding.",
+      "evidence_messages": [
+        "conv2_s10_005",
+        "conv2_s10_013"
+      ],
+      "difficulty": "easy",
+      "category": "life_event"
+    },
+    {
+      "id": "q_conv2_051",
+      "question": "What's the financial package for Sam's PhD?",
+      "conversation_id": "conv2",
+      "gold_answer": "UCLA offered full tuition waiver plus a $32,000 annual stipend for a 5-year program.",
+      "evidence_messages": [
+        "conv2_s10_015",
+        "conv2_s10_015",
+        "conv2_s10_018"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_052",
+      "question": "When is the family reunion?",
+      "conversation_id": "conv2",
+      "gold_answer": "The reunion for Abuela's 80th birthday is on Saturday March 15th at Tía Carmen's house in San Jose.",
+      "evidence_messages": [
+        "conv2_s03_038",
+        "conv2_s03_036",
+        "conv2_s03_036"
+      ],
+      "difficulty": "medium",
+      "category": "temporal"
+    },
+    {
+      "id": "q_conv2_053",
+      "question": "How many people are expected at the reunion?",
+      "conversation_id": "conv2",
+      "gold_answer": "About 45-50 family members are expected.",
+      "evidence_messages": [
+        "conv2_s07_031",
+        "conv2_s02_031"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_054",
+      "question": "Who is coming to Thanksgiving?",
+      "conversation_id": "conv2",
+      "gold_answer": "Aunt Rosa (bringing tres leches cake), Uncle Miguel (driving from Fresno), and cousin Sofia (back from Barcelona).",
+      "evidence_messages": [
+        "conv2_s01_024",
+        "conv2_s01_024",
+        "conv2_s03_012"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_055",
+      "question": "What did Sam's personal statement focus on?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam wrote about volunteering at a youth crisis center and how it inspired pursuing clinical psychology.",
+      "evidence_messages": [
+        "conv2_s02_027",
+        "conv2_s01_034"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_056",
+      "question": "What is Sam's father's profession?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam's father is a surgeon.",
+      "evidence_messages": [
+        "conv2_s10_021",
+        "conv2_s02_032"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_057",
+      "question": "How many classes is Sam taking this semester?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam is taking 5 classes: intro to psych, calc 2, English comp, bio, and a film studies elective.",
+      "evidence_messages": [
+        "conv2_s01_011",
+        "conv2_s01_013"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_058",
+      "question": "Who is Sam's favorite professor?",
+      "conversation_id": "conv2",
+      "gold_answer": "Dr. Okafor, the film studies professor who did her PhD at NYU on documentary filmmaking.",
+      "evidence_messages": [
+        "conv2_s01_017",
+        "conv2_s01_017"
+      ],
+      "difficulty": "easy",
+      "category": "preference"
+    },
+    {
+      "id": "q_conv2_059",
+      "question": "Did Maria's health improve?",
+      "conversation_id": "conv2",
+      "gold_answer": "Yes, Maria's glucose levels dropped significantly after following the meal plan and exercise routine, and her doctor said no medication was needed.",
+      "evidence_messages": [
+        "conv2_s08_035",
+        "conv2_s08_035"
+      ],
+      "difficulty": "medium",
+      "category": "life_event"
+    },
+    {
+      "id": "q_conv2_060",
+      "question": "What did cousin Sofia learn in Barcelona?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sofia learned to make paella during her semester in Spain and wanted to cook it for the family.",
+      "evidence_messages": [
+        "conv2_s03_016",
+        "conv2_s03_016"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_061",
+      "question": "How is Sam getting home for Christmas?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam is driving down on December 20th with friend Jake, who has a Prius and lives in Sacramento.",
+      "evidence_messages": [
+        "conv2_s06_027",
+        "conv2_s03_009",
+        "conv2_s04_009",
+        "conv2_s06_031",
+        "conv2_s06_027"
+      ],
+      "difficulty": "medium",
+      "category": "temporal"
+    },
+    {
+      "id": "q_conv2_062",
+      "question": "What are Sam's top school choices?",
+      "conversation_id": "conv2",
+      "gold_answer": "Berkeley is Sam's top choice because the clinical psych program is ranked top 5 nationally and it's close enough for weekend visits home.",
+      "evidence_messages": [
+        "conv2_s07_025",
+        "conv2_s07_025"
+      ],
+      "difficulty": "easy",
+      "category": "preference"
+    },
+    {
+      "id": "q_conv2_063",
+      "question": "When do the grad school decisions come out?",
+      "conversation_id": "conv2",
+      "gold_answer": "Berkeley decisions come out in March, UCLA in late February, and UCSF in mid-March.",
+      "evidence_messages": [
+        "conv2_s06_013",
+        "conv2_s08_007",
+        "conv2_s08_007"
+      ],
+      "difficulty": "medium",
+      "category": "temporal"
+    },
+    {
+      "id": "q_conv2_064",
+      "question": "What pottery did Sam make at the intermediate level?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam progressed to making functional mugs and was learning glazing techniques and larger forms in the 8-week intermediate course.",
+      "evidence_messages": [
+        "conv2_s05_030",
+        "conv2_s08_013",
+        "conv2_s08_015"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_065",
+      "question": "Who is paying for Sam's intermediate pottery course?",
+      "conversation_id": "conv2",
+      "gold_answer": "Maria offered to pay for it as a late Christmas gift.",
+      "evidence_messages": [
+        "conv2_s08_018",
+        "conv2_s08_018"
+      ],
+      "difficulty": "easy",
+      "category": "decision"
+    },
+    {
+      "id": "q_conv2_066",
+      "question": "What is Sam making as a gift for Abuela?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam decided to make a handmade pottery vase for Abuela's 80th birthday.",
+      "evidence_messages": [
+        "conv2_s09_037",
+        "conv2_s09_031"
+      ],
+      "difficulty": "easy",
+      "category": "decision"
+    },
+    {
+      "id": "q_conv2_067",
+      "question": "How was Sam feeling about the application process?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam was very stressed and overwhelmed, juggling finals, a bio paper, and the Berkeley application deadline simultaneously.",
+      "evidence_messages": [
+        "conv2_s05_001",
+        "conv2_s05_009",
+        "conv2_s05_007"
+      ],
+      "difficulty": "medium",
+      "category": "emotional"
+    },
+    {
+      "id": "q_conv2_068",
+      "question": "What did Sam write about for UCSF?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam wrote about a specific scenario from the crisis center where they helped a teenager having a panic attack, who later came back and asked for Sam specifically.",
+      "evidence_messages": [
+        "conv2_s07_018"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_069",
+      "question": "What is the UCLA program structure?",
+      "conversation_id": "conv2",
+      "gold_answer": "It's a 5-year program: first 2 years are coursework and the last 3 are research and clinical practice. Starting September.",
+      "evidence_messages": [
+        "conv2_s10_018",
+        "conv2_s10_018",
+        "conv2_s10_018"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_070",
+      "question": "How does Maria show she cares about Sam's pottery?",
+      "conversation_id": "conv2",
+      "gold_answer": "Maria uses the bowl Sam made every morning for oatmeal, put the planter on the kitchen windowsill, and sent photos of Sam's work to Abuela who shows all her friends.",
+      "evidence_messages": [
+        "conv2_s07_005",
+        "conv2_s07_007",
+        "conv2_s09_034"
+      ],
+      "difficulty": "hard",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_071",
+      "question": "How has Sam's pottery journey progressed?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam went from making a lopsided bowl in a beginner class to completing the 6-week series, making Christmas gifts, advancing to intermediate wheel-throwing, and selling at the Davis farmers market with Jake.",
+      "evidence_messages": [
+        "conv2_s04_013",
+        "conv2_s04_016",
+        "conv2_s08_013",
+        "conv2_s08_024"
+      ],
+      "difficulty": "hard",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_072",
+      "question": "What was Maria's health journey over the conversation?",
+      "conversation_id": "conv2",
+      "gold_answer": "Maria went from discovering high glucose in routine bloodwork, to being diagnosed with prediabetes, starting a meal plan and daily walks with her husband, and eventually getting good news that glucose dropped enough to avoid medication.",
+      "evidence_messages": [
+        "conv2_s02_007",
+        "conv2_s02_007",
+        "conv2_s03_022",
+        "conv2_s08_035"
+      ],
+      "difficulty": "hard",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_073",
+      "question": "When is the Berkeley application due?",
+      "conversation_id": "conv2",
+      "gold_answer": "The Berkeley application was due December 15th.",
+      "evidence_messages": [
+        "conv2_s05_005"
+      ],
+      "difficulty": "easy",
+      "category": "temporal"
+    },
+    {
+      "id": "q_conv2_074",
+      "question": "How many people has Sam's grandmother invited to the reunion?",
+      "conversation_id": "conv2",
+      "gold_answer": "The count grew to about 50 people as Abuela kept trying to invite more.",
+      "evidence_messages": [
+        "conv2_s09_016",
+        "conv2_s09_016"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_075",
+      "question": "What food is Maria making for Thanksgiving?",
+      "conversation_id": "conv2",
+      "gold_answer": "Maria is making green chile tamales that Sam loves.",
+      "evidence_messages": [
+        "conv2_s01_026"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_076",
+      "question": "Who is Sam's pottery friend?",
+      "conversation_id": "conv2",
+      "gold_answer": "Jake, who goes to school near Sam's campus and whose parents live in Sacramento.",
+      "evidence_messages": [
+        "conv2_s04_009",
+        "conv2_s06_027"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_077",
+      "question": "What subjects is Sam studying besides psych?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam is taking calc 2, English comp, bio, and film studies in addition to intro to psych.",
+      "evidence_messages": [
+        "conv2_s01_013",
+        "conv2_s01_013"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv2_078",
+      "question": "What happened when Sam submitted the Berkeley application?",
+      "conversation_id": "conv2",
+      "gold_answer": "Sam was thrilled and relieved. Professor Chen had helped narrow the research proposal to adolescent PTSD interventions specifically.",
+      "evidence_messages": [
+        "conv2_s06_004",
+        "conv2_s06_009"
+      ],
+      "difficulty": "medium",
+      "category": "emotional"
+    },
+    {
+      "id": "q_conv3_079",
+      "question": "How much were the flights to Japan?",
+      "conversation_id": "conv3",
+      "gold_answer": "The flights were $890 round trip per person on ANA, direct from LAX.",
+      "evidence_messages": [
+        "conv3_s03_005"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_080",
+      "question": "When is the Japan trip?",
+      "conversation_id": "conv3",
+      "gold_answer": "March 15 to March 29 — two full weeks.",
+      "evidence_messages": [
+        "conv3_s03_022",
+        "conv3_s03_022"
+      ],
+      "difficulty": "easy",
+      "category": "temporal"
+    },
+    {
+      "id": "q_conv3_081",
+      "question": "What's the total budget for the Japan trip?",
+      "conversation_id": "conv3",
+      "gold_answer": "About $4,780 total — flights $1,780, accommodation ~$1,370, and $1,850 for food/transport/activities.",
+      "evidence_messages": [
+        "conv3_s03_012",
+        "conv3_s11_019",
+        "conv3_s11_019"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_082",
+      "question": "Where are Dev and Casey staying in Tokyo?",
+      "conversation_id": "conv3",
+      "gold_answer": "An Airbnb in Shibuya, walking distance to Shibuya Crossing, at $95/night for 8 nights.",
+      "evidence_messages": [
+        "conv3_s11_011",
+        "conv3_s11_011"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_083",
+      "question": "What is the ryokan they booked in Kyoto?",
+      "conversation_id": "conv3",
+      "gold_answer": "Kumo no Ue — 'above the clouds' — for 4 nights at $120/night including breakfast.",
+      "evidence_messages": [
+        "conv3_s11_015",
+        "conv3_s05_009"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_084",
+      "question": "What cooking class did Dev book in Japan?",
+      "conversation_id": "conv3",
+      "gold_answer": "A traditional kaiseki cuisine class in Kyoto on March 18th afternoon, $80 per person.",
+      "evidence_messages": [
+        "conv3_s05_024",
+        "conv3_s05_026",
+        "conv3_s05_024"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_085",
+      "question": "Who is Gerald?",
+      "conversation_id": "conv3",
+      "gold_answer": "Gerald is a name partner at Casey's law firm who yelled at Casey in front of the team over a comma in a filing.",
+      "evidence_messages": [
+        "conv3_s04_003",
+        "conv3_s04_004"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_086",
+      "question": "What bootcamp is Casey doing?",
+      "conversation_id": "conv3",
+      "gold_answer": "Designlab, a 6-month fully online UX design bootcamp starting January 6th, costing $6,500.",
+      "evidence_messages": [
+        "conv3_s06_010",
+        "conv3_s06_010",
+        "conv3_s06_012"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_087",
+      "question": "Who is Casey's Designlab mentor?",
+      "conversation_id": "conv3",
+      "gold_answer": "A senior UX designer at Spotify.",
+      "evidence_messages": [
+        "conv3_s13_022"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_088",
+      "question": "How much does the kitchen renovation cost?",
+      "conversation_id": "conv3",
+      "gold_answer": "Marco from Roma Construction quoted $18,000 with a 6-week timeline.",
+      "evidence_messages": [
+        "conv3_s12_009",
+        "conv3_s12_007",
+        "conv3_s12_007",
+        "conv3_s12_009"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_089",
+      "question": "What countertops did they choose?",
+      "conversation_id": "conv3",
+      "gold_answer": "Calacatta-look quartz with white and grey veining, about $55-75 per square foot installed.",
+      "evidence_messages": [
+        "conv3_s07_009",
+        "conv3_s07_009"
+      ],
+      "difficulty": "easy",
+      "category": "decision"
+    },
+    {
+      "id": "q_conv3_090",
+      "question": "How long did Dev's ramen broth take?",
+      "conversation_id": "conv3",
+      "gold_answer": "12 hours — Dev started at 6am with pork neck bones.",
+      "evidence_messages": [
+        "conv3_s08_005",
+        "conv3_s08_005",
+        "conv3_s08_009"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_091",
+      "question": "What was Casey's salary at the law firm?",
+      "conversation_id": "conv3",
+      "gold_answer": "Casey was making $95,000 with $1,400/month in student loan payments.",
+      "evidence_messages": [
+        "conv3_s09_010"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_092",
+      "question": "How much law school debt does Casey have?",
+      "conversation_id": "conv3",
+      "gold_answer": "Casey went to law school for 3 years and has $180,000 in debt.",
+      "evidence_messages": [
+        "conv3_s04_012"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_093",
+      "question": "What's Designlab's placement rate?",
+      "conversation_id": "conv3",
+      "gold_answer": "89% placement within 6 months of graduating, with average starting salary in the $70-85k range for UX.",
+      "evidence_messages": [
+        "conv3_s06_016"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_094",
+      "question": "Who did Dev hire for the renovation?",
+      "conversation_id": "conv3",
+      "gold_answer": "Marco from Roma Construction — $18k quote, 6-week timeline, 4.9 stars on Yelp with 85 reviews.",
+      "evidence_messages": [
+        "conv3_s12_007",
+        "conv3_s12_007",
+        "conv3_s12_009"
+      ],
+      "difficulty": "easy",
+      "category": "decision"
+    },
+    {
+      "id": "q_conv3_095",
+      "question": "When did Casey give notice at the firm?",
+      "conversation_id": "conv3",
+      "gold_answer": "Casey gave two weeks notice with a last day of December 31st.",
+      "evidence_messages": [
+        "conv3_s09_008",
+        "conv3_s13_010"
+      ],
+      "difficulty": "easy",
+      "category": "temporal"
+    },
+    {
+      "id": "q_conv3_096",
+      "question": "How did Casey's managing partner react to the resignation?",
+      "conversation_id": "conv3",
+      "gold_answer": "Janet was actually nice about it, said she could tell Casey had been unhappy, and said the door was open if Casey ever wanted to come back.",
+      "evidence_messages": [
+        "conv3_s13_009",
+        "conv3_s13_012",
+        "conv3_s13_014"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_097",
+      "question": "How did Gerald react to Casey quitting?",
+      "conversation_id": "conv3",
+      "gold_answer": "Gerald just said 'noted' and went back to his laptop.",
+      "evidence_messages": [
+        "conv3_s13_016",
+        "conv3_s13_016"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_098",
+      "question": "What did Dev cook for the dinner party?",
+      "conversation_id": "conv3",
+      "gold_answer": "Dev hosted a 5-course dinner party for 8 people, including a 48-hour miso marinade dish.",
+      "evidence_messages": [
+        "conv3_s14_003",
+        "conv3_s14_003",
+        "conv3_s14_006"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_099",
+      "question": "What Japan Rail Pass did Dev buy?",
+      "conversation_id": "conv3",
+      "gold_answer": "A 14-day JR Pass for $420 total for both of them, covering unlimited bullet trains.",
+      "evidence_messages": [
+        "conv3_s11_021",
+        "conv3_s11_021",
+        "conv3_s11_021"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_100",
+      "question": "How many nights in each Japanese city?",
+      "conversation_id": "conv3",
+      "gold_answer": "4 nights in Kyoto, 8 nights in Tokyo, 2 nights in Osaka.",
+      "evidence_messages": [
+        "conv3_s05_011"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_101",
+      "question": "What's the Designlab curriculum structure?",
+      "conversation_id": "conv3",
+      "gold_answer": "First 2 months are foundations (design thinking, user research, wireframing), then 2 months of UI design, then 2 months of portfolio building.",
+      "evidence_messages": [
+        "conv3_s13_020",
+        "conv3_s12_011"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_102",
+      "question": "What suitcase did Dev recommend?",
+      "conversation_id": "conv3",
+      "gold_answer": "An Away carry-on for $275 with a 20% off code.",
+      "evidence_messages": [
+        "conv3_s14_024",
+        "conv3_s14_024",
+        "conv3_s14_024"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_103",
+      "question": "How did Casey's career change unfold?",
+      "conversation_id": "conv3",
+      "gold_answer": "Casey went from being burned out at the law firm under Gerald, to researching UX design bootcamps, finding Designlab, deciding to quit, giving notice (last day Dec 31), and enrolling in the January 6th cohort.",
+      "evidence_messages": [
+        "conv3_s02_011",
+        "conv3_s06_010",
+        "conv3_s02_016",
+        "conv3_s13_010",
+        "conv3_s13_018"
+      ],
+      "difficulty": "hard",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_104",
+      "question": "How did the renovation planning progress?",
+      "conversation_id": "conv3",
+      "gold_answer": "Dev researched kitchen renovation costs ($15-20k range), got three contractor quotes, chose Marco from Roma Construction at $18k, selected Calacatta quartz countertops and subway tile backsplash, with work starting mid-January.",
+      "evidence_messages": [
+        "conv3_s07_005",
+        "conv3_s12_001",
+        "conv3_s12_007",
+        "conv3_s07_009",
+        "conv3_s12_019"
+      ],
+      "difficulty": "hard",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_105",
+      "question": "What's Dev's cooking progression?",
+      "conversation_id": "conv3",
+      "gold_answer": "Dev started with NYT Cooking pasta recipes, progressed to making ramen completely from scratch (12-hour tonkotsu broth, homemade tare, chashu pork belly), and eventually hosted a full 5-course dinner party for 8 people.",
+      "evidence_messages": [
+        "conv3_s01_008",
+        "conv3_s08_001",
+        "conv3_s08_005",
+        "conv3_s14_003"
+      ],
+      "difficulty": "hard",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_106",
+      "question": "What ingredients did Dev use for the ramen?",
+      "conversation_id": "conv3",
+      "gold_answer": "Pork neck bones, dried shiitake, kombu, niboshi (dried sardines), ginger, garlic; plus a tare of soy sauce, mirin, sake, and brown sugar; and 2 lbs of braised pork belly for chashu.",
+      "evidence_messages": [
+        "conv3_s08_009",
+        "conv3_s08_009",
+        "conv3_s08_013",
+        "conv3_s08_015"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_107",
+      "question": "How much money does Casey have saved?",
+      "conversation_id": "conv3",
+      "gold_answer": "Casey has about $12,000 in savings, which would cover the bootcamp plus about 4 months of loan payments.",
+      "evidence_messages": [
+        "conv3_s09_012"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_108",
+      "question": "What freelance work is Casey considering during the bootcamp?",
+      "conversation_id": "conv3",
+      "gold_answer": "Casey plans to do freelance legal research on a platform called LawClerk.",
+      "evidence_messages": [
+        "conv3_s09_014",
+        "conv3_s09_013"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_109",
+      "question": "When does the kitchen renovation start?",
+      "conversation_id": "conv3",
+      "gold_answer": "Marco said he could start mid-January, finishing by end of February — before the Japan trip.",
+      "evidence_messages": [
+        "conv3_s12_019",
+        "conv3_s12_019"
+      ],
+      "difficulty": "easy",
+      "category": "temporal"
+    },
+    {
+      "id": "q_conv3_110",
+      "question": "What noodles did Dev use for the ramen?",
+      "conversation_id": "conv3",
+      "gold_answer": "Sun Noodle brand from the Japanese market on Sawtelle.",
+      "evidence_messages": [
+        "conv3_s08_023",
+        "conv3_s08_023"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_111",
+      "question": "What backsplash style did they consider?",
+      "conversation_id": "conv3",
+      "gold_answer": "Dev suggested classic subway tile, and Casey liked the idea of herringbone subway tile.",
+      "evidence_messages": [
+        "conv3_s07_013",
+        "conv3_s07_014"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_112",
+      "question": "How did Casey feel about quitting law?",
+      "conversation_id": "conv3",
+      "gold_answer": "Casey was emotional and relieved — crying happy tears. Casey had been unhappy for months, feeling that 3 years of law school and $180k in debt led to getting screamed at about commas.",
+      "evidence_messages": [
+        "conv3_s04_023",
+        "conv3_s04_012",
+        "conv3_s04_012"
+      ],
+      "difficulty": "medium",
+      "category": "emotional"
+    },
+    {
+      "id": "q_conv3_113",
+      "question": "What was the Osaka accommodation?",
+      "conversation_id": "conv3",
+      "gold_answer": "A hostel-hotel hybrid near Dotonbori for 2 nights at $65/night.",
+      "evidence_messages": [
+        "conv3_s11_017",
+        "conv3_s11_017"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_114",
+      "question": "What did Dev offer to help with Casey's career change?",
+      "conversation_id": "conv3",
+      "gold_answer": "Dev offered to cover a bigger share of rent for 6 months and handle more of the trip costs so Casey could focus on loan payments.",
+      "evidence_messages": [
+        "conv3_s09_017",
+        "conv3_s06_010",
+        "conv3_s05_020"
+      ],
+      "difficulty": "medium",
+      "category": "emotional"
+    },
+    {
+      "id": "q_conv3_115",
+      "question": "How many contractor quotes did Dev get?",
+      "conversation_id": "conv3",
+      "gold_answer": "Three: Mike's Remodeling at $22k, a guy named Steve from Thumbtack at $14k (sketchy reviews), and Marco from Roma Construction at $18k.",
+      "evidence_messages": [
+        "conv3_s12_003",
+        "conv3_s12_005",
+        "conv3_s12_005",
+        "conv3_s12_007",
+        "conv3_s12_009"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_116",
+      "question": "What was the travel fund status?",
+      "conversation_id": "conv3",
+      "gold_answer": "Dev and Casey had $3,200 saved in their travel fund, with Dev adding $200/month since August.",
+      "evidence_messages": [
+        "conv3_s03_014",
+        "conv3_s03_016"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv3_117",
+      "question": "What kind of sink were they considering?",
+      "conversation_id": "conv3",
+      "gold_answer": "A Belfast sink, which runs about $400-600 for a good one.",
+      "evidence_messages": [
+        "conv3_s07_023",
+        "conv3_s07_023"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_118",
+      "question": "What marathon is Riley training for?",
+      "conversation_id": "conv4",
+      "gold_answer": "The Portland Marathon on April 12th.",
+      "evidence_messages": [
+        "conv4_s01_022",
+        "conv4_s03_011"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_119",
+      "question": "What's Riley's marathon goal time?",
+      "conversation_id": "conv4",
+      "gold_answer": "Sub-3:30 for the full marathon.",
+      "evidence_messages": [
+        "conv4_s01_026"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_120",
+      "question": "How many miles per week is Riley running?",
+      "conversation_id": "conv4",
+      "gold_answer": "About 40 miles per week, five days running with two rest days.",
+      "evidence_messages": [
+        "conv4_s01_028",
+        "conv4_s01_028"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_121",
+      "question": "What's the name of Pat's side business?",
+      "conversation_id": "conv4",
+      "gold_answer": "MetricFlow (originally considered Clearview Analytics).",
+      "evidence_messages": [
+        "conv4_s05_026",
+        "conv4_s03_033"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_122",
+      "question": "What does MetricFlow do?",
+      "conversation_id": "conv4",
+      "gold_answer": "It's an analytics SaaS tool for mid-size teams that outgrow Google Analytics but can't afford enterprise tools like Amplitude.",
+      "evidence_messages": [
+        "conv4_s02_029",
+        "conv4_s02_029",
+        "conv4_s02_029"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_123",
+      "question": "How much will MetricFlow cost?",
+      "conversation_id": "conv4",
+      "gold_answer": "Pat settled on $49 per month per workspace.",
+      "evidence_messages": [
+        "conv4_s07_032"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_124",
+      "question": "Who is Asha Patel?",
+      "conversation_id": "conv4",
+      "gold_answer": "Asha Patel is Head of Growth at a Series B startup called Meridian. She was one of Pat's customer interviews and became the first design partner.",
+      "evidence_messages": [
+        "conv4_s04_033",
+        "conv4_s04_029",
+        "conv4_s05_032"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_125",
+      "question": "Who is Vanessa?",
+      "conversation_id": "conv4",
+      "gold_answer": "Vanessa is Pat and Riley's project lead at work who keeps changing requirements, including trying to pivot the dashboard project two weeks before a VP demo.",
+      "evidence_messages": [
+        "conv4_s01_010",
+        "conv4_s02_005",
+        "conv4_s01_012"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_126",
+      "question": "What wedding are Pat and Riley attending?",
+      "conversation_id": "conv4",
+      "gold_answer": "Jason and Elena's wedding on December 14th at Domaine Chandon in Napa Valley.",
+      "evidence_messages": [
+        "conv4_s03_039",
+        "conv4_s03_039",
+        "conv4_s03_045"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_127",
+      "question": "What wedding gift did Pat and Riley get?",
+      "conversation_id": "conv4",
+      "gold_answer": "They went in together on a Le Creuset Dutch oven (5.5 quart in 'flame' orange) from the Williams-Sonoma registry, splitting $190 each.",
+      "evidence_messages": [
+        "conv4_s05_039",
+        "conv4_s05_039",
+        "conv4_s05_042"
+      ],
+      "difficulty": "medium",
+      "category": "decision"
+    },
+    {
+      "id": "q_conv4_128",
+      "question": "What happened with Riley's knee?",
+      "conversation_id": "conv4",
+      "gold_answer": "Riley developed IT band pain around mile 14 of a long run. A PT friend named Nadia recommended foam rolling and easy days.",
+      "evidence_messages": [
+        "conv4_s05_005",
+        "conv4_s05_003",
+        "conv4_s05_009"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_129",
+      "question": "Did Riley's knee injury get better?",
+      "conversation_id": "conv4",
+      "gold_answer": "Yes, Nadia gave exercises that Riley followed religiously, and Riley did 18 miles with zero pain.",
+      "evidence_messages": [
+        "conv4_s07_028",
+        "conv4_s07_028"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_130",
+      "question": "What training plan is Riley using?",
+      "conversation_id": "conv4",
+      "gold_answer": "The Pfitzinger 18/55 plan — an 18-week program with 5 runs per week building up to peak mileage.",
+      "evidence_messages": [
+        "conv4_s03_013"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_131",
+      "question": "What app does Riley use to track runs?",
+      "conversation_id": "conv4",
+      "gold_answer": "Riley tracks everything in Strava — splits, heart rate, elevation.",
+      "evidence_messages": [
+        "conv4_s03_015"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_132",
+      "question": "What promotion did Riley get?",
+      "conversation_id": "conv4",
+      "gold_answer": "Riley was promoted to Senior Engineer effective January 1st, with about a 15% raise plus RSU refresh.",
+      "evidence_messages": [
+        "conv4_s06_006",
+        "conv4_s06_006",
+        "conv4_s06_015"
+      ],
+      "difficulty": "easy",
+      "category": "life_event"
+    },
+    {
+      "id": "q_conv4_133",
+      "question": "Who promoted Riley?",
+      "conversation_id": "conv4",
+      "gold_answer": "Diane, who pushed it through early — Riley was originally flagged for the July cycle.",
+      "evidence_messages": [
+        "conv4_s06_004",
+        "conv4_s06_011"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_134",
+      "question": "How many beta signups does MetricFlow have?",
+      "conversation_id": "conv4",
+      "gold_answer": "3 beta signups including Asha, with two coming organically through the landing page and one from a LinkedIn post.",
+      "evidence_messages": [
+        "conv4_s06_038",
+        "conv4_s05_020",
+        "conv4_s06_040"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_135",
+      "question": "What did Asha say about being a customer?",
+      "conversation_id": "conv4",
+      "gold_answer": "She said 'if you build this, we'd be your first customer' and mentioned spending $3K/month on tools that don't do what they need.",
+      "evidence_messages": [
+        "conv4_s04_031",
+        "conv4_s04_031"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_136",
+      "question": "How did Pat handle Vanessa's pivot request?",
+      "conversation_id": "conv4",
+      "gold_answer": "Pat wrote up a risk analysis and sent it to Vanessa on Friday. She backed off the full pivot and they compromised on adding two new metric views.",
+      "evidence_messages": [
+        "conv4_s02_047",
+        "conv4_s03_002",
+        "conv4_s03_004"
+      ],
+      "difficulty": "medium",
+      "category": "decision"
+    },
+    {
+      "id": "q_conv4_137",
+      "question": "What's Pat's plan for going part-time?",
+      "conversation_id": "conv4",
+      "gold_answer": "Pat decided to talk to their manager in January about a part-time arrangement starting in Q1, similar to what was approved for someone on the infrastructure team.",
+      "evidence_messages": [
+        "conv4_s08_026",
+        "conv4_s06_006",
+        "conv4_s08_027"
+      ],
+      "difficulty": "easy",
+      "category": "decision"
+    },
+    {
+      "id": "q_conv4_138",
+      "question": "Where is the wedding ceremony?",
+      "conversation_id": "conv4",
+      "gold_answer": "At a vineyard called Domaine Chandon in Napa Valley. Ceremony is at 4pm.",
+      "evidence_messages": [
+        "conv4_s03_045",
+        "conv4_s01_011"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_139",
+      "question": "How does Riley know the wedding couple?",
+      "conversation_id": "conv4",
+      "gold_answer": "Riley worked with Elena at a first job out of school — they were desk neighbors for two years.",
+      "evidence_messages": [
+        "conv4_s03_042",
+        "conv4_s03_042"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_140",
+      "question": "How does Pat know the couple?",
+      "conversation_id": "conv4",
+      "gold_answer": "Pat has known Jason since college.",
+      "evidence_messages": [
+        "conv4_s03_041"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_141",
+      "question": "What's Pat's Thanksgiving plan?",
+      "conversation_id": "conv4",
+      "gold_answer": "Going to their sister's place in Portland, where she and her husband Dave do a smoked turkey every year.",
+      "evidence_messages": [
+        "conv4_s07_003",
+        "conv4_s07_015"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_142",
+      "question": "What's Riley's Thanksgiving plan?",
+      "conversation_id": "conv4",
+      "gold_answer": "Going to parents' place in Eugene with brother Caleb, his wife, and other family — about 12-15 people.",
+      "evidence_messages": [
+        "conv4_s07_008",
+        "conv4_s07_010"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_143",
+      "question": "How did Pat validate the business idea?",
+      "conversation_id": "conv4",
+      "gold_answer": "Pat interviewed 12 people total — mostly product managers and growth leads — and every single one identified the same gap between free tools and enterprise solutions.",
+      "evidence_messages": [
+        "conv4_s03_022",
+        "conv4_s02_035"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_144",
+      "question": "What pricing did early customer interviews suggest?",
+      "conversation_id": "conv4",
+      "gold_answer": "The sweet spot seemed to be $30-60 per month per seat.",
+      "evidence_messages": [
+        "conv4_s02_039"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_145",
+      "question": "What's Pat's MVP timeline?",
+      "conversation_id": "conv4",
+      "gold_answer": "Pat wants the MVP ready by early January with a beta launch mid-January.",
+      "evidence_messages": [
+        "conv4_s07_036",
+        "conv4_s07_036"
+      ],
+      "difficulty": "easy",
+      "category": "temporal"
+    },
+    {
+      "id": "q_conv4_146",
+      "question": "What Italian restaurant do Pat and Riley know?",
+      "conversation_id": "conv4",
+      "gold_answer": "Lucca's, on 4th street — a team dinner spot.",
+      "evidence_messages": [
+        "conv4_s01_048",
+        "conv4_s01_048"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_147",
+      "question": "Where did Vanessa get her pivot idea from?",
+      "conversation_id": "conv4",
+      "gold_answer": "A Medium article about real-time analytics that she linked in the email.",
+      "evidence_messages": [
+        "conv4_s02_013"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_148",
+      "question": "What cross-training did Riley consider for the knee?",
+      "conversation_id": "conv4",
+      "gold_answer": "Riley decided to try swimming at the gym pool.",
+      "evidence_messages": [
+        "conv4_s05_013"
+      ],
+      "difficulty": "easy",
+      "category": "decision"
+    },
+    {
+      "id": "q_conv4_149",
+      "question": "How has Pat's side business evolved?",
+      "conversation_id": "conv4",
+      "gold_answer": "Pat went from a vague idea reading Indie Hackers, to customer interviews (12 total), validating the hypothesis, building a landing page (metricflow.io), getting first beta signups, signing Asha as design partner, and deciding to go part-time to focus on it.",
+      "evidence_messages": [
+        "conv4_s01_035",
+        "conv4_s03_022",
+        "conv4_s05_020",
+        "conv4_s04_033",
+        "conv4_s08_026"
+      ],
+      "difficulty": "hard",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_150",
+      "question": "How did Pat and Riley's friendship develop?",
+      "conversation_id": "conv4",
+      "gold_answer": "They went from professional coworkers of 8 months to genuine friends through bonding over Vanessa's management style, sharing personal goals, attending a wedding together, and supporting each other's ambitions.",
+      "evidence_messages": [
+        "conv4_s01_021",
+        "conv4_s01_010",
+        "conv4_s05_047"
+      ],
+      "difficulty": "hard",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_151",
+      "question": "What was the full Vanessa saga at work?",
+      "conversation_id": "conv4",
+      "gold_answer": "Vanessa tried to pivot the dashboard project 2 weeks before a VP demo, wanted to replace the aggregation pipeline based on a Medium article, called an emergency meeting to add a real-time notification system with one week left, and steamrolled objections from team members like Marcus.",
+      "evidence_messages": [
+        "conv4_s02_005",
+        "conv4_s01_012",
+        "conv4_s02_013",
+        "conv4_s04_005",
+        "conv4_s04_011"
+      ],
+      "difficulty": "hard",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv4_152",
+      "question": "What career tradeoff is Pat facing?",
+      "conversation_id": "conv4",
+      "gold_answer": "Pat is torn between a stable job and the side business, ultimately deciding to go part-time in Q1 to pursue MetricFlow more seriously.",
+      "evidence_messages": [
+        "conv4_s06_032",
+        "conv4_s08_026"
+      ],
+      "difficulty": "medium",
+      "category": "emotional"
+    },
+    {
+      "id": "q_conv4_153",
+      "question": "What did Riley say about the promotion's implications?",
+      "conversation_id": "conv4",
+      "gold_answer": "Riley noted that senior means more ownership of technical direction and mentoring junior engineers, not just a title bump.",
+      "evidence_messages": [
+        "conv4_s06_017",
+        "conv4_s06_017"
+      ],
+      "difficulty": "easy",
+      "category": "preference"
+    },
+    {
+      "id": "q_conv4_154",
+      "question": "What dress code is the wedding?",
+      "conversation_id": "conv4",
+      "gold_answer": "Cocktail attire — nicer than jeans but no tux needed.",
+      "evidence_messages": [
+        "conv4_s08_038"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_155",
+      "question": "Where does Taylor live?",
+      "conversation_id": "conv5",
+      "gold_answer": "Taylor lives in Berlin, Germany, in the Kreuzberg neighborhood.",
+      "evidence_messages": [
+        "conv5_s01_014",
+        "conv5_s02_045"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_156",
+      "question": "How long has Taylor been in Berlin?",
+      "conversation_id": "conv5",
+      "gold_answer": "About 3 years.",
+      "evidence_messages": [
+        "conv5_s01_018"
+      ],
+      "difficulty": "easy",
+      "category": "temporal"
+    },
+    {
+      "id": "q_conv5_157",
+      "question": "Where does Taylor work?",
+      "conversation_id": "conv5",
+      "gold_answer": "Taylor works at N26, a fintech/mobile banking company, as a product manager.",
+      "evidence_messages": [
+        "conv5_s01_019",
+        "conv5_s01_019"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_158",
+      "question": "What's the name of Morgan's baby?",
+      "conversation_id": "conv5",
+      "gold_answer": "Olive, a girl, about 3 months old.",
+      "evidence_messages": [
+        "conv5_s01_037",
+        "conv5_s01_039"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_159",
+      "question": "Who is Morgan's partner?",
+      "conversation_id": "conv5",
+      "gold_answer": "Chris, they've been together about 5 years and aren't married yet.",
+      "evidence_messages": [
+        "conv5_s01_042",
+        "conv5_s01_009",
+        "conv5_s01_043"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_160",
+      "question": "How much is Taylor's rent in Berlin?",
+      "conversation_id": "conv5",
+      "gold_answer": "About $900/month for a 2-bedroom in Kreuzberg.",
+      "evidence_messages": [
+        "conv5_s03_024",
+        "conv5_s03_022",
+        "conv5_s02_045"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_161",
+      "question": "How much do Morgan and Chris pay for their place?",
+      "conversation_id": "conv5",
+      "gold_answer": "About $2,200/month for a 2-bedroom in Portland.",
+      "evidence_messages": [
+        "conv5_s03_029",
+        "conv5_s01_028"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_162",
+      "question": "Where did Taylor and Morgan go to college?",
+      "conversation_id": "conv5",
+      "gold_answer": "University of Oregon.",
+      "evidence_messages": [
+        "conv5_s01_002"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_163",
+      "question": "Who is Lukas?",
+      "conversation_id": "conv5",
+      "gold_answer": "Lukas is a German photographer Taylor is seeing. They met at a bar in Friedrichshain.",
+      "evidence_messages": [
+        "conv5_s04_054",
+        "conv5_s04_057",
+        "conv5_s02_043"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_164",
+      "question": "When is Taylor visiting Portland?",
+      "conversation_id": "conv5",
+      "gold_answer": "February 14th through the 21st.",
+      "evidence_messages": [
+        "conv5_s05_007",
+        "conv5_s03_016"
+      ],
+      "difficulty": "easy",
+      "category": "temporal"
+    },
+    {
+      "id": "q_conv5_165",
+      "question": "How much are flights from Berlin to Portland?",
+      "conversation_id": "conv5",
+      "gold_answer": "About 700 euros round trip connecting through Amsterdam, about 14 hours total travel.",
+      "evidence_messages": [
+        "conv5_s05_005",
+        "conv5_s05_003",
+        "conv5_s06_006"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_166",
+      "question": "Where is Taylor staying during the visit?",
+      "conversation_id": "conv5",
+      "gold_answer": "At Morgan and Chris's place — they have a spare room.",
+      "evidence_messages": [
+        "conv5_s05_013",
+        "conv5_s05_015"
+      ],
+      "difficulty": "easy",
+      "category": "decision"
+    },
+    {
+      "id": "q_conv5_167",
+      "question": "What's the famous club in Berlin Taylor mentioned?",
+      "conversation_id": "conv5",
+      "gold_answer": "Berghain, in an old power plant in Friedrichshain.",
+      "evidence_messages": [
+        "conv5_s02_041",
+        "conv5_s02_043",
+        "conv5_s02_043"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_168",
+      "question": "What's Kreuzberg like?",
+      "conversation_id": "conv5",
+      "gold_answer": "It's the artsy multicultural neighborhood with tons of Turkish food and street art everywhere.",
+      "evidence_messages": [
+        "conv5_s02_048",
+        "conv5_s02_048",
+        "conv5_s02_048"
+      ],
+      "difficulty": "easy",
+      "category": "preference"
+    },
+    {
+      "id": "q_conv5_169",
+      "question": "What did Morgan do before having Olive?",
+      "conversation_id": "conv5",
+      "gold_answer": "Morgan was a graphic designer at an agency downtown in Portland.",
+      "evidence_messages": [
+        "conv5_s03_052",
+        "conv5_s03_054"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_170",
+      "question": "How much vacation does Taylor get?",
+      "conversation_id": "conv5",
+      "gold_answer": "30 days a year.",
+      "evidence_messages": [
+        "conv5_s01_055"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_171",
+      "question": "What's happening at N26 that worries Taylor?",
+      "conversation_id": "conv5",
+      "gold_answer": "There are rumors of layoffs, and since Taylor is on a work visa, losing the job would mean about 3 months to find a new one or leave Germany.",
+      "evidence_messages": [
+        "conv5_s05_042",
+        "conv5_s05_050",
+        "conv5_s01_039"
+      ],
+      "difficulty": "medium",
+      "category": "emotional"
+    },
+    {
+      "id": "q_conv5_172",
+      "question": "What baby milestone did Olive recently hit?",
+      "conversation_id": "conv5",
+      "gold_answer": "Olive did her first real smile, and at almost 4 months she started grabbing things — she reached out and grabbed Chris's finger.",
+      "evidence_messages": [
+        "conv5_s02_005",
+        "conv5_s06_038"
+      ],
+      "difficulty": "medium",
+      "category": "life_event"
+    },
+    {
+      "id": "q_conv5_173",
+      "question": "What's Olive's sleep schedule like?",
+      "conversation_id": "conv5",
+      "gold_answer": "She wakes up every 2-3 hours. Morgan and Chris do shifts but it's still brutal.",
+      "evidence_messages": [
+        "conv5_s02_012",
+        "conv5_s02_013"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_174",
+      "question": "Where did Taylor and Morgan's friend group end up?",
+      "conversation_id": "conv5",
+      "gold_answer": "Kelsey is in NYC working in publishing, Dave is still in Eugene brewing beer, and Priya is doing a PhD at MIT in computational neuroscience.",
+      "evidence_messages": [
+        "conv5_s04_025",
+        "conv5_s03_032",
+        "conv5_s04_027",
+        "conv5_s04_030",
+        "conv5_s02_035",
+        "conv5_s04_033",
+        "conv5_s04_039",
+        "conv5_s04_040"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_175",
+      "question": "What coffee shop did they go to in college?",
+      "conversation_id": "conv5",
+      "gold_answer": "Tailored — they went every morning before class.",
+      "evidence_messages": [
+        "conv5_s02_031"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_176",
+      "question": "What house did they live in during college?",
+      "conversation_id": "conv5",
+      "gold_answer": "A house on 18th Street during junior year.",
+      "evidence_messages": [
+        "conv5_s02_027"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_177",
+      "question": "What class did they bond over in college?",
+      "conversation_id": "conv5",
+      "gold_answer": "Economics 301 — intermediate microeconomics, junior year.",
+      "evidence_messages": [
+        "conv5_s02_026",
+        "conv5_s02_026"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_178",
+      "question": "What Portland spots does Morgan recommend?",
+      "conversation_id": "conv5",
+      "gold_answer": "Powell's Books (massive, half-day trip), Voodoo Doughnuts, Canard restaurant, Alberta Street neighborhood, the Japanese Garden, and Forest Park for hiking.",
+      "evidence_messages": [
+        "conv5_s05_026",
+        "conv5_s03_067",
+        "conv5_s03_066",
+        "conv5_s06_016"
+      ],
+      "difficulty": "medium",
+      "category": "preference"
+    },
+    {
+      "id": "q_conv5_179",
+      "question": "What's the weather like in Portland in February?",
+      "conversation_id": "conv5",
+      "gold_answer": "Rain — just constant rain.",
+      "evidence_messages": [
+        "conv5_s05_030",
+        "conv5_s05_033"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_180",
+      "question": "Is Morgan going back to work?",
+      "conversation_id": "conv5",
+      "gold_answer": "Morgan is unsure — on parental leave and doesn't know when or if they'll go back to the design agency.",
+      "evidence_messages": [
+        "conv5_s03_055",
+        "conv5_s03_055"
+      ],
+      "difficulty": "easy",
+      "category": "emotional"
+    },
+    {
+      "id": "q_conv5_181",
+      "question": "How long was Chris's parental leave?",
+      "conversation_id": "conv5",
+      "gold_answer": "Chris went back to work after 6 weeks, leaving Morgan mostly alone during the day.",
+      "evidence_messages": [
+        "conv5_s03_051",
+        "conv5_s03_051"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_182",
+      "question": "Is Taylor learning German?",
+      "conversation_id": "conv5",
+      "gold_answer": "Yes, taking classes twice a week, but struggling because everyone in Berlin speaks English.",
+      "evidence_messages": [
+        "conv5_s02_052",
+        "conv5_s02_055"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_183",
+      "question": "When do Berlin clubs open?",
+      "conversation_id": "conv5",
+      "gold_answer": "They don't open until midnight and go until Monday morning.",
+      "evidence_messages": [
+        "conv5_s02_040",
+        "conv5_s02_040"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_184",
+      "question": "What reunion dinner is Morgan planning?",
+      "conversation_id": "conv5",
+      "gold_answer": "Morgan wants to get some of the old college crew together for dinner while Taylor is visiting.",
+      "evidence_messages": [
+        "conv5_s06_025",
+        "conv5_s01_060"
+      ],
+      "difficulty": "easy",
+      "category": "decision"
+    },
+    {
+      "id": "q_conv5_185",
+      "question": "What's Taylor's flight itinerary?",
+      "conversation_id": "conv5",
+      "gold_answer": "Arriving Portland February 14th at 4:15pm, departing the 21st at 10am, connecting through Amsterdam.",
+      "evidence_messages": [
+        "conv5_s05_007",
+        "conv5_s06_004",
+        "conv5_s03_016",
+        "conv5_s06_004"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_186",
+      "question": "How is Morgan emotionally handling new parenthood?",
+      "conversation_id": "conv5",
+      "gold_answer": "Morgan opened up about postpartum struggles, feeling isolated, and the brutal sleep deprivation, though also experiencing joyful moments like Olive's first smile.",
+      "evidence_messages": [
+        "conv5_s03_048",
+        "conv5_s02_009",
+        "conv5_s02_005"
+      ],
+      "difficulty": "medium",
+      "category": "emotional"
+    },
+    {
+      "id": "q_conv5_187",
+      "question": "Does Taylor feel homesick?",
+      "conversation_id": "conv5",
+      "gold_answer": "Yes, Taylor sometimes feels lonely and homesick in Berlin despite loving the city.",
+      "evidence_messages": [
+        "conv5_s06_051",
+        "conv5_s03_010"
+      ],
+      "difficulty": "easy",
+      "category": "emotional"
+    },
+    {
+      "id": "q_conv5_188",
+      "question": "How did Taylor end up in Berlin?",
+      "conversation_id": "conv5",
+      "gold_answer": "Taylor was at a startup in San Francisco for 2 years after school, then the N26 opportunity came up kind of randomly.",
+      "evidence_messages": [
+        "conv5_s01_023",
+        "conv5_s01_023"
+      ],
+      "difficulty": "medium",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_189",
+      "question": "How long had Taylor and Morgan been out of touch?",
+      "conversation_id": "conv5",
+      "gold_answer": "About 5 years — they were close in college but drifted apart.",
+      "evidence_messages": [
+        "conv5_s01_009"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_190",
+      "question": "What activities are Taylor and Morgan planning?",
+      "conversation_id": "conv5",
+      "gold_answer": "Powell's Books, Voodoo Doughnuts, possibly the Japanese Garden, Forest Park hike, Alberta Street, a reunion dinner, and a drive to the coast.",
+      "evidence_messages": [
+        "conv5_s05_026",
+        "conv5_s03_067",
+        "conv5_s05_030",
+        "conv5_s06_017"
+      ],
+      "difficulty": "medium",
+      "category": "decision"
+    },
+    {
+      "id": "q_conv5_191",
+      "question": "What is computational neuroscience?",
+      "conversation_id": "conv5",
+      "gold_answer": "That's what their college friend Priya is studying for her PhD at MIT.",
+      "evidence_messages": [
+        "conv5_s04_045",
+        "conv5_s04_040"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_192",
+      "question": "When was Olive born?",
+      "conversation_id": "conv5",
+      "gold_answer": "About 3 months before the conversation, which takes place in November 2025 — so roughly August 2025.",
+      "evidence_messages": [
+        "conv5_s01_039"
+      ],
+      "difficulty": "easy",
+      "category": "temporal"
+    },
+    {
+      "id": "q_conv5_193",
+      "question": "What class did Professor Huang teach?",
+      "conversation_id": "conv5",
+      "gold_answer": "The context references Professor Huang's 'terrible lectures' from their college days.",
+      "evidence_messages": [
+        "conv5_s02_018"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    },
+    {
+      "id": "q_conv5_194",
+      "question": "What job did Taylor have before N26?",
+      "conversation_id": "conv5",
+      "gold_answer": "Taylor worked at a startup in San Francisco for about 2 years after graduating from University of Oregon.",
+      "evidence_messages": [
+        "conv5_s01_023",
+        "conv5_s01_023"
+      ],
+      "difficulty": "easy",
+      "category": "fact"
+    }
+  ]
+}

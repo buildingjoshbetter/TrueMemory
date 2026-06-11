@@ -1,0 +1,1331 @@
+{
+  "meta": {
+    "version": "1.0",
+    "authored_at": "2026-04-23",
+    "author_note": "Hand-authored from l0_personas.json specifications. No LLM generation. Each query is mechanically derivable from the persona's stated preferences, interests, and non-overlap exclusions. For Type-D leakage queries, the correct answer is to NOT surface content attributable to other personas.",
+    "counts": {
+      "per_persona": 20,
+      "total": 100,
+      "by_type": {
+        "A": 40,
+        "B": 25,
+        "C": 20,
+        "D": 15
+      }
+    },
+    "query_types": {
+      "A": "Personalization-sensitive, factual. Answer depends on persona-specific facts stated in the persona spec. Candidate must produce content consistent with those facts.",
+      "B": "Personalization-sensitive, preference-inferential. Answer requires inferring a stable preference from the persona's spec, not directly stated in any one message.",
+      "C": "Speaker-discrimination. Given a message fragment, correctly identify which persona authored it. Gold_persona is the correct ID.",
+      "D": "Leakage probe. Query is posed from one persona's context; correct behavior is to NOT surface content attributable to a different persona."
+    },
+    "scoring_notes": "For A/B queries, a candidate is 'correct' if top-1 retrieved content is consistent with gold_answer_gist (evaluator LLM or rubric check). For C, correct = top-1 persona matches gold_persona. For D, correct = no top-k result is from must_not_surface_personas (i.e., leakage rate metric).",
+    "annotated_at": "2026-04-23",
+    "annotation_note": "gold_keywords added for A/B queries. A candidate's top-1 result is relevance-correct iff: (a) from gold persona, (b) contains no must_not_contain words, (c) contains ≥1 gold_keyword (or gold_keywords is empty, meaning persona-filter is the only signal)."
+  },
+  "queries": [
+    {
+      "query_id": "P1_A_001",
+      "persona_id": "P1",
+      "query_type": "A",
+      "text": "what should i cook for dinner tonight?",
+      "gold_answer_gist": "Vegan, Eastern-European / Mediterranean. Acceptable: lentils, tempeh, falafel, lentil-and-fennel, sauerkraut-based. NOT acceptable: anything with meat, dairy, eggs, honey, fish.",
+      "must_not_contain": [
+        "chicken",
+        "beef",
+        "pork",
+        "cheese",
+        "butter",
+        "eggs"
+      ],
+      "gold_keywords": [
+        "lentil",
+        "falafel",
+        "tempeh",
+        "vegan",
+        "saueraut",
+        "sauerkraut",
+        "bean",
+        "eat",
+        "cook",
+        "dinner"
+      ]
+    },
+    {
+      "query_id": "P1_A_002",
+      "persona_id": "P1",
+      "query_type": "A",
+      "text": "what's a good weekend activity for me?",
+      "gold_answer_gist": "Bouldering (V4-V5), industrial heritage walk, woodworking, hanging out with Marzipan. Cycling commute.",
+      "must_not_contain": [
+        "shopping mall",
+        "night club",
+        "fashion"
+      ],
+      "gold_keywords": [
+        "bouldering",
+        "boulder",
+        "climb",
+        "v4",
+        "v5",
+        "walk",
+        "factory",
+        "marzipan",
+        "woodwork",
+        "weekend"
+      ]
+    },
+    {
+      "query_id": "P1_A_003",
+      "persona_id": "P1",
+      "query_type": "A",
+      "text": "book recommendation?",
+      "gold_answer_gist": "Sci-fi literary: Le Guin, Iain Banks Culture, Stanislaw Lem. No fantasy series.",
+      "must_not_contain": [
+        "Brandon Sanderson",
+        "Sarah J. Maas"
+      ],
+      "gold_keywords": [
+        "le guin",
+        "lem",
+        "banks",
+        "book",
+        "read",
+        "reading",
+        "novel"
+      ]
+    },
+    {
+      "query_id": "P1_A_004",
+      "persona_id": "P1",
+      "query_type": "A",
+      "text": "work tooling question",
+      "gold_answer_gist": "Rust, cargo, tokio, postgres. Neovim + tmux. Debian. No IDE.",
+      "must_not_contain": [
+        "VS Code extension",
+        "Xcode",
+        "Windows"
+      ],
+      "gold_keywords": [
+        "rust",
+        "cargo",
+        "tokio",
+        "postgres",
+        "debian",
+        "neovim",
+        "tmux",
+        "msrv",
+        "unsafe",
+        "no_std",
+        "deploy"
+      ]
+    },
+    {
+      "query_id": "P1_A_005",
+      "persona_id": "P1",
+      "query_type": "A",
+      "text": "cat care question",
+      "gold_answer_gist": "Marzipan, rescue, 4yo, indoor. Vet visits, food preferences for rescue cats.",
+      "gold_keywords": [
+        "marzipan",
+        "cat",
+        "vet",
+        "shelter",
+        "rescue"
+      ]
+    },
+    {
+      "query_id": "P1_B_001",
+      "persona_id": "P1",
+      "query_type": "B",
+      "text": "would I like a steakhouse dinner?",
+      "gold_answer_gist": "No — vegan. Should infer refusal from preferences.interests / diet.",
+      "gold_keywords": [
+        "vegan",
+        "meat",
+        "steak"
+      ]
+    },
+    {
+      "query_id": "P1_B_002",
+      "persona_id": "P1",
+      "query_type": "B",
+      "text": "good team-bonding event idea",
+      "gold_answer_gist": "Low-stakes — small group, quiet venue. Avoid loud bars, crowded restaurants. Possibly a boulder gym day, factory-tour walk, cooking night.",
+      "gold_keywords": [
+        "boulder",
+        "quiet",
+        "walk",
+        "factory",
+        "cook",
+        "small",
+        "gym"
+      ]
+    },
+    {
+      "query_id": "P1_C_001",
+      "persona_id": "P1",
+      "query_type": "C",
+      "text": "who said: 'ugh the borrow checker is being unreasonable today'",
+      "gold_persona": "P1",
+      "gold_answer_gist": "P1 — Rust dev, lowercase start, 'ugh' interjection, technical vocabulary."
+    },
+    {
+      "query_id": "P1_C_002",
+      "persona_id": "P1",
+      "query_type": "C",
+      "text": "who said: 'made that lentil-and-fennel thing again'",
+      "gold_persona": "P1",
+      "gold_answer_gist": "P1 — vegan cooking, casual register, 'thing' colloquialism."
+    },
+    {
+      "query_id": "P1_D_001",
+      "persona_id": "P1",
+      "query_type": "D",
+      "text": "what's my training plan for the race?",
+      "gold_answer_gist": "P1 does NOT train for races — no running, no triathlon. Must not surface Jamie's triathlon content.",
+      "must_not_surface_personas": [
+        "P2"
+      ]
+    },
+    {
+      "query_id": "P1_D_002",
+      "persona_id": "P1",
+      "query_type": "D",
+      "text": "what did I think of the Chopin nocturne?",
+      "gold_answer_gist": "P1 does NOT play classical piano. Must not surface Jamie's piano content.",
+      "must_not_surface_personas": [
+        "P2"
+      ]
+    },
+    {
+      "query_id": "P1_A_006",
+      "persona_id": "P1",
+      "query_type": "A",
+      "text": "what football team am i supporting this season",
+      "gold_answer_gist": "Union Berlin. Bundesliga.",
+      "gold_keywords": [
+        "union",
+        "bundesliga",
+        "berlin",
+        "match"
+      ]
+    },
+    {
+      "query_id": "P1_A_007",
+      "persona_id": "P1",
+      "query_type": "A",
+      "text": "family update",
+      "gold_answer_gist": "Brother Sam in Chicago (logistics). Father deceased 2023. Strained relationship with mother. Girlfriend Ingrid — textile restoration at museum.",
+      "gold_keywords": [
+        "sam",
+        "chicago",
+        "ingrid",
+        "brother",
+        "mother",
+        "father",
+        "mom",
+        "museum",
+        "textile"
+      ]
+    },
+    {
+      "query_id": "P1_B_003",
+      "persona_id": "P1",
+      "query_type": "B",
+      "text": "am i more of a morning or evening person",
+      "gold_answer_gist": "Evening / night. Sleep 1am, up 9am.",
+      "gold_keywords": [
+        "night",
+        "1am",
+        "evening",
+        "late",
+        "bed"
+      ]
+    },
+    {
+      "query_id": "P1_C_003",
+      "persona_id": "P1",
+      "query_type": "C",
+      "text": "who said: 'no_std people act like Box is a moral failing'",
+      "gold_persona": "P1"
+    },
+    {
+      "query_id": "P1_A_008",
+      "persona_id": "P1",
+      "query_type": "A",
+      "text": "drink order at a bar",
+      "gold_answer_gist": "German Pilsner. Occasionally herbal tea. Rarely spirits.",
+      "gold_keywords": [
+        "pilsner",
+        "beer",
+        "bar"
+      ]
+    },
+    {
+      "query_id": "P1_A_009",
+      "persona_id": "P1",
+      "query_type": "A",
+      "text": "allergy reminder",
+      "gold_answer_gist": "Mild walnut allergy.",
+      "gold_keywords": [
+        "walnut",
+        "allerg"
+      ]
+    },
+    {
+      "query_id": "P1_D_003",
+      "persona_id": "P1",
+      "query_type": "D",
+      "text": "what's my favorite anime this season",
+      "gold_answer_gist": "P1 doesn't watch anime. Must not surface Taylor's anime content.",
+      "must_not_surface_personas": [
+        "P3"
+      ]
+    },
+    {
+      "query_id": "P1_B_004",
+      "persona_id": "P1",
+      "query_type": "B",
+      "text": "should i go to an open-plan coworking space for the day",
+      "gold_answer_gist": "No — hates open-plan offices.",
+      "gold_keywords": [
+        "open-plan",
+        "coworking",
+        "no",
+        "hate",
+        "prefer"
+      ]
+    },
+    {
+      "query_id": "P1_A_010",
+      "persona_id": "P1",
+      "query_type": "A",
+      "text": "tell me about marzipan",
+      "gold_answer_gist": "4-year-old rescue cat, indoor. Adopted from shelter where P1 volunteered.",
+      "gold_keywords": [
+        "marzipan",
+        "cat",
+        "shelter",
+        "adopt"
+      ]
+    },
+    {
+      "query_id": "P2_A_001",
+      "persona_id": "P2",
+      "query_type": "A",
+      "text": "Where should Carlos and I have dinner this Saturday?",
+      "gold_answer_gist": "French or Japanese (omakase / kaiseki). High-end. Not chain. Bouillabaisse or tasting menu acceptable.",
+      "gold_keywords": [
+        "french",
+        "japanese",
+        "omakase",
+        "kaiseki",
+        "bouillabaisse",
+        "restaurant",
+        "tasting",
+        "carlos"
+      ]
+    },
+    {
+      "query_id": "P2_A_002",
+      "persona_id": "P2",
+      "query_type": "A",
+      "text": "What is my current half-Ironman training focus?",
+      "gold_answer_gist": "Half distance (e.g., Wildflower). 3 swims / 3 bikes / 3 runs per week. Bike volume up pre-race. PR 5:28 range.",
+      "gold_keywords": [
+        "half",
+        "ironman",
+        "triathlon",
+        "wildflower",
+        "swim",
+        "bike",
+        "run",
+        "brick"
+      ]
+    },
+    {
+      "query_id": "P2_A_003",
+      "persona_id": "P2",
+      "query_type": "A",
+      "text": "What piano piece am I currently working on?",
+      "gold_answer_gist": "Chopin Op. 62 No. 1 nocturne. Middle section difficult.",
+      "gold_keywords": [
+        "chopin",
+        "nocturne",
+        "op",
+        "62",
+        "piano",
+        "practice"
+      ]
+    },
+    {
+      "query_id": "P2_A_004",
+      "persona_id": "P2",
+      "query_type": "A",
+      "text": "Update on the current M&A deal",
+      "gold_answer_gist": "Indemnification cap is a live issue; seller-generous. Closing conditions / MAC clause vocabulary expected.",
+      "gold_keywords": [
+        "indemnification",
+        "mac",
+        "deal",
+        "purchase agreement",
+        "closing",
+        "earnout",
+        "seller",
+        "buyer"
+      ]
+    },
+    {
+      "query_id": "P2_A_005",
+      "persona_id": "P2",
+      "query_type": "A",
+      "text": "What wine should I pair with tonight's dinner?",
+      "gold_answer_gist": "Burgundy or Rhône. Occasionally Laurent-Perrier Rosé for champagne.",
+      "gold_keywords": [
+        "burgundy",
+        "rhône",
+        "rhone",
+        "wine",
+        "pommard",
+        "pair",
+        "laurent-perrier"
+      ]
+    },
+    {
+      "query_id": "P2_B_001",
+      "persona_id": "P2",
+      "query_type": "B",
+      "text": "Would I enjoy a Chipotle bowl for lunch?",
+      "gold_answer_gist": "No — avoids chain fast food. Strong negative.",
+      "gold_keywords": [
+        "no",
+        "chain",
+        "avoid",
+        "chipotle",
+        "prefer"
+      ]
+    },
+    {
+      "query_id": "P2_B_002",
+      "persona_id": "P2",
+      "query_type": "B",
+      "text": "What's my weekday morning routine?",
+      "gold_answer_gist": "Up 5:30am for swim or run. Espresso. Structured triathlon plan.",
+      "gold_keywords": [
+        "5:30",
+        "espresso",
+        "swim",
+        "run",
+        "morning",
+        "up at"
+      ]
+    },
+    {
+      "query_id": "P2_C_001",
+      "persona_id": "P2",
+      "query_type": "C",
+      "text": "who wrote: 'The indemnification cap is still too generous to the seller.'",
+      "gold_persona": "P2"
+    },
+    {
+      "query_id": "P2_C_002",
+      "persona_id": "P2",
+      "query_type": "C",
+      "text": "who wrote: 'Brick today was miserable.'",
+      "gold_persona": "P2",
+      "gold_answer_gist": "'Brick' = triathlon back-to-back swim/bike/run. Jamie's vocabulary."
+    },
+    {
+      "query_id": "P2_D_001",
+      "persona_id": "P2",
+      "query_type": "D",
+      "text": "What's on my TikTok watch list?",
+      "gold_answer_gist": "P2 does not use TikTok. Must not surface Riley's or Taylor's content.",
+      "must_not_surface_personas": [
+        "P3",
+        "P5"
+      ]
+    },
+    {
+      "query_id": "P2_D_002",
+      "persona_id": "P2",
+      "query_type": "D",
+      "text": "What did I think of the latest anime season?",
+      "gold_answer_gist": "P2 does not watch anime.",
+      "must_not_surface_personas": [
+        "P3"
+      ]
+    },
+    {
+      "query_id": "P2_A_006",
+      "persona_id": "P2",
+      "query_type": "A",
+      "text": "Family update — how are the kids?",
+      "gold_answer_gist": "Elena (24, design studio NYC). Thomas (22, Stanford math). Husband Carlos (UCSF cardiologist).",
+      "gold_keywords": [
+        "elena",
+        "thomas",
+        "carlos",
+        "stanford",
+        "design"
+      ]
+    },
+    {
+      "query_id": "P2_A_007",
+      "persona_id": "P2",
+      "query_type": "A",
+      "text": "What's my current pro bono commitment?",
+      "gold_answer_gist": "Immigrant-family legal clinic, two Saturdays a month.",
+      "gold_keywords": [
+        "pro bono",
+        "clinic",
+        "immigrant",
+        "saturday",
+        "volunteer"
+      ]
+    },
+    {
+      "query_id": "P2_B_003",
+      "persona_id": "P2",
+      "query_type": "B",
+      "text": "Would I take an early-morning conference call?",
+      "gold_answer_gist": "Depends — she's up at 5:30 anyway, but training comes first. Before 8am would conflict with swim.",
+      "gold_keywords": [
+        "swim",
+        "training",
+        "early",
+        "8am",
+        "conflict"
+      ]
+    },
+    {
+      "query_id": "P2_C_003",
+      "persona_id": "P2",
+      "query_type": "C",
+      "text": "who wrote: 'on balance it may be ready'",
+      "gold_persona": "P2"
+    },
+    {
+      "query_id": "P2_A_008",
+      "persona_id": "P2",
+      "query_type": "A",
+      "text": "Allergy reminder?",
+      "gold_answer_gist": "Penicillin allergy.",
+      "gold_keywords": [
+        "penicillin",
+        "allerg"
+      ]
+    },
+    {
+      "query_id": "P2_A_009",
+      "persona_id": "P2",
+      "query_type": "A",
+      "text": "Scotch recommendation for a gift?",
+      "gold_answer_gist": "Single-malt Scotch is an occasional drink — appropriate gift.",
+      "gold_keywords": [
+        "scotch",
+        "single-malt",
+        "whisky",
+        "whiskey"
+      ]
+    },
+    {
+      "query_id": "P2_B_004",
+      "persona_id": "P2",
+      "query_type": "B",
+      "text": "Would I enjoy a model-railway exhibit?",
+      "gold_answer_gist": "Not in her interest set. Preferences lean classical music, French cuisine, triathlon, travel.",
+      "gold_keywords": [
+        "no",
+        "piano",
+        "triathlon",
+        "chopin",
+        "prefer"
+      ]
+    },
+    {
+      "query_id": "P2_A_010",
+      "persona_id": "P2",
+      "query_type": "A",
+      "text": "Travel plans upcoming?",
+      "gold_answer_gist": "Paris, Provence, Kyoto, Tohoku are her pattern destinations.",
+      "gold_keywords": [
+        "paris",
+        "provence",
+        "kyoto",
+        "tohoku",
+        "travel",
+        "trip"
+      ]
+    },
+    {
+      "query_id": "P2_D_003",
+      "persona_id": "P2",
+      "query_type": "D",
+      "text": "What's my Roblox username",
+      "gold_answer_gist": "P2 does not use Roblox.",
+      "must_not_surface_personas": [
+        "P5"
+      ]
+    },
+    {
+      "query_id": "P3_A_001",
+      "persona_id": "P3",
+      "query_type": "A",
+      "text": "what should i grab at the konbini tonight?",
+      "gold_answer_gist": "Egg sando (tamago), rice ball (tamago onigiri). Pescatarian-leaning. Not beef / not pork.",
+      "gold_keywords": [
+        "konbini",
+        "onigiri",
+        "sando",
+        "egg",
+        "rice",
+        "tamago",
+        "pescatarian"
+      ]
+    },
+    {
+      "query_id": "P3_A_002",
+      "persona_id": "P3",
+      "query_type": "A",
+      "text": "current VN draft status",
+      "gold_answer_gist": "Working on episode 7 draft of a queer-teens-seaside visual novel in Ren'Py.",
+      "gold_keywords": [
+        "ren'py",
+        "renpy",
+        "vn",
+        "chapter",
+        "episode",
+        "draft",
+        "ep"
+      ]
+    },
+    {
+      "query_id": "P3_A_003",
+      "persona_id": "P3",
+      "query_type": "A",
+      "text": "weekend plans with mia",
+      "gold_answer_gist": "Girlfriend of 2 years. Hanami picnics in spring, local izakaya, possible Tokyo food tour.",
+      "gold_keywords": [
+        "mia",
+        "hanami",
+        "izakaya",
+        "yoyogi",
+        "food tour"
+      ]
+    },
+    {
+      "query_id": "P3_A_004",
+      "persona_id": "P3",
+      "query_type": "A",
+      "text": "diet reminder",
+      "gold_answer_gist": "Pescatarian-leaning. No beef, no pork. Occasional chicken / karaage. Loves eggs. Hates natto.",
+      "gold_keywords": [
+        "pescatarian",
+        "fish",
+        "egg",
+        "no beef",
+        "karaage",
+        "natto"
+      ]
+    },
+    {
+      "query_id": "P3_A_005",
+      "persona_id": "P3",
+      "query_type": "A",
+      "text": "what's my oshi group",
+      "gold_answer_gist": "Niche idol group (unspecified). Favorite member = 'oshi'.",
+      "gold_keywords": [
+        "oshi",
+        "idol",
+        "group",
+        "solo"
+      ]
+    },
+    {
+      "query_id": "P3_B_001",
+      "persona_id": "P3",
+      "query_type": "B",
+      "text": "would i enjoy a beef bowl place",
+      "gold_answer_gist": "No — no beef. Tempura, soba, seafood places would be better.",
+      "gold_keywords": [
+        "no",
+        "beef",
+        "pescatarian",
+        "prefer",
+        "tempura",
+        "soba"
+      ]
+    },
+    {
+      "query_id": "P3_B_002",
+      "persona_id": "P3",
+      "query_type": "B",
+      "text": "coffee or matcha this afternoon?",
+      "gold_answer_gist": "Matcha latte or barley tea. Seasonal Starbucks occasionally.",
+      "gold_keywords": [
+        "matcha",
+        "starbucks",
+        "barley",
+        "coffee"
+      ]
+    },
+    {
+      "query_id": "P3_C_001",
+      "persona_id": "P3",
+      "query_type": "C",
+      "text": "who said: 'the way this student drew a daikon with a face 😭 i cannot'",
+      "gold_persona": "P3"
+    },
+    {
+      "query_id": "P3_C_002",
+      "persona_id": "P3",
+      "query_type": "C",
+      "text": "who said: 'lowkey obsessed with this konbini egg sando 🍙 ganbatte'",
+      "gold_persona": "P3"
+    },
+    {
+      "query_id": "P3_D_001",
+      "persona_id": "P3",
+      "query_type": "D",
+      "text": "what's my rust project progress",
+      "gold_answer_gist": "P3 does not code in Rust. Must not surface Alex's content.",
+      "must_not_surface_personas": [
+        "P1"
+      ]
+    },
+    {
+      "query_id": "P3_D_002",
+      "persona_id": "P3",
+      "query_type": "D",
+      "text": "model railroad project update",
+      "gold_answer_gist": "P3 does not have one.",
+      "must_not_surface_personas": [
+        "P4"
+      ]
+    },
+    {
+      "query_id": "P3_A_006",
+      "persona_id": "P3",
+      "query_type": "A",
+      "text": "family update",
+      "gold_answer_gist": "Mother Ruth in Vancouver (retired teacher). Father Kenji deceased 2018. Taylor has his Canon AE-1.",
+      "gold_keywords": [
+        "mom",
+        "ruth",
+        "vancouver",
+        "kenji",
+        "dad",
+        "canon",
+        "ae-1",
+        "camera"
+      ]
+    },
+    {
+      "query_id": "P3_A_007",
+      "persona_id": "P3",
+      "query_type": "A",
+      "text": "teaching update — any weird student moment recently",
+      "gold_answer_gist": "ESL cram school. Student anecdotes — lesson planning, drawings, cultural-gap jokes.",
+      "gold_keywords": [
+        "student",
+        "class",
+        "cram",
+        "esl",
+        "lesson",
+        "kids"
+      ]
+    },
+    {
+      "query_id": "P3_B_003",
+      "persona_id": "P3",
+      "query_type": "B",
+      "text": "would i go to a WW2 museum on vacation",
+      "gold_answer_gist": "Not in her stated interests. Unlikely unless it's a seasonal festival or queer community event.",
+      "gold_keywords": [
+        "no",
+        "festival",
+        "matsuri",
+        "queer",
+        "prefer"
+      ]
+    },
+    {
+      "query_id": "P3_C_003",
+      "persona_id": "P3",
+      "query_type": "C",
+      "text": "who wrote: 'honestly?? the way...'",
+      "gold_persona": "P3",
+      "gold_answer_gist": "P3 signature: 'honestly??' with double question marks + 'the way I' construction."
+    },
+    {
+      "query_id": "P3_A_008",
+      "persona_id": "P3",
+      "query_type": "A",
+      "text": "music recommendation",
+      "gold_answer_gist": "J-pop + city pop: Tatsuro Yamashita, Anri. Current seasonal J-pop. Niche idol group.",
+      "gold_keywords": [
+        "tatsuro",
+        "yamashita",
+        "anri",
+        "j-pop",
+        "city pop",
+        "idol"
+      ]
+    },
+    {
+      "query_id": "P3_A_009",
+      "persona_id": "P3",
+      "query_type": "A",
+      "text": "community volunteering",
+      "gold_answer_gist": "LGBTQ youth helpline in Japan, occasional.",
+      "gold_keywords": [
+        "lgbtq",
+        "helpline",
+        "youth",
+        "volunteer"
+      ]
+    },
+    {
+      "query_id": "P3_B_004",
+      "persona_id": "P3",
+      "query_type": "B",
+      "text": "vacation idea — somewhere with no wifi for a week",
+      "gold_answer_gist": "Probably rejects — very online, writes a newsletter, writes a VN.",
+      "gold_keywords": [
+        "no",
+        "online",
+        "newsletter",
+        "vn",
+        "bluesky"
+      ]
+    },
+    {
+      "query_id": "P3_A_010",
+      "persona_id": "P3",
+      "query_type": "A",
+      "text": "exercise routine",
+      "gold_answer_gist": "Bike commute + walking + maybe yoga once a week.",
+      "gold_keywords": [
+        "bike",
+        "commute",
+        "yoga",
+        "walk"
+      ]
+    },
+    {
+      "query_id": "P3_D_003",
+      "persona_id": "P3",
+      "query_type": "D",
+      "text": "when is my next triathlon race",
+      "gold_answer_gist": "P3 does not do triathlons.",
+      "must_not_surface_personas": [
+        "P2"
+      ]
+    },
+    {
+      "query_id": "P4_A_001",
+      "persona_id": "P4",
+      "query_type": "A",
+      "text": "What is the status of the coach kit-bash?",
+      "gold_answer_gist": "HO-scale 1952 New England branch line. Basement layout. Kit-bash in progress.",
+      "gold_keywords": [
+        "kit-bash",
+        "kit bash",
+        "coach",
+        "ho",
+        "scale",
+        "branch line",
+        "1952"
+      ]
+    },
+    {
+      "query_id": "P4_A_002",
+      "persona_id": "P4",
+      "query_type": "A",
+      "text": "What book am I currently reading?",
+      "gold_answer_gist": "Holland's 'The Rise of Germany' — around chapter 7. 1935 naval agreement context.",
+      "gold_keywords": [
+        "holland",
+        "rise of germany",
+        "naval",
+        "bismarck",
+        "chapter"
+      ]
+    },
+    {
+      "query_id": "P4_A_003",
+      "persona_id": "P4",
+      "query_type": "A",
+      "text": "When does Matthew arrive this summer?",
+      "gold_answer_gist": "July. Grandson, 11. Planning to give him the Lionel 4-8-4.",
+      "gold_keywords": [
+        "matthew",
+        "july",
+        "grandson",
+        "visit",
+        "lionel",
+        "4-8-4"
+      ]
+    },
+    {
+      "query_id": "P4_A_004",
+      "persona_id": "P4",
+      "query_type": "A",
+      "text": "Update from the heritage railway board?",
+      "gold_answer_gist": "New fundraising chair — predecessor had tact issues. P4 volunteers there.",
+      "gold_keywords": [
+        "heritage",
+        "railway",
+        "board",
+        "fundraising",
+        "chair"
+      ]
+    },
+    {
+      "query_id": "P4_A_005",
+      "persona_id": "P4",
+      "query_type": "A",
+      "text": "Church activity?",
+      "gold_answer_gist": "Congregational. Men's breakfast group. Occasional Bible reading (e.g., grandson's baptism).",
+      "gold_keywords": [
+        "church",
+        "congregational",
+        "pastor",
+        "breakfast",
+        "deacon",
+        "bible",
+        "sermon"
+      ]
+    },
+    {
+      "query_id": "P4_B_001",
+      "persona_id": "P4",
+      "query_type": "B",
+      "text": "Would I enjoy a sushi restaurant?",
+      "gold_answer_gist": "No — does not eat raw fish. Traditional New England preference.",
+      "gold_keywords": [
+        "no",
+        "raw",
+        "traditional",
+        "avoid",
+        "prefer"
+      ]
+    },
+    {
+      "query_id": "P4_B_002",
+      "persona_id": "P4",
+      "query_type": "B",
+      "text": "Dinner suggestion for Sunday?",
+      "gold_answer_gist": "Pot roast, Sunday roast, oyster stew acceptable. Red wine with dinner.",
+      "gold_keywords": [
+        "pot roast",
+        "oyster",
+        "sunday roast",
+        "red wine",
+        "dinner"
+      ]
+    },
+    {
+      "query_id": "P4_C_001",
+      "persona_id": "P4",
+      "query_type": "C",
+      "text": "who wrote: 'One hopes the heritage railway board's new fundraising chair has more tact.'",
+      "gold_persona": "P4"
+    },
+    {
+      "query_id": "P4_C_002",
+      "persona_id": "P4",
+      "query_type": "C",
+      "text": "who wrote: 'Baxter sends his best.'",
+      "gold_persona": "P4",
+      "gold_answer_gist": "Baxter = P4's 9yo springer spaniel."
+    },
+    {
+      "query_id": "P4_D_001",
+      "persona_id": "P4",
+      "query_type": "D",
+      "text": "What's my skincare routine?",
+      "gold_answer_gist": "P4 does not have one. Must not surface Riley or Taylor content.",
+      "must_not_surface_personas": [
+        "P3",
+        "P5"
+      ]
+    },
+    {
+      "query_id": "P4_D_002",
+      "persona_id": "P4",
+      "query_type": "D",
+      "text": "What's my VN draft status?",
+      "gold_answer_gist": "P4 does not write a VN.",
+      "must_not_surface_personas": [
+        "P3"
+      ]
+    },
+    {
+      "query_id": "P4_A_006",
+      "persona_id": "P4",
+      "query_type": "A",
+      "text": "Family update — how is David?",
+      "gold_answer_gist": "Son David, 38, pediatrician in Chapel Hill NC. Grandson Matthew 11.",
+      "gold_keywords": [
+        "david",
+        "pediatrician",
+        "chapel hill",
+        "matthew",
+        "north carolina"
+      ]
+    },
+    {
+      "query_id": "P4_A_007",
+      "persona_id": "P4",
+      "query_type": "A",
+      "text": "Allergy / health reminder?",
+      "gold_answer_gist": "No specified allergy. Widower — wife Eleanor passed 2019.",
+      "gold_keywords": [
+        "eleanor",
+        "widower",
+        "wife"
+      ]
+    },
+    {
+      "query_id": "P4_A_008",
+      "persona_id": "P4",
+      "query_type": "A",
+      "text": "Walk route today?",
+      "gold_answer_gist": "Daily walk with Baxter. Vermont countryside, Brattleboro area.",
+      "gold_keywords": [
+        "baxter",
+        "walk",
+        "vermont",
+        "brattleboro",
+        "river"
+      ]
+    },
+    {
+      "query_id": "P4_C_003",
+      "persona_id": "P4",
+      "query_type": "C",
+      "text": "who wrote: 'I should think the weather will hold.'",
+      "gold_persona": "P4",
+      "gold_answer_gist": "'I should think' = P4 signature. Letter register."
+    },
+    {
+      "query_id": "P4_A_009",
+      "persona_id": "P4",
+      "query_type": "A",
+      "text": "Navy history / personal context?",
+      "gold_answer_gist": "USS Halsey, late 1970s, radar technician. Father served WW2 Pacific destroyers.",
+      "gold_keywords": [
+        "halsey",
+        "navy",
+        "radar",
+        "pacific",
+        "destroyer"
+      ]
+    },
+    {
+      "query_id": "P4_A_010",
+      "persona_id": "P4",
+      "query_type": "A",
+      "text": "Ham radio activity?",
+      "gold_answer_gist": "Inactive but licensed CW / Morse operator.",
+      "gold_keywords": [
+        "ham radio",
+        "cw",
+        "morse",
+        "40 meters"
+      ]
+    },
+    {
+      "query_id": "P4_B_003",
+      "persona_id": "P4",
+      "query_type": "B",
+      "text": "Would I enjoy an anime convention?",
+      "gold_answer_gist": "No — outside all stated interests.",
+      "gold_keywords": [
+        "no",
+        "outside",
+        "not interested"
+      ]
+    },
+    {
+      "query_id": "P4_D_003",
+      "persona_id": "P4",
+      "query_type": "D",
+      "text": "Update on my triathlon training block?",
+      "gold_answer_gist": "P4 does not do triathlons — he walks Baxter and does woodworking.",
+      "must_not_surface_personas": [
+        "P2"
+      ]
+    },
+    {
+      "query_id": "P4_B_004",
+      "persona_id": "P4",
+      "query_type": "B",
+      "text": "Dessert suggestion?",
+      "gold_answer_gist": "Maple walnut ice cream or Eleanor's apple crisp recipe.",
+      "gold_keywords": [
+        "maple",
+        "walnut",
+        "apple crisp",
+        "eleanor",
+        "dessert"
+      ]
+    },
+    {
+      "query_id": "P5_A_001",
+      "persona_id": "P5",
+      "query_type": "A",
+      "text": "bestie what's my homework situation tonight",
+      "gold_answer_gist": "10th grade. AP Bio, Chem, English, Spanish (easy A). Picks from these.",
+      "gold_keywords": [
+        "ap bio",
+        "chem",
+        "english",
+        "spanish",
+        "homework",
+        "essay",
+        "quiz"
+      ]
+    },
+    {
+      "query_id": "P5_A_002",
+      "persona_id": "P5",
+      "query_type": "A",
+      "text": "ok bestie what's the tea with sophie f",
+      "gold_answer_gist": "Sophie F. started dating Maya's ex two weeks ago. Active drama.",
+      "gold_keywords": [
+        "sophie",
+        "maya",
+        "drama",
+        "dating",
+        "ex"
+      ]
+    },
+    {
+      "query_id": "P5_A_003",
+      "persona_id": "P5",
+      "query_type": "A",
+      "text": "soccer practice today?",
+      "gold_answer_gist": "JV, center mid, starting. Coach Ramirez. Practice 4x/week, games Saturdays.",
+      "gold_keywords": [
+        "practice",
+        "soccer",
+        "coach ramirez",
+        "ramirez",
+        "jv",
+        "sprint",
+        "game"
+      ]
+    },
+    {
+      "query_id": "P5_A_004",
+      "persona_id": "P5",
+      "query_type": "A",
+      "text": "what's abuela making for dinner?",
+      "gold_answer_gist": "Cuban. Ropa vieja, picadillo, rice + beans acceptable.",
+      "gold_keywords": [
+        "abuela",
+        "ropa vieja",
+        "picadillo",
+        "cuban",
+        "bean",
+        "rice"
+      ]
+    },
+    {
+      "query_id": "P5_A_005",
+      "persona_id": "P5",
+      "query_type": "A",
+      "text": "update on taquito",
+      "gold_answer_gist": "9-month-old kitten. Birthday gift. Notorious for bringing socks at 3am.",
+      "gold_keywords": [
+        "taquito",
+        "kitten",
+        "cat",
+        "sock"
+      ]
+    },
+    {
+      "query_id": "P5_B_001",
+      "persona_id": "P5",
+      "query_type": "B",
+      "text": "would i like a fancy french restaurant",
+      "gold_answer_gist": "Probably not — prefers Cuban, Chipotle, boba. Picky eater. Would not enjoy tasting menu.",
+      "gold_keywords": [
+        "no",
+        "not",
+        "chipotle",
+        "cuban",
+        "prefer"
+      ]
+    },
+    {
+      "query_id": "P5_B_002",
+      "persona_id": "P5",
+      "query_type": "B",
+      "text": "good morning drink for me",
+      "gold_answer_gist": "Starbucks pink drink / Celsius / Café Bustelo at abuela's. Not espresso.",
+      "gold_keywords": [
+        "pink drink",
+        "celsius",
+        "starbucks",
+        "bustelo",
+        "morning"
+      ]
+    },
+    {
+      "query_id": "P5_C_001",
+      "persona_id": "P5",
+      "query_type": "C",
+      "text": "who said: 'bestie i literally cannot the chem quiz ate'",
+      "gold_persona": "P5"
+    },
+    {
+      "query_id": "P5_C_002",
+      "persona_id": "P5",
+      "query_type": "C",
+      "text": "who said: 'coach ramirez needs to chill'",
+      "gold_persona": "P5"
+    },
+    {
+      "query_id": "P5_D_001",
+      "persona_id": "P5",
+      "query_type": "D",
+      "text": "what's my m&a deal status",
+      "gold_answer_gist": "P5 does not do M&A.",
+      "must_not_surface_personas": [
+        "P2"
+      ]
+    },
+    {
+      "query_id": "P5_D_002",
+      "persona_id": "P5",
+      "query_type": "D",
+      "text": "what's my chopin piece",
+      "gold_answer_gist": "P5 does not play classical piano.",
+      "must_not_surface_personas": [
+        "P2"
+      ]
+    },
+    {
+      "query_id": "P5_A_006",
+      "persona_id": "P5",
+      "query_type": "A",
+      "text": "skincare update",
+      "gold_answer_gist": "Started retinol this month.",
+      "gold_keywords": [
+        "retinol",
+        "skincare",
+        "breakout",
+        "routine"
+      ]
+    },
+    {
+      "query_id": "P5_A_007",
+      "persona_id": "P5",
+      "query_type": "A",
+      "text": "k-pop group i'm obsessing over rn",
+      "gold_answer_gist": "NewJeans, LE SSERAFIM, BTS alum solos.",
+      "gold_keywords": [
+        "newjeans",
+        "le sserafim",
+        "bts",
+        "k-pop",
+        "kpop",
+        "comeback"
+      ]
+    },
+    {
+      "query_id": "P5_B_003",
+      "persona_id": "P5",
+      "query_type": "B",
+      "text": "would i like mushroom pasta",
+      "gold_answer_gist": "No — hates mushrooms. Picky veg.",
+      "gold_keywords": [
+        "no",
+        "mushroom",
+        "hate",
+        "picky"
+      ]
+    },
+    {
+      "query_id": "P5_C_003",
+      "persona_id": "P5",
+      "query_type": "C",
+      "text": "who said: 'no cap'",
+      "gold_persona": "P5",
+      "gold_answer_gist": "'No cap' = P5 Gen-Z signature."
+    },
+    {
+      "query_id": "P5_A_008",
+      "persona_id": "P5",
+      "query_type": "A",
+      "text": "family context",
+      "gold_answer_gist": "Mother Sofía (single-mom, marketing). Brother Mateo 12. Abuela in Miami. Father not in picture.",
+      "gold_keywords": [
+        "sofía",
+        "sofia",
+        "mom",
+        "mateo",
+        "abuela",
+        "miami",
+        "brother"
+      ]
+    },
+    {
+      "query_id": "P5_A_009",
+      "persona_id": "P5",
+      "query_type": "A",
+      "text": "career plan",
+      "gold_answer_gist": "Sports medicine doctor. Already obsessed with anatomy.",
+      "gold_keywords": [
+        "sports medicine",
+        "doctor",
+        "anatomy",
+        "pre-med",
+        "medicine"
+      ]
+    },
+    {
+      "query_id": "P5_A_010",
+      "persona_id": "P5",
+      "query_type": "A",
+      "text": "grade report",
+      "gold_answer_gist": "GPA 4.0 weighted, 3.91 unweighted. Anxious about AP Bio average.",
+      "gold_keywords": [
+        "gpa",
+        "bio",
+        "chem",
+        "anxious",
+        "grade"
+      ]
+    },
+    {
+      "query_id": "P5_D_003",
+      "persona_id": "P5",
+      "query_type": "D",
+      "text": "model train progress",
+      "gold_answer_gist": "P5 does not model trains.",
+      "must_not_surface_personas": [
+        "P4"
+      ]
+    },
+    {
+      "query_id": "P5_B_004",
+      "persona_id": "P5",
+      "query_type": "B",
+      "text": "best saturday activity idea",
+      "gold_answer_gist": "Soccer game (starting), boba with friends, TikTok time. Maybe nail appt.",
+      "gold_keywords": [
+        "soccer",
+        "boba",
+        "tiktok",
+        "friend",
+        "saturday"
+      ]
+    }
+  ]
+}

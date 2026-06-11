@@ -1,0 +1,48 @@
+{
+  "candidate": "v05_baseline_nogate",
+  "dataset": "short_horizon_200",
+  "timestamp": "2026-04-23T09:43:25.884586+00:00",
+  "db_path": "/Users/j/.cache/memorist_dbs/v05_baseline_nogate__short_horizon_200.db",
+  "ingest": {
+    "total_sessions": 10,
+    "total_messages": 5882,
+    "kept": 15,
+    "dropped": 0,
+    "drop_rate_pct": 0.0,
+    "ingest_wall_clock_s": 212.97,
+    "per_message_ms_avg": 36.36
+  },
+  "retrieval": {
+    "total_qs": 200,
+    "gold_in_topk": 3,
+    "precision_at_k_pct": 1.5,
+    "k": 10,
+    "by_category": {
+      "1": {
+        "recovered": 0,
+        "total": 37,
+        "pct": 0.0
+      },
+      "2": {
+        "recovered": 0,
+        "total": 42,
+        "pct": 0.0
+      },
+      "3": {
+        "recovered": 0,
+        "total": 12,
+        "pct": 0.0
+      },
+      "4": {
+        "recovered": 3,
+        "total": 109,
+        "pct": 2.75
+      }
+    },
+    "wall_clock_s": 0.11
+  },
+  "storage": {
+    "db_size_bytes": 4096,
+    "rows_in_messages": 15
+  }
+}

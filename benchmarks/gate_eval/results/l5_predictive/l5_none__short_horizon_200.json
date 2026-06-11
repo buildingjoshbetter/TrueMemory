@@ -1,0 +1,61 @@
+{
+  "candidate": "l5_none",
+  "dataset": "short_horizon_200",
+  "alpha_surprise": 0.0,
+  "ingest": {
+    "n_messages": 5882,
+    "wall_s": 0.11,
+    "per_message_ms_avg": 0.0,
+    "per_message_ms_p95": 0.001
+  },
+  "retrieval": {
+    "n_queries": 200,
+    "precision_at_1_pct": 12.5,
+    "precision_at_3_pct": 20.0,
+    "precision_at_10_pct": 25.0,
+    "n_rare_queries": 39,
+    "rare_precision_at_10_pct": 28.21,
+    "wall_s": 3.6,
+    "by_category": {
+      "1": {
+        "recovered": 4,
+        "total": 37,
+        "pct": 10.81
+      },
+      "2": {
+        "recovered": 1,
+        "total": 42,
+        "pct": 2.38
+      },
+      "3": {
+        "recovered": 1,
+        "total": 12,
+        "pct": 8.33
+      },
+      "4": {
+        "recovered": 44,
+        "total": 109,
+        "pct": 40.37
+      }
+    },
+    "by_probe": {}
+  },
+  "calibration": {
+    "n_pairs": 5882,
+    "spearman": -0.0375,
+    "kendall_tau": NaN,
+    "oracle_mean": 0.4022,
+    "candidate_mean": 0.5
+  },
+  "surprise_distribution": {
+    "n": 5882,
+    "mean": 0.5,
+    "p25": 0.5,
+    "p50": 0.5,
+    "p75": 0.5,
+    "p95": 0.5,
+    "min": 0.5,
+    "max": 0.5,
+    "frac_gt_05": 0.0
+  }
+}

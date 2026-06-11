@@ -1,0 +1,59 @@
+{
+  "candidate": "regex_then_nli",
+  "dataset": "long_horizon_synthetic",
+  "config": {
+    "nli_model": "MoritzLaurer/roberta-base-zeroshot-v2.0-c",
+    "threshold": 0.7,
+    "regex_profile": "off"
+  },
+  "timestamp": "2026-04-23T11:10:11.356160+00:00",
+  "ingest": {
+    "total_messages": 750,
+    "kept": 214,
+    "dropped": 536,
+    "drop_rate_pct": 71.47,
+    "ingest_wall_clock_s": 0.87,
+    "per_message_ms_p50": 0.007,
+    "per_message_ms_p95": 0.039,
+    "per_message_ms_p99": 0.057,
+    "drop_rate_by_stage": {}
+  },
+  "retrieval": {
+    "total_qs": 91,
+    "precision_at_1_pct": 6.59,
+    "precision_at_3_pct": 6.59,
+    "precision_at_10_pct": 6.59,
+    "wall_clock_s": 0.11
+  },
+  "chitchat_test": {
+    "n_chitchat_in_records": 3,
+    "n_dropped_by_gate": 3,
+    "n_total_chitchat_in_dataset": 3,
+    "drop_rate_pct": 100.0
+  },
+  "storage": {
+    "db_size_bytes": 4096,
+    "rows_in_messages": 2
+  },
+  "telemetry": {
+    "stage1_drop_reasons": {},
+    "n_stage2_inferences": 1500,
+    "p_substantive_min": 0.019382178783416748,
+    "p_substantive_mean": 0.5197,
+    "p_substantive_median": 0.5253,
+    "p_substantive_max": 0.9739313125610352,
+    "p_substantive_histogram": {
+      "[0.1,0.2)": 128,
+      "[0.2,0.3)": 150,
+      "[0.9,1.0)": 84,
+      "[0.3,0.4)": 206,
+      "[0.6,0.7)": 182,
+      "[0.7,0.8)": 176,
+      "[0.5,0.6)": 186,
+      "[0.4,0.5)": 162,
+      "[0.0,0.1)": 58,
+      "[0.8,0.9)": 168
+    },
+    "per_message_records_truncated_to": 750
+  }
+}

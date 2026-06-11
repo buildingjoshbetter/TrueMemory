@@ -1,0 +1,34 @@
+{
+  "best_dynamic_config": "config_5",
+  "setups": {
+    "A_baseline": {
+      "label": "Baseline only",
+      "s_encode": 0.8809,
+      "n_fp": 0.4207,
+      "s4_recall": 0.875,
+      "auc": 0.8073
+    },
+    "B_existing": {
+      "label": "Existing mechanisms",
+      "s_encode": 0.9679,
+      "n_fp": 0.5052,
+      "s4_recall": 0.9583,
+      "auc": 0.848
+    },
+    "C_dynamic": {
+      "label": "Dynamic weights only (config_5)",
+      "s_encode": 0.9405,
+      "n_fp": 0.429,
+      "s4_recall": 0.9583,
+      "auc": 0.8172,
+      "config_used": "config_5"
+    },
+    "D_all_three": {
+      "label": "All three combined",
+      "s_encode": 0.9725,
+      "n_fp": 0.5177,
+      "s4_recall": 0.9583,
+      "auc": 0.8603
+    }
+  }
+}

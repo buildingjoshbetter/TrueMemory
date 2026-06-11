@@ -1,0 +1,340 @@
+{
+  "meta": {
+    "version": "1.0",
+    "authored_at": "2026-04-23",
+    "author_note": "Hand-authored within Claude-Opus-4.7 autonomous research session. No LLM generation of persona content — these specifications were written in the same authorial mode as the surrounding documents (FORMALIZATION, SYNTHESIS, CANDIDATES). Fields are mechanically enforced to be non-overlapping across personas.",
+    "non_overlap_invariants": [
+      "No two personas share an occupation",
+      "Age bands are distinct: {15, 27, 31, 48, 68}",
+      "Geographic regions distinct: {Berlin, Tokyo, San Francisco, Vermont, Atlanta suburb}",
+      "Primary interest clusters distinct: {Rust systems/veganism, classical music/triathlon/law, ESL teaching/anime, model trains/WW2 history, TikTok/high school social/gaming}",
+      "Formality levels span: very-casual / casual / mixed / formal / very-formal",
+      "Emoji usage spans: none / minimal / moderate / frequent / heavy",
+      "NO persona uses Josh-signature tokens: clickhouse, f1, acl, biscuit, corgi, lily"
+    ]
+  },
+  "personas": [
+    {
+      "id": "P1",
+      "name": "Alex Morgenstern",
+      "pronouns": "they/them",
+      "age": 31,
+      "location": "Berlin, Germany (US expat, 5 years)",
+      "occupation": "Rust backend engineer at a small industrial-IoT startup",
+      "bio": "Staff-level Rust dev. Builds firmware-adjacent cloud services. Prefers boring, correct code. Mildly grumpy about async. Vegan for 6 years (ethical + environmental). Owns a 4-year-old rescue cat named Marzipan. Lives with their girlfriend Ingrid, a textile restorer. Quiet by default; warms up once you earn it.",
+      "communication_style": {
+        "formality_level": "casual",
+        "formality_notes": "Usually lowercase start of sentences. Drops articles sometimes. Brief. Technical vocabulary but rarely capitalizes product names (`rust`, `tokio`, `postgres` — lowercased).",
+        "emoji_usage": "minimal",
+        "emoji_notes": "Uses 🤷 and ¯\\_(ツ)_/¯ occasionally; no face/heart emoji.",
+        "typical_greetings": ["hey", "morning"],
+        "slang_level": "low",
+        "signature_phrases": ["fair enough", "not a fan", "that tracks", "ugh", "anyway"],
+        "vocabulary_markers": ["borrow checker", "no_std", "panic", "unsafe", "tokio", "msrv", "cargo", "cranelift", "eprintln", "debian"],
+        "avg_message_length_range_chars": [40, 200],
+        "typical_first_word_distribution": {"hey": 0.20, "yeah": 0.15, "lowercase-subject": 0.40, "other": 0.25}
+      },
+      "interests_and_topics": [
+        "rust programming language, systems engineering",
+        "vegan cooking — mostly eastern european + mediterranean, lentils, tempeh",
+        "woodworking (hobbyist, apartment-scale)",
+        "bouldering (V4-V5, plateaued for 2 years)",
+        "industrial heritage tours (old factories, rail infrastructure)",
+        "her cat Marzipan — vet visits, food preferences",
+        "Bundesliga football (supports Union Berlin)"
+      ],
+      "explicitly_does_not_talk_about": [
+        "fashion, beauty, makeup",
+        "reality TV",
+        "mainstream American pop culture",
+        "sports cars, luxury goods",
+        "religion or spirituality"
+      ],
+      "preferences_concrete": {
+        "diet": "vegan — no meat, no dairy, no eggs, no honey. Ok with most cuisines if prepared vegan.",
+        "favorite_foods": ["lentil soup", "homemade sauerkraut", "falafel", "döner (vegan variant)", "oat milk coffee"],
+        "never_eats": ["meat", "dairy", "eggs", "fish", "shellfish"],
+        "drinks": "beer (German Pilsner mostly), oat-milk coffee, herbal tea; rarely spirits",
+        "exercise": "bouldering 2x/week, walks Marzipan around the courtyard (joke — cat is indoor), commute cycling",
+        "sleep_routine": "bed around 1am, up around 9am — not a morning person",
+        "work_tools": "neovim + tmux, cargo, linux (debian stable), no IDE",
+        "hates": ["open-plan offices", "Agile meetings", "JS tooling churn", "crypto bros"]
+      },
+      "notable_facts": [
+        "Allergic to walnuts (mild)",
+        "Speaks German B2-ish, learned on the job",
+        "Younger brother (Sam) in Chicago, works in logistics",
+        "Father died in 2023; relationship with mother is strained",
+        "Volunteered at a rescue shelter where they adopted Marzipan",
+        "Ingrid (girlfriend) restores 19th-century textile samples at a museum",
+        "Reads Le Guin, Stanislaw Lem, Iain Banks — no fantasy series"
+      ],
+      "discriminative_sentences": [
+        "ugh the borrow checker is being unreasonable today, going to take marzipan on a walk",
+        "made that lentil-and-fennel thing again, still not as good as ingrid's",
+        "no_std people act like Box is a moral failing",
+        "not a fan of crypto discourse. anyway, hownis your week"
+      ]
+    },
+    {
+      "id": "P2",
+      "name": "Jamie Fairfax-Mendez",
+      "pronouns": "she/her",
+      "age": 48,
+      "location": "San Francisco, California",
+      "occupation": "Partner, M&A practice, mid-tier law firm",
+      "bio": "Deal lawyer. 22 years in practice, made partner in her mid-thirties. Runs half-Ironman triathlons. Studies classical piano seriously (reached advanced amateur level). Food culture — she and her husband eat out 3–4 times a week, lean French and Japanese. Two kids in their early twenties (Elena and Thomas), both launched. Precise. Measures her words.",
+      "communication_style": {
+        "formality_level": "formal",
+        "formality_notes": "Full sentences, proper capitalization, minimal contractions in written form. Uses em-dashes. Does not truncate greetings. Will say 'I am' not 'I'm' in writing.",
+        "emoji_usage": "none",
+        "emoji_notes": "Has never used an emoji in a work context. In personal contexts, a single smiley at most — and only as the last character.",
+        "typical_greetings": ["Good morning", "Hello", "Hi Sarah"],
+        "slang_level": "none",
+        "signature_phrases": ["that said", "as it happens", "to be fair", "on balance", "I would suggest"],
+        "vocabulary_markers": ["indemnification", "closing conditions", "MAC clause", "cadence", "sonata-allegro", "cadenza", "threshold pace", "negative split", "amuse-bouche", "terroir"],
+        "avg_message_length_range_chars": [120, 400],
+        "typical_first_word_distribution": {"I": 0.30, "The": 0.15, "Good morning": 0.10, "Thank": 0.08, "other-capitalized": 0.37}
+      },
+      "interests_and_topics": [
+        "mergers and acquisitions practice, client matter management",
+        "classical piano (repertoire: Chopin nocturnes, Beethoven sonatas, Ravel)",
+        "triathlon (Olympic and Half-Ironman distance — swim, bike, run)",
+        "French cuisine (Alain Ducasse disciple restaurants in SF; home cooking)",
+        "Japanese cuisine (omakase sushi, kaiseki)",
+        "wine — Burgundy and Rhône focus",
+        "travel — Paris, Provence, Kyoto, Tohoku"
+      ],
+      "explicitly_does_not_talk_about": [
+        "video games",
+        "anime / manga",
+        "crypto or startup culture",
+        "reality TV",
+        "American football or basketball (has watched maybe 2 NFL games in her life)"
+      ],
+      "preferences_concrete": {
+        "diet": "omnivore with strong preferences — loves fish and shellfish, moderate red meat, avoids industrial bread and anything microwaveable",
+        "favorite_foods": ["bouillabaisse", "kaiseki", "omakase", "roasted duck", "Laurent-Perrier Rosé", "tarte Tatin"],
+        "never_eats": ["anything from a chain fast-food restaurant", "Cheez-Its (irrational)"],
+        "drinks": "wine with dinner, espresso mornings, single-malt Scotch occasionally",
+        "exercise": "structured triathlon training plan — 3 swims, 3 bike rides, 3 runs per week, cutting volume peri-race",
+        "sleep_routine": "in bed by 10:30pm, up at 5:30am for swim or run",
+        "work_tools": "macOS, Outlook, Teams, Word with revision marks, iManage",
+        "hates": ["sloppy drafting", "lateness", "people who take their shoes off on planes"]
+      },
+      "notable_facts": [
+        "Husband Carlos Mendez — cardiologist at UCSF",
+        "Daughter Elena, 24, works at a design studio in NYC",
+        "Son Thomas, 22, senior at Stanford — mathematics major",
+        "Has completed 4 half-Ironmans, PR 5:28:xx",
+        "Studied piano at Eastman (non-performance track) before law school at Columbia",
+        "Father was a federal judge (retired); mother a cellist (emerita)",
+        "Volunteers pro bono for an immigrant-family legal clinic two Saturdays a month",
+        "Allergic to penicillin"
+      ],
+      "discriminative_sentences": [
+        "The Chopin Op. 62 No. 1 is finally starting to come together — that said, the middle section still defeats me.",
+        "I am running the Wildflower half distance in May, so the bike volume is up. Brick today was miserable.",
+        "Tell Carlos we should try the new Californios tasting menu — on balance it may be ready.",
+        "Reviewed the draft purchase agreement. The indemnification cap is still too generous to the seller."
+      ]
+    },
+    {
+      "id": "P3",
+      "name": "Taylor Obata-Hanson",
+      "pronouns": "they/them",
+      "age": 27,
+      "location": "Tokyo, Japan (Setagaya), moved from Vancouver 3 years ago",
+      "occupation": "ESL teacher at a mid-sized cram school; side gig writing an indie visual novel",
+      "bio": "Half-Japanese (father), half-Canadian (mother). Grew up in Vancouver; moved to Tokyo 3 years ago for a teaching contract and stayed. Anime-adjacent community. Big social media presence (Bluesky, Instagram). Bilingual EN/JP but daily life in Japanese. Writes a visual novel about queer teens in a seaside town. Very online.",
+      "communication_style": {
+        "formality_level": "casual",
+        "formality_notes": "Mixed register. Often lowercase in text but not always. Frequent em-dashes and ellipses. Will drop into Japanese for a word or phrase. Uses occasional textspeak.",
+        "emoji_usage": "frequent",
+        "emoji_notes": "😭 💀 🫠 ✨ 🌸 🍙 are common. Uses kaomoji too (´・ω・`) sometimes. Not every message — clusters them in emotional messages.",
+        "typical_greetings": ["heyyy", "おはよう", "yooo", "hihi"],
+        "slang_level": "moderate-high",
+        "signature_phrases": ["lowkey", "fam", "honestly??", "the way I...", "iykyk", "no but seriously", "it's giving", "slaps", "ok but hear me out"],
+        "vocabulary_markers": ["ship", "canon", "fanfic", "VN", "hiragana", "kanji", "daikon", "onigiri", "katamari", "hanami", "izakaya", "gaijin", "ganbatte", "oshi"],
+        "avg_message_length_range_chars": [30, 250],
+        "typical_first_word_distribution": {"lowercase-i": 0.15, "heyyy": 0.08, "so": 0.18, "the": 0.10, "lowkey": 0.06, "other": 0.43}
+      },
+      "interests_and_topics": [
+        "teaching ESL — lesson planning, student anecdotes",
+        "anime + manga (Showa-era favorites + current seasonal)",
+        "writing an indie visual novel in Ren'Py",
+        "Tokyo food scene — izakaya, onigiri, seasonal convenience-store finds",
+        "queer community + activism",
+        "J-pop and city pop (Tatsuro Yamashita, Anri)",
+        "seasonal hanami picnics, matsuri festivals",
+        "social media — Bluesky drama, Instagram aesthetic"
+      ],
+      "explicitly_does_not_talk_about": [
+        "sports (any)",
+        "corporate law or finance",
+        "cars",
+        "WW2 history",
+        "classical Western music"
+      ],
+      "preferences_concrete": {
+        "diet": "pescatarian-leaning — no red meat, occasional chicken, lots of fish and vegetables. Pro-egg.",
+        "favorite_foods": ["tamago onigiri", "okonomiyaki", "karaage (occasional cheat)", "konbini egg sandwiches", "shirauo", "zaru soba"],
+        "never_eats": ["beef", "pork (minus cheat days)", "natto (hated)"],
+        "drinks": "matcha latte, highballs, the seasonal Starbucks thing, one cup of barley tea per day",
+        "exercise": "bike commute + walking, maybe yoga once a week",
+        "sleep_routine": "bed by midnight, up at 7:30am for the first class",
+        "work_tools": "iPad + Apple Pencil for lesson sketches, Notion for planning, Ren'Py + VS Code for the VN",
+        "hates": ["mansplaining", "tourists in Shinjuku", "being called 'exotic'"]
+      },
+      "notable_facts": [
+        "Non-binary; out since university",
+        "Dating Mia, a fellow ESL teacher, for 2 years",
+        "Mother (Ruth) lives in Vancouver, visits once a year — retired teacher",
+        "Father (Kenji) passed in 2018; Taylor has his camera, a Canon AE-1",
+        "Studied comparative literature at UBC",
+        "Has an oshi (favorite member) in a niche idol group",
+        "Volunteers occasionally at an LGBTQ youth helpline in Japan",
+        "Draws a weekly newsletter about Tokyo seasonal food"
+      ],
+      "discriminative_sentences": [
+        "honestly?? the way this student drew a daikon with a face 😭 i cannot. also my ep7 draft is GIVING",
+        "lowkey obsessed with this konbini egg sando 🍙 ganbatte to the part-timer who made it",
+        "ok but hear me out — if we canonize the ship in ep 9 the whole thing makes more sense",
+        "mia and i hanami'd in yoyogi and i almost cried at the wind 🫠"
+      ]
+    },
+    {
+      "id": "P4",
+      "name": "Morgan Whitfield",
+      "pronouns": "he/him",
+      "age": 68,
+      "location": "Brattleboro, Vermont",
+      "occupation": "Retired mechanical engineer (30+ years at a turbine manufacturer); now volunteers at the local heritage railway",
+      "bio": "Widower as of 2019 (wife Eleanor passed, breast cancer). One son (David, 38, lives in North Carolina). Spends his days working on his HO-scale model railway (basement layout, three years into building a 1952 New England branch line) and reading WW2 naval history. Attends the Congregational church on Sundays. Polite, reserved, principled, not tech-averse but deliberate.",
+      "communication_style": {
+        "formality_level": "very-formal",
+        "formality_notes": "Impeccable capitalization and punctuation. Full sentences, often signed off. Will write 'Please' and 'Thank you' explicitly. Never contractions in writing except 'don't' and 'can't'. Reads as a letter more than a text.",
+        "emoji_usage": "none",
+        "emoji_notes": "Has never used an emoji. Does not own any sticker packs.",
+        "typical_greetings": ["Good morning", "Hello David", "Dear Sir or Madam", "Good afternoon"],
+        "slang_level": "none",
+        "signature_phrases": ["I should think", "in my experience", "if I may say", "one hopes", "as I recall", "I expect"],
+        "vocabulary_markers": ["locomotive", "consist", "gauge", "scale", "roundhouse", "rivet counter", "kit-bash", "Mallet", "Pacific", "fireman", "Bismarck", "Hood", "Halsey", "convoy", "Enigma", "pastor", "congregation"],
+        "avg_message_length_range_chars": [100, 400],
+        "typical_first_word_distribution": {"I": 0.25, "Good": 0.10, "Thank": 0.10, "David": 0.08, "The": 0.15, "other-capitalized": 0.32}
+      },
+      "interests_and_topics": [
+        "HO-scale model railroading (branch-line New England, 1952)",
+        "WW2 naval history (Atlantic theater primarily)",
+        "cold-weather woodworking (model-scale)",
+        "Vermont heritage railway preservation",
+        "Congregational church, men's breakfast group",
+        "his late wife Eleanor's perennial garden (maintaining it)",
+        "correspondence with his son David and grandson Matthew",
+        "ham radio (CW / Morse operator, inactive but licensed)"
+      ],
+      "explicitly_does_not_talk_about": [
+        "video games",
+        "social media / TikTok / Instagram",
+        "anime or manga",
+        "cryptocurrency",
+        "club music",
+        "contemporary celebrity culture"
+      ],
+      "preferences_concrete": {
+        "diet": "traditional New England — meat and potatoes, Sunday roast, moderate portions. Not a foodie but competent.",
+        "favorite_foods": ["pot roast", "oyster stew", "maple walnut ice cream", "Eleanor's apple crisp recipe"],
+        "never_eats": ["raw fish", "kimchi", "anything with cilantro"],
+        "drinks": "black coffee (drip, never espresso), a glass of red wine on Sunday, occasional whiskey sour",
+        "exercise": "daily walk with the dog (Baxter, a 9-year-old springer spaniel)",
+        "sleep_routine": "bed at 9:30pm, up at 5:45am",
+        "work_tools": "iPad for email + family photos, MacBook from 2015 for letters and spreadsheets, workshop is all hand tools + a Dremel",
+        "hates": ["rivet-counter forum drama", "people who don't signal", "fast food"]
+      },
+      "notable_facts": [
+        "Navy veteran (USS Halsey, late 1970s, radar technician)",
+        "Son David is a pediatrician in Chapel Hill NC",
+        "Grandson Matthew is 11, visits every summer",
+        "Wife Eleanor passed in 2019 — 42-year marriage",
+        "Father served aboard destroyers in the Pacific during WW2 — primary reason for the naval history interest",
+        "Best friend Henry died in 2022; still processes it",
+        "Maintains an elaborate physical card-catalog of his model-railroad inventory",
+        "Gave a Bible reading at his grandson's baptism"
+      ],
+      "discriminative_sentences": [
+        "Good morning David — the weather cleared overnight, so I expect to get the new coach kit-bash started today. Baxter sends his best.",
+        "Finished Chapter 7 of Holland's `The Rise of Germany` last night. A bit dense but useful on the 1935 naval agreement.",
+        "One hopes the heritage railway board's new fundraising chair has more tact than the previous one.",
+        "Please tell Matthew I have set aside the old Lionel 4-8-4 for his visit in July."
+      ]
+    },
+    {
+      "id": "P5",
+      "name": "Riley Delgado",
+      "pronouns": "she/her",
+      "age": 15,
+      "location": "Atlanta suburb (Alpharetta), Georgia",
+      "occupation": "High school sophomore — public school",
+      "bio": "10th grader. Plays JV soccer. Wants to be a sports medicine doctor — already obsessed with anatomy. TikTok-native. Heavy slang. Part of a 6-girl friend group. Lives with her mom Sofía (single mother, marketing manager) and younger brother Mateo (12, also a menace). Cuban-American, Spanglish at home. Anxious about grades but competent.",
+      "communication_style": {
+        "formality_level": "very-casual",
+        "formality_notes": "Rarely capitalizes. Punctuation optional. Uses textspeak and Gen-Z slang heavily. Multiple messages in a row instead of one long one. All lowercase is the default.",
+        "emoji_usage": "heavy",
+        "emoji_notes": "💀 😭 🥰 ✨ 🥀 🫶 are constant. Often multiple per message. Uses them as literal punctuation.",
+        "typical_greetings": ["heyyy", "hellooo", "yoooo", "broooo"],
+        "slang_level": "very-high",
+        "signature_phrases": ["no cap", "bet", "fr fr", "lowkey/highkey", "it's giving", "slay", "ate and left no crumbs", "on god", "period", "I'm deceased", "that's so real", "bestie"],
+        "vocabulary_markers": ["period", "slay", "ate", "fr", "no cap", "bestie", "bet", "bro", "mid", "glowup", "tiktok", "roblox (ironic)", "for the plot", "anatomy notes", "JV", "coach ramirez"],
+        "avg_message_length_range_chars": [20, 150],
+        "typical_first_word_distribution": {"lowercase-i": 0.22, "oh": 0.10, "wait": 0.08, "bestie": 0.05, "literally": 0.06, "other-lowercase": 0.49}
+      },
+      "interests_and_topics": [
+        "JV soccer (center midfielder, starting)",
+        "anatomy and medicine — specifically sports medicine career plan",
+        "TikTok (makes and watches; skincare + study-vlogs mostly)",
+        "friend group drama — Maya, Nisha, Sophie F., Sophie B., Grace",
+        "skincare routine (new retinol this month)",
+        "high school classes — AP Bio, Chem, English, Spanish (easy A)",
+        "her cat Taquito (kitten, 9 months)",
+        "K-pop (NewJeans, LE SSERAFIM, BTS alum solos)",
+        "Cuban food at abuela's"
+      ],
+      "explicitly_does_not_talk_about": [
+        "wine or fine dining",
+        "classical music",
+        "stock market",
+        "corporate work",
+        "model trains",
+        "WW2 history",
+        "triathlon",
+        "rust programming"
+      ],
+      "preferences_concrete": {
+        "diet": "omnivore teenager. Chicken, rice, beans, pasta. Picky about vegetables — loves corn, tomato, cucumber; hates mushrooms.",
+        "favorite_foods": ["ropa vieja", "picadillo", "Chipotle chicken bowl", "Takis", "Starbucks pink drink", "boba"],
+        "never_eats": ["mushrooms", "olives", "anything with visible fat"],
+        "drinks": "Celsius, Liquid Death, pink drinks, Café Bustelo with half-and-half (abuela's house only)",
+        "exercise": "soccer practice 4x/week, games Saturdays",
+        "sleep_routine": "bed at midnight ideally, 2am on TikTok nights, up at 6:30am for school",
+        "work_tools": "school MacBook + iPhone 13 + iPad mini for notes + Notion for homework tracking",
+        "hates": ["the girl from chem class who copies her notes", "when Mateo touches her stuff", "math homework"]
+      },
+      "notable_facts": [
+        "Mother Sofía, single-mom marketing manager — close relationship",
+        "Brother Mateo, 12, currently obsessed with Minecraft",
+        "Abuela Mercedes lives in Miami, they FaceTime weekly",
+        "Father not in the picture since she was 6",
+        "GPA: 4.0 weighted, 3.91 unweighted",
+        "Has mild anxiety about AP Bio test average",
+        "Got her kitten Taquito for her 15th birthday",
+        "Friend group drama: Sophie F. started dating Maya's ex two weeks ago"
+      ],
+      "discriminative_sentences": [
+        "bestie i literally cannot the chem quiz ate 💀💀 fr",
+        "soccer practice kicked my ass today no cap 🥀 also coach ramirez needs to chill",
+        "ok but why did taquito bring me a sock at 3am like that's so real of him",
+        "abuela made picadillo tonight and mateo ATE THREE PLATES bestie how 😭"
+      ]
+    }
+  ]
+}

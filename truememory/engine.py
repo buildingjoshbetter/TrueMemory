@@ -1824,9 +1824,13 @@ class TrueMemoryEngine:
         # profile results (score=1.0) dominate factual queries.
         if self._has_personality and _has_personality_intent(query):
             try:
+                # Only forward include_directives when explicitly enabled so
+                # we stay compatible with callers/mocks using the older
+                # 3-arg signature (the default-False path already excludes
+                # directives via search_personality's own candidate filter).
+                _pers_kwargs = {"include_directives": True} if include_directives else {}
                 personality_results = search_personality(
-                    self.conn, query, limit=5,
-                    include_directives=include_directives,
+                    self.conn, query, limit=5, **_pers_kwargs,
                 )
                 if personality_results:
                     existing_ids = {r.get("id") for r in results if r.get("id")}

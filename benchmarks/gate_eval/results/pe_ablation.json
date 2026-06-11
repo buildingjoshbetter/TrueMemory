@@ -1,0 +1,1012 @@
+{
+  "variant_070": {
+    "variant": "variant_070",
+    "pe_auc": 0.6257,
+    "baselines": {
+      "novelty_only": {
+        "weights": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "auc": 0.7883,
+        "s4_recall": 0.5833,
+        "n_fp_rate": 0.3392
+      },
+      "salience_only": {
+        "weights": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "auc": 0.7329,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.3403
+      },
+      "nov_sal": {
+        "weights": [
+          0.5,
+          0.5,
+          0.0
+        ],
+        "auc": 0.7832,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4311
+      },
+      "nov_sal_paper": {
+        "weights": [
+          0.55,
+          0.45,
+          0.0
+        ],
+        "auc": 0.792,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4447
+      }
+    },
+    "three_signal": {
+      "equal": {
+        "weights": [
+          0.33,
+          0.33,
+          0.33
+        ],
+        "auc": 0.7738,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.6357
+      },
+      "novelty_heavy": {
+        "weights": [
+          0.5,
+          0.25,
+          0.25
+        ],
+        "auc": 0.7879,
+        "s4_recall": 0.8333,
+        "n_fp_rate": 0.6441
+      },
+      "salience_heavy": {
+        "weights": [
+          0.25,
+          0.5,
+          0.25
+        ],
+        "auc": 0.7617,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.6994
+      },
+      "pe_heavy": {
+        "weights": [
+          0.25,
+          0.25,
+          0.5
+        ],
+        "auc": 0.7726,
+        "s4_recall": 0.7083,
+        "n_fp_rate": 0.6242
+      },
+      "paper_default": {
+        "weights": [
+          0.4,
+          0.35,
+          0.25
+        ],
+        "auc": 0.7804,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.6482
+      }
+    },
+    "improvement": -0.0041,
+    "best_baseline_auc": 0.792,
+    "best_three_signal_auc": 0.7879
+  },
+  "variant_033": {
+    "variant": "variant_033",
+    "pe_auc": 0.6086,
+    "baselines": {
+      "novelty_only": {
+        "weights": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "auc": 0.7883,
+        "s4_recall": 0.5833,
+        "n_fp_rate": 0.3392
+      },
+      "salience_only": {
+        "weights": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "auc": 0.7329,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.3403
+      },
+      "nov_sal": {
+        "weights": [
+          0.5,
+          0.5,
+          0.0
+        ],
+        "auc": 0.7832,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4311
+      },
+      "nov_sal_paper": {
+        "weights": [
+          0.55,
+          0.45,
+          0.0
+        ],
+        "auc": 0.792,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4447
+      }
+    },
+    "three_signal": {
+      "equal": {
+        "weights": [
+          0.33,
+          0.33,
+          0.33
+        ],
+        "auc": 0.7891,
+        "s4_recall": 0.5833,
+        "n_fp_rate": 0.0595
+      },
+      "novelty_heavy": {
+        "weights": [
+          0.5,
+          0.25,
+          0.25
+        ],
+        "auc": 0.8126,
+        "s4_recall": 0.5,
+        "n_fp_rate": 0.0929
+      },
+      "salience_heavy": {
+        "weights": [
+          0.25,
+          0.5,
+          0.25
+        ],
+        "auc": 0.7681,
+        "s4_recall": 0.75,
+        "n_fp_rate": 0.2954
+      },
+      "pe_heavy": {
+        "weights": [
+          0.25,
+          0.25,
+          0.5
+        ],
+        "auc": 0.7891,
+        "s4_recall": 0.1667,
+        "n_fp_rate": 0.0344
+      },
+      "paper_default": {
+        "weights": [
+          0.4,
+          0.35,
+          0.25
+        ],
+        "auc": 0.7942,
+        "s4_recall": 0.625,
+        "n_fp_rate": 0.1263
+      }
+    },
+    "improvement": 0.0206,
+    "best_baseline_auc": 0.792,
+    "best_three_signal_auc": 0.8126
+  },
+  "variant_079": {
+    "variant": "variant_079",
+    "pe_auc": 0.5993,
+    "baselines": {
+      "novelty_only": {
+        "weights": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "auc": 0.7883,
+        "s4_recall": 0.5833,
+        "n_fp_rate": 0.3392
+      },
+      "salience_only": {
+        "weights": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "auc": 0.7329,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.3403
+      },
+      "nov_sal": {
+        "weights": [
+          0.5,
+          0.5,
+          0.0
+        ],
+        "auc": 0.7832,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4311
+      },
+      "nov_sal_paper": {
+        "weights": [
+          0.55,
+          0.45,
+          0.0
+        ],
+        "auc": 0.792,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4447
+      }
+    },
+    "three_signal": {
+      "equal": {
+        "weights": [
+          0.33,
+          0.33,
+          0.33
+        ],
+        "auc": 0.7894,
+        "s4_recall": 0.5417,
+        "n_fp_rate": 0.0647
+      },
+      "novelty_heavy": {
+        "weights": [
+          0.5,
+          0.25,
+          0.25
+        ],
+        "auc": 0.8104,
+        "s4_recall": 0.5,
+        "n_fp_rate": 0.1023
+      },
+      "salience_heavy": {
+        "weights": [
+          0.25,
+          0.5,
+          0.25
+        ],
+        "auc": 0.7669,
+        "s4_recall": 0.75,
+        "n_fp_rate": 0.3069
+      },
+      "pe_heavy": {
+        "weights": [
+          0.25,
+          0.25,
+          0.5
+        ],
+        "auc": 0.7858,
+        "s4_recall": 0.0417,
+        "n_fp_rate": 0.0292
+      },
+      "paper_default": {
+        "weights": [
+          0.4,
+          0.35,
+          0.25
+        ],
+        "auc": 0.7946,
+        "s4_recall": 0.625,
+        "n_fp_rate": 0.1441
+      }
+    },
+    "improvement": 0.0184,
+    "best_baseline_auc": 0.792,
+    "best_three_signal_auc": 0.8104
+  },
+  "variant_067": {
+    "variant": "variant_067",
+    "pe_auc": 0.5968,
+    "baselines": {
+      "novelty_only": {
+        "weights": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "auc": 0.7883,
+        "s4_recall": 0.5833,
+        "n_fp_rate": 0.3392
+      },
+      "salience_only": {
+        "weights": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "auc": 0.7329,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.3403
+      },
+      "nov_sal": {
+        "weights": [
+          0.5,
+          0.5,
+          0.0
+        ],
+        "auc": 0.7832,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4311
+      },
+      "nov_sal_paper": {
+        "weights": [
+          0.55,
+          0.45,
+          0.0
+        ],
+        "auc": 0.792,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4447
+      }
+    },
+    "three_signal": {
+      "equal": {
+        "weights": [
+          0.33,
+          0.33,
+          0.33
+        ],
+        "auc": 0.7775,
+        "s4_recall": 0.6667,
+        "n_fp_rate": 0.1566
+      },
+      "novelty_heavy": {
+        "weights": [
+          0.5,
+          0.25,
+          0.25
+        ],
+        "auc": 0.8018,
+        "s4_recall": 0.75,
+        "n_fp_rate": 0.191
+      },
+      "salience_heavy": {
+        "weights": [
+          0.25,
+          0.5,
+          0.25
+        ],
+        "auc": 0.7569,
+        "s4_recall": 0.7917,
+        "n_fp_rate": 0.3267
+      },
+      "pe_heavy": {
+        "weights": [
+          0.25,
+          0.25,
+          0.5
+        ],
+        "auc": 0.7646,
+        "s4_recall": 0.3333,
+        "n_fp_rate": 0.0501
+      },
+      "paper_default": {
+        "weights": [
+          0.4,
+          0.35,
+          0.25
+        ],
+        "auc": 0.7858,
+        "s4_recall": 0.875,
+        "n_fp_rate": 0.2474
+      }
+    },
+    "improvement": 0.0098,
+    "best_baseline_auc": 0.792,
+    "best_three_signal_auc": 0.8018
+  },
+  "variant_100": {
+    "variant": "variant_100",
+    "pe_auc": 0.593,
+    "baselines": {
+      "novelty_only": {
+        "weights": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "auc": 0.7883,
+        "s4_recall": 0.5833,
+        "n_fp_rate": 0.3392
+      },
+      "salience_only": {
+        "weights": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "auc": 0.7329,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.3403
+      },
+      "nov_sal": {
+        "weights": [
+          0.5,
+          0.5,
+          0.0
+        ],
+        "auc": 0.7832,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4311
+      },
+      "nov_sal_paper": {
+        "weights": [
+          0.55,
+          0.45,
+          0.0
+        ],
+        "auc": 0.792,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4447
+      }
+    },
+    "three_signal": {
+      "equal": {
+        "weights": [
+          0.33,
+          0.33,
+          0.33
+        ],
+        "auc": 0.782,
+        "s4_recall": 0.7917,
+        "n_fp_rate": 0.2411
+      },
+      "novelty_heavy": {
+        "weights": [
+          0.5,
+          0.25,
+          0.25
+        ],
+        "auc": 0.8067,
+        "s4_recall": 0.8333,
+        "n_fp_rate": 0.2735
+      },
+      "salience_heavy": {
+        "weights": [
+          0.25,
+          0.5,
+          0.25
+        ],
+        "auc": 0.7659,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.3455
+      },
+      "pe_heavy": {
+        "weights": [
+          0.25,
+          0.25,
+          0.5
+        ],
+        "auc": 0.7557,
+        "s4_recall": 0.625,
+        "n_fp_rate": 0.1691
+      },
+      "paper_default": {
+        "weights": [
+          0.4,
+          0.35,
+          0.25
+        ],
+        "auc": 0.7923,
+        "s4_recall": 0.875,
+        "n_fp_rate": 0.3184
+      }
+    },
+    "improvement": 0.0147,
+    "best_baseline_auc": 0.792,
+    "best_three_signal_auc": 0.8067
+  },
+  "variant_080": {
+    "variant": "variant_080",
+    "pe_auc": 0.5928,
+    "baselines": {
+      "novelty_only": {
+        "weights": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "auc": 0.7883,
+        "s4_recall": 0.5833,
+        "n_fp_rate": 0.3392
+      },
+      "salience_only": {
+        "weights": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "auc": 0.7329,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.3403
+      },
+      "nov_sal": {
+        "weights": [
+          0.5,
+          0.5,
+          0.0
+        ],
+        "auc": 0.7832,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4311
+      },
+      "nov_sal_paper": {
+        "weights": [
+          0.55,
+          0.45,
+          0.0
+        ],
+        "auc": 0.792,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4447
+      }
+    },
+    "three_signal": {
+      "equal": {
+        "weights": [
+          0.33,
+          0.33,
+          0.33
+        ],
+        "auc": 0.7621,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.5188
+      },
+      "novelty_heavy": {
+        "weights": [
+          0.5,
+          0.25,
+          0.25
+        ],
+        "auc": 0.7868,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.5136
+      },
+      "salience_heavy": {
+        "weights": [
+          0.25,
+          0.5,
+          0.25
+        ],
+        "auc": 0.7622,
+        "s4_recall": 1.0,
+        "n_fp_rate": 0.4875
+      },
+      "pe_heavy": {
+        "weights": [
+          0.25,
+          0.25,
+          0.5
+        ],
+        "auc": 0.7261,
+        "s4_recall": 0.875,
+        "n_fp_rate": 0.5992
+      },
+      "paper_default": {
+        "weights": [
+          0.4,
+          0.35,
+          0.25
+        ],
+        "auc": 0.7786,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.5063
+      }
+    },
+    "improvement": -0.0052,
+    "best_baseline_auc": 0.792,
+    "best_three_signal_auc": 0.7868
+  },
+  "variant_020": {
+    "variant": "variant_020",
+    "pe_auc": 0.58,
+    "baselines": {
+      "novelty_only": {
+        "weights": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "auc": 0.7883,
+        "s4_recall": 0.5833,
+        "n_fp_rate": 0.3392
+      },
+      "salience_only": {
+        "weights": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "auc": 0.7329,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.3403
+      },
+      "nov_sal": {
+        "weights": [
+          0.5,
+          0.5,
+          0.0
+        ],
+        "auc": 0.7832,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4311
+      },
+      "nov_sal_paper": {
+        "weights": [
+          0.55,
+          0.45,
+          0.0
+        ],
+        "auc": 0.792,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4447
+      }
+    },
+    "three_signal": {
+      "equal": {
+        "weights": [
+          0.33,
+          0.33,
+          0.33
+        ],
+        "auc": 0.7873,
+        "s4_recall": 0.5417,
+        "n_fp_rate": 0.0543
+      },
+      "novelty_heavy": {
+        "weights": [
+          0.5,
+          0.25,
+          0.25
+        ],
+        "auc": 0.8107,
+        "s4_recall": 0.4583,
+        "n_fp_rate": 0.0866
+      },
+      "salience_heavy": {
+        "weights": [
+          0.25,
+          0.5,
+          0.25
+        ],
+        "auc": 0.7627,
+        "s4_recall": 0.7083,
+        "n_fp_rate": 0.2965
+      },
+      "pe_heavy": {
+        "weights": [
+          0.25,
+          0.25,
+          0.5
+        ],
+        "auc": 0.7846,
+        "s4_recall": 0.125,
+        "n_fp_rate": 0.0146
+      },
+      "paper_default": {
+        "weights": [
+          0.4,
+          0.35,
+          0.25
+        ],
+        "auc": 0.7929,
+        "s4_recall": 0.5833,
+        "n_fp_rate": 0.1284
+      }
+    },
+    "improvement": 0.0187,
+    "best_baseline_auc": 0.792,
+    "best_three_signal_auc": 0.8107
+  },
+  "variant_072": {
+    "variant": "variant_072",
+    "pe_auc": 0.5735,
+    "baselines": {
+      "novelty_only": {
+        "weights": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "auc": 0.7883,
+        "s4_recall": 0.5833,
+        "n_fp_rate": 0.3392
+      },
+      "salience_only": {
+        "weights": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "auc": 0.7329,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.3403
+      },
+      "nov_sal": {
+        "weights": [
+          0.5,
+          0.5,
+          0.0
+        ],
+        "auc": 0.7832,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4311
+      },
+      "nov_sal_paper": {
+        "weights": [
+          0.55,
+          0.45,
+          0.0
+        ],
+        "auc": 0.792,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4447
+      }
+    },
+    "three_signal": {
+      "equal": {
+        "weights": [
+          0.33,
+          0.33,
+          0.33
+        ],
+        "auc": 0.751,
+        "s4_recall": 0.75,
+        "n_fp_rate": 0.2129
+      },
+      "novelty_heavy": {
+        "weights": [
+          0.5,
+          0.25,
+          0.25
+        ],
+        "auc": 0.77,
+        "s4_recall": 0.6667,
+        "n_fp_rate": 0.2296
+      },
+      "salience_heavy": {
+        "weights": [
+          0.25,
+          0.5,
+          0.25
+        ],
+        "auc": 0.7532,
+        "s4_recall": 0.9167,
+        "n_fp_rate": 0.3727
+      },
+      "pe_heavy": {
+        "weights": [
+          0.25,
+          0.25,
+          0.5
+        ],
+        "auc": 0.7289,
+        "s4_recall": 0.25,
+        "n_fp_rate": 0.19
+      },
+      "paper_default": {
+        "weights": [
+          0.4,
+          0.35,
+          0.25
+        ],
+        "auc": 0.765,
+        "s4_recall": 0.8333,
+        "n_fp_rate": 0.2526
+      }
+    },
+    "improvement": -0.022,
+    "best_baseline_auc": 0.792,
+    "best_three_signal_auc": 0.77
+  },
+  "variant_062": {
+    "variant": "variant_062",
+    "pe_auc": 0.5633,
+    "baselines": {
+      "novelty_only": {
+        "weights": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "auc": 0.7883,
+        "s4_recall": 0.5833,
+        "n_fp_rate": 0.3392
+      },
+      "salience_only": {
+        "weights": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "auc": 0.7329,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.3403
+      },
+      "nov_sal": {
+        "weights": [
+          0.5,
+          0.5,
+          0.0
+        ],
+        "auc": 0.7832,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4311
+      },
+      "nov_sal_paper": {
+        "weights": [
+          0.55,
+          0.45,
+          0.0
+        ],
+        "auc": 0.792,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4447
+      }
+    },
+    "three_signal": {
+      "equal": {
+        "weights": [
+          0.33,
+          0.33,
+          0.33
+        ],
+        "auc": 0.7794,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.358
+      },
+      "novelty_heavy": {
+        "weights": [
+          0.5,
+          0.25,
+          0.25
+        ],
+        "auc": 0.8058,
+        "s4_recall": 0.9167,
+        "n_fp_rate": 0.3737
+      },
+      "salience_heavy": {
+        "weights": [
+          0.25,
+          0.5,
+          0.25
+        ],
+        "auc": 0.7596,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.3664
+      },
+      "pe_heavy": {
+        "weights": [
+          0.25,
+          0.25,
+          0.5
+        ],
+        "auc": 0.7633,
+        "s4_recall": 0.875,
+        "n_fp_rate": 0.3048
+      },
+      "paper_default": {
+        "weights": [
+          0.4,
+          0.35,
+          0.25
+        ],
+        "auc": 0.7886,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.3967
+      }
+    },
+    "improvement": 0.0138,
+    "best_baseline_auc": 0.792,
+    "best_three_signal_auc": 0.8058
+  },
+  "variant_004": {
+    "variant": "variant_004",
+    "pe_auc": 0.555,
+    "baselines": {
+      "novelty_only": {
+        "weights": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "auc": 0.7883,
+        "s4_recall": 0.5833,
+        "n_fp_rate": 0.3392
+      },
+      "salience_only": {
+        "weights": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "auc": 0.7329,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.3403
+      },
+      "nov_sal": {
+        "weights": [
+          0.5,
+          0.5,
+          0.0
+        ],
+        "auc": 0.7832,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4311
+      },
+      "nov_sal_paper": {
+        "weights": [
+          0.55,
+          0.45,
+          0.0
+        ],
+        "auc": 0.792,
+        "s4_recall": 0.9583,
+        "n_fp_rate": 0.4447
+      }
+    },
+    "three_signal": {
+      "equal": {
+        "weights": [
+          0.33,
+          0.33,
+          0.33
+        ],
+        "auc": 0.7863,
+        "s4_recall": 0.5417,
+        "n_fp_rate": 0.0449
+      },
+      "novelty_heavy": {
+        "weights": [
+          0.5,
+          0.25,
+          0.25
+        ],
+        "auc": 0.8111,
+        "s4_recall": 0.4583,
+        "n_fp_rate": 0.0783
+      },
+      "salience_heavy": {
+        "weights": [
+          0.25,
+          0.5,
+          0.25
+        ],
+        "auc": 0.7613,
+        "s4_recall": 0.7083,
+        "n_fp_rate": 0.2912
+      },
+      "pe_heavy": {
+        "weights": [
+          0.25,
+          0.25,
+          0.5
+        ],
+        "auc": 0.7871,
+        "s4_recall": 0.0417,
+        "n_fp_rate": 0.0125
+      },
+      "paper_default": {
+        "weights": [
+          0.4,
+          0.35,
+          0.25
+        ],
+        "auc": 0.7915,
+        "s4_recall": 0.5833,
+        "n_fp_rate": 0.1148
+      }
+    },
+    "improvement": 0.0191,
+    "best_baseline_auc": 0.792,
+    "best_three_signal_auc": 0.8111
+  }
+}

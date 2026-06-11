@@ -1,0 +1,72 @@
+{
+  "candidate": "v05_baseline_nogate",
+  "dataset": "long_horizon_synthetic",
+  "timestamp": "2026-04-23T10:08:49.692359+00:00",
+  "db_path": "/Users/j/.cache/memorist_dbs/v05_baseline_nogate__long_horizon_synthetic.db",
+  "ingest": {
+    "total_sessions": 48,
+    "total_messages": 750,
+    "kept": 253,
+    "dropped": 0,
+    "drop_rate_pct": 0.0,
+    "ingest_wall_clock_s": 0.58,
+    "per_message_ms_avg": 0.72
+  },
+  "retrieval": {
+    "total_qs": 91,
+    "recovered": 16,
+    "precision_at_k_pct": 17.58,
+    "precision_at_1_pct": 16.48,
+    "precision_at_3_pct": 17.58,
+    "precision_at_10_pct": 17.58,
+    "k": 10,
+    "by_probe_type": {
+      "baseline": {
+        "recovered": 9,
+        "total": 55,
+        "pct": 16.36
+      },
+      "rehearsal": {
+        "recovered": 0,
+        "total": 10,
+        "pct": 0.0
+      },
+      "emotional": {
+        "recovered": 1,
+        "total": 18,
+        "pct": 5.56
+      },
+      "contradiction": {
+        "recovered": 0,
+        "total": 2,
+        "pct": 0.0
+      },
+      "noise": {
+        "recovered": 6,
+        "total": 6,
+        "pct": 100.0
+      }
+    },
+    "by_time_gap_days": {
+      "3": {
+        "recovered": 9,
+        "total": 67,
+        "pct": 13.43
+      },
+      "14": {
+        "recovered": 1,
+        "total": 18,
+        "pct": 5.56
+      },
+      "5": {
+        "recovered": 6,
+        "total": 6,
+        "pct": 100.0
+      }
+    }
+  },
+  "storage": {
+    "db_size_bytes": 167936,
+    "rows_in_messages": 253
+  }
+}

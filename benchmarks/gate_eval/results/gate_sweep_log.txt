@@ -1,0 +1,85 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+======================================================================
+Gate Weight/Threshold Sweep
+======================================================================
+
+[1/5] Loading benchmark data...
+  Messages: 2000
+  Questions: 200
+  Version: 1.1
+  Signal: 1042, Noise: 958
+
+[2/5] Loading Pro tier models (one-time)...
+Loading weights:   0%|          | 0/138 [00:00<?, ?it/s]Loading weights: 100%|██████████| 138/138 [00:00<00:00, 5966.54it/s]
+  Embedding: Qwen3 256d
+  Reranker: gte-reranker-modernbert-base
+
+[3/5] Running sweep...
+  Total configs: 200
+  Resuming: 1 configs already done
+Loading weights:   0%|          | 0/310 [00:00<?, ?it/s]Loading weights: 100%|██████████| 310/310 [00:00<00:00, 8304.97it/s]
+  [1/200] default @ 0.30: p@10=0.2400 sig_ret=79% ns_drop=72% kept=1096 (209s) ETA=11.5h
+  [2/200] default @ 0.35: p@10=0.2450 sig_ret=57% ns_drop=86% kept=728 (164s) ETA=10.2h
+  [3/200] default @ 0.40: p@10=0.2700 sig_ret=39% ns_drop=93% kept=467 (120s) ETA=9.0h
+  [4/200] default @ 0.45: p@10=0.2400 sig_ret=22% ns_drop=98% kept=255 (98s) ETA=8.0h
+  [5/200] default @ 0.50: p@10=0.1800 sig_ret=13% ns_drop=99% kept=140 (95s) ETA=7.4h
+  [6/200] default @ 0.55: p@10=0.1600 sig_ret=7% ns_drop=100% kept=73 (90s) ETA=7.0h
+  [7/200] default @ 0.60: p@10=0.1250 sig_ret=4% ns_drop=100% kept=38 (88s) ETA=6.6h
+  [8/200] default @ 0.65: p@10=0.0600 sig_ret=1% ns_drop=100% kept=15 (90s) ETA=6.4h
+  [9/200] default @ 0.70: p@10=0.0050 sig_ret=0% ns_drop=100% kept=3 (116s) ETA=6.3h
+  [10/200] default @ 0.75: p@10=0.0100 sig_ret=0% ns_drop=100% kept=2 (150s) ETA=6.4h
+  [11/200] equal @ 0.30: p@10=0.2600 sig_ret=70% ns_drop=79% kept=938 (216s) ETA=6.9h
+  [12/200] equal @ 0.35: p@10=0.2500 sig_ret=50% ns_drop=87% kept=648 (203s) ETA=7.1h
+  [13/200] equal @ 0.40: p@10=0.2750 sig_ret=36% ns_drop=92% kept=452 (190s) ETA=7.3h
+  [14/200] equal @ 0.45: p@10=0.2500 sig_ret=23% ns_drop=97% kept=269 (186s) ETA=7.4h
+  [15/200] equal @ 0.50: p@10=0.1600 sig_ret=13% ns_drop=99% kept=145 (136s) ETA=7.4h
+  [16/200] equal @ 0.55: p@10=0.1550 sig_ret=7% ns_drop=100% kept=73 (127s) ETA=7.3h
+  [17/200] equal @ 0.60: p@10=0.1200 sig_ret=4% ns_drop=100% kept=41 (121s) ETA=7.2h
+  [18/200] equal @ 0.65: p@10=0.0600 sig_ret=2% ns_drop=100% kept=16 (119s) ETA=7.1h
+  [19/200] equal @ 0.70: p@10=0.0100 sig_ret=0% ns_drop=100% kept=3 (138s) ETA=7.0h
+  [20/200] equal @ 0.75: p@10=0.0000 sig_ret=0% ns_drop=100% kept=1 (136s) ETA=7.0h
+  [21/200] novelty_heavy @ 0.30: p@10=0.2200 sig_ret=92% ns_drop=49% kept=1441 (265s) ETA=7.2h
+  [22/200] novelty_heavy @ 0.35: p@10=0.2350 sig_ret=73% ns_drop=77% kept=982 (230s) ETA=7.4h
+  [23/200] novelty_heavy @ 0.40: p@10=0.2650 sig_ret=46% ns_drop=90% kept=570 (174s) ETA=7.4h
+  [24/200] novelty_heavy @ 0.45: p@10=0.1850 sig_ret=25% ns_drop=97% kept=289 (158s) ETA=7.4h
+  [25/200] novelty_heavy @ 0.50: p@10=0.1750 sig_ret=12% ns_drop=99% kept=130 (151s) ETA=7.3h
+  [26/200] novelty_heavy @ 0.55: p@10=0.1600 sig_ret=5% ns_drop=100% kept=57 (151s) ETA=7.3h
+  [27/200] novelty_heavy @ 0.60: p@10=0.0700 sig_ret=2% ns_drop=100% kept=21 (151s) ETA=7.2h
+  [28/200] novelty_heavy @ 0.65: p@10=0.0300 sig_ret=1% ns_drop=100% kept=8 (125s) ETA=7.2h
+  [29/200] novelty_heavy @ 0.70: p@10=0.0050 sig_ret=0% ns_drop=100% kept=2 (106s) ETA=7.0h
+  [30/200] novelty_heavy @ 0.75: p@10=0.0100 sig_ret=0% ns_drop=100% kept=1 (106s) ETA=6.9h
+  [31/200] novelty_dominant @ 0.30: p@10=0.2550 sig_ret=95% ns_drop=37% kept=1602 (187s) ETA=7.0h
+  [32/200] novelty_dominant @ 0.35: p@10=0.2250 sig_ret=81% ns_drop=65% kept=1176 (170s) ETA=7.0h
+  [33/200] novelty_dominant @ 0.40: p@10=0.2400 sig_ret=52% ns_drop=87% kept=670 (149s) ETA=6.9h
+  [34/200] novelty_dominant @ 0.45: p@10=0.2200 sig_ret=28% ns_drop=97% kept=319 (183s) ETA=6.9h
+  [35/200] novelty_dominant @ 0.50: p@10=0.1800 sig_ret=11% ns_drop=99% kept=124 (190s) ETA=6.9h
+  [36/200] novelty_dominant @ 0.55: p@10=0.1450 sig_ret=4% ns_drop=100% kept=46 (181s) ETA=6.9h
+  [37/200] novelty_dominant @ 0.60: p@10=0.0600 sig_ret=1% ns_drop=100% kept=13 (217s) ETA=7.0h
+  [38/200] novelty_dominant @ 0.65: p@10=0.0200 sig_ret=0% ns_drop=100% kept=4 (198s) ETA=7.0h
+  [39/200] novelty_dominant @ 0.70: p@10=0.0000 sig_ret=0% ns_drop=100% kept=2 (175s) ETA=6.9h
+  [40/200] novelty_dominant @ 0.75: p@10=0.0000 sig_ret=0% ns_drop=100% kept=1 (213s) ETA=7.0h
+  [41/200] salience_heavy @ 0.30: p@10=0.2500 sig_ret=70% ns_drop=80% kept=917 (296s) ETA=7.1h
+  [42/200] salience_heavy @ 0.35: p@10=0.2450 sig_ret=50% ns_drop=90% kept=619 (255s) ETA=7.1h
+  [43/200] salience_heavy @ 0.40: p@10=0.2650 sig_ret=36% ns_drop=95% kept=419 (223s) ETA=7.1h
+  [44/200] salience_heavy @ 0.45: p@10=0.2150 sig_ret=20% ns_drop=98% kept=233 (176s) ETA=7.1h
+  [45/200] salience_heavy @ 0.50: p@10=0.1900 sig_ret=13% ns_drop=99% kept=143 (181s) ETA=7.1h
+  [46/200] salience_heavy @ 0.55: p@10=0.1850 sig_ret=9% ns_drop=100% kept=93 (202s) ETA=7.1h
+  [47/200] salience_heavy @ 0.60: p@10=0.1450 sig_ret=5% ns_drop=100% kept=56 (259s) ETA=7.1h
+  [48/200] salience_heavy @ 0.65: p@10=0.1250 sig_ret=4% ns_drop=100% kept=39 (208s) ETA=7.1h
+  [49/200] salience_heavy @ 0.70: p@10=0.0800 sig_ret=2% ns_drop=100% kept=20 (182s) ETA=7.1h
+  [50/200] salience_heavy @ 0.75: p@10=0.0200 sig_ret=0% ns_drop=100% kept=5 (122s) ETA=7.0h
+  [51/200] salience_dominant @ 0.30: p@10=0.2200 sig_ret=68% ns_drop=82% kept=884 (175s) ETA=6.9h
+  [52/200] salience_dominant @ 0.35: p@10=0.2150 sig_ret=49% ns_drop=91% kept=602 (188s) ETA=6.9h
+  [53/200] salience_dominant @ 0.40: p@10=0.2550 sig_ret=35% ns_drop=96% kept=406 (170s) ETA=6.9h
+  [54/200] salience_dominant @ 0.45: p@10=0.2150 sig_ret=21% ns_drop=98% kept=237 (178s) ETA=6.8h
+  [55/200] salience_dominant @ 0.50: p@10=0.1800 sig_ret=13% ns_drop=99% kept=144 (165s) ETA=6.8h
+  [56/200] salience_dominant @ 0.55: p@10=0.1800 sig_ret=9% ns_drop=99% kept=98 (218s) ETA=6.8h
+  [57/200] salience_dominant @ 0.60: p@10=0.1450 sig_ret=6% ns_drop=100% kept=63 (189s) ETA=6.7h
+  [58/200] salience_dominant @ 0.65: p@10=0.1350 sig_ret=4% ns_drop=100% kept=42 (196s) ETA=6.7h
+  [59/200] salience_dominant @ 0.70: p@10=0.0800 sig_ret=2% ns_drop=100% kept=24 (182s) ETA=6.7h
+  [60/200] salience_dominant @ 0.75: p@10=0.0450 sig_ret=1% ns_drop=100% kept=12 (166s) ETA=6.6h
+  [61/200] salience_max @ 0.30: p@10=0.2450 sig_ret=68% ns_drop=83% kept=876 (246s) ETA=6.6h
+  [62/200] salience_max @ 0.35: p@10=0.2300 sig_ret=50% ns_drop=92% kept=600 (232s) ETA=6.6h
+  [63/200] salience_max @ 0.40: p@10=0.2250 sig_ret=34% ns_drop=96% kept=392 (236s) ETA=6.6h
+  [64/200] salience_max @ 0.45: p@10=0.2050 sig_ret=21% ns_drop=98% kept=238 (215s) ETA=6.6h
+  [65/200] salience_max @ 0.50: p@10=0.2000 sig_ret=13% ns_drop=98% kept=153 (131s) ETA=6.5h

@@ -1,0 +1,106 @@
+{
+  "meta": {
+    "candidate": "c5_expanded_keywords",
+    "tier": "edge",
+    "seed": 42,
+    "top_k": 5,
+    "timestamp": "2026-04-23T14:11:16Z",
+    "commit": "9b7af17"
+  },
+  "build_wall_s": 0.004,
+  "profile_bytes_avg": 309.2,
+  "profile_readable": true,
+  "intra_persona_consistency": 0.3646031746031746,
+  "slop_transfer_gap": null,
+  "human_probe_scores": {
+    "skipped": false,
+    "pool_size": 100,
+    "retrieval_wall_s": 0.085,
+    "a_b_accuracy": 0.5428571428571428,
+    "speaker_id_accuracy": 1.0,
+    "leakage_failure_rate": 0.0,
+    "mean_leakage_rate_top_k": 0.0,
+    "counts": {
+      "A_B": 70,
+      "C": 15,
+      "D": 15
+    },
+    "per_query_sample": [
+      {
+        "query_id": "P1_A_001",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_002",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-0"
+      },
+      {
+        "query_id": "P1_A_003",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-2"
+      },
+      {
+        "query_id": "P1_A_004",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-1"
+      },
+      {
+        "query_id": "P1_A_005",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_B_001",
+        "query_type": "B",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_B_002",
+        "query_type": "B",
+        "correct": true,
+        "notes": "matched rank-0"
+      },
+      {
+        "query_id": "P1_C_001",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_C_002",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_D_001",
+        "query_type": "D",
+        "correct": true,
+        "notes": "0/5 leaked"
+      }
+    ]
+  },
+  "synthetic_scores": {
+    "skipped": true,
+    "note": "synthetic pool empty"
+  },
+  "cold_start_curve": {
+    "5": 0.5428571428571428,
+    "20": 0.5428571428571428
+  },
+  "profile_summaries": {
+    "P1": "P1 · mixed · emoji=none · topics=['software_engineering', 'rust_programming', 'bouldering_climbing', 'beer_brewery'] · traits=['family_oriented', 'health_conscious']",
+    "P2": "P2 · casual · emoji=none · topics=['triathlon', 'law_practice', 'software_engineering', 'sleep_routine'] · traits=['casual_breezy', 'health_conscious']",
+    "P3": "P3 · casual · emoji=minimal · topics=['teaching_education', 'japanese_cuisine', 'visual_novel_dev', 'model_railroading'] · traits=['casual_breezy', 'family_oriented']",
+    "P4": "P4 · mixed · emoji=none · topics=['model_railroading', 'software_engineering', 'religion_church', 'family_core'] · traits=['casual_breezy', 'family_oriented']",
+    "P5": "P5 · casual · emoji=minimal · topics=['software_engineering', 'model_railroading', 'yoga_pilates', 'soccer'] · traits=['casual_breezy', 'family_oriented']"
+  }
+}

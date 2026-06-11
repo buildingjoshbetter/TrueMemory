@@ -1,0 +1,315 @@
+{
+  "novelty_only": {
+    "weights": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "auc": 0.7883
+  },
+  "salience_only": {
+    "weights": [
+      0.0,
+      1.0,
+      0.0
+    ],
+    "auc": 0.7329
+  },
+  "nov_sal_paper": {
+    "weights": [
+      0.55,
+      0.45,
+      0.0
+    ],
+    "auc": 0.792
+  },
+  "variant_003": {
+    "paper_default": {
+      "weights": [
+        0.4,
+        0.35,
+        0.25
+      ],
+      "auc": 0.8274
+    },
+    "novelty_heavy": {
+      "weights": [
+        0.5,
+        0.25,
+        0.25
+      ],
+      "auc": 0.8368
+    },
+    "equal": {
+      "weights": [
+        0.33,
+        0.33,
+        0.33
+      ],
+      "auc": 0.8237
+    },
+    "pe_heavy": {
+      "weights": [
+        0.35,
+        0.35,
+        0.3
+      ],
+      "auc": 0.8239
+    }
+  },
+  "variant_044": {
+    "paper_default": {
+      "weights": [
+        0.4,
+        0.35,
+        0.25
+      ],
+      "auc": 0.8094
+    },
+    "novelty_heavy": {
+      "weights": [
+        0.5,
+        0.25,
+        0.25
+      ],
+      "auc": 0.8233
+    },
+    "equal": {
+      "weights": [
+        0.33,
+        0.33,
+        0.33
+      ],
+      "auc": 0.8111
+    },
+    "pe_heavy": {
+      "weights": [
+        0.35,
+        0.35,
+        0.3
+      ],
+      "auc": 0.8084
+    }
+  },
+  "variant_005": {
+    "paper_default": {
+      "weights": [
+        0.4,
+        0.35,
+        0.25
+      ],
+      "auc": 0.7929
+    },
+    "novelty_heavy": {
+      "weights": [
+        0.5,
+        0.25,
+        0.25
+      ],
+      "auc": 0.7961
+    },
+    "equal": {
+      "weights": [
+        0.33,
+        0.33,
+        0.33
+      ],
+      "auc": 0.7824
+    },
+    "pe_heavy": {
+      "weights": [
+        0.35,
+        0.35,
+        0.3
+      ],
+      "auc": 0.7857
+    }
+  },
+  "variant_001": {
+    "paper_default": {
+      "weights": [
+        0.4,
+        0.35,
+        0.25
+      ],
+      "auc": 0.7979
+    },
+    "novelty_heavy": {
+      "weights": [
+        0.5,
+        0.25,
+        0.25
+      ],
+      "auc": 0.7978
+    },
+    "equal": {
+      "weights": [
+        0.33,
+        0.33,
+        0.33
+      ],
+      "auc": 0.7863
+    },
+    "pe_heavy": {
+      "weights": [
+        0.35,
+        0.35,
+        0.3
+      ],
+      "auc": 0.7907
+    }
+  },
+  "variant_010": {
+    "paper_default": {
+      "weights": [
+        0.4,
+        0.35,
+        0.25
+      ],
+      "auc": 0.7993
+    },
+    "novelty_heavy": {
+      "weights": [
+        0.5,
+        0.25,
+        0.25
+      ],
+      "auc": 0.7984
+    },
+    "equal": {
+      "weights": [
+        0.33,
+        0.33,
+        0.33
+      ],
+      "auc": 0.7848
+    },
+    "pe_heavy": {
+      "weights": [
+        0.35,
+        0.35,
+        0.3
+      ],
+      "auc": 0.7912
+    }
+  },
+  "combo_1_mean": {
+    "variants": [
+      "variant_003",
+      "variant_044"
+    ],
+    "method": "mean",
+    "paper_default": {
+      "weights": [
+        0.4,
+        0.35,
+        0.25
+      ],
+      "auc": 0.8265
+    },
+    "novelty_heavy": {
+      "weights": [
+        0.5,
+        0.25,
+        0.25
+      ],
+      "auc": 0.8385
+    },
+    "equal": {
+      "weights": [
+        0.33,
+        0.33,
+        0.33
+      ],
+      "auc": 0.8324
+    },
+    "pe_heavy": {
+      "weights": [
+        0.35,
+        0.35,
+        0.3
+      ],
+      "auc": 0.8288
+    }
+  },
+  "combo_2_mean": {
+    "variants": [
+      "variant_003",
+      "variant_044",
+      "variant_075"
+    ],
+    "method": "mean",
+    "paper_default": {
+      "weights": [
+        0.4,
+        0.35,
+        0.25
+      ],
+      "auc": 0.821
+    },
+    "novelty_heavy": {
+      "weights": [
+        0.5,
+        0.25,
+        0.25
+      ],
+      "auc": 0.8344
+    },
+    "equal": {
+      "weights": [
+        0.33,
+        0.33,
+        0.33
+      ],
+      "auc": 0.8245
+    },
+    "pe_heavy": {
+      "weights": [
+        0.35,
+        0.35,
+        0.3
+      ],
+      "auc": 0.8214
+    }
+  },
+  "combo_3_mean": {
+    "variants": [
+      "variant_003",
+      "variant_044",
+      "variant_070"
+    ],
+    "method": "mean",
+    "paper_default": {
+      "weights": [
+        0.4,
+        0.35,
+        0.25
+      ],
+      "auc": 0.8189
+    },
+    "novelty_heavy": {
+      "weights": [
+        0.5,
+        0.25,
+        0.25
+      ],
+      "auc": 0.8327
+    },
+    "equal": {
+      "weights": [
+        0.33,
+        0.33,
+        0.33
+      ],
+      "auc": 0.8227
+    },
+    "pe_heavy": {
+      "weights": [
+        0.35,
+        0.35,
+        0.3
+      ],
+      "auc": 0.8196
+    }
+  }
+}

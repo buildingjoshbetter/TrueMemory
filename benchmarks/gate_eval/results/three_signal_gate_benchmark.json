@@ -1,0 +1,125 @@
+{
+  "config": {
+    "weights": {
+      "novelty": 0.4,
+      "salience": 0.35,
+      "pe": 0.25
+    },
+    "threshold": 0.3,
+    "novelty_scorer": "compression_v025",
+    "salience_scorer": "encoding_salience_d",
+    "pe_scorer": "v044_embedding_diff"
+  },
+  "overall": {
+    "auc": 0.7957,
+    "signal_encode_rate": 0.6611,
+    "noise_fp_rate": 0.2537,
+    "s4_recall": 0.8333
+  },
+  "per_category": {
+    "B1": {
+      "count": 152,
+      "avg_gate_score": 0.2857,
+      "avg_novelty": 0.3306,
+      "avg_salience": 0.35,
+      "avg_pe": 0.124,
+      "encode_rate": 0.4013
+    },
+    "B2": {
+      "count": 154,
+      "avg_gate_score": 0.3066,
+      "avg_novelty": 0.3632,
+      "avg_salience": 0.3627,
+      "avg_pe": 0.1375,
+      "encode_rate": 0.5519
+    },
+    "B3": {
+      "count": 81,
+      "avg_gate_score": 0.2873,
+      "avg_novelty": 0.3397,
+      "avg_salience": 0.35,
+      "avg_pe": 0.1155,
+      "encode_rate": 0.5185
+    },
+    "N1": {
+      "count": 500,
+      "avg_gate_score": 0.2273,
+      "avg_novelty": 0.2671,
+      "avg_salience": 0.2846,
+      "avg_pe": 0.0832,
+      "encode_rate": 0.228
+    },
+    "N2": {
+      "count": 115,
+      "avg_gate_score": 0.271,
+      "avg_novelty": 0.3601,
+      "avg_salience": 0.296,
+      "avg_pe": 0.0934,
+      "encode_rate": 0.3652
+    },
+    "N3": {
+      "count": 169,
+      "avg_gate_score": 0.2162,
+      "avg_novelty": 0.2426,
+      "avg_salience": 0.2822,
+      "avg_pe": 0.0813,
+      "encode_rate": 0.1834
+    },
+    "N4": {
+      "count": 114,
+      "avg_gate_score": 0.2639,
+      "avg_novelty": 0.3041,
+      "avg_salience": 0.3287,
+      "avg_pe": 0.1089,
+      "encode_rate": 0.307
+    },
+    "N5": {
+      "count": 60,
+      "avg_gate_score": 0.2482,
+      "avg_novelty": 0.2653,
+      "avg_salience": 0.3504,
+      "avg_pe": 0.0778,
+      "encode_rate": 0.35
+    },
+    "S1": {
+      "count": 377,
+      "avg_gate_score": 0.3553,
+      "avg_novelty": 0.3931,
+      "avg_salience": 0.4553,
+      "avg_pe": 0.1546,
+      "encode_rate": 0.7639
+    },
+    "S2": {
+      "count": 77,
+      "avg_gate_score": 0.3084,
+      "avg_novelty": 0.3555,
+      "avg_salience": 0.3794,
+      "avg_pe": 0.1337,
+      "encode_rate": 0.5065
+    },
+    "S3": {
+      "count": 58,
+      "avg_gate_score": 0.2787,
+      "avg_novelty": 0.3219,
+      "avg_salience": 0.3421,
+      "avg_pe": 0.1208,
+      "encode_rate": 0.4138
+    },
+    "S4": {
+      "count": 24,
+      "avg_gate_score": 0.3471,
+      "avg_novelty": 0.3181,
+      "avg_salience": 0.5502,
+      "avg_pe": 0.1093,
+      "encode_rate": 0.8333
+    },
+    "S5": {
+      "count": 119,
+      "avg_gate_score": 0.2996,
+      "avg_novelty": 0.3285,
+      "avg_salience": 0.3968,
+      "avg_pe": 0.1172,
+      "encode_rate": 0.521
+    }
+  }
+}

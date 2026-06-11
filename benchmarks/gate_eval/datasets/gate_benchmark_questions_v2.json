@@ -1,0 +1,2579 @@
+[
+  {
+    "id": "q_conv1_001",
+    "question": "Where does Alex work now?",
+    "conversation_id": "conv1",
+    "gold_answer": "Alex works at Anthropic as a Senior ML Infrastructure Engineer. They left Stripe after a reorg and a frustrating new manager, and started at Anthropic on January 6th, 2026.",
+    "evidence_messages": [
+      "conv1_s06_010"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv1_002",
+    "question": "How much is Alex making at the new gig?",
+    "conversation_id": "conv1",
+    "gold_answer": "Alex's base salary at Anthropic is $245k. With RSUs over 4 years, total comp is about $380k all in \u2014 almost a 40% raise from Stripe.",
+    "evidence_messages": [
+      "conv1_s06_011"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv1_003",
+    "question": "How much is Jordan paying for rent?",
+    "conversation_id": "conv1",
+    "gold_answer": "Jordan is paying $2,400 a month for a 1-bedroom apartment in the Inner Richmond.",
+    "evidence_messages": [
+      "conv1_s04_032"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv1_004",
+    "question": "Who's Alex seeing? What's her name and what does she do?",
+    "conversation_id": "conv1",
+    "gold_answer": "Alex is dating Priya. She's a product designer at Figma.",
+    "evidence_messages": [
+      "conv1_s04_005"
+    ],
+    "difficulty": "easy",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv1_005",
+    "question": "Who's Alex's manager at Anthropic?",
+    "conversation_id": "conv1",
+    "gold_answer": "Alex's manager is a woman named Ava who came from DeepMind.",
+    "evidence_messages": [
+      "conv1_s07_008"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv1_006",
+    "question": "What's Alex working on at the new job?",
+    "conversation_id": "conv1",
+    "gold_answer": "Alex is building Anthropic's model evaluation infrastructure \u2014 benchmarks and monitoring systems.",
+    "evidence_messages": [
+      "conv1_s07_013"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv1_007",
+    "question": "When did Alex start at Anthropic?",
+    "conversation_id": "conv1",
+    "gold_answer": "Alex's start date at Anthropic was January 6th, 2026.",
+    "evidence_messages": [
+      "conv1_s06_017"
+    ],
+    "difficulty": "easy",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv1_008",
+    "question": "When was Jordan's housewarming?",
+    "conversation_id": "conv1",
+    "gold_answer": "Jordan's housewarming party was Saturday, January 25th.",
+    "evidence_messages": [
+      "conv1_s08_005"
+    ],
+    "difficulty": "easy",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv1_009",
+    "question": "What kind of music is Priya into?",
+    "conversation_id": "conv1",
+    "gold_answer": "Priya is really into indie music \u2014 Japanese Breakfast, Mitski, that kind of stuff.",
+    "evidence_messages": [
+      "conv1_s04_020"
+    ],
+    "difficulty": "easy",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv1_010",
+    "question": "What does Alex think of the culture at Anthropic?",
+    "conversation_id": "conv1",
+    "gold_answer": "Alex thinks it's amazing \u2014 said it's so different from Stripe. Everyone is genuinely nice, which Alex found almost surprising for a tech company.",
+    "evidence_messages": [
+      "conv1_s07_004"
+    ],
+    "difficulty": "easy",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv1_011",
+    "question": "Where exactly is Jordan's apartment?",
+    "conversation_id": "conv1",
+    "gold_answer": "Jordan has a 1-bedroom on Balboa Street, between 6th and 7th Avenue, in the Inner Richmond neighborhood of San Francisco.",
+    "evidence_messages": [
+      "conv1_s04_030"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv1_012",
+    "question": "Was Alex nervous about the Anthropic interview?",
+    "conversation_id": "conv1",
+    "gold_answer": "Definitely \u2014 Alex said they were kind of freaking out about it honestly.",
+    "evidence_messages": [
+      "conv1_s05_008"
+    ],
+    "difficulty": "easy",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv1_013",
+    "question": "Is Jordan thinking about switching to product management?",
+    "conversation_id": "conv1",
+    "gold_answer": "Yeah, Jordan's been thinking about PM. They feel like they're always the person on the team thinking about the user and the 'why' behind building things, not just the 'how.'",
+    "evidence_messages": [
+      "conv1_s10_012"
+    ],
+    "difficulty": "easy",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv1_014",
+    "question": "Did Alex get the Anthropic offer?",
+    "conversation_id": "conv1",
+    "gold_answer": "Yes! Alex got the offer and was over the moon about it \u2014 said they were literally shaking.",
+    "evidence_messages": [
+      "conv1_s06_002"
+    ],
+    "difficulty": "easy",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv1_015",
+    "question": "What was the Anthropic interview like?",
+    "conversation_id": "conv1",
+    "gold_answer": "It was a full-day thing with five rounds: system design, two coding rounds, behavioral, and then a team lunch with the hiring manager.",
+    "evidence_messages": [
+      "conv1_s05_016"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv1_016",
+    "question": "How big is Alex's team at Anthropic?",
+    "conversation_id": "conv1",
+    "gold_answer": "Alex's team is 8 people \u2014 really tight-knit.",
+    "evidence_messages": [
+      "conv1_s07_007"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv1_017",
+    "question": "How did Alex's whole job search play out?",
+    "conversation_id": "conv1",
+    "gold_answer": "Alex started thinking about leaving Stripe in early November after the culture went downhill and their new manager Derek was unbearable. They spotted a role at Anthropic, updated LinkedIn, and scheduled an interview. The full-day interview was late November, and by early December they had an offer for Senior ML Infrastructure Engineer at $245k base. Alex gave notice at Stripe and started at Anthropic on January 6th.",
+    "evidence_messages": [
+      "conv1_s02_015",
+      "conv1_s02_022",
+      "conv1_s05_003",
+      "conv1_s06_002"
+    ],
+    "difficulty": "medium",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv1_018",
+    "question": "What happened with the broken heater in Jordan's apartment?",
+    "conversation_id": "conv1",
+    "gold_answer": "The heater was broken from the day Jordan moved in. They emailed the landlord three times with no response \u2014 the building is from the 1920s so everything is ancient. Jordan was about to file a complaint with the city, but the landlord finally sent someone to fix it right around early January.",
+    "evidence_messages": [
+      "conv1_s05_027",
+      "conv1_s05_029",
+      "conv1_s07_025"
+    ],
+    "difficulty": "medium",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv1_019",
+    "question": "What kind of neighborhood was Jordan looking for in SF?",
+    "conversation_id": "conv1",
+    "gold_answer": "Jordan initially targeted Hayes Valley and the Mission but found them too expensive \u2014 a decent 1br in Hayes Valley starts at 3k. Alex suggested the Richmond is underrated. Jordan ended up in the Inner Richmond at $2,400/month and loves it \u2014 great restaurants on Clement Street, and the neighborhood has character. Budget (under $2,800) and natural light were key criteria.",
+    "evidence_messages": [
+      "conv1_s02_030",
+      "conv1_s02_033",
+      "conv1_s02_035"
+    ],
+    "difficulty": "medium",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv1_020",
+    "question": "Why was Alex so fed up at Stripe?",
+    "conversation_id": "conv1",
+    "gold_answer": "Multiple things piled up. Alex's team got completely split in a reorg and they were moved to payments core. Their new manager Derek was a PM from McKinsey with zero engineering background who threw around corporate buzzwords. Derek called an all-hands to say the team was underperforming. Half of Alex's old team had already left. Alex felt like Stripe's culture had gotten so corporate it wasn't the same company they joined in 2022.",
+    "evidence_messages": [
+      "conv1_s02_005",
+      "conv1_s02_006",
+      "conv1_s02_012",
+      "conv1_s03_005"
+    ],
+    "difficulty": "medium",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv1_021",
+    "question": "What does Alex want to do long-term career-wise?",
+    "conversation_id": "conv1",
+    "gold_answer": "Alex wants to move into a leadership role \u2014 tech lead or team lead, where they get to shape the direction of what the team builds, not just individual contributor work. Long term, they're really drawn to AI safety and want to work on stuff that actually matters. Ava mentioned there might be a tech lead opportunity on Alex's team in about 6 months.",
+    "evidence_messages": [
+      "conv1_s10_028",
+      "conv1_s10_031",
+      "conv1_s10_036"
+    ],
+    "difficulty": "medium",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv1_022",
+    "question": "How's things going between Alex and Priya?",
+    "conversation_id": "conv1",
+    "gold_answer": "Really well. Alex said early on they hadn't clicked with someone like that in so long. By January, Priya had met Alex's parents \u2014 Alex's mom loved her, they bonded over cooking. Coming up on 3 months and Alex says it still feels brand new. Priya was a hit at Jordan's housewarming too.",
+    "evidence_messages": [
+      "conv1_s04_013",
+      "conv1_s09_007",
+      "conv1_s12_012"
+    ],
+    "difficulty": "medium",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv1_023",
+    "question": "If I wanted to plan a group trip with Alex and friends, what kind of trip would they be into?",
+    "conversation_id": "conv1",
+    "gold_answer": "Based on the Tahoe cabin trip Alex and Priya organized: they love group trips in nature with close friends. Alex found an Airbnb in Truckee that sleeps 8 for about $400/night split. They invited Jordan, Mike, Priya, and Anil \u2014 small group, cabin vibe. I'd suggest a mountain or lakeside rental with room for 5-6 people, somewhere within a few hours of the Bay Area, with good food options nearby.",
+    "evidence_messages": [
+      "conv1_s11_016",
+      "conv1_s11_018",
+      "conv1_s12_029"
+    ],
+    "difficulty": "medium",
+    "category": "recommendation"
+  },
+  {
+    "id": "q_conv1_024",
+    "question": "How's Jordan's PM application going?",
+    "conversation_id": "conv1",
+    "gold_answer": "Jordan applied for an associate PM role at Google on the Cloud team. They submitted the application and then got an email back saying Google wants to do a phone screen \u2014 it was scheduled for the following Wednesday. Jordan's cautiously optimistic but trying not to get too ahead of themselves.",
+    "evidence_messages": [
+      "conv1_s10_018",
+      "conv1_s11_023",
+      "conv1_s12_017"
+    ],
+    "difficulty": "medium",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv1_025",
+    "question": "How long have Alex and Priya been dating?",
+    "conversation_id": "conv1",
+    "gold_answer": "They started seeing each other in mid-November 2025. By early December they'd been hanging out every weekend for about six weeks. By mid-January, Alex said it was almost 3 months, and by early February it still felt brand new.",
+    "evidence_messages": [
+      "conv1_s04_022",
+      "conv1_s06_030",
+      "conv1_s09_013"
+    ],
+    "difficulty": "medium",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv1_026",
+    "question": "How'd it go when Priya met Alex's parents?",
+    "conversation_id": "conv1",
+    "gold_answer": "It went great. Alex's mom loved Priya \u2014 they bonded over cooking stuff. Alex said the parents could tell they were genuinely happy. It was a significant relationship milestone.",
+    "evidence_messages": [
+      "conv1_s09_003",
+      "conv1_s09_007",
+      "conv1_s09_011"
+    ],
+    "difficulty": "medium",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv1_027",
+    "question": "Is Jordan enjoying the new apartment and neighborhood?",
+    "conversation_id": "conv1",
+    "gold_answer": "Yeah, Jordan loves it now. They said the neighborhood is great with tons of good restaurants on Clement Street. After the heater got fixed, the place is really nice \u2014 Jordan said they're really settling in.",
+    "evidence_messages": [
+      "conv1_s05_026",
+      "conv1_s07_027"
+    ],
+    "difficulty": "medium",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv1_028",
+    "question": "How did Jordan's life change after moving into the new apartment?",
+    "conversation_id": "conv1",
+    "gold_answer": "Major upgrade. Jordan went from desperately searching since September to landing a great corner unit in the Inner Richmond for $2,400/month. After the heater got fixed, Jordan was really settling in and loving the Clement Street restaurants. They hosted a housewarming party for 15-20 people with a taco bar and fire pit. But the bigger shift is social: the party brought friends together (college crew, coworker Anil), and Jordan started feeling more rooted. The apartment hunt stress gave way to career reflection \u2014 feeling safe enough at home to question whether they want to stay at Dropbox or pursue PM.",
+    "evidence_messages": [
+      "conv1_s08_008",
+      "conv1_s08_011",
+      "conv1_s08_017",
+      "conv1_s08_020"
+    ],
+    "difficulty": "medium",
+    "category": "comparison"
+  },
+  {
+    "id": "q_conv1_029",
+    "question": "Did Alex bring Priya to Jordan's housewarming? How'd that go?",
+    "conversation_id": "conv1",
+    "gold_answer": "Yes, Alex asked to bring Priya and she was excited about it. Jordan said they really liked Priya afterward and called them 'adorable together.' The party was a great success.",
+    "evidence_messages": [
+      "conv1_s08_023",
+      "conv1_s11_003",
+      "conv1_s11_004"
+    ],
+    "difficulty": "medium",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv1_030",
+    "question": "What was the timeline from Alex deciding to leave Stripe to their first day at Anthropic?",
+    "conversation_id": "conv1",
+    "gold_answer": "Early November 2025: Alex started seriously thinking about leaving after the reorg. Late November: interviewed at Anthropic (full day, five rounds). December 2nd: got the offer. Next week: gave notice at Stripe, telling Derek on Monday. January 6th, 2026: first day at Anthropic. So about 2 months from decision to first day.",
+    "evidence_messages": [
+      "conv1_s02_015",
+      "conv1_s05_003",
+      "conv1_s06_002",
+      "conv1_s06_017"
+    ],
+    "difficulty": "medium",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv1_031",
+    "question": "Has Priya had any career news recently?",
+    "conversation_id": "conv1",
+    "gold_answer": "Yeah! Priya got promoted at Figma \u2014 she's now a Senior Product Designer. The promotion happened around late January/early February 2026.",
+    "evidence_messages": [
+      "conv1_s04_005",
+      "conv1_s12_014"
+    ],
+    "difficulty": "medium",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv1_032",
+    "question": "Is Alex happy at Anthropic compared to Stripe?",
+    "conversation_id": "conv1",
+    "gold_answer": "Night and day. Alex said they really are happy \u2014 like genuinely excited about work for the first time in a long time. It's the opposite of Stripe where the culture had gone corporate. At Anthropic, the mission resonates with what Alex cares about, the team is great, and Ava is a supportive manager.",
+    "evidence_messages": [
+      "conv1_s07_015",
+      "conv1_s10_023",
+      "conv1_s10_038"
+    ],
+    "difficulty": "medium",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv1_033",
+    "question": "Between Alex and Jordan, who seems more settled in life right now?",
+    "conversation_id": "conv1",
+    "gold_answer": "Alex, pretty clearly. They landed a dream job at Anthropic with a huge pay bump ($245k base, $380k total), have a great relationship with Priya that's going strong (3 months, met parents), love their team and manager Ava, and are genuinely excited about work. Jordan, by contrast, is still figuring things out \u2014 3 years at Dropbox feeling uninspired, exploring a PM career switch, just starting the Google application process. Jordan's apartment is settled though, and they're in a good neighborhood. Alex has arrived; Jordan is still en route.",
+    "evidence_messages": [
+      "conv1_s06_010",
+      "conv1_s06_011",
+      "conv1_s09_011",
+      "conv1_s10_005",
+      "conv1_s10_007",
+      "conv1_s10_023"
+    ],
+    "difficulty": "hard",
+    "category": "comparison"
+  },
+  {
+    "id": "q_conv1_034",
+    "question": "How has Alex's outlook on life changed from November through February?",
+    "conversation_id": "conv1",
+    "gold_answer": "Massive shift. In early November, Alex was bitter and burned out \u2014 the Stripe culture had gone corporate, Derek was unbearable, they were 'so done.' By mid-November, meeting Priya brought a spark of personal happiness. Getting the Anthropic offer in December was a turning point \u2014 Alex was literally shaking with joy. By January they were thriving at work (great team, meaningful project, supportive manager) and in love. By February, Alex was talking about long-term career goals in AI safety and a potential tech lead role. The whole trajectory is someone going from stuck and miserable to aligned and optimistic in under 3 months.",
+    "evidence_messages": [
+      "conv1_s02_012",
+      "conv1_s03_010",
+      "conv1_s04_013",
+      "conv1_s06_026",
+      "conv1_s07_015",
+      "conv1_s10_023",
+      "conv1_s10_038"
+    ],
+    "difficulty": "hard",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv1_035",
+    "question": "What would be a good birthday gift for Alex?",
+    "conversation_id": "conv1",
+    "gold_answer": "Based on everything I know: Alex is a foodie who loves ramen and good SF restaurants, they've been getting into rock climbing with Priya at Dogpatch Boulders, Priya got them into indie music (Japanese Breakfast, Mitski), and they care deeply about AI safety work. A concert ticket to Japanese Breakfast, a nice climbing gear set, or a fancy ramen-making kit would all be solid. If you want something meaningful, a book on AI safety or a donation to an AI alignment org in their name would resonate \u2014 they said they want to 'work on stuff that actually matters.'",
+    "evidence_messages": [
+      "conv1_s01_018",
+      "conv1_s04_017",
+      "conv1_s04_020",
+      "conv1_s10_036"
+    ],
+    "difficulty": "hard",
+    "category": "recommendation"
+  },
+  {
+    "id": "q_conv1_036",
+    "question": "Walk me through all the big things that happened in Alex's life from November through February.",
+    "conversation_id": "conv1",
+    "gold_answer": "November: team reorg at Stripe, new manager Derek from McKinsey, Alex started job hunting. Met Priya (product designer at Figma) mid-month, started dating. Applied to Anthropic. Late November: full-day interview. December 2nd: got the offer \u2014 $245k base, $380k total comp. Gave notice at Stripe. December: deepening relationship with Priya. January 6th: first day at Anthropic, team of 8, manager Ava (ex-DeepMind), working on model eval infra. Mid-January: Priya met Alex's parents, they bonded. January 25th: went to Jordan's housewarming. Planned Tahoe cabin trip. February: relationship at 3 months, Priya promoted to Senior Product Designer at Figma, Alex eyeing tech lead opportunity in 6 months, interested in AI safety long-term.",
+    "evidence_messages": [
+      "conv1_s02_005",
+      "conv1_s04_005",
+      "conv1_s05_003",
+      "conv1_s06_002",
+      "conv1_s06_017",
+      "conv1_s07_008",
+      "conv1_s09_003",
+      "conv1_s10_031",
+      "conv1_s12_014"
+    ],
+    "difficulty": "hard",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv1_037",
+    "question": "If Alex and Priya wanted a special date night, what would you suggest for them?",
+    "conversation_id": "conv1",
+    "gold_answer": "They've done wine bars (Wildhawk in Noe Valley) and sushi (Sushi Sato in Japantown) already. Given their shared interests: rock climbing at Dogpatch Boulders followed by ramen at one of SF's top spots (Alex thinks the city has the best ramen). Or catch a Japanese Breakfast or Mitski show since Priya loves indie music. For something different, a cooking class together \u2014 they both seem food-oriented. Alex's Anthropic office has a rooftop deck near Embarcadero which could be fun for sunset drinks nearby.",
+    "evidence_messages": [
+      "conv1_s01_018",
+      "conv1_s04_008",
+      "conv1_s04_014",
+      "conv1_s04_023",
+      "conv1_s06_023"
+    ],
+    "difficulty": "hard",
+    "category": "recommendation"
+  },
+  {
+    "id": "q_conv1_038",
+    "question": "Who's going through a bigger career transition right now \u2014 Alex or Jordan?",
+    "conversation_id": "conv1",
+    "gold_answer": "Alex already completed their transition \u2014 left Stripe, landed at Anthropic with a 40% raise, and is thriving with meaningful work in AI. It was dramatic but is now resolved successfully. Jordan's transition is still unfolding and potentially bigger in scope: they're considering leaving engineering entirely for product management, which would mean starting over. They've applied to one Google PM role and just got a phone screen, but they're still at Dropbox feeling uncertain. Alex's was bigger in magnitude and outcome; Jordan's has more risk and uncertainty ahead.",
+    "evidence_messages": [
+      "conv1_s02_015",
+      "conv1_s06_010",
+      "conv1_s06_014",
+      "conv1_s10_012",
+      "conv1_s10_018",
+      "conv1_s12_017"
+    ],
+    "difficulty": "hard",
+    "category": "comparison"
+  },
+  {
+    "id": "q_conv1_039",
+    "question": "What big decisions did Alex and Jordan each make over the past few months?",
+    "conversation_id": "conv1",
+    "gold_answer": "Alex: decided to leave Stripe despite job security, interviewed at and accepted Anthropic's offer, gave notice (telling Derek on a Monday), got serious with Priya (meeting parents, planning group trips). Jordan: chose the $2,400/month Inner Richmond apartment over more expensive neighborhoods, decided to pursue product management as a career pivot, applied for a Google Cloud APM role, hosted the housewarming to mark the new chapter. Both are making big life moves, but Alex's have been more definitive while Jordan's are more exploratory.",
+    "evidence_messages": [
+      "conv1_s02_015",
+      "conv1_s04_028",
+      "conv1_s06_018",
+      "conv1_s08_023",
+      "conv1_s10_018",
+      "conv1_s11_010"
+    ],
+    "difficulty": "hard",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv1_040",
+    "question": "How would you describe the dynamic of Alex and Jordan's friendship?",
+    "conversation_id": "conv1",
+    "gold_answer": "They're close, supportive friends who've known each other a long time and share everything openly. Alex is more of the direct advice-giver \u2014 encouraging Jordan to go for PM ('life's too short to feel meh about your work'), recommending the Richmond neighborhood. Jordan provides more behind-the-scenes support \u2014 connecting Alex with Lisa for interview tips at Anthropic, being genuinely excited about Priya. They celebrate each other's wins (Alex at the housewarming, Jordan's phone screen). The dynamic shifted as Alex became the one thriving while Jordan is still figuring things out, but there's no jealousy \u2014 Jordan openly says Alex's Anthropic stuff seems exciting in a way Dropbox isn't.",
+    "evidence_messages": [
+      "conv1_s02_035",
+      "conv1_s05_012",
+      "conv1_s10_007",
+      "conv1_s10_024",
+      "conv1_s11_004"
+    ],
+    "difficulty": "hard",
+    "category": "comparison"
+  },
+  {
+    "id": "q_conv2_001",
+    "question": "How many classes is Sam taking this semester?",
+    "conversation_id": "conv2",
+    "gold_answer": "Sam is taking 5 classes this semester \u2014 intro to psych, calc 2, English comp, bio, and a film studies elective.",
+    "evidence_messages": [
+      "conv2_s01_011"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv2_002",
+    "question": "Where is Sam applying for grad school?",
+    "conversation_id": "conv2",
+    "gold_answer": "Sam is applying to clinical psych programs at Berkeley, UCLA, and UCSF.",
+    "evidence_messages": [
+      "conv2_s01_034"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv2_003",
+    "question": "What did Maria's doctor find?",
+    "conversation_id": "conv2",
+    "gold_answer": "Maria's glucose levels were high in routine bloodwork. The doctor said she might have prediabetes.",
+    "evidence_messages": [
+      "conv2_s02_007"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv2_004",
+    "question": "How much did Sam's beginner pottery class cost?",
+    "conversation_id": "conv2",
+    "gold_answer": "$180 for the 6-week beginner series, which includes all materials and kiln time.",
+    "evidence_messages": [
+      "conv2_s04_018"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv2_005",
+    "question": "What's Sam's research proposal about?",
+    "conversation_id": "conv2",
+    "gold_answer": "Sam's research proposal is about adolescent PTSD interventions specifically \u2014 Professor Chen helped them narrow it down from the broader topic of adolescent trauma interventions.",
+    "evidence_messages": [
+      "conv2_s06_009"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv2_006",
+    "question": "What's Sam's favorite class this semester?",
+    "conversation_id": "conv2",
+    "gold_answer": "Psychology is Sam's favorite \u2014 they said the professor is incredible.",
+    "evidence_messages": [
+      "conv2_s01_015"
+    ],
+    "difficulty": "easy",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv2_007",
+    "question": "When is the Berkeley application due?",
+    "conversation_id": "conv2",
+    "gold_answer": "Berkeley's application was due December 15th.",
+    "evidence_messages": [
+      "conv2_s05_005"
+    ],
+    "difficulty": "easy",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv2_008",
+    "question": "When is Abuela's birthday party?",
+    "conversation_id": "conv2",
+    "gold_answer": "Abuela's 80th birthday party is Saturday, March 15th.",
+    "evidence_messages": [
+      "conv2_s03_038"
+    ],
+    "difficulty": "easy",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv2_009",
+    "question": "Did Sam submit the Berkeley app on time?",
+    "conversation_id": "conv2",
+    "gold_answer": "Yes! Sam submitted the Berkeley application on December 15th, right on the deadline.",
+    "evidence_messages": [
+      "conv2_s06_004"
+    ],
+    "difficulty": "easy",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv2_010",
+    "question": "How was Sam feeling during application season?",
+    "conversation_id": "conv2",
+    "gold_answer": "Really stressed \u2014 Sam was freaking out about the Berkeley deadline while simultaneously dealing with finals and a bio paper due that Friday.",
+    "evidence_messages": [
+      "conv2_s05_001"
+    ],
+    "difficulty": "easy",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv2_011",
+    "question": "What did Sam make Maria for Christmas?",
+    "conversation_id": "conv2",
+    "gold_answer": "Sam made Maria a handmade bowl and a little planter from their pottery class.",
+    "evidence_messages": [
+      "conv2_s06_021"
+    ],
+    "difficulty": "easy",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv2_012",
+    "question": "How much did Sam make at the farmers market?",
+    "conversation_id": "conv2",
+    "gold_answer": "Sam and Jake sold 6 mugs and 3 bowls and made about $180 total on their first weekend.",
+    "evidence_messages": [
+      "conv2_s09_041"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv2_013",
+    "question": "What's Maria doing with Sam's pottery gifts?",
+    "conversation_id": "conv2",
+    "gold_answer": "Maria uses the bowl every morning for her oatmeal and she loves it.",
+    "evidence_messages": [
+      "conv2_s07_005"
+    ],
+    "difficulty": "easy",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv2_014",
+    "question": "Is Sam going home for Thanksgiving?",
+    "conversation_id": "conv2",
+    "gold_answer": "Yes, Sam is taking the train home Wednesday night.",
+    "evidence_messages": [
+      "conv2_s01_023"
+    ],
+    "difficulty": "easy",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv2_015",
+    "question": "When do the grad school decisions come out?",
+    "conversation_id": "conv2",
+    "gold_answer": "Berkeley decisions come out in March.",
+    "evidence_messages": [
+      "conv2_s06_013"
+    ],
+    "difficulty": "easy",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv2_016",
+    "question": "What's Sam's top choice for grad school?",
+    "conversation_id": "conv2",
+    "gold_answer": "Berkeley is Sam's top choice by far \u2014 the clinical psych program is ranked top 5 nationally.",
+    "evidence_messages": [
+      "conv2_s07_025"
+    ],
+    "difficulty": "easy",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv2_017",
+    "question": "What's the full story with Maria's health \u2014 how'd it turn out?",
+    "conversation_id": "conv2",
+    "gold_answer": "Maria's doctor found high glucose in routine bloodwork in November. Follow-up tests confirmed prediabetes. She was put on a meal plan, needed to cut sugar and refined carbs, and started walking 30 minutes daily with Sam's dad. By December, her blood sugar was trending down on the glucose monitor. By January, great news \u2014 glucose levels dropped significantly and the doctor said no medication is needed. The lifestyle changes worked.",
+    "evidence_messages": [
+      "conv2_s02_007",
+      "conv2_s03_020",
+      "conv2_s05_020",
+      "conv2_s08_035"
+    ],
+    "difficulty": "medium",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv2_018",
+    "question": "What's the timeline on Sam's grad school applications?",
+    "conversation_id": "conv2",
+    "gold_answer": "Berkeley was due December 15th (submitted on time). UCLA was due January 5th. UCSF was due January 15th. All three were submitted by mid-January. UCLA decisions come late February, Berkeley in March, and UCSF in mid-March. Sam ended up getting into UCLA with full funding at the end of February.",
+    "evidence_messages": [
+      "conv2_s05_005",
+      "conv2_s06_016",
+      "conv2_s08_001"
+    ],
+    "difficulty": "medium",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv2_019",
+    "question": "How did Maria react to Sam's pottery gifts?",
+    "conversation_id": "conv2",
+    "gold_answer": "Maria was incredibly touched \u2014 she said 'Oh my heart. I can't wait' when Sam told her. She uses the bowl every morning for oatmeal and put the planter on the kitchen windowsill with a basil plant. Aunt Rosa even wants to commission Sam for serving bowls.",
+    "evidence_messages": [
+      "conv2_s06_022",
+      "conv2_s07_005",
+      "conv2_s07_009"
+    ],
+    "difficulty": "medium",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv2_020",
+    "question": "How did Sam's pottery go from a random class to a real thing?",
+    "conversation_id": "conv2",
+    "gold_answer": "Sam's friend Jake took them to a pottery class on a whim, and Sam immediately loved it. They signed up for the 6-week beginner series ($180), the instructor said they had a natural feel for the wheel, and Sam was making functional mugs by week 5. After finishing the series, Sam moved to intermediate (8 weeks, glazing and larger forms), started selling at the Davis farmers market with Jake, and made $180 their first weekend. Family started wanting commissions too.",
+    "evidence_messages": [
+      "conv2_s04_011",
+      "conv2_s05_031",
+      "conv2_s08_013",
+      "conv2_s09_039"
+    ],
+    "difficulty": "medium",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv2_021",
+    "question": "How did the family Thanksgiving go?",
+    "conversation_id": "conv2",
+    "gold_answer": "Sam took the 6pm train from Davis. The whole family gathered \u2014 Aunt Rosa and Uncle Miguel drove from Fresno, and cousin Sofia came too, fresh from her semester in Barcelona. Maria made her green chile tamales, Aunt Rosa brought tres leches cake, and Sofia cooked paella she learned to make in Spain. Sam's dad picked them up from the station.",
+    "evidence_messages": [
+      "conv2_s03_002",
+      "conv2_s03_007",
+      "conv2_s03_012",
+      "conv2_s03_016"
+    ],
+    "difficulty": "medium",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv2_022",
+    "question": "What's the UCLA acceptance package look like?",
+    "conversation_id": "conv2",
+    "gold_answer": "Sam got into UCLA's Clinical Psychology PhD program with full admission and funding \u2014 a full tuition waiver plus a $32,000 annual stipend. It's a 5-year program: first 2 years coursework, last 3 years research and clinical practice. Starting September 2026.",
+    "evidence_messages": [
+      "conv2_s10_013",
+      "conv2_s10_015",
+      "conv2_s10_018"
+    ],
+    "difficulty": "medium",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv2_023",
+    "question": "How did Sam and Maria both react to the UCLA news?",
+    "conversation_id": "conv2",
+    "gold_answer": "They were both crying with joy. Sam said 'I'M LITERALLY CRYING RN' and Maria responded 'I'm crying too! Oh honey I'm so proud of you!' Sam was in disbelief about the acceptance, especially the full funding. Maria was overwhelmed by the financial aid \u2014 she said 'that's everything.' Really emotional moment for both of them.",
+    "evidence_messages": [
+      "conv2_s10_009",
+      "conv2_s10_010",
+      "conv2_s10_016"
+    ],
+    "difficulty": "medium",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv2_024",
+    "question": "What's the plan for Abuela's party?",
+    "conversation_id": "conv2",
+    "gold_answer": "It's at T\u00eda Carmen's house in San Jose on March 15th. They're expecting about 45-50 family members. Maria is coordinating food with Rosa and Carmen, they're renting tables and chairs for the backyard. Sam is in charge of the music playlist \u2014 a mix of old school stuff for Abuela and modern stuff for the younger generation. Sam is also making Abuela a handmade vase as a gift.",
+    "evidence_messages": [
+      "conv2_s07_029",
+      "conv2_s09_016",
+      "conv2_s09_020",
+      "conv2_s09_037"
+    ],
+    "difficulty": "medium",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv2_025",
+    "question": "What kind of research topic would be a good fit for Sam's PhD?",
+    "conversation_id": "conv2",
+    "gold_answer": "Sam is deeply drawn to adolescent mental health intervention. Their volunteer experience at a youth crisis center was transformative \u2014 they helped a teenager through a panic attack, and that teen came back asking specifically for Sam. Their Berkeley research proposal focused on adolescent PTSD interventions. Anything combining clinical work with at-risk youth, trauma-informed care, or crisis intervention would be right in Sam's wheelhouse.",
+    "evidence_messages": [
+      "conv2_s02_027",
+      "conv2_s07_018",
+      "conv2_s07_021"
+    ],
+    "difficulty": "medium",
+    "category": "recommendation"
+  },
+  {
+    "id": "q_conv2_026",
+    "question": "How did Maria's health scare affect the family?",
+    "conversation_id": "conv2",
+    "gold_answer": "It brought everyone closer. Maria's prediabetes diagnosis initially worried Sam \u2014 who was relieved when she shared it openly rather than keeping secrets. Sam's dad stepped up immediately, walking with Maria every morning (2 miles along the river trail). Sam was so relieved about the positive health updates that they said 'seriously, so relieved' with a heart emoji. When the doctor said no medication was needed in January, it was an emotional high point. The health scare turned into a family bonding experience.",
+    "evidence_messages": [
+      "conv2_s03_024",
+      "conv2_s05_022"
+    ],
+    "difficulty": "medium",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv2_027",
+    "question": "Does Sam think they want to stay in California?",
+    "conversation_id": "conv2",
+    "gold_answer": "Definitely. All three schools Sam applied to \u2014 Berkeley, UCLA, and UCSF \u2014 are in California. Sam said Berkeley is their top choice and they've always wanted to live in LA, so UCLA works great too.",
+    "evidence_messages": [
+      "conv2_s07_025",
+      "conv2_s10_029"
+    ],
+    "difficulty": "medium",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv2_028",
+    "question": "How did Maria decide to handle the pottery class costs?",
+    "conversation_id": "conv2",
+    "gold_answer": "When Sam mentioned the intermediate class was $250 (with a 15% discount for finishing the beginner series), Maria offered to pay for it as a late Christmas gift. She said she wanted to support Sam's talent and creativity.",
+    "evidence_messages": [
+      "conv2_s08_017",
+      "conv2_s08_018",
+      "conv2_s08_020"
+    ],
+    "difficulty": "medium",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv2_029",
+    "question": "How did Sam feel after submitting the Berkeley app?",
+    "conversation_id": "conv2",
+    "gold_answer": "Huge relief. Sam had been stressed and freaking out about the deadline, but once it was done, they said 'it feels so good to have it done.' The research proposal turned out well after Professor Chen helped narrow the focus.",
+    "evidence_messages": [
+      "conv2_s06_002",
+      "conv2_s06_007"
+    ],
+    "difficulty": "medium",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv2_030",
+    "question": "What's the deal with Sam and Jake at the farmers market?",
+    "conversation_id": "conv2",
+    "gold_answer": "Their pottery instructor connected them with the Davis farmers market organizer. Sam and Jake split a booth at $50 each per weekend, selling mugs, bowls, and planters. Their first weekend was a hit \u2014 they sold 6 mugs and 3 bowls for about $180 total. One woman bought 3 mugs as gifts.",
+    "evidence_messages": [
+      "conv2_s08_026",
+      "conv2_s08_028",
+      "conv2_s09_041"
+    ],
+    "difficulty": "medium",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv2_031",
+    "question": "When is Sam moving to LA?",
+    "conversation_id": "conv2",
+    "gold_answer": "Sam's UCLA program starts in September 2026 with the fall semester. They'll need to figure out housing \u2014 there's grad student housing available that Sam needs to look into.",
+    "evidence_messages": [
+      "conv2_s10_027",
+      "conv2_s10_031"
+    ],
+    "difficulty": "medium",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv2_032",
+    "question": "What's Maria's approach to parenting Sam through the stressful times?",
+    "conversation_id": "conv2",
+    "gold_answer": "Maria is steady and practical \u2014 when Sam is freaking out, she says 'Take a deep breath. Make a list. Prioritize.' She offers encouragement ('You've earned it') and practical support (paying for pottery class, asking about Professor Chen's recommendation letter). She's proud and says so openly, but doesn't hover.",
+    "evidence_messages": [
+      "conv2_s05_008",
+      "conv2_s08_010",
+      "conv2_s08_020"
+    ],
+    "difficulty": "medium",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv2_033",
+    "question": "How has Sam grown as a person from November through February?",
+    "conversation_id": "conv2",
+    "gold_answer": "Enormous growth. In November, Sam was a stressed college student juggling 5 classes and panicking about grad school applications. By December, they'd discovered pottery as both a creative outlet and stress relief, submitted the hardest application (Berkeley), and made heartfelt handmade gifts. January brought confidence \u2014 all three apps submitted, moved to intermediate pottery, started selling at the farmers market. By February, Sam was a pottery entrepreneur making $180 a weekend and had just gotten into UCLA with full funding. They went from anxious applicant to someone with a clear path, a creative passion, and proof that they could handle big challenges.",
+    "evidence_messages": [
+      "conv2_s04_011",
+      "conv2_s05_001",
+      "conv2_s06_002",
+      "conv2_s08_001",
+      "conv2_s09_039",
+      "conv2_s10_005"
+    ],
+    "difficulty": "hard",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv2_034",
+    "question": "How has the relationship between Maria and Sam deepened over this period?",
+    "conversation_id": "conv2",
+    "gold_answer": "Their relationship evolved from typical mom-kid to real mutual vulnerability. Early on, Maria was the concerned parent asking about sleep and classes. But sharing her prediabetes diagnosis opened a new channel \u2014 Sam became the worried one, and Maria showed she trusted Sam with serious health news. Sam's pottery gifts showed a new maturity in how they express love. Maria offering to pay for the intermediate class showed she's supporting Sam's identity, not just academics. The UCLA acceptance was a peak moment \u2014 both crying, Maria saying 'that's everything' about the funding. By the end, they're celebrating each other's wins (Maria's health improvement, Sam's acceptance) with genuine emotional depth.",
+    "evidence_messages": [
+      "conv2_s02_017",
+      "conv2_s02_038",
+      "conv2_s06_022",
+      "conv2_s07_005",
+      "conv2_s08_020",
+      "conv2_s10_010"
+    ],
+    "difficulty": "hard",
+    "category": "comparison"
+  },
+  {
+    "id": "q_conv2_035",
+    "question": "What would be a perfect graduation gift for Sam?",
+    "conversation_id": "conv2",
+    "gold_answer": "Sam loves pottery (it's become a real passion and even a small business), is heading to UCLA for clinical psych, and has always wanted to live in LA. A pottery studio membership or toolkit for their new life in LA would be incredibly meaningful \u2014 combining their creative side with the new chapter. A nice set of pottery glazes or a quality wheel would show you get what matters to them. Alternatively, since their research focuses on adolescent PTSD interventions, a significant text in that field would resonate. Don't forget they're practical too \u2014 $32k stipend means a nice apartment essential for their new LA life would go far.",
+    "evidence_messages": [
+      "conv2_s04_022",
+      "conv2_s06_009",
+      "conv2_s09_039",
+      "conv2_s10_015",
+      "conv2_s10_029"
+    ],
+    "difficulty": "hard",
+    "category": "recommendation"
+  },
+  {
+    "id": "q_conv2_036",
+    "question": "Map out all the important dates and deadlines in Sam's life from November to March.",
+    "conversation_id": "conv2",
+    "gold_answer": "November 5: semester in full swing, 5 classes. Late November: Thanksgiving at home (train from Davis), started pottery. December 15: Berkeley app deadline (submitted on time). December 20: driving home with Jake for Christmas. January 5: UCLA app deadline. January 15: UCSF deadline. Mid-January: all three submitted, started intermediate pottery. Late January: first farmers market weekend, $180 revenue. Late February: UCLA acceptance with full funding and $32k stipend. March: Berkeley decisions expected. March 15: Abuela's 80th birthday party in San Jose, ~50 family members.",
+    "evidence_messages": [
+      "conv2_s01_023",
+      "conv2_s05_005",
+      "conv2_s06_016",
+      "conv2_s06_027",
+      "conv2_s08_001",
+      "conv2_s09_039",
+      "conv2_s10_005",
+      "conv2_s03_038"
+    ],
+    "difficulty": "hard",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv2_037",
+    "question": "If Sam wanted to turn pottery into a real side business at UCLA, what would you recommend?",
+    "conversation_id": "conv2",
+    "gold_answer": "Sam already has great momentum: the Davis farmers market proved demand ($180 first weekend), the instructor says they have natural talent, and family members want commissions. For LA: find a pottery studio near UCLA with wheel access, research LA-area farmers markets and craft fairs (much bigger market than Davis), set up an Etsy or Instagram shop for the mugs/bowls/planters that are already selling, take commission orders (Aunt Rosa already wants serving bowls). The $50/weekend booth model with Jake worked well \u2014 replicate it. Sam's 'blue-green glaze' mugs seem to be a signature style. The grad student stipend ($32k) means extra income would be meaningful. Keep it as a stress-relief hobby that also pays.",
+    "evidence_messages": [
+      "conv2_s04_011",
+      "conv2_s05_033",
+      "conv2_s08_028",
+      "conv2_s09_041",
+      "conv2_s09_043"
+    ],
+    "difficulty": "hard",
+    "category": "recommendation"
+  },
+  {
+    "id": "q_conv2_038",
+    "question": "Who handles stress better \u2014 Maria or Sam?",
+    "conversation_id": "conv2",
+    "gold_answer": "Maria is the calmer one by far. When she got the prediabetes news, she was measured: 'Don't panic, it's not confirmed yet.' She followed the doctor's plan diligently without drama and her health improved steadily. Sam spirals more openly \u2014 'mom I'm freaking out' about applications, visibly overwhelmed by competing deadlines. But Sam also recovers fast and channels stress productively (pottery is explicitly described as calming). Maria's coping style is 'make a plan and execute'; Sam's is 'panic, vent, then rally.' Maria gives the steady advice \u2014 'Take a deep breath. Make a list. Prioritize.' Sam needs that grounding.",
+    "evidence_messages": [
+      "conv2_s02_007",
+      "conv2_s04_022",
+      "conv2_s05_001",
+      "conv2_s05_008",
+      "conv2_s05_009"
+    ],
+    "difficulty": "hard",
+    "category": "comparison"
+  },
+  {
+    "id": "q_conv2_039",
+    "question": "What are all the milestones Sam hit between November and February?",
+    "conversation_id": "conv2",
+    "gold_answer": "November: discovered pottery, signed up for 6-week beginner series. December 15: submitted Berkeley application. Late December: finished pottery beginner series, made Christmas gifts for Maria (bowl + planter), submitted UCLA app. January: submitted UCSF (all three done), started intermediate pottery class, instructor called Sam a natural. Late January: first farmers market with Jake, sold $180 worth of pottery. February: accepted to UCLA's Clinical Psychology PhD program with full tuition waiver and $32,000 annual stipend. All while managing 5 college classes and finals.",
+    "evidence_messages": [
+      "conv2_s04_011",
+      "conv2_s06_002",
+      "conv2_s06_020",
+      "conv2_s08_001",
+      "conv2_s09_039",
+      "conv2_s10_005"
+    ],
+    "difficulty": "hard",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv2_040",
+    "question": "How do Maria and Sam show love to each other?",
+    "conversation_id": "conv2",
+    "gold_answer": "In beautifully different ways. Maria shows love through food (making Sam's favorite green chile tamales), practical support (offering to pay for pottery class, driving logistics), steady encouragement ('You've earned it'), and pride (crying at the UCLA acceptance). Sam shows love through creation \u2014 the handmade bowl Maria uses every morning for oatmeal, the planter on the windowsill, planning to make Abuela a special vase. Sam also shows love through vulnerability: sharing stress and fears openly with Maria, and being genuinely relieved about Maria's health improvement. Maria's love language is caretaking and structure; Sam's is creative acts and emotional openness.",
+    "evidence_messages": [
+      "conv2_s01_026",
+      "conv2_s06_021",
+      "conv2_s07_005",
+      "conv2_s08_018",
+      "conv2_s10_010"
+    ],
+    "difficulty": "hard",
+    "category": "comparison"
+  },
+  {
+    "id": "q_conv3_001",
+    "question": "How much are the flights to Japan?",
+    "conversation_id": "conv3",
+    "gold_answer": "Dev found round-trip flights to Tokyo on ANA for $890 per person, direct from LAX. That's $1,780 for both of them \u2014 way below the usual $1,400+ price.",
+    "evidence_messages": [
+      "conv3_s03_005"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv3_002",
+    "question": "How much student debt does Casey have?",
+    "conversation_id": "conv3",
+    "gold_answer": "Casey has $180k in law school debt, with monthly payments of $1,400.",
+    "evidence_messages": [
+      "conv3_s04_012"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv3_003",
+    "question": "What bootcamp is Casey doing?",
+    "conversation_id": "conv3",
+    "gold_answer": "Casey enrolled in Designlab \u2014 it's a 6-month, fully online UX design career track that costs $6,500.",
+    "evidence_messages": [
+      "conv3_s06_010"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv3_004",
+    "question": "Who's the terrible boss at Casey's law firm?",
+    "conversation_id": "conv3",
+    "gold_answer": "Gerald \u2014 he's a name partner at the firm. He yelled at Casey in front of the whole team over a comma in a filing and made another associate, Rachel, cry in a meeting.",
+    "evidence_messages": [
+      "conv3_s04_003"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv3_005",
+    "question": "What contractor did they pick for the kitchen?",
+    "conversation_id": "conv3",
+    "gold_answer": "They went with Marco from Roma Construction \u2014 $18k, 6-week timeline, 4.9 stars on Yelp with 85 reviews. He specializes in kitchen and bath.",
+    "evidence_messages": [
+      "conv3_s12_009"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv3_006",
+    "question": "What kind of wine does Dev like?",
+    "conversation_id": "conv3",
+    "gold_answer": "Dev is into Malbec.",
+    "evidence_messages": [
+      "conv3_s01_024"
+    ],
+    "difficulty": "easy",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv3_007",
+    "question": "Does Casey like spicy food?",
+    "conversation_id": "conv3",
+    "gold_answer": "Yes! Casey specifically asked for green curry extra spicy when Dev ordered Thai.",
+    "evidence_messages": [
+      "conv3_s02_009"
+    ],
+    "difficulty": "easy",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv3_008",
+    "question": "When are they going to Japan?",
+    "conversation_id": "conv3",
+    "gold_answer": "March 15th to 29th, 2026 \u2014 two full weeks during cherry blossom season.",
+    "evidence_messages": [
+      "conv3_s03_022"
+    ],
+    "difficulty": "easy",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv3_009",
+    "question": "When does Casey start the bootcamp?",
+    "conversation_id": "conv3",
+    "gold_answer": "Designlab starts January 6th. Casey will be done by July.",
+    "evidence_messages": [
+      "conv3_s13_018"
+    ],
+    "difficulty": "easy",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv3_010",
+    "question": "Did Casey actually quit the law firm?",
+    "conversation_id": "conv3",
+    "gold_answer": "Yes! Casey gave two weeks notice in mid-December, told the managing partner Janet (not Gerald), and the last day was December 31st.",
+    "evidence_messages": [
+      "conv3_s13_003"
+    ],
+    "difficulty": "easy",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv3_011",
+    "question": "How was Casey feeling about work at the law firm?",
+    "conversation_id": "conv3",
+    "gold_answer": "Completely burned out. Casey said they used to love the job but now literally dreaded every morning going in.",
+    "evidence_messages": [
+      "conv3_s02_012"
+    ],
+    "difficulty": "easy",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv3_012",
+    "question": "Did Casey agree to the Japan trip?",
+    "conversation_id": "conv3",
+    "gold_answer": "Absolutely \u2014 Casey said 'YES. a million times YES!!' and was literally shaking with excitement.",
+    "evidence_messages": [
+      "conv3_s03_019"
+    ],
+    "difficulty": "easy",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv3_013",
+    "question": "What bread does Casey love from the bakery?",
+    "conversation_id": "conv3",
+    "gold_answer": "Casey loves the rosemary loaf \u2014 says it's insane.",
+    "evidence_messages": [
+      "conv3_s01_013"
+    ],
+    "difficulty": "easy",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv3_014",
+    "question": "How much have Dev and Casey saved for the trip?",
+    "conversation_id": "conv3",
+    "gold_answer": "They have about $3,200 in their travel fund. Dev's been adding $200 a month since August.",
+    "evidence_messages": [
+      "conv3_s03_014"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv3_015",
+    "question": "What's Casey's salary at the law firm?",
+    "conversation_id": "conv3",
+    "gold_answer": "Casey's salary is $95k.",
+    "evidence_messages": [
+      "conv3_s09_010"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv3_016",
+    "question": "What kind of ramen did Dev make from scratch?",
+    "conversation_id": "conv3",
+    "gold_answer": "Dev made tonkotsu ramen with everything from scratch \u2014 pork bone broth that took 12 hours, homemade tare, chashu pork belly, and marinated eggs (ajitsuke tamago).",
+    "evidence_messages": [
+      "conv3_s08_003"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv3_017",
+    "question": "What's the full Japan trip itinerary?",
+    "conversation_id": "conv3",
+    "gold_answer": "Two weeks: 8 nights in a Shibuya Airbnb ($95/night, walking distance to Shibuya Crossing), 4 nights at a traditional ryokan called Kumo no Ue in Kyoto ($120/night, includes breakfast), and 2 nights in Osaka near Dotonbori ($65/night). They're flying ANA from LAX, have a 14-day JR Pass for unlimited bullet trains, and booked a cooking class in Kyoto on March 18th for $80 per person. Total budget is about $5k.",
+    "evidence_messages": [
+      "conv3_s05_011",
+      "conv3_s11_011",
+      "conv3_s11_015",
+      "conv3_s11_017"
+    ],
+    "difficulty": "medium",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv3_018",
+    "question": "How did Casey's career change decision unfold?",
+    "conversation_id": "conv3",
+    "gold_answer": "It started with burnout \u2014 Casey was dreading every morning and Gerald was making things worse. Then Casey worked on a client website redesign and hit a flow state, which sparked interest in UX design. They researched Designlab (6 months, $6,500, 89% placement rate), agonized over the fear of starting over at 28, and finally committed: enrolled in Designlab, gave two weeks notice, and walked out of the firm December 31st.",
+    "evidence_messages": [
+      "conv3_s02_012",
+      "conv3_s06_003",
+      "conv3_s09_004",
+      "conv3_s13_003"
+    ],
+    "difficulty": "medium",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv3_019",
+    "question": "How did Dev and Casey actually make the Japan trip happen financially?",
+    "conversation_id": "conv3",
+    "gold_answer": "Methodical saving. Dev started putting $200/month into a travel fund since August and built up $3,200. The total trip budget is about $5,000 (flights $1,780, accommodation $1,370, JR Pass $420, food/transport/activities $1,850). They needed about $1,580 more by March. Dev offered to cover most of the extra savings while Casey focuses on loan payments. Dev also found deals everywhere \u2014 cherry blossom season flights at $890pp (usually $1,400+), a well-reviewed Airbnb at $95/night, and the ryokan with breakfast included.",
+    "evidence_messages": [
+      "conv3_s05_016",
+      "conv3_s05_018",
+      "conv3_s11_019",
+      "conv3_s11_021"
+    ],
+    "difficulty": "medium",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv3_020",
+    "question": "How did Casey feel about leaving law?",
+    "conversation_id": "conv3",
+    "gold_answer": "A rollercoaster. Casey was terrified \u2014 'what if I'm not good enough, what if I'm making a huge mistake.' They felt like they were starting over from scratch at 28 with $180k in debt. But the burnout was real: Gerald's abuse, dreading mornings, crying in the office bathroom. When Dev showed support (covering more rent, encouraging the bootcamp), Casey was moved to tears. By the end, Casey felt transformed \u2014 going from crying at work to enrolling in design school and booking Japan.",
+    "evidence_messages": [
+      "conv3_s06_020",
+      "conv3_s09_020",
+      "conv3_s09_025",
+      "conv3_s14_030"
+    ],
+    "difficulty": "medium",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv3_021",
+    "question": "Dev and Casey are renovating their kitchen \u2014 what style would suit them?",
+    "conversation_id": "conv3",
+    "gold_answer": "Based on their choices: they gravitate toward modern-classic. Casey found two-tone cabinets on Pinterest (white uppers, navy lowers) and wants a herringbone backsplash (friend Lina's inspiration) and a big Belfast farmhouse sink. Dev picked Calacatta-look quartz countertops (white with grey veining, durable, no-maintenance). Their taste is Pinterest-trending but practical. I'd recommend warm metallics for hardware, under-cabinet lighting, and open shelving to show off Dev's growing collection of cooking gear.",
+    "evidence_messages": [
+      "conv3_s07_009",
+      "conv3_s07_014",
+      "conv3_s07_022",
+      "conv3_s12_009",
+      "conv3_s12_024"
+    ],
+    "difficulty": "medium",
+    "category": "recommendation"
+  },
+  {
+    "id": "q_conv3_022",
+    "question": "How did Dev support Casey through the career change?",
+    "conversation_id": "conv3",
+    "gold_answer": "Dev was incredibly supportive at every stage. When Casey was burned out, Dev ordered Thai food without being asked. When the bootcamp idea came up, Dev said they could cover it financially. Dev offered to cover a bigger share of rent for 6 months while Casey transitions. Dev told Casey it wasn't starting over \u2014 it was 'starting right.' Casey was literally crying at work from gratitude.",
+    "evidence_messages": [
+      "conv3_s02_008",
+      "conv3_s05_020",
+      "conv3_s09_017"
+    ],
+    "difficulty": "medium",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv3_023",
+    "question": "What happened when Casey gave notice at the firm?",
+    "conversation_id": "conv3",
+    "gold_answer": "Casey walked into managing partner Janet's office (not Gerald's, obviously) and said they were pursuing a career change with a last day of December 31st. Janet was actually really nice \u2014 she said she could tell Casey had been unhappy and wished them well, even leaving the door open to come back. Gerald's reaction? He just said 'noted' and went back to his laptop.",
+    "evidence_messages": [
+      "conv3_s13_009",
+      "conv3_s13_012",
+      "conv3_s13_016"
+    ],
+    "difficulty": "medium",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv3_024",
+    "question": "What's the Designlab program actually like?",
+    "conversation_id": "conv3",
+    "gold_answer": "It's a 6-month UX design career track starting January 6th, fully online, costing $6,500 (or $1,100/month payment plan). The curriculum: 2 months of foundations (design thinking, user research, wireframing), 2 months of UI/visual design, 2 months of prototyping and portfolio building. Casey gets a 1-on-1 industry mentor for the whole program \u2014 a senior UX designer at Spotify named Priya. The program has an 89% placement rate within 6 months of graduating.",
+    "evidence_messages": [
+      "conv3_s06_010",
+      "conv3_s06_016",
+      "conv3_s13_020",
+      "conv3_s13_022"
+    ],
+    "difficulty": "medium",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv3_025",
+    "question": "When is the kitchen renovation happening?",
+    "conversation_id": "conv3",
+    "gold_answer": "Marco said he could start mid-January, with a 6-week timeline putting completion at end of February. They chose him over two other contractors: Mike's Remodeling was too expensive ($22k, 8 weeks) and Steve from Thumbtack was too sketchy ($14k but bad reviews).",
+    "evidence_messages": [
+      "conv3_s12_003",
+      "conv3_s12_005",
+      "conv3_s12_019"
+    ],
+    "difficulty": "medium",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv3_026",
+    "question": "What kind of food does Dev love to cook?",
+    "conversation_id": "conv3",
+    "gold_answer": "Dev is seriously into cooking. They've made pistachio pesto pasta from NYT Cooking, homemade tonkotsu ramen (12-hour broth!), chashu pork belly, miso-glazed salmon with a 48-hour marinade, and hosted a full 5-course dinner for 8 people. Dev buys specialty ingredients like Sun Noodle brand noodles from the Japanese market on Sawtelle.",
+    "evidence_messages": [
+      "conv3_s01_008",
+      "conv3_s08_001",
+      "conv3_s14_003",
+      "conv3_s14_006"
+    ],
+    "difficulty": "medium",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv3_027",
+    "question": "What cabinet style did they pick for the kitchen?",
+    "conversation_id": "conv3",
+    "gold_answer": "Two-tone: white upper cabinets and navy lower cabinets. It was Casey's idea \u2014 they saw it on Pinterest. Dev agreed it's actually trending. They're pairing it with Calacatta-look quartz countertops and a herringbone backsplash pattern.",
+    "evidence_messages": [
+      "conv3_s12_024",
+      "conv3_s12_025"
+    ],
+    "difficulty": "medium",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv3_028",
+    "question": "How much is Casey's financial runway for the career change?",
+    "conversation_id": "conv3",
+    "gold_answer": "Casey has about $12k in savings, which covers the $6,500 bootcamp plus about 4 months of loan payments ($1,400/month). Dev is covering a bigger share of rent for 6 months. Casey can also freelance through LawClerk, a legal research platform, to earn some income during the transition.",
+    "evidence_messages": [
+      "conv3_s09_010",
+      "conv3_s09_012",
+      "conv3_s09_014"
+    ],
+    "difficulty": "medium",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv3_029",
+    "question": "How does Dev approach money and budgeting?",
+    "conversation_id": "conv3",
+    "gold_answer": "Very methodically. Dev started saving $200/month for Japan since August, built up $3,200 in a travel fund, ran the numbers on every trip cost down to the dollar, and offered to cover the extra savings gap while Casey focuses on loan payments. For the kitchen renovation, Dev got three contractor quotes and compared them carefully. Dev even found discount codes for Casey's suitcase. They're generous but calculated \u2014 always knowing the exact numbers.",
+    "evidence_messages": [
+      "conv3_s03_014",
+      "conv3_s03_016",
+      "conv3_s05_018"
+    ],
+    "difficulty": "medium",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv3_030",
+    "question": "What did Casey decide to do about the career switch?",
+    "conversation_id": "conv3",
+    "gold_answer": "Casey committed fully: enrolled in Designlab's UX design bootcamp (starting January 6th) and gave two weeks notice at the firm in mid-December. Last day was December 31st. The managing partner Janet was supportive; Gerald just said 'noted.' Casey had $12k in savings and a plan to freelance on LawClerk during the transition.",
+    "evidence_messages": [
+      "conv3_s09_004",
+      "conv3_s09_006",
+      "conv3_s13_003",
+      "conv3_s13_010"
+    ],
+    "difficulty": "medium",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv3_031",
+    "question": "Did Dev cook that homemade ramen they were talking about?",
+    "conversation_id": "conv3",
+    "gold_answer": "Oh yeah \u2014 Dev went all out. Started the tonkotsu broth at 6am (12 hours!), used 4 lbs of pork neck bones, dried shiitake, kombu, and niboshi for umami. Made the tare from scratch (soy, mirin, sake, brown sugar), rolled and braised chashu pork belly for 3 hours, marinated the eggs. Even got Sun Noodle brand noodles from the Japanese market on Sawtelle.",
+    "evidence_messages": [
+      "conv3_s08_005",
+      "conv3_s08_009",
+      "conv3_s08_015",
+      "conv3_s08_023"
+    ],
+    "difficulty": "medium",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv3_032",
+    "question": "Is Casey scared about the career change?",
+    "conversation_id": "conv3",
+    "gold_answer": "Definitely scared but determined. Casey worried about not being good enough and the risk of leaving law. They're 28, starting over with $180k in debt. But the Gerald incident broke something \u2014 Casey realized they didn't even want to be a lawyer anymore. Dev's support helped enormously, and by the time Casey gave notice, it felt right. Casey ended the year saying it was 'the most transformative year of my life.'",
+    "evidence_messages": [
+      "conv3_s04_014",
+      "conv3_s06_020",
+      "conv3_s09_025"
+    ],
+    "difficulty": "medium",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv3_033",
+    "question": "How has Casey's life completely changed from November to December?",
+    "conversation_id": "conv3",
+    "gold_answer": "Dramatic transformation. In early November, Casey was a burned-out lawyer crying in the office bathroom, dreading every morning, getting screamed at by Gerald over commas, and feeling trapped by $180k in student debt. By late December, Casey had quit the firm, enrolled in a UX design bootcamp starting January, booked a 2-week trip to Japan, was planning a kitchen renovation, and had a clear vision for the future. Casey summed it up perfectly: 'I went from crying in the office bathroom to enrolling in a design bootcamp. I booked a trip to JAPAN. We're renovating our kitchen.' Dev's unwavering support \u2014 emotional, financial, practical \u2014 made it possible.",
+    "evidence_messages": [
+      "conv3_s02_011",
+      "conv3_s04_014",
+      "conv3_s09_029",
+      "conv3_s13_003",
+      "conv3_s14_029",
+      "conv3_s14_030"
+    ],
+    "difficulty": "hard",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv3_034",
+    "question": "Between Dev and Casey, who's the planner in the relationship?",
+    "conversation_id": "conv3",
+    "gold_answer": "Dev, hands down. Dev is the one who found the Japan flights, researched neighborhoods (Shibuya vs Shinjuku), calculated the trip budget down to the dollar, found the ryokan and Airbnb, bought the JR Pass, booked the cooking class, got three kitchen contractor quotes, compared prices on quartz countertops, and even found the Away suitcase with a discount code. Dev plans with spreadsheet-level detail \u2014 flight times, per-night costs, running totals. Casey is more the emotional compass: they pick the vibe (herringbone pattern from Pinterest, navy cabinets, farmhouse sink, Golden Gai from TikTok) while Dev handles the logistics.",
+    "evidence_messages": [
+      "conv3_s03_005",
+      "conv3_s05_016",
+      "conv3_s07_009",
+      "conv3_s11_019",
+      "conv3_s12_009",
+      "conv3_s14_020"
+    ],
+    "difficulty": "hard",
+    "category": "comparison"
+  },
+  {
+    "id": "q_conv3_035",
+    "question": "If I wanted to cook something Dev would love, what should I make?",
+    "conversation_id": "conv3",
+    "gold_answer": "Dev is a serious home cook who appreciates technique. Their proudest achievement is homemade tonkotsu ramen \u2014 12-hour broth with pork neck bones, handmade tare, braised chashu, marinated eggs. The 48-hour miso-glazed salmon was a hit at their dinner party. They're into Japanese cuisine (ramen, the Kyoto cooking class in kaiseki), Italian (pistachio pesto pasta from NYT Cooking), and appreciate good wine (Malbec). If you want to impress Dev, go Japanese \u2014 a well-made ramen or miso dish would speak their language. Or do a homemade pasta with quality ingredients like pecorino and fresh basil.",
+    "evidence_messages": [
+      "conv3_s01_008",
+      "conv3_s01_024",
+      "conv3_s08_003",
+      "conv3_s14_004",
+      "conv3_s14_006"
+    ],
+    "difficulty": "hard",
+    "category": "recommendation"
+  },
+  {
+    "id": "q_conv3_036",
+    "question": "What does 2026 look like for Dev and Casey?",
+    "conversation_id": "conv3",
+    "gold_answer": "They've got a stacked year. Kitchen renovation starts mid-January and finishes by end of February (Marco from Roma Construction, $18k). Japan trip is March 15-29 \u2014 two weeks across Tokyo, Kyoto, and Osaka during cherry blossom season, with a cooking class and everything planned. Casey finishes Designlab in July and starts job hunting for UX roles (89% placement rate, ~$85k average starting salary). Dev mentioned it's going to be their best year yet. Casey even outlined it: 'new kitchen in February, Japan in March, I finish Designlab in July... it's all happening.'",
+    "evidence_messages": [
+      "conv3_s12_019",
+      "conv3_s13_018",
+      "conv3_s14_037",
+      "conv3_s14_038"
+    ],
+    "difficulty": "hard",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv3_037",
+    "question": "What would be a great anniversary gift for Dev and Casey?",
+    "conversation_id": "conv3",
+    "gold_answer": "They clearly bond over food and travel. A kaiseki cooking class (like the one they booked in Kyoto for $80pp) would be meaningful. Since they love Japanese food, a high-end Japanese knife set for their newly renovated kitchen would be perfect timing. A nice bottle of Malbec (Dev's preference) with artisan sourdough. For something sentimental, matching Away luggage for future trips \u2014 Casey specifically wanted the green one. Or a reservation at a great ramen spot, since that's basically their love language.",
+    "evidence_messages": [
+      "conv3_s01_024",
+      "conv3_s05_024",
+      "conv3_s08_001",
+      "conv3_s14_004",
+      "conv3_s14_025"
+    ],
+    "difficulty": "hard",
+    "category": "recommendation"
+  },
+  {
+    "id": "q_conv3_038",
+    "question": "How has Dev's cooking evolved throughout the conversations?",
+    "conversation_id": "conv3",
+    "gold_answer": "Major progression. Started with a relatively simple pistachio pesto pasta from an NYT Cooking video. Then jumped to the insane ambition of homemade tonkotsu ramen \u2014 12-hour broth, handmade everything (tare, chashu, marinated eggs), sourcing specialty ingredients from the Japanese market on Sawtelle. That ramen ended up being the highlight of a full 5-course dinner Dev hosted for 8 people, which also included a 48-hour miso-glazed salmon. Casey specifically noted the arc: from basic pasta to hosting elaborate dinner parties with homemade ramen broth. They're also about to take a kaiseki cooking class in Kyoto.",
+    "evidence_messages": [
+      "conv3_s01_008",
+      "conv3_s08_001",
+      "conv3_s08_005",
+      "conv3_s14_003",
+      "conv3_s14_013"
+    ],
+    "difficulty": "hard",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv3_039",
+    "question": "Who seems happier right now \u2014 Dev or Casey?",
+    "conversation_id": "conv3",
+    "gold_answer": "Both are genuinely happy by the end, but in different ways. Dev has been steadily happy throughout \u2014 they're the stable, supportive partner who finds joy in cooking, planning, and taking care of Casey. Casey's happiness is more transformational: they went from deeply miserable (burnout, dreading work, Gerald's abuse) to ecstatic about the future. Casey's end-of-year reflection says it all: 'this year has been the most transformative year of my life.' Dev's happiness comes from seeing Casey thrive and from the shared adventures ahead. Casey's is the relief of escaping something awful and finding a new path. Dev is content; Casey is liberated.",
+    "evidence_messages": [
+      "conv3_s02_011",
+      "conv3_s09_020",
+      "conv3_s14_015",
+      "conv3_s14_029",
+      "conv3_s14_037"
+    ],
+    "difficulty": "hard",
+    "category": "comparison"
+  },
+  {
+    "id": "q_conv3_040",
+    "question": "What were all the major decisions Dev and Casey made together?",
+    "conversation_id": "conv3",
+    "gold_answer": "Quite a few big ones: decided to book the Japan trip during cherry blossom season ($5k budget), agreed on the kitchen renovation with Marco ($18k), Casey decided to quit law and Dev committed to covering more rent for 6 months, chose the Designlab bootcamp ($6,500), booked the Kyoto cooking class, picked two-tone cabinets and herringbone backsplash for the kitchen, committed to Dev covering the extra savings needed for Japan while Casey focuses on loan payments. Every decision was collaborative \u2014 Dev handles logistics and numbers, Casey drives the vision.",
+    "evidence_messages": [
+      "conv3_s03_019",
+      "conv3_s05_020",
+      "conv3_s09_017",
+      "conv3_s09_029",
+      "conv3_s12_017",
+      "conv3_s12_024"
+    ],
+    "difficulty": "hard",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv4_001",
+    "question": "What's Pat's startup called?",
+    "conversation_id": "conv4",
+    "gold_answer": "MetricFlow \u2014 the domain is metricflow.io. Pat originally considered 'Clearview Analytics' but landed on MetricFlow.",
+    "evidence_messages": [
+      "conv4_s05_026"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv4_002",
+    "question": "What marathon is Riley training for?",
+    "conversation_id": "conv4",
+    "gold_answer": "The Portland Marathon, on April 12th. It would be Riley's first full marathon \u2014 they're shooting for sub-3:30.",
+    "evidence_messages": [
+      "conv4_s01_022"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv4_003",
+    "question": "Who's Vanessa?",
+    "conversation_id": "conv4",
+    "gold_answer": "Vanessa is Pat and Riley's boss at work. She's a chaotic manager who constantly changes direction \u2014 rethinking the Q4 roadmap, pivoting the dashboard project based on a Medium article, and adding last-minute requirements before a VP demo.",
+    "evidence_messages": [
+      "conv4_s01_010"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv4_004",
+    "question": "What's Pat building exactly?",
+    "conversation_id": "conv4",
+    "gold_answer": "An analytics SaaS tool for mid-size teams that outgrow Google Analytics but can't afford Amplitude or Mixpanel. It fills the gap between free tools and enterprise solutions.",
+    "evidence_messages": [
+      "conv4_s02_029"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv4_005",
+    "question": "How many miles a week is Riley running?",
+    "conversation_id": "conv4",
+    "gold_answer": "About 40 miles a week \u2014 five days running, two rest days.",
+    "evidence_messages": [
+      "conv4_s01_028"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv4_006",
+    "question": "What's MetricFlow's pricing?",
+    "conversation_id": "conv4",
+    "gold_answer": "Pat settled on $49 per month per workspace \u2014 self-serve signup, credit card, no sales team needed.",
+    "evidence_messages": [
+      "conv4_s07_032"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv4_007",
+    "question": "When is the Portland Marathon?",
+    "conversation_id": "conv4",
+    "gold_answer": "April 12th.",
+    "evidence_messages": [
+      "conv4_s03_011"
+    ],
+    "difficulty": "easy",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv4_008",
+    "question": "Did Riley get promoted?",
+    "conversation_id": "conv4",
+    "gold_answer": "Yes! Riley was promoted to Senior Engineer, effective January 1st, with about a 15% raise plus RSU refresh.",
+    "evidence_messages": [
+      "conv4_s06_006"
+    ],
+    "difficulty": "easy",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv4_009",
+    "question": "How does Riley feel about running?",
+    "conversation_id": "conv4",
+    "gold_answer": "It's deeply meaningful \u2014 Riley said running is the thing that keeps them sane. When they're at mile 15 and everything hurts, there's no room to think about any of the other stuff. It's not just about the marathon \u2014 it's about proving they can commit to something hard and follow through.",
+    "evidence_messages": [
+      "conv4_s08_014"
+    ],
+    "difficulty": "easy",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv4_010",
+    "question": "Is Pat thinking about leaving the day job?",
+    "conversation_id": "conv4",
+    "gold_answer": "Yes \u2014 if Pat is being really honest with themselves, they'd choose the business over the day job. Pat said they'd go all in on MetricFlow full time if they could.",
+    "evidence_messages": [
+      "conv4_s06_032"
+    ],
+    "difficulty": "easy",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv4_011",
+    "question": "What training plan is Riley following?",
+    "conversation_id": "conv4",
+    "gold_answer": "The Pfitzinger 18/55 \u2014 an 18-week program with 5 runs per week, building up to 55 miles in the peak week.",
+    "evidence_messages": [
+      "conv4_s03_013"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv4_012",
+    "question": "Who's Asha?",
+    "conversation_id": "conv4",
+    "gold_answer": "Asha Patel is the Head of Growth at a Series B startup called Meridian. She reached out to Pat and wants to be MetricFlow's first customer and design partner. Her team of 8 is spending $3K/month on Mixpanel and barely using 20% of it.",
+    "evidence_messages": [
+      "conv4_s04_033"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv4_013",
+    "question": "What's Riley's marathon time goal?",
+    "conversation_id": "conv4",
+    "gold_answer": "Riley is trying to go sub-3:30 for the full marathon.",
+    "evidence_messages": [
+      "conv4_s01_026"
+    ],
+    "difficulty": "easy",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv4_014",
+    "question": "When is the Jason and Elena wedding?",
+    "conversation_id": "conv4",
+    "gold_answer": "December 14th in Napa Valley at Domaine Chandon vineyard.",
+    "evidence_messages": [
+      "conv4_s03_039"
+    ],
+    "difficulty": "easy",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv4_015",
+    "question": "What gift did Pat and Riley get for the wedding?",
+    "conversation_id": "conv4",
+    "gold_answer": "They went in together on a Le Creuset Dutch oven \u2014 the 5.5 quart in 'flame' orange from the Williams-Sonoma registry. $380 total, split $190 each.",
+    "evidence_messages": [
+      "conv4_s05_039"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv4_016",
+    "question": "Where does Pat's sister live?",
+    "conversation_id": "conv4",
+    "gold_answer": "Pat's sister lives in Portland \u2014 she and her husband Dave host Thanksgiving every year.",
+    "evidence_messages": [
+      "conv4_s07_003"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv4_017",
+    "question": "How has MetricFlow evolved from idea to real business?",
+    "conversation_id": "conv4",
+    "gold_answer": "Started as Pat reading Indie Hackers articles obsessively. Then 6 customer interviews turned into 12, all validating the same gap between free tools and enterprise analytics. Pat built a landing page at metricflow.io, Asha at Meridian signed on as the first design partner at $200/month, two more organic signups came through the landing page, and one from a LinkedIn post. Pat decided on $49/month per workspace pricing, and is targeting MVP by early January with beta launch mid-January.",
+    "evidence_messages": [
+      "conv4_s02_029",
+      "conv4_s03_022",
+      "conv4_s05_026",
+      "conv4_s06_038",
+      "conv4_s07_032"
+    ],
+    "difficulty": "medium",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv4_018",
+    "question": "What happened with Riley's knee injury?",
+    "conversation_id": "conv4",
+    "gold_answer": "Riley's knee started hurting around mile 14 during a long run \u2014 a dull ache on the outside of the left knee, possibly IT band. Their PT friend Nadia recommended foam rolling and easy days. Riley was stressed about missing training weeks with the marathon 5 months out. But they took the advice, did the exercises religiously, and by the next week was back to 18 miles with zero pain.",
+    "evidence_messages": [
+      "conv4_s05_005",
+      "conv4_s05_009",
+      "conv4_s07_026",
+      "conv4_s07_028"
+    ],
+    "difficulty": "medium",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv4_019",
+    "question": "What advice would you give Pat about dealing with Vanessa?",
+    "conversation_id": "conv4",
+    "gold_answer": "Based on what's worked: when Vanessa wanted to redo the metrics pipeline based on a Medium article, Pat wrote a risk analysis quantifying the cost of the pivot \u2014 and she backed off, compromising on just two new metric views. Riley's advice was key: push back tactfully, frame it as timeline risk. For the notification system demand, Riley suggested making existing dashboard metrics the star and putting notifications on a 'roadmap' slide. The pattern is: don't fight Vanessa's ideas head-on, but redirect them through data. She responds to evidence-based pushback when it protects her from looking bad at the VP demo.",
+    "evidence_messages": [
+      "conv4_s01_011",
+      "conv4_s02_005",
+      "conv4_s03_002",
+      "conv4_s04_005"
+    ],
+    "difficulty": "medium",
+    "category": "recommendation"
+  },
+  {
+    "id": "q_conv4_020",
+    "question": "How did Pat handle the Vanessa pivot situation?",
+    "conversation_id": "conv4",
+    "gold_answer": "Riley advised Pat to push back tactfully by framing it as risk to the demo timeline. Pat wrote up a risk analysis and sent it to Vanessa on Friday. It worked \u2014 she backed off the full pivot and they compromised on adding two new metric views instead of redoing the whole pipeline. The demo timeline was saved.",
+    "evidence_messages": [
+      "conv4_s02_016",
+      "conv4_s02_017",
+      "conv4_s03_002",
+      "conv4_s03_004"
+    ],
+    "difficulty": "medium",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv4_021",
+    "question": "What's the deal with Asha from Meridian?",
+    "conversation_id": "conv4",
+    "gold_answer": "Asha Patel is Head of Growth at Meridian (Series B startup). She was one of Pat's customer interviewees and reached out wanting to pay for early access. Her team spends $3K/month on Mixpanel and uses only 20% of it. She signed on as MetricFlow's first design partner, and they had a call to define core requirements. She's exactly the target customer: mid-size team that needs real analytics without the enterprise price tag.",
+    "evidence_messages": [
+      "conv4_s04_029",
+      "conv4_s04_031",
+      "conv4_s05_032"
+    ],
+    "difficulty": "medium",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv4_022",
+    "question": "How's Riley feeling about the promotion?",
+    "conversation_id": "conv4",
+    "gold_answer": "Mixed emotions. Riley is grateful and kind of in shock, but also anxious. The technical direction part of the senior role scares them \u2014 what if they make the wrong call on architecture and it costs the team months? And they're worried about work-life balance, already feeling stretched between work and marathon training. Pat reassured Riley that they've got good instincts based on their code reviews.",
+    "evidence_messages": [
+      "conv4_s06_009",
+      "conv4_s06_019",
+      "conv4_s06_021",
+      "conv4_s06_027"
+    ],
+    "difficulty": "medium",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv4_023",
+    "question": "What's Pat's plan to transition from day job to startup?",
+    "conversation_id": "conv4",
+    "gold_answer": "Pat is going to ask their manager for a part-time arrangement (3 days/week) starting in February. There's precedent \u2014 Diane approved a similar arrangement for someone on the infrastructure team. Pat has enough savings to make it work financially. The goal is to have the MetricFlow MVP ready by early January and beta launch mid-January, then scale back the day job to focus more on the startup.",
+    "evidence_messages": [
+      "conv4_s08_027",
+      "conv4_s08_029",
+      "conv4_s08_031"
+    ],
+    "difficulty": "medium",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv4_024",
+    "question": "What do Pat and Riley value most in their friendship?",
+    "conversation_id": "conv4",
+    "gold_answer": "Honest, practical support. Pat values that Riley takes the startup idea seriously ('I haven't told many people'). Riley values Pat's directness and analytical approach. They give each other real advice: Riley told Pat to push back on Vanessa with data, Pat suggested cross-training for Riley's knee. Both appreciate that they can be vulnerable \u2014 Pat about fear of leaving the stable job, Riley about loneliness. They went from coworkers who barely knew each other to people who push each other to be braver.",
+    "evidence_messages": [
+      "conv4_s01_021",
+      "conv4_s02_043",
+      "conv4_s05_050"
+    ],
+    "difficulty": "medium",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv4_025",
+    "question": "How do Pat and Riley's Thanksgiving plans compare?",
+    "conversation_id": "conv4",
+    "gold_answer": "Different vibes. Pat is going to their sister's place in Portland \u2014 she and husband Dave host every year with smoked turkey. More intimate. Riley is going to parents' in Eugene (2-hour drive) with a bigger group: parents, brother Caleb and wife, aunt, uncle, cousins \u2014 about 12 people. Riley also has a 14-mile training run planned for Thanksgiving morning before dinner. Pat's is cozy family tradition; Riley's is bigger extended family with the marathon training woven in.",
+    "evidence_messages": [
+      "conv4_s07_008",
+      "conv4_s07_010",
+      "conv4_s07_020"
+    ],
+    "difficulty": "medium",
+    "category": "comparison"
+  },
+  {
+    "id": "q_conv4_026",
+    "question": "How did Pat validate the MetricFlow idea?",
+    "conversation_id": "conv4",
+    "gold_answer": "Through 12 customer interviews, mostly with product managers and growth leads. Every single one said the same thing: they need something between Google Analytics and enterprise tools, something that does event analytics without a $50K annual contract. Riley also validated it personally \u2014 they dealt with the exact same problem at their last company. Asha at Meridian went from interviewee to paying customer, confirming real willingness to pay.",
+    "evidence_messages": [
+      "conv4_s02_033",
+      "conv4_s02_037",
+      "conv4_s03_022",
+      "conv4_s04_029"
+    ],
+    "difficulty": "medium",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv4_027",
+    "question": "What happened during Riley's Thanksgiving at home?",
+    "conversation_id": "conv4",
+    "gold_answer": "It was a good time but hit Riley unexpectedly hard emotionally. Being around family \u2014 especially seeing brother Caleb's put-together life (married, just bought a house in Bend, VP at his company) \u2014 made Riley feel like they're falling behind. Riley opened up about feeling lonely and wondering what they're working toward. It was a moment of real vulnerability between Pat and Riley.",
+    "evidence_messages": [
+      "conv4_s08_007",
+      "conv4_s08_009",
+      "conv4_s08_013"
+    ],
+    "difficulty": "medium",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv4_028",
+    "question": "Tell me about the Jason and Elena wedding \u2014 what's the plan?",
+    "conversation_id": "conv4",
+    "gold_answer": "December 14th at Domaine Chandon vineyard in Napa Valley. Cocktail attire, ceremony at 4pm. Pat and Riley are carpooling (about 90 minutes). They went in on a Le Creuset Dutch oven (5.5 quart, flame orange, $380 split). Riley ordered it and they'll wrap it together. Pat knows Jason from college; Riley and Elena were desk neighbors at their first job.",
+    "evidence_messages": [
+      "conv4_s03_039",
+      "conv4_s03_045",
+      "conv4_s05_042",
+      "conv4_s08_042"
+    ],
+    "difficulty": "medium",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv4_029",
+    "question": "What does Pat think about being a solo founder?",
+    "conversation_id": "conv4",
+    "gold_answer": "Pat is self-aware about their tendency to overthink and not act \u2014 they joked 'I'll probably just keep thinking about it for another year and never do anything.' But the MetricFlow idea energized them like nothing has in a long time. Working 2 hours a night on it doesn't feel like work. Pat is nervous about the customer calls and values Riley's sounding board. The main fear holding Pat back from going full-time is 'golden handcuffs' \u2014 health insurance, stable income.",
+    "evidence_messages": [
+      "conv4_s01_037",
+      "conv4_s03_031",
+      "conv4_s08_023"
+    ],
+    "difficulty": "medium",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv4_030",
+    "question": "Is Pat going to charge for MetricFlow early access?",
+    "conversation_id": "conv4",
+    "gold_answer": "Yes. Pat initially considered a free month trial but Riley pushed back \u2014 'If someone won't pay $200 a month for something they said they desperately need, that tells you something.' Pat agreed: no free tier. Design partner pricing is $200/month with a commitment to feedback. The general pricing will be $49/month per workspace once it launches broadly.",
+    "evidence_messages": [
+      "conv4_s04_035",
+      "conv4_s04_037",
+      "conv4_s04_039"
+    ],
+    "difficulty": "medium",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv4_031",
+    "question": "How has Riley's training been going overall?",
+    "conversation_id": "conv4",
+    "gold_answer": "Mostly well but with a scare. Riley was doing about 40 miles a week on the Pfitzinger 18/55 plan, hit a 16-mile long run, then had a knee issue (IT band pain on the left knee at mile 14). PT friend Nadia gave exercises, Riley was religious about them, and did 18 miles with zero pain by the following week. Riley's longest run has been 18 miles so far, needs to peak around late March for the April 12th marathon.",
+    "evidence_messages": [
+      "conv4_s01_028",
+      "conv4_s03_009",
+      "conv4_s05_005",
+      "conv4_s07_028"
+    ],
+    "difficulty": "medium",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv4_032",
+    "question": "What's the dynamic between Pat and Riley with advice?",
+    "conversation_id": "conv4",
+    "gold_answer": "They give each other sharp, honest advice. Riley told Pat to push back on Vanessa tactfully (frame it as timeline risk) \u2014 and it worked. Pat suggested cross-training for Riley's knee injury. Riley pushed back on Pat's free-tier idea for MetricFlow. Pat questions Riley about the mental side of marathon training. They both value the other's perspective because they come from different angles: Pat is analytical and numbers-focused; Riley is intuitive and emotionally honest.",
+    "evidence_messages": [
+      "conv4_s02_016",
+      "conv4_s04_037",
+      "conv4_s05_012",
+      "conv4_s06_024"
+    ],
+    "difficulty": "medium",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv4_033",
+    "question": "Between Pat and Riley, who's taking bigger risks right now?",
+    "conversation_id": "conv4",
+    "gold_answer": "Pat, by a significant margin. Pat is building a startup (MetricFlow) on the side while holding a day job, has signed on a design partner, built a landing page, is planning to ask for part-time work in January, and might eventually quit entirely. That's financial risk, career risk, and identity risk all at once. Riley's risks are more personal: the marathon is a physical and mental challenge, and the promotion brings new responsibilities that scare them. But Riley has a stable job with a raise and promotion locked in. Pat is betting on an uncertain future with MetricFlow while Riley is being rewarded for past performance. Pat's risks could change everything; Riley's risks are about growth within a secure framework.",
+    "evidence_messages": [
+      "conv4_s02_029",
+      "conv4_s05_026",
+      "conv4_s06_006",
+      "conv4_s06_032",
+      "conv4_s08_023",
+      "conv4_s08_031"
+    ],
+    "difficulty": "hard",
+    "category": "comparison"
+  },
+  {
+    "id": "q_conv4_034",
+    "question": "What's really going on with Riley emotionally beneath the marathon and promotion?",
+    "conversation_id": "conv4",
+    "gold_answer": "Riley is dealing with deeper stuff than they usually show. The Thanksgiving visit exposed it: comparing themselves to brother Caleb (married, house in Bend, VP), feeling like they're 'running in circles literally,' coming home to an empty apartment. The marathon isn't just about fitness \u2014 it's about proving to themselves that they can commit to something hard and follow through, because they feel like personal commitment is their weakness (work is different, they say). The promotion brings anxiety, not just pride \u2014 fear of wrong architecture calls, stretched balance. Running is therapy: 'when I'm at mile 15 and everything hurts, there's no room to think about the other stuff.' Beneath the humor and competence, Riley is lonely and questioning their direction.",
+    "evidence_messages": [
+      "conv4_s01_031",
+      "conv4_s02_029",
+      "conv4_s05_026",
+      "conv4_s06_006",
+      "conv4_s06_032",
+      "conv4_s08_023",
+      "conv4_s08_031"
+    ],
+    "difficulty": "hard",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv4_035",
+    "question": "What would be a thoughtful gift for Riley right now?",
+    "conversation_id": "conv4",
+    "gold_answer": "Given what Riley's going through: something that shows you see the whole person, not just the runner. For the marathon: high-quality running gear, a Strava premium subscription (they already track everything there), or a massage gift card for training recovery. For the deeper stuff: Riley mentioned wanting to prove they can commit to something \u2014 a really nice journal for logging the marathon journey would validate that commitment. Nadia (their PT friend) helped with the knee, so a set of professional-grade foam rollers would be practical. Don't do anything too sentimental \u2014 Riley uses humor as armor and would deflect. Something practical but premium shows you care without making them uncomfortable.",
+    "evidence_messages": [
+      "conv4_s01_022",
+      "conv4_s03_015",
+      "conv4_s05_009",
+      "conv4_s08_016"
+    ],
+    "difficulty": "hard",
+    "category": "recommendation"
+  },
+  {
+    "id": "q_conv4_036",
+    "question": "How has the friendship between Pat and Riley deepened over time?",
+    "conversation_id": "conv4",
+    "gold_answer": "Dramatically. They started as coworkers who'd worked together 8 months and barely knew each other outside standups. A conference started the real connection. Pat opened up about the startup idea and Riley took it seriously (Pat said 'thanks for actually taking this seriously, I haven't told many people'). They carpooled to the wedding, shopped for a gift together, and started having vulnerable conversations: Riley admitted to comparing themselves to Caleb, Pat confessed the golden handcuffs fear. By the end, Pat is thanking Riley 'for pushing me' and Riley is sharing things they usually deflect with humor. They went from work acquaintances to the kind of friends who push each other to be braver.",
+    "evidence_messages": [
+      "conv4_s01_021",
+      "conv4_s02_043",
+      "conv4_s05_050",
+      "conv4_s08_013",
+      "conv4_s08_033"
+    ],
+    "difficulty": "hard",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv4_037",
+    "question": "If Pat and Riley were giving each other honest advice about their biggest fear, what should they say?",
+    "conversation_id": "conv4",
+    "gold_answer": "To Pat: 'You've already validated the idea with 12 interviews, you have a paying design partner, and working on MetricFlow is the first thing that's energized you in years. The golden handcuffs and health insurance fear is real but solvable \u2014 you've got savings, there's a part-time precedent, and Asha's already paying. Stop waiting for certainty; it won't come.' To Riley: 'The marathon is great but it's also a way to avoid the loneliness and direction question. You're comparing yourself to Caleb's life milestones but your path is different, not behind. The promotion proves people believe in you. The commitment thing isn't about running \u2014 you've been committed to this training for months. Apply that energy to the personal stuff you're avoiding.'",
+    "evidence_messages": [
+      "conv4_s03_031",
+      "conv4_s04_029",
+      "conv4_s06_032",
+      "conv4_s08_009",
+      "conv4_s08_016",
+      "conv4_s08_023",
+      "conv4_s08_025"
+    ],
+    "difficulty": "hard",
+    "category": "recommendation"
+  },
+  {
+    "id": "q_conv4_038",
+    "question": "Walk me through everything that happened with MetricFlow from first idea to where it is now.",
+    "conversation_id": "conv4",
+    "gold_answer": "Started with Pat obsessively reading about startups and a $30K MRR solo founder article on Indie Hackers. The idea crystallized: analytics SaaS for mid-size teams in the gap between free tools and enterprise. Pat did 12 customer interviews, all confirming the same need. Then: built a landing page at metricflow.io (originally considered Clearview Analytics), Asha at Meridian committed as first design partner at $200/month, two more organic signups plus one from LinkedIn. Pat decided on $49/month per workspace pricing, no free tier. Working 2 hours a night, targeting MVP early January and beta launch mid-January. Planning to ask for part-time work arrangement in January to focus more. Has 3 beta signups total.",
+    "evidence_messages": [
+      "conv4_s01_035",
+      "conv4_s02_029",
+      "conv4_s03_022",
+      "conv4_s05_026",
+      "conv4_s06_038",
+      "conv4_s07_032",
+      "conv4_s08_031"
+    ],
+    "difficulty": "hard",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv4_039",
+    "question": "Who's more emotionally open \u2014 Pat or Riley?",
+    "conversation_id": "conv4",
+    "gold_answer": "Riley, surprisingly, despite using humor as armor. Riley was the one who opened up about comparing themselves to Caleb, admitted to loneliness, shared that running is about proving they can commit, and was honest about promotion anxiety. Pat's vulnerability is more controlled \u2014 they admitted the golden handcuffs fear and thanked Riley for taking the startup idea seriously ('I haven't told many people'). But Pat channels emotions into analysis ('What do you think about X?') while Riley goes raw ('sometimes I wonder what I'm actually working toward'). Riley's emotional honesty is what pushed Pat to actually decide on the part-time plan. Both are more open than they realize, but Riley goes deeper.",
+    "evidence_messages": [
+      "conv4_s02_043",
+      "conv4_s04_043",
+      "conv4_s08_009",
+      "conv4_s08_014",
+      "conv4_s08_016"
+    ],
+    "difficulty": "hard",
+    "category": "comparison"
+  },
+  {
+    "id": "q_conv4_040",
+    "question": "What were all the big decisions Pat and Riley each made?",
+    "conversation_id": "conv4",
+    "gold_answer": "Pat: validated the MetricFlow idea through 12 interviews, chose the name MetricFlow over Clearview Analytics, built a landing page, decided on $200/month design partner pricing with no free tier, signed Asha as first customer, set $49/month workspace pricing, and committed to asking for part-time work in January. Riley: followed the Pfitzinger 18/55 training plan, decided to cross-train (swimming) during the knee injury, accepted the Senior Engineer promotion, decided to run 14 miles on Thanksgiving morning, and \u2014 most importantly \u2014 decided to be emotionally honest with Pat about the loneliness and direction stuff. That last one pushed Pat to commit to the part-time plan.",
+    "evidence_messages": [
+      "conv4_s03_023",
+      "conv4_s04_039",
+      "conv4_s05_013",
+      "conv4_s05_026",
+      "conv4_s06_006",
+      "conv4_s08_013",
+      "conv4_s08_031"
+    ],
+    "difficulty": "hard",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv5_001",
+    "question": "Where does Taylor live?",
+    "conversation_id": "conv5",
+    "gold_answer": "Taylor lives in Berlin, Germany \u2014 in the Kreuzberg neighborhood specifically. They've been there about 3 years.",
+    "evidence_messages": [
+      "conv5_s01_014"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv5_002",
+    "question": "What does Taylor do for work?",
+    "conversation_id": "conv5",
+    "gold_answer": "Taylor is a product manager at N26, a mobile banking fintech company that's big in Europe.",
+    "evidence_messages": [
+      "conv5_s01_019"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv5_003",
+    "question": "What's Morgan's baby's name?",
+    "conversation_id": "conv5",
+    "gold_answer": "Olive \u2014 she's a little girl, about 3 months old.",
+    "evidence_messages": [
+      "conv5_s01_037"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv5_004",
+    "question": "Who's Morgan's partner?",
+    "conversation_id": "conv5",
+    "gold_answer": "Chris \u2014 they've been together about 5 years, not married yet but basically married.",
+    "evidence_messages": [
+      "conv5_s01_042"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv5_005",
+    "question": "How much is Taylor paying for rent in Berlin?",
+    "conversation_id": "conv5",
+    "gold_answer": "About $900 a month for a 2-bedroom in Kreuzberg.",
+    "evidence_messages": [
+      "conv5_s03_024"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv5_006",
+    "question": "How much vacation does Taylor get?",
+    "conversation_id": "conv5",
+    "gold_answer": "30 days a year \u2014 Taylor says the work-life balance in Germany is unreal compared to the US.",
+    "evidence_messages": [
+      "conv5_s01_055"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv5_007",
+    "question": "When is Taylor visiting Portland?",
+    "conversation_id": "conv5",
+    "gold_answer": "February 14th to 21st. Arriving at 4:15pm, leaving the 21st at 10am.",
+    "evidence_messages": [
+      "conv5_s06_004"
+    ],
+    "difficulty": "easy",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv5_008",
+    "question": "How much are the flights from Berlin?",
+    "conversation_id": "conv5",
+    "gold_answer": "About 700 euros round trip, connecting through Amsterdam. About a 14-hour journey total.",
+    "evidence_messages": [
+      "conv5_s05_005"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv5_009",
+    "question": "What does Morgan do for work?",
+    "conversation_id": "conv5",
+    "gold_answer": "Morgan is a graphic designer \u2014 they worked at an agency downtown but are currently on parental leave and not sure when or if they'll go back.",
+    "evidence_messages": [
+      "conv5_s03_052"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv5_010",
+    "question": "Is Taylor seeing anyone?",
+    "conversation_id": "conv5",
+    "gold_answer": "Yeah, Taylor is kind of seeing someone named Lukas. He's German, a photographer, and they met at a bar in Friedrichshain.",
+    "evidence_messages": [
+      "conv5_s04_054"
+    ],
+    "difficulty": "easy",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv5_011",
+    "question": "What does Taylor think of German work culture?",
+    "conversation_id": "conv5",
+    "gold_answer": "Taylor thinks it's great \u2014 says the work-life balance in Germany is unreal compared to the US. They get 30 vacation days a year.",
+    "evidence_messages": [
+      "conv5_s01_053"
+    ],
+    "difficulty": "easy",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv5_012",
+    "question": "How is Morgan handling being a new parent?",
+    "conversation_id": "conv5",
+    "gold_answer": "It's been really rough. Morgan loves Olive but is struggling with sleep deprivation (Olive wakes every 2-3 hours), isolation, and feeling like their world shrank to a tiny apartment and a baby. Postpartum has been particularly hard.",
+    "evidence_messages": [
+      "conv5_s03_047"
+    ],
+    "difficulty": "easy",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv5_013",
+    "question": "Did Taylor book the Portland flight?",
+    "conversation_id": "conv5",
+    "gold_answer": "Yes! Taylor booked it \u2014 February 14th arriving Portland at 4:15pm, leaving the 21st at 10am, connecting through Amsterdam.",
+    "evidence_messages": [
+      "conv5_s06_001"
+    ],
+    "difficulty": "easy",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv5_014",
+    "question": "Where did Taylor and Morgan go to college?",
+    "conversation_id": "conv5",
+    "gold_answer": "University of Oregon \u2014 they were friends there and had Econ 301 together junior year.",
+    "evidence_messages": [
+      "conv5_s01_002"
+    ],
+    "difficulty": "easy",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv5_015",
+    "question": "What's happening with N26 \u2014 any layoff worries?",
+    "conversation_id": "conv5",
+    "gold_answer": "There are rumors that N26 might be doing layoffs. Taylor thinks they're probably safe since their team is essential and they're not expensive after only 3 years. But if they lost their job, they'd have about 3 months to find a new one or leave Germany because of their work visa.",
+    "evidence_messages": [
+      "conv5_s05_042"
+    ],
+    "difficulty": "easy",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv5_016",
+    "question": "When did Taylor move to Berlin?",
+    "conversation_id": "conv5",
+    "gold_answer": "About 3 years ago. Taylor was at a startup in San Francisco for 2 years after school, then N26 was hiring and offered the Berlin move.",
+    "evidence_messages": [
+      "conv5_s01_018"
+    ],
+    "difficulty": "easy",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv5_017",
+    "question": "What's the plan for Taylor's Portland visit?",
+    "conversation_id": "conv5",
+    "gold_answer": "Taylor is staying with Morgan and Chris (they have a spare room). The itinerary includes: Powell's Books (a half-day trip since it's massive), Voodoo Doughnuts one morning, the Alberta Street neighborhood for food and shops, a hike in Forest Park if the weather cooperates, possibly a drive to Mount Hood (1.5 hours away), dinner at Canard, and Morgan is trying to organize a reunion dinner with college friends.",
+    "evidence_messages": [
+      "conv5_s05_019",
+      "conv5_s06_012",
+      "conv5_s06_014",
+      "conv5_s06_017"
+    ],
+    "difficulty": "medium",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv5_018",
+    "question": "How is Morgan really doing with the new baby?",
+    "conversation_id": "conv5",
+    "gold_answer": "Honestly struggling. Morgan loves Olive deeply \u2014 she's 'the most beautiful thing I've ever seen' \u2014 but the reality is brutal. Olive wakes every 2-3 hours, Chris went back to work after 6 weeks so it's mostly just Morgan during the day. The postpartum period has been really rough, with significant feelings of isolation: Morgan went from seeing people every day at the design agency to being alone with a baby. They're unsure about going back to work because daycare is expensive, creating financial stress on top of everything. Morgan admits their whole world shrank to a tiny apartment and a baby.",
+    "evidence_messages": [
+      "conv5_s02_012",
+      "conv5_s03_047",
+      "conv5_s03_048",
+      "conv5_s03_051",
+      "conv5_s03_057"
+    ],
+    "difficulty": "medium",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv5_019",
+    "question": "What's Taylor's Berlin life like?",
+    "conversation_id": "conv5",
+    "gold_answer": "Taylor has a 2-bedroom in Kreuzberg (the artsy, multicultural neighborhood with Turkish food and street art) for $900/month. They work at N26 with 30 vacation days. They take German classes twice a week but it's hard to practice because everyone in Berlin speaks English. The nightlife is legendary \u2014 Berghain, the famous club in a former power plant in nearby Friedrichshain. Taylor loves it but misses the US \u2014 Target runs, good Mexican food, English everywhere, and people who really know them.",
+    "evidence_messages": [
+      "conv5_s02_045",
+      "conv5_s02_048",
+      "conv5_s02_052",
+      "conv5_s06_047"
+    ],
+    "difficulty": "medium",
+    "category": "fact"
+  },
+  {
+    "id": "q_conv5_020",
+    "question": "How did Taylor and Morgan reconnect?",
+    "conversation_id": "conv5",
+    "gold_answer": "Taylor texted Morgan randomly one Saturday \u2014 they're old friends from University of Oregon who'd lost touch. They were in Econ 301 together junior year and lived in a house on 18th Street. Both felt bad about losing contact and were excited to catch up. Morgan shared about having Olive, Taylor shared about Berlin. The reconnection was meaningful for both since they're each dealing with isolation \u2014 Taylor as an expat and Morgan as a new parent.",
+    "evidence_messages": [
+      "conv5_s01_002",
+      "conv5_s02_026",
+      "conv5_s03_060",
+      "conv5_s06_061"
+    ],
+    "difficulty": "medium",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv5_021",
+    "question": "Morgan wants to organize a college reunion dinner \u2014 who should they invite and where?",
+    "conversation_id": "conv5",
+    "gold_answer": "The college crew from UO: Taylor will already be in town for the February visit, Kelsey is in New York (Morgan talks to her on Instagram \u2014 worth a reach-out), Dave is still in Eugene (he's into brewing beer now, only a 2-hour drive), and Priya is at MIT doing a computational neuroscience PhD (might be a stretch). For the dinner, Canard is Morgan's top Portland restaurant pick \u2014 it would be perfect. Alberta Street is also great for group dining. Given Taylor is only in town Feb 14-21, plan early.",
+    "evidence_messages": [
+      "conv5_s04_025",
+      "conv5_s04_031",
+      "conv5_s04_040"
+    ],
+    "difficulty": "medium",
+    "category": "recommendation"
+  },
+  {
+    "id": "q_conv5_022",
+    "question": "What are Taylor's concerns about the N26 layoffs?",
+    "conversation_id": "conv5",
+    "gold_answer": "The main worry isn't just the job itself \u2014 it's the visa situation. Taylor is in Germany on a work visa, and if they lose the job, they'd have about 3 months to find a new one or leave the country. Taylor thinks they're probably safe (essential team, not expensive), but the uncertainty is stressful. They're trying not to spiral about it.",
+    "evidence_messages": [
+      "conv5_s05_042",
+      "conv5_s05_050",
+      "conv5_s05_052"
+    ],
+    "difficulty": "medium",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv5_023",
+    "question": "What does Taylor miss most about the US?",
+    "conversation_id": "conv5",
+    "gold_answer": "Taylor gets homesick in waves. They miss everyday stuff: Target runs, actually good Mexican food, English everywhere. But the deeper thing is missing people who really know them \u2014 the kind of deep connections that take years to build. Taylor said sometimes they get so homesick it physically hurts. They haven't been back in about a year and a half.",
+    "evidence_messages": [
+      "conv5_s06_045",
+      "conv5_s06_047",
+      "conv5_s06_048"
+    ],
+    "difficulty": "medium",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv5_024",
+    "question": "How much is Morgan paying for rent compared to Taylor?",
+    "conversation_id": "conv5",
+    "gold_answer": "Huge difference. Morgan's 2-bedroom in Portland costs $2,200/month. Taylor's 2-bedroom in Kreuzberg, Berlin is about $900/month. That's less than half. Taylor says reasonable rent is one of the best things about Berlin.",
+    "evidence_messages": [
+      "conv5_s03_024",
+      "conv5_s03_029"
+    ],
+    "difficulty": "medium",
+    "category": "comparison"
+  },
+  {
+    "id": "q_conv5_025",
+    "question": "What milestones has baby Olive hit?",
+    "conversation_id": "conv5",
+    "gold_answer": "Olive did her first real smile at around 3 months (Morgan literally cried). She's started grabbing things \u2014 she reached out and grabbed Chris's finger and just held on, which made Morgan sob. By session 6 she's almost 4 months old. She still wakes every 2-3 hours though.",
+    "evidence_messages": [
+      "conv5_s02_005",
+      "conv5_s06_036",
+      "conv5_s06_038"
+    ],
+    "difficulty": "medium",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv5_026",
+    "question": "Is Morgan going back to work?",
+    "conversation_id": "conv5",
+    "gold_answer": "Unclear. Morgan is on parental leave from the graphic design agency and isn't sure when or if they'll go back. Financially they kind of need the income eventually, but daycare is incredibly expensive. Chris went back to work after 6 weeks, so timing the return is complicated. It's a source of stress on top of the postpartum challenges.",
+    "evidence_messages": [
+      "conv5_s03_055",
+      "conv5_s03_057"
+    ],
+    "difficulty": "medium",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv5_027",
+    "question": "What's the coffee shop Taylor and Morgan used to love?",
+    "conversation_id": "conv5",
+    "gold_answer": "Tailored \u2014 a coffee shop near their college that they went to every morning before class. Taylor literally dreams about their lattes, and Morgan says the oat milk latte was life-changing.",
+    "evidence_messages": [
+      "conv5_s02_031",
+      "conv5_s02_032",
+      "conv5_s02_033"
+    ],
+    "difficulty": "medium",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv5_028",
+    "question": "What does Taylor do for fun in Berlin?",
+    "conversation_id": "conv5",
+    "gold_answer": "Berlin's nightlife scene is central \u2014 clubs don't open until midnight and go until Monday morning. Berghain, the world's most famous club in a former power plant in Friedrichshain, is nearby. Taylor takes German classes twice a week (though everyone in Berlin speaks English, making practice hard). They're dating Lukas, a German photographer they met at a bar in Friedrichshain. The expat and startup scene is big, and Taylor is exploring Kreuzberg's amazing Turkish food and street art.",
+    "evidence_messages": [
+      "conv5_s02_040",
+      "conv5_s02_052"
+    ],
+    "difficulty": "medium",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv5_029",
+    "question": "What's keeping Taylor in Berlin vs pulling them back to the US?",
+    "conversation_id": "conv5",
+    "gold_answer": "Keeping in Berlin: incredible work-life balance (30 vacation days), cheap rent ($900 for a 2-bedroom), the startup scene, Kreuzberg's artsy vibe, dating Lukas. Pulling back: deep homesickness that physically hurts, missing Target runs and good Mexican food, missing people who really know them, not having seen the US in 1.5 years. Taylor loves Berlin practically but is emotionally tethered to the US. The layoff risk adds uncertainty \u2014 if they lose the N26 job, they'd have 3 months to find a new one or leave.",
+    "evidence_messages": [
+      "conv5_s01_053",
+      "conv5_s03_010",
+      "conv5_s06_045",
+      "conv5_s06_047"
+    ],
+    "difficulty": "medium",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv5_030",
+    "question": "Why is this visit so important to both Taylor and Morgan?",
+    "conversation_id": "conv5",
+    "gold_answer": "They're both dealing with isolation in different ways. Taylor is an expat in Berlin who hasn't been home in a year and a half, misses deep connections with people who really know them, and gets homesick enough that it physically hurts. Morgan is a new parent whose world shrank to a tiny apartment and a baby, struggling with postpartum isolation after going from daily social contact at work to being home alone. They both acknowledged: 'god we're both kind of lonely huh.' The visit represents human connection they're both starving for.",
+    "evidence_messages": [
+      "conv5_s05_018",
+      "conv5_s06_048",
+      "conv5_s06_051",
+      "conv5_s06_054"
+    ],
+    "difficulty": "medium",
+    "category": "emotional"
+  },
+  {
+    "id": "q_conv5_031",
+    "question": "What food and activities does Morgan recommend in Portland?",
+    "conversation_id": "conv5",
+    "gold_answer": "Morgan has a solid list: Canard restaurant (incredible), Voodoo Doughnuts (a Portland requirement), Alberta Street neighborhood for food and shops, Powell's Books (a half-day visit), Forest Park for hiking, the Japanese Garden if it's not too rainy, and a drive to Mount Hood (1.5 hours away). February in Portland means constant rain though.",
+    "evidence_messages": [
+      "conv5_s03_066",
+      "conv5_s05_026",
+      "conv5_s06_016",
+      "conv5_s06_017"
+    ],
+    "difficulty": "medium",
+    "category": "preference"
+  },
+  {
+    "id": "q_conv5_032",
+    "question": "What's the deal with Taylor learning German?",
+    "conversation_id": "conv5",
+    "gold_answer": "Taylor takes German classes twice a week, but the frustrating part is that it's hard to practice because everyone in Berlin speaks English. They've been there 3 years and are still working on it.",
+    "evidence_messages": [
+      "conv5_s02_052",
+      "conv5_s02_055"
+    ],
+    "difficulty": "medium",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv5_033",
+    "question": "How are Taylor and Morgan dealing with loneliness in really different ways?",
+    "conversation_id": "conv5",
+    "gold_answer": "Same core problem, wildly different contexts. Taylor's loneliness is geographic \u2014 they chose an adventure (moving to Berlin) and got the career, the cool apartment, the nightlife, the travel, but lost the deep human connections. They miss 'people who really KNOW me' and get homesick enough that it physically hurts. Morgan's loneliness is situational \u2014 they didn't choose isolation, parenthood brought it. Their world shrank from daily coworker interactions at the agency to being alone with a baby in an apartment, with Chris back at work. Taylor's isolation has cosmopolitan perks (Berghain, 30 vacation days); Morgan's has none. But both arrive at the same place: 'god we're both kind of lonely huh.' The Portland visit is medicine for both of them.",
+    "evidence_messages": [
+      "conv5_s01_067",
+      "conv5_s02_050",
+      "conv5_s03_048",
+      "conv5_s03_051",
+      "conv5_s05_018",
+      "conv5_s06_048",
+      "conv5_s06_050",
+      "conv5_s06_051"
+    ],
+    "difficulty": "hard",
+    "category": "comparison"
+  },
+  {
+    "id": "q_conv5_034",
+    "question": "What would be the perfect gift to bring Morgan when Taylor visits?",
+    "conversation_id": "conv5",
+    "gold_answer": "Given what Morgan's going through: something that says 'I see you as a person, not just a parent.' Morgan was a graphic designer who loved their job at the agency \u2014 maybe a beautiful art book or design tool from a Berlin shop. Morgan is sleep-deprived and isolated, so a luxurious self-care package would be meaningful. Since they used to love Tailored's oat milk lattes together, a specialty coffee set from a Berlin roaster would be perfect nostalgia. For Olive: something from Berlin (a German baby outfit or toy) would be sweet. Don't go purely baby-focused \u2014 Morgan needs things that remind them they're still Morgan, not just Olive's parent.",
+    "evidence_messages": [
+      "conv5_s02_033",
+      "conv5_s03_047",
+      "conv5_s03_052",
+      "conv5_s06_050"
+    ],
+    "difficulty": "hard",
+    "category": "recommendation"
+  },
+  {
+    "id": "q_conv5_035",
+    "question": "How has Morgan's life changed since having Olive?",
+    "conversation_id": "conv5",
+    "gold_answer": "Drastically. Before Olive, Morgan was a graphic designer going into the agency every day, seeing people, doing creative work they loved. Now: they're on parental leave with no clear return date, the baby wakes every 2-3 hours, Chris went back to work after 6 weeks leaving Morgan alone during the day, and the financial pressure of daycare costs creates anxiety about the future. Morgan's social world collapsed \u2014 from daily coworker interactions to feeling like their 'whole world shrank to this tiny apartment and a baby.' The postpartum period has been really rough emotionally. But there are beautiful moments too: Olive's first real smile, her grabbing Chris's finger. Morgan describes it perfectly: it's simultaneously the most difficult and most beautiful experience of their life.",
+    "evidence_messages": [
+      "conv5_s02_005",
+      "conv5_s02_012",
+      "conv5_s03_047",
+      "conv5_s03_051",
+      "conv5_s03_054",
+      "conv5_s06_038"
+    ],
+    "difficulty": "hard",
+    "category": "life_event"
+  },
+  {
+    "id": "q_conv5_036",
+    "question": "What are all the things Taylor should consider if N26 does lay them off?",
+    "conversation_id": "conv5",
+    "gold_answer": "Big stakes. Taylor is in Germany on a work visa \u2014 if they lose the job, they have about 3 months to find a new one or leave the country. Berlin has a big startup scene and lots of international companies where English is fine, which helps. Taylor's been a PM for ~5 years total (2 years SF startup + 3 years N26), so they're experienced. Options: find another PM role in Berlin's startup scene (timeline pressure: 3 months), move back to the US (but they love Berlin, the rent is amazing, they're dating Lukas), or look at other European cities. The February Portland trip might serve as a test of whether coming home permanently feels right. Taylor thinks they're probably safe since their team is essential, but the uncertainty is real.",
+    "evidence_messages": [
+      "conv5_s01_023",
+      "conv5_s03_038",
+      "conv5_s05_042",
+      "conv5_s05_050",
+      "conv5_s05_052"
+    ],
+    "difficulty": "hard",
+    "category": "decision"
+  },
+  {
+    "id": "q_conv5_037",
+    "question": "If I was planning a perfect day in Portland for Taylor's visit, what should I include?",
+    "conversation_id": "conv5",
+    "gold_answer": "Start with Voodoo Doughnuts in the morning (Morgan said it's a Portland requirement). Then head to Powell's Books \u2014 Taylor could spend a whole day there but budget half a day since it's massive. Lunch on Alberta Street (great food and shops). If the weather cooperates, afternoon hike in Forest Park (Taylor's been dying for hiking since Berlin is flat as a pancake). Drive to Mount Hood for sunset if time allows (1.5 hours). Dinner at Canard (Morgan says it's incredible). Given that Taylor misses deep connections and Morgan is isolated, build in time for real conversation \u2014 maybe a nice coffee spot reminiscent of their old Tailored hangouts. February means rain though, so have indoor backups.",
+    "evidence_messages": [
+      "conv5_s03_066",
+      "conv5_s05_026",
+      "conv5_s06_013",
+      "conv5_s06_014",
+      "conv5_s06_018",
+      "conv5_s06_021"
+    ],
+    "difficulty": "hard",
+    "category": "recommendation"
+  },
+  {
+    "id": "q_conv5_038",
+    "question": "How has the friendship between Taylor and Morgan evolved from college to now?",
+    "conversation_id": "conv5",
+    "gold_answer": "In college at UO, they were everyday friends \u2014 Econ 301 together, living in a house on 18th Street, morning lattes at Tailored. Then they lost touch as life scattered them: Taylor to SF then Berlin, Morgan to Portland and parenthood. The reconnection started with a random text from Taylor on a Saturday. What's different now is the depth \u2014 in college it was fun and proximity, but now they're connecting over real life challenges: Taylor's expat loneliness and visa uncertainty, Morgan's postpartum struggles and identity shift. They recognized they're both lonely in different ways and actually need each other. The Portland visit isn't just nostalgia \u2014 it's two people who grew up separately finding that the friendship matters more now than it did at 20.",
+    "evidence_messages": [
+      "conv5_s01_002",
+      "conv5_s02_027",
+      "conv5_s03_060",
+      "conv5_s03_061",
+      "conv5_s06_051",
+      "conv5_s06_061"
+    ],
+    "difficulty": "hard",
+    "category": "temporal"
+  },
+  {
+    "id": "q_conv5_039",
+    "question": "Who seems to have more stability right now \u2014 Taylor or Morgan?",
+    "conversation_id": "conv5",
+    "gold_answer": "Neither has clean stability \u2014 they're both dealing with uncertainty. Taylor has career stability (N26 PM, good salary, 30 vacation days) but it's fragile (layoff rumors, work visa dependency) and emotionally they're unsettled (homesick, missing deep connections). Morgan has relationship stability (Chris, 5 years, baby) but career instability (on leave, unsure about return, daycare costs), emotional instability (postpartum, isolation), and financial pressure. Taylor's instability is existential (where do I belong?); Morgan's is practical (how do we make this work?). If forced to choose, Taylor has more structural stability \u2014 a job, an apartment, freedom \u2014 but Morgan has more relational stability \u2014 a partner, a child, a home base. Both are stable in ways the other isn't.",
+    "evidence_messages": [
+      "conv5_s01_042",
+      "conv5_s01_055",
+      "conv5_s03_055",
+      "conv5_s03_057",
+      "conv5_s05_042",
+      "conv5_s06_045"
+    ],
+    "difficulty": "hard",
+    "category": "comparison"
+  },
+  {
+    "id": "q_conv5_040",
+    "question": "What are all the emotions Morgan is dealing with as a new parent?",
+    "conversation_id": "conv5",
+    "gold_answer": "A complex mix. Love: Olive is 'the most beautiful thing I've ever seen' and milestones (first smile, grabbing Chris's finger) make Morgan cry happy tears. Exhaustion: Olive wakes every 2-3 hours, even doing shifts with Chris it's brutal. Isolation: went from daily agency life to being alone with a baby, feels like their world shrank. Identity loss: was a graphic designer who loved their work, now unsure when or if they'll go back. Financial anxiety: daycare is expensive but they need the income eventually. Gratitude for reconnection: Taylor's texts made Morgan's night, the upcoming visit means 'more than you know.' Self-awareness: 'postpartum has been rough \u2014 like really rough' shows Morgan can name it. Hope: counting the days until Taylor's visit, excited about the reunion dinner idea.",
+    "evidence_messages": [
+      "conv5_s02_005",
+      "conv5_s02_015",
+      "conv5_s03_047",
+      "conv5_s03_048",
+      "conv5_s03_057",
+      "conv5_s06_039",
+      "conv5_s06_054"
+    ],
+    "difficulty": "hard",
+    "category": "emotional"
+  }
+]

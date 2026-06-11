@@ -1,0 +1,106 @@
+{
+  "meta": {
+    "candidate": "d1_no_l0",
+    "tier": "edge",
+    "seed": 42,
+    "top_k": 5,
+    "timestamp": "2026-04-23T14:09:41Z",
+    "commit": "9b7af17"
+  },
+  "build_wall_s": 0.0,
+  "profile_bytes_avg": 0.0,
+  "profile_readable": true,
+  "intra_persona_consistency": 1.0,
+  "slop_transfer_gap": null,
+  "human_probe_scores": {
+    "skipped": false,
+    "pool_size": 100,
+    "retrieval_wall_s": 0.008,
+    "a_b_accuracy": 0.37142857142857144,
+    "speaker_id_accuracy": 0.5333333333333333,
+    "leakage_failure_rate": 0.6,
+    "mean_leakage_rate_top_k": 0.26666666666666666,
+    "counts": {
+      "A_B": 70,
+      "C": 15,
+      "D": 15
+    },
+    "per_query_sample": [
+      {
+        "query_id": "P1_A_001",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_002",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_003",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_004",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-0"
+      },
+      {
+        "query_id": "P1_A_005",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-1"
+      },
+      {
+        "query_id": "P1_B_001",
+        "query_type": "B",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_B_002",
+        "query_type": "B",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_C_001",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_C_002",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_D_001",
+        "query_type": "D",
+        "correct": false,
+        "notes": "3/5 leaked"
+      }
+    ]
+  },
+  "synthetic_scores": {
+    "skipped": true,
+    "note": "synthetic pool empty"
+  },
+  "cold_start_curve": {
+    "5": 0.37142857142857144,
+    "20": 0.37142857142857144
+  },
+  "profile_summaries": {
+    "P1": "(D1) no profile; no user filter",
+    "P2": "(D1) no profile; no user filter",
+    "P3": "(D1) no profile; no user filter",
+    "P4": "(D1) no profile; no user filter",
+    "P5": "(D1) no profile; no user filter"
+  }
+}

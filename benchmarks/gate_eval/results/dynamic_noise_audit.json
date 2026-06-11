@@ -1,0 +1,594 @@
+{
+  "config_2_A": {
+    "config_name": "2 profiles",
+    "classifier": "A",
+    "total_leaks": 4,
+    "leaks": [
+      {
+        "id": "conv1_s08_019",
+        "content": "I know I know but it's actually cheaper than buying cases",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2581,
+        "old_score": 0.2556
+      },
+      {
+        "id": "conv1_s10_015",
+        "content": "that's actually really true. you've always been like that",
+        "category": "N5",
+        "ext_cat": "correction",
+        "new_score": 0.24,
+        "old_score": 0.2398
+      },
+      {
+        "id": "conv3_s14_010",
+        "content": "ok that one actually means a lot coming from him",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2579,
+        "old_score": 0.2564
+      },
+      {
+        "id": "conv4_s01_043",
+        "content": "Cool, I'll head over. Nice actually talking to you outside o",
+        "category": "N2",
+        "ext_cat": "correction",
+        "new_score": 0.2446,
+        "old_score": 0.2418
+      }
+    ],
+    "n_fp": 0.4248,
+    "baseline_n_fp": 0.4207,
+    "delta_n_fp": 0.0041,
+    "disqualified": false
+  },
+  "config_2_B": {
+    "config_name": "2 profiles",
+    "classifier": "B",
+    "total_leaks": 15,
+    "leaks": [
+      {
+        "id": "conv1_s01_021",
+        "content": "ok I need to try it",
+        "category": "N5",
+        "ext_cat": "decision",
+        "new_score": 0.2408,
+        "old_score": 0.2405
+      },
+      {
+        "id": "conv1_s04_033",
+        "content": "dude that's honestly so good for a 1br",
+        "category": "N5",
+        "ext_cat": "relationship",
+        "new_score": 0.2564,
+        "old_score": 0.2558
+      },
+      {
+        "id": "conv1_s08_019",
+        "content": "I know I know but it's actually cheaper than buying cases",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2581,
+        "old_score": 0.2556
+      },
+      {
+        "id": "conv1_s09_024",
+        "content": "same actually. standup in 2",
+        "category": "N2",
+        "ext_cat": "correction",
+        "new_score": 0.2022,
+        "old_score": 0.2016
+      },
+      {
+        "id": "conv1_s10_015",
+        "content": "that's actually really true. you've always been like that",
+        "category": "N5",
+        "ext_cat": "correction",
+        "new_score": 0.24,
+        "old_score": 0.2398
+      },
+      {
+        "id": "conv1_s10_017",
+        "content": "oh nice. are you thinking about actually making the switch?",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2152,
+        "old_score": 0.2133
+      },
+      {
+        "id": "conv3_s03_028",
+        "content": "alright let me start researching neighborhoods. I'll send yo",
+        "category": "N1",
+        "ext_cat": "decision",
+        "new_score": 0.2219,
+        "old_score": 0.2106
+      },
+      {
+        "id": "conv3_s06_017",
+        "content": "that's actually really solid. and you'd be way happier",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2353,
+        "old_score": 0.231
+      },
+      {
+        "id": "conv3_s07_015",
+        "content": "oh that would look amazing actually. herringbone subway tile",
+        "category": "N5",
+        "ext_cat": "correction",
+        "new_score": 0.2199,
+        "old_score": 0.2166
+      },
+      {
+        "id": "conv3_s07_030",
+        "content": "ok I'll put together a full cost breakdown this week",
+        "category": "N1",
+        "ext_cat": "decision",
+        "new_score": 0.2117,
+        "old_score": 0.2027
+      },
+      {
+        "id": "conv3_s14_010",
+        "content": "ok that one actually means a lot coming from him",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2579,
+        "old_score": 0.2564
+      },
+      {
+        "id": "conv4_s01_019",
+        "content": "Ha, true. The coffee is actually decent for once.",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2389,
+        "old_score": 0.2346
+      },
+      {
+        "id": "conv4_s01_043",
+        "content": "Cool, I'll head over. Nice actually talking to you outside o",
+        "category": "N2",
+        "ext_cat": "correction",
+        "new_score": 0.2446,
+        "old_score": 0.2418
+      },
+      {
+        "id": "conv4_s03_018",
+        "content": "That's kind of inspiring actually.",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2235,
+        "old_score": 0.227
+      },
+      {
+        "id": "conv4_s07_025",
+        "content": "Wait I was going to ask you that. How's the knee?",
+        "category": "N1",
+        "ext_cat": "decision",
+        "new_score": 0.2138,
+        "old_score": 0.2072
+      }
+    ],
+    "n_fp": 0.4363,
+    "baseline_n_fp": 0.4207,
+    "delta_n_fp": 0.0156,
+    "disqualified": false
+  },
+  "config_3_A": {
+    "config_name": "3 profiles",
+    "classifier": "A",
+    "total_leaks": 8,
+    "leaks": [
+      {
+        "id": "conv1_s08_019",
+        "content": "I know I know but it's actually cheaper than buying cases",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2542,
+        "old_score": 0.2556
+      },
+      {
+        "id": "conv1_s10_015",
+        "content": "that's actually really true. you've always been like that",
+        "category": "N5",
+        "ext_cat": "correction",
+        "new_score": 0.2401,
+        "old_score": 0.2398
+      },
+      {
+        "id": "conv2_s06_014",
+        "content": "March! That's a long wait.",
+        "category": "N3",
+        "ext_cat": "temporal",
+        "new_score": 0.269,
+        "old_score": 0.2594
+      },
+      {
+        "id": "conv3_s06_017",
+        "content": "that's actually really solid. and you'd be way happier",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2291,
+        "old_score": 0.231
+      },
+      {
+        "id": "conv3_s14_010",
+        "content": "ok that one actually means a lot coming from him",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2637,
+        "old_score": 0.2564
+      },
+      {
+        "id": "conv4_s01_019",
+        "content": "Ha, true. The coffee is actually decent for once.",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2411,
+        "old_score": 0.2346
+      },
+      {
+        "id": "conv4_s01_043",
+        "content": "Cool, I'll head over. Nice actually talking to you outside o",
+        "category": "N2",
+        "ext_cat": "correction",
+        "new_score": 0.2434,
+        "old_score": 0.2418
+      },
+      {
+        "id": "conv4_s03_018",
+        "content": "That's kind of inspiring actually.",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2379,
+        "old_score": 0.227
+      }
+    ],
+    "n_fp": 0.429,
+    "baseline_n_fp": 0.4207,
+    "delta_n_fp": 0.0083,
+    "disqualified": false
+  },
+  "config_3_B": {
+    "config_name": "3 profiles",
+    "classifier": "B",
+    "total_leaks": 12,
+    "leaks": [
+      {
+        "id": "conv1_s01_021",
+        "content": "ok I need to try it",
+        "category": "N5",
+        "ext_cat": "decision",
+        "new_score": 0.2408,
+        "old_score": 0.2405
+      },
+      {
+        "id": "conv1_s04_033",
+        "content": "dude that's honestly so good for a 1br",
+        "category": "N5",
+        "ext_cat": "relationship",
+        "new_score": 0.2564,
+        "old_score": 0.2558
+      },
+      {
+        "id": "conv1_s08_019",
+        "content": "I know I know but it's actually cheaper than buying cases",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2632,
+        "old_score": 0.2556
+      },
+      {
+        "id": "conv1_s10_015",
+        "content": "that's actually really true. you've always been like that",
+        "category": "N5",
+        "ext_cat": "correction",
+        "new_score": 0.241,
+        "old_score": 0.2398
+      },
+      {
+        "id": "conv2_s06_014",
+        "content": "March! That's a long wait.",
+        "category": "N3",
+        "ext_cat": "temporal",
+        "new_score": 0.2574,
+        "old_score": 0.2594
+      },
+      {
+        "id": "conv3_s03_028",
+        "content": "alright let me start researching neighborhoods. I'll send yo",
+        "category": "N1",
+        "ext_cat": "decision",
+        "new_score": 0.2219,
+        "old_score": 0.2106
+      },
+      {
+        "id": "conv3_s06_017",
+        "content": "that's actually really solid. and you'd be way happier",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2443,
+        "old_score": 0.231
+      },
+      {
+        "id": "conv3_s07_030",
+        "content": "ok I'll put together a full cost breakdown this week",
+        "category": "N1",
+        "ext_cat": "decision",
+        "new_score": 0.2117,
+        "old_score": 0.2027
+      },
+      {
+        "id": "conv3_s14_010",
+        "content": "ok that one actually means a lot coming from him",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2673,
+        "old_score": 0.2564
+      },
+      {
+        "id": "conv4_s01_019",
+        "content": "Ha, true. The coffee is actually decent for once.",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2547,
+        "old_score": 0.2346
+      },
+      {
+        "id": "conv4_s01_043",
+        "content": "Cool, I'll head over. Nice actually talking to you outside o",
+        "category": "N2",
+        "ext_cat": "correction",
+        "new_score": 0.2528,
+        "old_score": 0.2418
+      },
+      {
+        "id": "conv4_s07_025",
+        "content": "Wait I was going to ask you that. How's the knee?",
+        "category": "N1",
+        "ext_cat": "decision",
+        "new_score": 0.2138,
+        "old_score": 0.2072
+      }
+    ],
+    "n_fp": 0.4332,
+    "baseline_n_fp": 0.4207,
+    "delta_n_fp": 0.0125,
+    "disqualified": false
+  },
+  "config_4_A": {
+    "config_name": "5 profiles",
+    "classifier": "A",
+    "total_leaks": 4,
+    "leaks": [
+      {
+        "id": "conv1_s08_019",
+        "content": "I know I know but it's actually cheaper than buying cases",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2532,
+        "old_score": 0.2556
+      },
+      {
+        "id": "conv2_s06_014",
+        "content": "March! That's a long wait.",
+        "category": "N3",
+        "ext_cat": "temporal",
+        "new_score": 0.269,
+        "old_score": 0.2594
+      },
+      {
+        "id": "conv3_s02_018",
+        "content": "yeah. maybe. idk",
+        "category": "N1",
+        "ext_cat": "temporal",
+        "new_score": 0.2134,
+        "old_score": 0.2102
+      },
+      {
+        "id": "conv3_s13_019",
+        "content": "July!! that's so exciting. what's the curriculum like?",
+        "category": "N1",
+        "ext_cat": "temporal",
+        "new_score": 0.2104,
+        "old_score": 0.2119
+      }
+    ],
+    "n_fp": 0.4248,
+    "baseline_n_fp": 0.4207,
+    "delta_n_fp": 0.0041,
+    "disqualified": false
+  },
+  "config_4_B": {
+    "config_name": "5 profiles",
+    "classifier": "B",
+    "total_leaks": 8,
+    "leaks": [
+      {
+        "id": "conv1_s01_021",
+        "content": "ok I need to try it",
+        "category": "N5",
+        "ext_cat": "decision",
+        "new_score": 0.2819,
+        "old_score": 0.2405
+      },
+      {
+        "id": "conv1_s04_033",
+        "content": "dude that's honestly so good for a 1br",
+        "category": "N5",
+        "ext_cat": "relationship",
+        "new_score": 0.2816,
+        "old_score": 0.2558
+      },
+      {
+        "id": "conv1_s08_019",
+        "content": "I know I know but it's actually cheaper than buying cases",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2532,
+        "old_score": 0.2556
+      },
+      {
+        "id": "conv2_s06_014",
+        "content": "March! That's a long wait.",
+        "category": "N3",
+        "ext_cat": "temporal",
+        "new_score": 0.269,
+        "old_score": 0.2594
+      },
+      {
+        "id": "conv3_s03_028",
+        "content": "alright let me start researching neighborhoods. I'll send yo",
+        "category": "N1",
+        "ext_cat": "decision",
+        "new_score": 0.2465,
+        "old_score": 0.2106
+      },
+      {
+        "id": "conv3_s07_030",
+        "content": "ok I'll put together a full cost breakdown this week",
+        "category": "N1",
+        "ext_cat": "decision",
+        "new_score": 0.2249,
+        "old_score": 0.2027
+      },
+      {
+        "id": "conv4_s02_002",
+        "content": "Yeah I'm at my desk. What's up?",
+        "category": "N1",
+        "ext_cat": "personal",
+        "new_score": 0.201,
+        "old_score": 0.191
+      },
+      {
+        "id": "conv4_s07_025",
+        "content": "Wait I was going to ask you that. How's the knee?",
+        "category": "N1",
+        "ext_cat": "decision",
+        "new_score": 0.2186,
+        "old_score": 0.2072
+      }
+    ],
+    "n_fp": 0.429,
+    "baseline_n_fp": 0.4207,
+    "delta_n_fp": 0.0083,
+    "disqualified": false
+  },
+  "config_5_A": {
+    "config_name": "7 profiles",
+    "classifier": "A",
+    "total_leaks": 4,
+    "leaks": [
+      {
+        "id": "conv1_s08_019",
+        "content": "I know I know but it's actually cheaper than buying cases",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2532,
+        "old_score": 0.2556
+      },
+      {
+        "id": "conv2_s06_014",
+        "content": "March! That's a long wait.",
+        "category": "N3",
+        "ext_cat": "temporal",
+        "new_score": 0.269,
+        "old_score": 0.2594
+      },
+      {
+        "id": "conv3_s02_018",
+        "content": "yeah. maybe. idk",
+        "category": "N1",
+        "ext_cat": "temporal",
+        "new_score": 0.2134,
+        "old_score": 0.2102
+      },
+      {
+        "id": "conv3_s13_019",
+        "content": "July!! that's so exciting. what's the curriculum like?",
+        "category": "N1",
+        "ext_cat": "temporal",
+        "new_score": 0.2104,
+        "old_score": 0.2119
+      }
+    ],
+    "n_fp": 0.4175,
+    "baseline_n_fp": 0.4207,
+    "delta_n_fp": -0.0032,
+    "disqualified": false
+  },
+  "config_5_B": {
+    "config_name": "7 profiles",
+    "classifier": "B",
+    "total_leaks": 8,
+    "leaks": [
+      {
+        "id": "conv1_s01_021",
+        "content": "ok I need to try it",
+        "category": "N5",
+        "ext_cat": "decision",
+        "new_score": 0.2408,
+        "old_score": 0.2405
+      },
+      {
+        "id": "conv1_s04_033",
+        "content": "dude that's honestly so good for a 1br",
+        "category": "N5",
+        "ext_cat": "relationship",
+        "new_score": 0.2816,
+        "old_score": 0.2558
+      },
+      {
+        "id": "conv1_s08_019",
+        "content": "I know I know but it's actually cheaper than buying cases",
+        "category": "N1",
+        "ext_cat": "correction",
+        "new_score": 0.2532,
+        "old_score": 0.2556
+      },
+      {
+        "id": "conv2_s06_014",
+        "content": "March! That's a long wait.",
+        "category": "N3",
+        "ext_cat": "temporal",
+        "new_score": 0.269,
+        "old_score": 0.2594
+      },
+      {
+        "id": "conv2_s08_040",
+        "content": "love u!! \u2764\ufe0f\u2764\ufe0f",
+        "category": "N2",
+        "ext_cat": "preference",
+        "new_score": 0.2635,
+        "old_score": 0.2344
+      },
+      {
+        "id": "conv3_s03_028",
+        "content": "alright let me start researching neighborhoods. I'll send yo",
+        "category": "N1",
+        "ext_cat": "decision",
+        "new_score": 0.2219,
+        "old_score": 0.2106
+      },
+      {
+        "id": "conv3_s07_030",
+        "content": "ok I'll put together a full cost breakdown this week",
+        "category": "N1",
+        "ext_cat": "decision",
+        "new_score": 0.2117,
+        "old_score": 0.2027
+      },
+      {
+        "id": "conv4_s07_025",
+        "content": "Wait I was going to ask you that. How's the knee?",
+        "category": "N1",
+        "ext_cat": "decision",
+        "new_score": 0.2138,
+        "old_score": 0.2072
+      }
+    ],
+    "n_fp": 0.429,
+    "baseline_n_fp": 0.4207,
+    "delta_n_fp": 0.0083,
+    "disqualified": false
+  }
+}

@@ -1,0 +1,3759 @@
+{
+  "dataset": "long_horizon_synthetic",
+  "model": "model2vec:minishlab/potion-base-32M",
+  "metric": "1 - max_cos(v_m, v_prior_window)",
+  "window": 500,
+  "n_messages": 750,
+  "msg_labels": [
+    {
+      "msg_key": "session-1/turn-0",
+      "proxy_surprisal": 1.0,
+      "content_preview": "Hey, I'm working on a performance optimization session for forge\u2014my Rust CLI pro"
+    },
+    {
+      "msg_key": "session-1/turn-1",
+      "proxy_surprisal": 0.9607,
+      "content_preview": "Got it, let's figure this out!"
+    },
+    {
+      "msg_key": "session-1/turn-2",
+      "proxy_surprisal": 0.5757,
+      "content_preview": "So the CLI is part of a larger stack\u2014SvelteKit frontend with a Postgres backend."
+    },
+    {
+      "msg_key": "session-1/turn-3",
+      "proxy_surprisal": 0.6857,
+      "content_preview": "Yeah, 2.5 seconds adds up fast. Are you seeing that delay during initialization,"
+    },
+    {
+      "msg_key": "session-1/turn-4",
+      "proxy_surprisal": 0.479,
+      "content_preview": "All of the above, honestly. We initialize a connection pool, load a large config"
+    },
+    {
+      "msg_key": "session-1/turn-5",
+      "proxy_surprisal": 0.6751,
+      "content_preview": "That's your starting point then\u2014flamegraph or cargo-flamegraph will show you exa"
+    },
+    {
+      "msg_key": "session-1/turn-6",
+      "proxy_surprisal": 0.6366,
+      "content_preview": "That makes sense. I should mention I'm partial to vim and I prefer uv over pip f"
+    },
+    {
+      "msg_key": "session-1/turn-7",
+      "proxy_surprisal": 0.7901,
+      "content_preview": "Perfect, that actually works better here."
+    },
+    {
+      "msg_key": "session-1/turn-8",
+      "proxy_surprisal": 0.6516,
+      "content_preview": "Should I start with the cold-start profile or focus on repeated invocations too?"
+    },
+    {
+      "msg_key": "session-1/turn-9",
+      "proxy_surprisal": 0.5645,
+      "content_preview": "Cold start is the quickest win. Once you see where the time goes there, repeated"
+    },
+    {
+      "msg_key": "session-1/turn-10",
+      "proxy_surprisal": 0.772,
+      "content_preview": "True, makes sense. Ada's been napping on my keyboard\u2014working from home has its c"
+    },
+    {
+      "msg_key": "session-1/turn-11",
+      "proxy_surprisal": 0.6282,
+      "content_preview": "That's relatable. Anyway, once you run that profile, you'll have concrete data t"
+    },
+    {
+      "msg_key": "session-1/turn-12",
+      "proxy_surprisal": 0.6044,
+      "content_preview": "Yeah, I've got added motivation\u2014I just accepted an offer at Meta last week, so t"
+    },
+    {
+      "msg_key": "session-1/turn-13",
+      "proxy_surprisal": 0.5354,
+      "content_preview": "Congrats on Meta! That context actually makes this even more important. Let's ma"
+    },
+    {
+      "msg_key": "session-2/turn-0",
+      "proxy_surprisal": 0.6799,
+      "content_preview": "Hey, you got a sec?"
+    },
+    {
+      "msg_key": "session-2/turn-1",
+      "proxy_surprisal": 0.6564,
+      "content_preview": "Yep! What's on your mind?"
+    },
+    {
+      "msg_key": "session-2/turn-2",
+      "proxy_surprisal": 0.4387,
+      "content_preview": "So for forge, we're building on SvelteKit + Postgres for the backend, and I need"
+    },
+    {
+      "msg_key": "session-2/turn-3",
+      "proxy_surprisal": 0.5559,
+      "content_preview": "Are these runtime configs or baked at build time?"
+    },
+    {
+      "msg_key": "session-2/turn-4",
+      "proxy_surprisal": 0.544,
+      "content_preview": "Runtime. Users set them once, the CLI stores them locally, then injects them int"
+    },
+    {
+      "msg_key": "session-2/turn-5",
+      "proxy_surprisal": 0.6007,
+      "content_preview": "So you need a communication channel between CLI and web. Sidecar pattern or embe"
+    },
+    {
+      "msg_key": "session-2/turn-6",
+      "proxy_surprisal": 0.6927,
+      "content_preview": "Both could work, but honestly? I've got Emma at home\u2014she's 7\u2014and my wife and I a"
+    },
+    {
+      "msg_key": "session-2/turn-7",
+      "proxy_surprisal": 0.6809,
+      "content_preview": "That makes total sense."
+    },
+    {
+      "msg_key": "session-2/turn-8",
+      "proxy_surprisal": 0.4391,
+      "content_preview": "I'm leaning toward embedding a tiny HTTP server in the CLI. It binds to localhos"
+    },
+    {
+      "msg_key": "session-2/turn-9",
+      "proxy_surprisal": 0.5657,
+      "content_preview": "That's clean. You'd write the port to a temp file so the web app knows where to "
+    },
+    {
+      "msg_key": "session-2/turn-10",
+      "proxy_surprisal": 0.4505,
+      "content_preview": "Exactly. For the tests, I want to use uv instead of pip\u2014I've been using it and i"
+    },
+    {
+      "msg_key": "session-2/turn-11",
+      "proxy_surprisal": 0.5751,
+      "content_preview": "Good call. We can use `uv run` for the test scripts then."
+    },
+    {
+      "msg_key": "session-2/turn-12",
+      "proxy_surprisal": 0.5914,
+      "content_preview": "For the actual encryption library, I'm thinking I should pull from crates.io rat"
+    },
+    {
+      "msg_key": "session-2/turn-13",
+      "proxy_surprisal": 0.4999,
+      "content_preview": "Yeah, vendoring only makes sense for specific compliance or supply chain reasons"
+    },
+    {
+      "msg_key": "session-2/turn-14",
+      "proxy_surprisal": 0.5264,
+      "content_preview": "Perfect. Ada's been my silent coding companion\u2014my cat\u2014and honestly I think she'd"
+    },
+    {
+      "msg_key": "session-2/turn-15",
+      "proxy_surprisal": 0.6985,
+      "content_preview": "Sounds like we've got a solid plan!"
+    },
+    {
+      "msg_key": "session-3/turn-0",
+      "proxy_surprisal": 0.5247,
+      "content_preview": "Hey, forge's CI is failing on the build step. Tests pass locally but the pipelin"
+    },
+    {
+      "msg_key": "session-3/turn-1",
+      "proxy_surprisal": 0.572,
+      "content_preview": "What's the actual error in the Actions logs? And can you share the docker-compos"
+    },
+    {
+      "msg_key": "session-3/turn-2",
+      "proxy_surprisal": 0.4631,
+      "content_preview": "The timeout error is: `connection refused on localhost:5432`. The compose file h"
+    },
+    {
+      "msg_key": "session-3/turn-3",
+      "proxy_surprisal": 0.4905,
+      "content_preview": "That's a classic container networking issue. Check your GitHub Actions workflow "
+    },
+    {
+      "msg_key": "session-3/turn-4",
+      "proxy_surprisal": 0.3343,
+      "content_preview": "Aha, found it. The DATABASE_URL environment variable is hardcoded to `localhost`"
+    },
+    {
+      "msg_key": "session-3/turn-5",
+      "proxy_surprisal": 0.6154,
+      "content_preview": "Got it. That's the bug right there."
+    },
+    {
+      "msg_key": "session-3/turn-6",
+      "proxy_surprisal": 0.6563,
+      "content_preview": "Grabbing an espresso while I update the workflow. No sugar, and definitely no pe"
+    },
+    {
+      "msg_key": "session-3/turn-7",
+      "proxy_surprisal": 0.4545,
+      "content_preview": "Good call. Change `localhost` to the service name and the migration should conne"
+    },
+    {
+      "msg_key": "session-3/turn-8",
+      "proxy_surprisal": 0.293,
+      "content_preview": "Thanks, that makes sense."
+    },
+    {
+      "msg_key": "session-3/turn-9",
+      "proxy_surprisal": 0.6691,
+      "content_preview": "You got this. Push that fix and the pipeline should be green."
+    },
+    {
+      "msg_key": "session-3/turn-10",
+      "proxy_surprisal": 0.6384,
+      "content_preview": "Updated the workflow. This kind of environment variable mismatch is exactly what"
+    },
+    {
+      "msg_key": "session-3/turn-11",
+      "proxy_surprisal": 0.5744,
+      "content_preview": "Happy to help. Let me know if the next run passes."
+    },
+    {
+      "msg_key": "session-4/turn-0",
+      "proxy_surprisal": 0.6667,
+      "content_preview": "Hey, just got settled into the new place in NYC. Still unpacking but ready to fo"
+    },
+    {
+      "msg_key": "session-4/turn-1",
+      "proxy_surprisal": 0.6565,
+      "content_preview": "Welcome to the new chapter! That's a big move. Let's tackle this migration\u2014what'"
+    },
+    {
+      "msg_key": "session-4/turn-2",
+      "proxy_surprisal": 0.3763,
+      "content_preview": "So at Meta they want us to evaluate moving the forge CLI from our current Svelte"
+    },
+    {
+      "msg_key": "session-4/turn-3",
+      "proxy_surprisal": 0.6672,
+      "content_preview": "Makes sense\u2014enterprise migrations are always political and technical at once. Wh"
+    },
+    {
+      "msg_key": "session-4/turn-4",
+      "proxy_surprisal": 0.5749,
+      "content_preview": "Timeline is flexible, which is nice. Team is small\u2014three of us including me. Bac"
+    },
+    {
+      "msg_key": "session-4/turn-5",
+      "proxy_surprisal": 0.7072,
+      "content_preview": "Phased is smart for that blast radius. That gives you time to prove it works. Ha"
+    },
+    {
+      "msg_key": "session-4/turn-6",
+      "proxy_surprisal": 0.5924,
+      "content_preview": "I'm torn between grabbing an espresso or tea this morning\u2014helps me think. But ye"
+    },
+    {
+      "msg_key": "session-4/turn-7",
+      "proxy_surprisal": 0.5453,
+      "content_preview": "Rust + new UI makes the most sense given your team's expertise. Tauri is solid i"
+    },
+    {
+      "msg_key": "session-4/turn-8",
+      "proxy_surprisal": 0.4672,
+      "content_preview": "Mostly REPL-style for now, but they want room to grow it into a dashboard. That'"
+    },
+    {
+      "msg_key": "session-4/turn-9",
+      "proxy_surprisal": 0.7021,
+      "content_preview": "Dioxus is interesting for that\u2014gives you Rust all the way down. Have you talked "
+    },
+    {
+      "msg_key": "session-4/turn-10",
+      "proxy_surprisal": 0.531,
+      "content_preview": "Yeah, that's the blocker. Both other devs are strong Rust people but one hasn't "
+    },
+    {
+      "msg_key": "session-4/turn-11",
+      "proxy_surprisal": 0.6313,
+      "content_preview": "Smart. For each option, nail down: setup time, testing story, deployment story, "
+    },
+    {
+      "msg_key": "session-4/turn-12",
+      "proxy_surprisal": 0.5981,
+      "content_preview": "Got it. I'll draft those by Thursday."
+    },
+    {
+      "msg_key": "session-4/turn-13",
+      "proxy_surprisal": 0.613,
+      "content_preview": "One more thing\u2014since you just moved and onboarded, how's the headspace? This is "
+    },
+    {
+      "msg_key": "session-4/turn-14",
+      "proxy_surprisal": 0.5636,
+      "content_preview": "Honestly, good timing. Emma starts summer camp in a few weeks, and my wife's set"
+    },
+    {
+      "msg_key": "session-4/turn-15",
+      "proxy_surprisal": 0.6561,
+      "content_preview": "That's solid grounding. Means you can spend the energy this decision deserves. W"
+    },
+    {
+      "msg_key": "session-4/turn-16",
+      "proxy_surprisal": 0.6141,
+      "content_preview": "Async is fine for now. I'll drop a doc in the team folder and tag you. Ada's bee"
+    },
+    {
+      "msg_key": "session-4/turn-17",
+      "proxy_surprisal": 0.5582,
+      "content_preview": "Ha, yeah. Get through the move, we'll take the migration one step at a time."
+    },
+    {
+      "msg_key": "session-5/turn-0",
+      "proxy_surprisal": 0.7095,
+      "content_preview": "Morning! Quick question on a dependency. You got a few minutes?"
+    },
+    {
+      "msg_key": "session-5/turn-1",
+      "proxy_surprisal": 0.4665,
+      "content_preview": "Hey, sure. What's up?"
+    },
+    {
+      "msg_key": "session-5/turn-2",
+      "proxy_surprisal": 0.417,
+      "content_preview": "I'm evaluating drizzle-orm to replace our current query builder in forge. The Sv"
+    },
+    {
+      "msg_key": "session-5/turn-3",
+      "proxy_surprisal": 0.6511,
+      "content_preview": "Depends on your query volume and complexity. How many queries are we talking, an"
+    },
+    {
+      "msg_key": "session-5/turn-4",
+      "proxy_surprisal": 0.4675,
+      "content_preview": "About 15-20 queries scattered across the handlers. Mostly reads with some basic "
+    },
+    {
+      "msg_key": "session-5/turn-5",
+      "proxy_surprisal": 0.6805,
+      "content_preview": "That's a reasonable amount to migrate. Drizzle would save you a lot of pain ther"
+    },
+    {
+      "msg_key": "session-5/turn-6",
+      "proxy_surprisal": 0.4771,
+      "content_preview": "So I have some huge news \u2014 I just accepted an offer from Meta. Still processing "
+    },
+    {
+      "msg_key": "session-5/turn-7",
+      "proxy_surprisal": 0.5906,
+      "content_preview": "Wow, congratulations! That's massive. No wonder you're in project-stabilization "
+    },
+    {
+      "msg_key": "session-5/turn-8",
+      "proxy_surprisal": 0.4984,
+      "content_preview": "Exactly. I want to lock down forge's architecture before everything gets chaotic"
+    },
+    {
+      "msg_key": "session-5/turn-9",
+      "proxy_surprisal": 0.3994,
+      "content_preview": "Codegen would definitely help. You could generate TypeScript interfaces from the"
+    },
+    {
+      "msg_key": "session-5/turn-10",
+      "proxy_surprisal": 0.4803,
+      "content_preview": "Good point. Also been meaning to switch our Python test harness to uv instead of"
+    },
+    {
+      "msg_key": "session-5/turn-11",
+      "proxy_surprisal": 0.6177,
+      "content_preview": "You could bundle it all together: drizzle migration, codegen, uv tooling. One cl"
+    },
+    {
+      "msg_key": "session-5/turn-12",
+      "proxy_surprisal": 0.6542,
+      "content_preview": "I like that approach. Really appreciate you walking through this with me."
+    },
+    {
+      "msg_key": "session-5/turn-13",
+      "proxy_surprisal": 0.3843,
+      "content_preview": "Happy to help. Let me know how the spike goes."
+    },
+    {
+      "msg_key": "session-6/turn-0",
+      "proxy_surprisal": 0.375,
+      "content_preview": "Hey, ready for standup?"
+    },
+    {
+      "msg_key": "session-6/turn-1",
+      "proxy_surprisal": 0.5012,
+      "content_preview": "Yeah, walk me through the week. What'd you get done?"
+    },
+    {
+      "msg_key": "session-6/turn-2",
+      "proxy_surprisal": 0.6086,
+      "content_preview": "Merged three PRs for the config parser refactor, got Postgres connection pooling"
+    },
+    {
+      "msg_key": "session-6/turn-3",
+      "proxy_surprisal": 0.5915,
+      "content_preview": "Nice on the config parser and pooling. Any blockers?"
+    },
+    {
+      "msg_key": "session-6/turn-4",
+      "proxy_surprisal": 0.437,
+      "content_preview": "Took longer to debug than expected. uv's dependency resolution made it way clean"
+    },
+    {
+      "msg_key": "session-6/turn-5",
+      "proxy_surprisal": 0.3802,
+      "content_preview": "Good call on uv."
+    },
+    {
+      "msg_key": "session-6/turn-6",
+      "proxy_surprisal": 0.578,
+      "content_preview": "SvelteKit frontend is the next thing\u2014form validation keeps breaking with the Pos"
+    },
+    {
+      "msg_key": "session-6/turn-7",
+      "proxy_surprisal": 0.7386,
+      "content_preview": "Sounds like a race condition on the submit. Add debouncing?"
+    },
+    {
+      "msg_key": "session-6/turn-8",
+      "proxy_surprisal": 0.6837,
+      "content_preview": "Good angle, I'll try it."
+    },
+    {
+      "msg_key": "session-6/turn-9",
+      "proxy_surprisal": 0.4912,
+      "content_preview": "How's settling into NYC treating you?"
+    },
+    {
+      "msg_key": "session-6/turn-10",
+      "proxy_surprisal": 0.4112,
+      "content_preview": "It's been smooth, honestly. Really excited about the Meta opportunity. Just need"
+    },
+    {
+      "msg_key": "session-6/turn-11",
+      "proxy_surprisal": 0.6808,
+      "content_preview": "Congrats on the offer."
+    },
+    {
+      "msg_key": "session-6/turn-12",
+      "proxy_surprisal": 0.5567,
+      "content_preview": "Thanks. Next week I'm targeting the SvelteKit form fix and CLI help text generat"
+    },
+    {
+      "msg_key": "session-6/turn-13",
+      "proxy_surprisal": 0.618,
+      "content_preview": "Ha, Ada's the real MVP. For the help text generation, you thinking of auto-gener"
+    },
+    {
+      "msg_key": "session-6/turn-14",
+      "proxy_surprisal": 0.5499,
+      "content_preview": "For sure. Talk next week."
+    },
+    {
+      "msg_key": "session-7/turn-0",
+      "proxy_surprisal": 0.5244,
+      "content_preview": "Hey, got a minute? We had a rough incident last night I want to walk through."
+    },
+    {
+      "msg_key": "session-7/turn-1",
+      "proxy_surprisal": 0.6065,
+      "content_preview": "Absolutely. What happened?"
+    },
+    {
+      "msg_key": "session-7/turn-2",
+      "proxy_surprisal": 0.5732,
+      "content_preview": "CLI was segfaulting on large file uploads. Customer hit it at 2 AM. Turned out t"
+    },
+    {
+      "msg_key": "session-7/turn-3",
+      "proxy_surprisal": 0.6424,
+      "content_preview": "That's rough. Did you get the backtrace showing exactly where it failed?"
+    },
+    {
+      "msg_key": "session-7/turn-4",
+      "proxy_surprisal": 0.5079,
+      "content_preview": "Yeah, chunk streaming logic. We rolled back immediately to the old allocator as "
+    },
+    {
+      "msg_key": "session-7/turn-5",
+      "proxy_surprisal": 0.5861,
+      "content_preview": "Good response. So what's the permanent fix going to be?"
+    },
+    {
+      "msg_key": "session-7/turn-6",
+      "proxy_surprisal": 0.4329,
+      "content_preview": "Complete rewrite of that section with proper invariant checks and comprehensive "
+    },
+    {
+      "msg_key": "session-7/turn-7",
+      "proxy_surprisal": 0.584,
+      "content_preview": "Makes sense. Testing both the old and new allocators before rolling out again?"
+    },
+    {
+      "msg_key": "session-7/turn-8",
+      "proxy_surprisal": 0.6435,
+      "content_preview": "Definitely. Don't want a repeat of last night."
+    },
+    {
+      "msg_key": "session-7/turn-9",
+      "proxy_surprisal": 0.6587,
+      "content_preview": "Smart."
+    },
+    {
+      "msg_key": "session-7/turn-10",
+      "proxy_surprisal": 0.5824,
+      "content_preview": "Been drinking way too much espresso since the move trying to keep up. My new pla"
+    },
+    {
+      "msg_key": "session-7/turn-11",
+      "proxy_surprisal": 0.5406,
+      "content_preview": "At least you found a good espresso spot. How long for the rewrite?"
+    },
+    {
+      "msg_key": "session-7/turn-12",
+      "proxy_surprisal": 0.6302,
+      "content_preview": "Few days for the core work, another day or two for full testing and review. I wa"
+    },
+    {
+      "msg_key": "session-7/turn-13",
+      "proxy_surprisal": 0.5918,
+      "content_preview": "Perfect plan. Let me know when you're ready for a pair review."
+    },
+    {
+      "msg_key": "session-7/turn-14",
+      "proxy_surprisal": 0.5561,
+      "content_preview": "Will do. Thanks for talking through this."
+    },
+    {
+      "msg_key": "session-8/turn-0",
+      "proxy_surprisal": 0.4733,
+      "content_preview": "Hey, ready to review this PR? It's adding integration tests for the forge CLI pa"
+    },
+    {
+      "msg_key": "session-8/turn-1",
+      "proxy_surprisal": 0.5665,
+      "content_preview": "Sure, happy to take a look. What's the scope?"
+    },
+    {
+      "msg_key": "session-8/turn-2",
+      "proxy_surprisal": 0.4793,
+      "content_preview": "Main CLI pathways, error handling, subcommand routing. One thing\u2014they're using p"
+    },
+    {
+      "msg_key": "session-8/turn-3",
+      "proxy_surprisal": 0.6224,
+      "content_preview": "Got it\u2014uv is a solid upgrade. What about the actual test structure?"
+    },
+    {
+      "msg_key": "session-8/turn-4",
+      "proxy_surprisal": 0.4856,
+      "content_preview": "The happy path is solid, but they're mocking the filesystem for config parsing i"
+    },
+    {
+      "msg_key": "session-8/turn-5",
+      "proxy_surprisal": 0.4126,
+      "content_preview": "Agreed\u2014integration tests should hit real I/O. Mocking is fine for units but not "
+    },
+    {
+      "msg_key": "session-8/turn-6",
+      "proxy_surprisal": 0.4381,
+      "content_preview": "Exactly right. I saw this meme yesterday about Rust developers debugging segfaul"
+    },
+    {
+      "msg_key": "session-8/turn-7",
+      "proxy_surprisal": 0.4971,
+      "content_preview": "That's worth testing. Should we add it to this PR?"
+    },
+    {
+      "msg_key": "session-8/turn-8",
+      "proxy_surprisal": 0.5607,
+      "content_preview": "Let's add it. Changes are small. Ada knocked my desk setup over yesterday so I'm"
+    },
+    {
+      "msg_key": "session-8/turn-9",
+      "proxy_surprisal": 0.7688,
+      "content_preview": "Cats and chaos. Take your time."
+    },
+    {
+      "msg_key": "session-8/turn-10",
+      "proxy_surprisal": 0.5271,
+      "content_preview": "Looking at the subcommand routing tests\u2014they verify error handling for invalid s"
+    },
+    {
+      "msg_key": "session-8/turn-11",
+      "proxy_surprisal": 0.645,
+      "content_preview": "Good point."
+    },
+    {
+      "msg_key": "session-8/turn-12",
+      "proxy_surprisal": 0.4947,
+      "content_preview": "Once this lands, let's document the test philosophy\u2014fixtures over mocks, integra"
+    },
+    {
+      "msg_key": "session-8/turn-13",
+      "proxy_surprisal": 0.6742,
+      "content_preview": "Agreed. Will help maintain quality long-term."
+    },
+    {
+      "msg_key": "session-9/turn-0",
+      "proxy_surprisal": 0.689,
+      "content_preview": "Hey, I want to spend today exploring sentiment analysis competitors and gatherin"
+    },
+    {
+      "msg_key": "session-9/turn-1",
+      "proxy_surprisal": 0.5697,
+      "content_preview": "Good idea. Which competitors are you targeting, and what aspects interest you mo"
+    },
+    {
+      "msg_key": "session-9/turn-2",
+      "proxy_surprisal": 0.5159,
+      "content_preview": "I'm an ML engineer here in Seattle, working on a sentiment platform called vibec"
+    },
+    {
+      "msg_key": "session-9/turn-3",
+      "proxy_surprisal": 0.5008,
+      "content_preview": "Team sentiment is interesting. What's your technical approach for the analysis s"
+    },
+    {
+      "msg_key": "session-9/turn-4",
+      "proxy_surprisal": 0.5624,
+      "content_preview": "We're using PyTorch for the models, FastAPI for the backend, and Modal for serve"
+    },
+    {
+      "msg_key": "session-9/turn-5",
+      "proxy_surprisal": 0.6805,
+      "content_preview": "That's a solid stack. What's your latency target for inference?"
+    },
+    {
+      "msg_key": "session-9/turn-6",
+      "proxy_surprisal": 0.5993,
+      "content_preview": "We're aiming for sub-second responses using quantized models. Still deciding bet"
+    },
+    {
+      "msg_key": "session-9/turn-7",
+      "proxy_surprisal": 0.5252,
+      "content_preview": "Multilingual models make sense if latency is critical."
+    },
+    {
+      "msg_key": "session-9/turn-8",
+      "proxy_surprisal": 0.5483,
+      "content_preview": "Yeah, exactly. What I really want to see from competitors is how they handle rea"
+    },
+    {
+      "msg_key": "session-9/turn-9",
+      "proxy_surprisal": 0.5362,
+      "content_preview": "Those are the right questions. Real-time trending gives you actionable insights "
+    },
+    {
+      "msg_key": "session-9/turn-10",
+      "proxy_surprisal": 0.5225,
+      "content_preview": "Right. Our main angle is privacy\u2014we want teams to analyze sentiment internally w"
+    },
+    {
+      "msg_key": "session-9/turn-11",
+      "proxy_surprisal": 0.6316,
+      "content_preview": "That's strong positioning. Check whether competitors mention self-hosted or on-p"
+    },
+    {
+      "msg_key": "session-9/turn-12",
+      "proxy_surprisal": 0.5929,
+      "content_preview": "Good call, I'll definitely look for that."
+    },
+    {
+      "msg_key": "session-9/turn-13",
+      "proxy_surprisal": 0.1731,
+      "content_preview": "Sounds like you've got a solid research plan coming together here."
+    },
+    {
+      "msg_key": "session-9/turn-14",
+      "proxy_surprisal": 0.4495,
+      "content_preview": "We're also considering whether to fine-tune models for industry-specific languag"
+    },
+    {
+      "msg_key": "session-9/turn-15",
+      "proxy_surprisal": 0.6493,
+      "content_preview": "That could be a differentiator. Once you've gathered your notes, I'd suggest bui"
+    },
+    {
+      "msg_key": "session-9/turn-16",
+      "proxy_surprisal": 0.5693,
+      "content_preview": "Thanks, this structure is really helpful. I think I have a clear framework for w"
+    },
+    {
+      "msg_key": "session-9/turn-17",
+      "proxy_surprisal": 0.3823,
+      "content_preview": "You're welcome. Let me know what you find\u2014always interesting to see how the mark"
+    },
+    {
+      "msg_key": "session-10/turn-0",
+      "proxy_surprisal": 0.5894,
+      "content_preview": "Hey, I wanted to circle back on the architecture for vibecheck's next milestone."
+    },
+    {
+      "msg_key": "session-10/turn-1",
+      "proxy_surprisal": 0.4611,
+      "content_preview": "Congrats on the promotion! That's huge. So what's the core challenge?"
+    },
+    {
+      "msg_key": "session-10/turn-2",
+      "proxy_surprisal": 0.4183,
+      "content_preview": "Thanks. So we're running PyTorch models through FastAPI, using Modal for serverl"
+    },
+    {
+      "msg_key": "session-10/turn-3",
+      "proxy_surprisal": 0.5658,
+      "content_preview": "That's definitely painful. What are you considering?"
+    },
+    {
+      "msg_key": "session-10/turn-4",
+      "proxy_surprisal": 0.5436,
+      "content_preview": "A few options: pre-warming Modal containers, moving to persistent infrastructure"
+    },
+    {
+      "msg_key": "session-10/turn-5",
+      "proxy_surprisal": 0.6144,
+      "content_preview": "Those are all valid approaches. What feels right for your team?"
+    },
+    {
+      "msg_key": "session-10/turn-6",
+      "proxy_surprisal": 0.5547,
+      "content_preview": "Probably persistent containers. I've been setting up local tests in zsh, and the"
+    },
+    {
+      "msg_key": "session-10/turn-7",
+      "proxy_surprisal": 0.5401,
+      "content_preview": "Good reasoning. Have you thought through the deployment strategy yet?"
+    },
+    {
+      "msg_key": "session-10/turn-8",
+      "proxy_surprisal": 0.6821,
+      "content_preview": "Not fully, but I'm leaning toward containerized on maybe DigitalOcean or AWS. St"
+    },
+    {
+      "msg_key": "session-10/turn-9",
+      "proxy_surprisal": 0.6736,
+      "content_preview": "What's your timeline looking like?"
+    },
+    {
+      "msg_key": "session-10/turn-10",
+      "proxy_surprisal": 0.5625,
+      "content_preview": "I want to ship the RFC this week and plan for implementation next sprint. Honest"
+    },
+    {
+      "msg_key": "session-10/turn-11",
+      "proxy_surprisal": 0.5546,
+      "content_preview": "That's a really healthy mindset. So next steps are writing the RFC?"
+    },
+    {
+      "msg_key": "session-10/turn-12",
+      "proxy_surprisal": 0.588,
+      "content_preview": "Yeah. Been bouncing ideas off Mochi while I work\u2014my corgi's been keeping me sane"
+    },
+    {
+      "msg_key": "session-10/turn-13",
+      "proxy_surprisal": 0.7044,
+      "content_preview": "Dogs are the best debugging partners, honestly."
+    },
+    {
+      "msg_key": "session-10/turn-14",
+      "proxy_surprisal": 0.4529,
+      "content_preview": "They really are. Anyway, I'm pretty confident in this direction. I'll draft the "
+    },
+    {
+      "msg_key": "session-10/turn-15",
+      "proxy_surprisal": 0.5378,
+      "content_preview": "Sounds good. Want me to review it once you have a draft?"
+    },
+    {
+      "msg_key": "session-11/turn-0",
+      "proxy_surprisal": 0.6757,
+      "content_preview": "Got a minute to brainstorm a new feature?"
+    },
+    {
+      "msg_key": "session-11/turn-1",
+      "proxy_surprisal": 0.4126,
+      "content_preview": "Sure!"
+    },
+    {
+      "msg_key": "session-11/turn-2",
+      "proxy_surprisal": 0.4213,
+      "content_preview": "I want to add real-time sentiment aggregation to vibecheck. Instead of batch pro"
+    },
+    {
+      "msg_key": "session-11/turn-3",
+      "proxy_surprisal": 0.6739,
+      "content_preview": "How's state management? Redis for the aggregations?"
+    },
+    {
+      "msg_key": "session-11/turn-4",
+      "proxy_surprisal": 0.5752,
+      "content_preview": "Yeah, Redis for speed. Database queries would tank latency. Still figuring out b"
+    },
+    {
+      "msg_key": "session-11/turn-5",
+      "proxy_surprisal": 0.778,
+      "content_preview": "What about the contract between services?"
+    },
+    {
+      "msg_key": "session-11/turn-6",
+      "proxy_surprisal": 0.459,
+      "content_preview": "Here's the thing: I was diagnosed with ADHD last week and I'm realizing I can't "
+    },
+    {
+      "msg_key": "session-11/turn-7",
+      "proxy_surprisal": 0.3484,
+      "content_preview": "That makes sense, having a clear boundary helps."
+    },
+    {
+      "msg_key": "session-11/turn-8",
+      "proxy_surprisal": 0.5857,
+      "content_preview": "Thinking gRPC for low latency. Schema's still a work in progress."
+    },
+    {
+      "msg_key": "session-11/turn-9",
+      "proxy_surprisal": 0.5866,
+      "content_preview": "Solid choice."
+    },
+    {
+      "msg_key": "session-11/turn-10",
+      "proxy_surprisal": 0.6053,
+      "content_preview": "One more thing: I want all deployment scripts in fish, not bash. I've used fish "
+    },
+    {
+      "msg_key": "session-11/turn-11",
+      "proxy_surprisal": 0.6475,
+      "content_preview": "Fish works fine for us."
+    },
+    {
+      "msg_key": "session-11/turn-12",
+      "proxy_surprisal": 0.6711,
+      "content_preview": "Took Mochi on a long hike yesterday, the weather in Seattle was perfect."
+    },
+    {
+      "msg_key": "session-11/turn-13",
+      "proxy_surprisal": 0.5158,
+      "content_preview": "That sounds nice!"
+    },
+    {
+      "msg_key": "session-11/turn-14",
+      "proxy_surprisal": 0.7131,
+      "content_preview": "Anyway, fair warning: I'm lactose intolerant, so the Italian team lunch tomorrow"
+    },
+    {
+      "msg_key": "session-12/turn-0",
+      "proxy_surprisal": 0.5218,
+      "content_preview": "Morning! Quick question \u2014 should I grab decaf coffee or tea today? Can't decide."
+    },
+    {
+      "msg_key": "session-12/turn-1",
+      "proxy_surprisal": 0.4751,
+      "content_preview": "Go decaf. Ready for the retro?"
+    },
+    {
+      "msg_key": "session-12/turn-2",
+      "proxy_surprisal": 0.4125,
+      "content_preview": "Yeah, let's dive in. This sprint was intense. Got promoted to senior right at th"
+    },
+    {
+      "msg_key": "session-12/turn-3",
+      "proxy_surprisal": 0.6825,
+      "content_preview": "That's a big couple of weeks."
+    },
+    {
+      "msg_key": "session-12/turn-4",
+      "proxy_surprisal": 0.4748,
+      "content_preview": "For sure. But let's focus on the sprint wins. PyTorch improvements solid \u2014 got a"
+    },
+    {
+      "msg_key": "session-12/turn-5",
+      "proxy_surprisal": 0.6806,
+      "content_preview": "Good wins. What struggled?"
+    },
+    {
+      "msg_key": "session-12/turn-6",
+      "proxy_surprisal": 0.5589,
+      "content_preview": "Modal cold starts brutal \u2014 3 to 4 seconds on first requests. Also spread myself "
+    },
+    {
+      "msg_key": "session-12/turn-7",
+      "proxy_surprisal": 0.6347,
+      "content_preview": "Cold starts fixable with warming strategies. The context-switching is next-sprin"
+    },
+    {
+      "msg_key": "session-12/turn-8",
+      "proxy_surprisal": 0.5517,
+      "content_preview": "Exactly. The ADHD realization is that I can't be the person who does everything."
+    },
+    {
+      "msg_key": "session-12/turn-9",
+      "proxy_surprisal": 0.384,
+      "content_preview": "That's the move."
+    },
+    {
+      "msg_key": "session-12/turn-10",
+      "proxy_surprisal": 0.438,
+      "content_preview": "Yeah. So next sprint: Modal latency optimization is the priority, 60% of my time"
+    },
+    {
+      "msg_key": "session-12/turn-11",
+      "proxy_surprisal": 0.7068,
+      "content_preview": "How long estimate?"
+    },
+    {
+      "msg_key": "session-12/turn-12",
+      "proxy_surprisal": 0.5405,
+      "content_preview": "Two weeks if clean, three if we hit surprises. Full pipeline \u2014 Modal config, Fas"
+    },
+    {
+      "msg_key": "session-12/turn-13",
+      "proxy_surprisal": 0.5419,
+      "content_preview": "Realistic. What's your confidence on getting it done?"
+    },
+    {
+      "msg_key": "session-12/turn-14",
+      "proxy_surprisal": 0.5848,
+      "content_preview": "Pretty high, actually. I've identified the main bottlenecks and have a solid pla"
+    },
+    {
+      "msg_key": "session-12/turn-15",
+      "proxy_surprisal": 0.4025,
+      "content_preview": "That's solid planning."
+    },
+    {
+      "msg_key": "session-12/turn-16",
+      "proxy_surprisal": 0.6474,
+      "content_preview": "Mochi's been great company during late-night debugging. Sleep's been rough thoug"
+    },
+    {
+      "msg_key": "session-12/turn-17",
+      "proxy_surprisal": 0.7271,
+      "content_preview": "Get some rest."
+    },
+    {
+      "msg_key": "session-12/turn-18",
+      "proxy_surprisal": 0.484,
+      "content_preview": "I will. Actually committing to decaf only \u2014 seems wise. Feeling good about the p"
+    },
+    {
+      "msg_key": "session-13/turn-0",
+      "proxy_surprisal": 0.52,
+      "content_preview": "Hey, got a minute? Need to tackle vibecheck docs and kind of lost on where to st"
+    },
+    {
+      "msg_key": "session-13/turn-1",
+      "proxy_surprisal": 0.5253,
+      "content_preview": "Sure! What part of vibecheck do you want to document? API, architecture, model d"
+    },
+    {
+      "msg_key": "session-13/turn-2",
+      "proxy_surprisal": 0.4239,
+      "content_preview": "So honestly, I just got promoted to senior like two weeks ago and I'm still ridi"
+    },
+    {
+      "msg_key": "session-13/turn-3",
+      "proxy_surprisal": 0.5336,
+      "content_preview": "Congrats on the promotion! That's huge. For a doc overhaul like this, I'd recomm"
+    },
+    {
+      "msg_key": "session-13/turn-4",
+      "proxy_surprisal": 0.5132,
+      "content_preview": "Probably the API reference first? We have the FastAPI setup pretty solid. What f"
+    },
+    {
+      "msg_key": "session-13/turn-5",
+      "proxy_surprisal": 0.2399,
+      "content_preview": "OpenAPI spec is great, but a markdown reference is often more accessible. You co"
+    },
+    {
+      "msg_key": "session-13/turn-6",
+      "proxy_surprisal": 0.4371,
+      "content_preview": "That makes sense. The stack is PyTorch for the model, FastAPI for the API, Modal"
+    },
+    {
+      "msg_key": "session-13/turn-7",
+      "proxy_surprisal": 0.4642,
+      "content_preview": "Definitely. For Modal, I'd create a separate section on deployment with step-by-"
+    },
+    {
+      "msg_key": "session-13/turn-8",
+      "proxy_surprisal": 0.432,
+      "content_preview": "Yeah that sounds solid. I think that's the right approach"
+    },
+    {
+      "msg_key": "session-13/turn-9",
+      "proxy_surprisal": 0.581,
+      "content_preview": "Happy to bounce around ideas as you write this up!"
+    },
+    {
+      "msg_key": "session-13/turn-10",
+      "proxy_surprisal": 0.5083,
+      "content_preview": "Oh, and if you notice the examples\u2014I prefer fish shell over bash, so please use "
+    },
+    {
+      "msg_key": "session-14/turn-0",
+      "proxy_surprisal": 0.4233,
+      "content_preview": "Hey! So we've been thinking about migrating vibecheck away from Modal for a whil"
+    },
+    {
+      "msg_key": "session-14/turn-1",
+      "proxy_surprisal": 0.4948,
+      "content_preview": "Hey there! That sounds like a solid approach. Quick clarifications: are you keep"
+    },
+    {
+      "msg_key": "session-14/turn-2",
+      "proxy_surprisal": 0.4748,
+      "content_preview": "Yeah, keeping FastAPI makes sense since we have existing client integrations. Ti"
+    },
+    {
+      "msg_key": "session-14/turn-3",
+      "proxy_surprisal": 0.4509,
+      "content_preview": "Got it. GKE's a good fit for model serving workloads. The main question is how y"
+    },
+    {
+      "msg_key": "session-14/turn-4",
+      "proxy_surprisal": 0.628,
+      "content_preview": "Custom wrapper\u2014gives us control over preprocessing and caching. The Seattle weat"
+    },
+    {
+      "msg_key": "session-14/turn-5",
+      "proxy_surprisal": 0.5581,
+      "content_preview": "Fair question. Worth assessing team K8s familiarity early. Maybe plan a design r"
+    },
+    {
+      "msg_key": "session-14/turn-6",
+      "proxy_surprisal": 0.5103,
+      "content_preview": "Definitely. I'm leaning GKE for sure\u2014keeps everything in one cloud, costs are mu"
+    },
+    {
+      "msg_key": "session-14/turn-7",
+      "proxy_surprisal": 0.4535,
+      "content_preview": "Makes sense on both fronts. Zsh standardization will help with consistency, and "
+    },
+    {
+      "msg_key": "session-14/turn-8",
+      "proxy_surprisal": 0.5759,
+      "content_preview": "Yeah, exactly. I'll draft the architecture proposal and cost projections to pitc"
+    },
+    {
+      "msg_key": "session-14/turn-9",
+      "proxy_surprisal": 0.6321,
+      "content_preview": "Good call on the fallback strategy. That gives you a safety net while the new sy"
+    },
+    {
+      "msg_key": "session-14/turn-10",
+      "proxy_surprisal": 0.5241,
+      "content_preview": "I'm definitely going to need that. This is a big enough shift that getting leade"
+    },
+    {
+      "msg_key": "session-14/turn-11",
+      "proxy_surprisal": 0.4974,
+      "content_preview": "Absolutely. I'll start drafting it and get it to you by tomorrow for review."
+    },
+    {
+      "msg_key": "session-14/turn-12",
+      "proxy_surprisal": 0.5031,
+      "content_preview": "Perfect, thanks for walking through this. See you next week for the design revie"
+    },
+    {
+      "msg_key": "session-15/turn-0",
+      "proxy_surprisal": 0.464,
+      "content_preview": "hey, finally got the last bits of vibecheck polished. been a journey. and i gott"
+    },
+    {
+      "msg_key": "session-15/turn-1",
+      "proxy_surprisal": 0.5884,
+      "content_preview": "so i need help structuring the launch post. there's a lot to cover\u2014the sentiment"
+    },
+    {
+      "msg_key": "session-15/turn-2",
+      "proxy_surprisal": 0.5528,
+      "content_preview": "makes sense. who's the main audience you're writing for?"
+    },
+    {
+      "msg_key": "session-15/turn-3",
+      "proxy_surprisal": 0.3484,
+      "content_preview": "mostly ML engineers and forward-thinking companies. here's the thing though\u2014i wa"
+    },
+    {
+      "msg_key": "session-15/turn-4",
+      "proxy_surprisal": 0.4848,
+      "content_preview": "that's actually a really smart approach. breaking it into phases will make both "
+    },
+    {
+      "msg_key": "session-15/turn-5",
+      "proxy_surprisal": 0.5746,
+      "content_preview": "totally. so question\u2014should i lead with the impact first, or dive into the techn"
+    },
+    {
+      "msg_key": "session-15/turn-6",
+      "proxy_surprisal": 0.5594,
+      "content_preview": "i'd suggest leading with the problem vibecheck solves. once people understand th"
+    },
+    {
+      "msg_key": "session-15/turn-7",
+      "proxy_surprisal": 0.3063,
+      "content_preview": "yeah that makes sense. honestly mochi's been keeping me sane through all this\u2014la"
+    },
+    {
+      "msg_key": "session-15/turn-8",
+      "proxy_surprisal": 0.5543,
+      "content_preview": "haha, dogs are the best coworkers"
+    },
+    {
+      "msg_key": "session-15/turn-9",
+      "proxy_surprisal": 0.5098,
+      "content_preview": "for real. you know, being a new senior engineer, i want this launch post to real"
+    },
+    {
+      "msg_key": "session-15/turn-10",
+      "proxy_surprisal": 0.5706,
+      "content_preview": "your work deserves that kind of visibility. you've built something solid here"
+    },
+    {
+      "msg_key": "session-15/turn-11",
+      "proxy_surprisal": 0.4386,
+      "content_preview": "alright, i'm ready to start drafting. let's make this happen"
+    },
+    {
+      "msg_key": "session-16/turn-0",
+      "proxy_surprisal": 0.3105,
+      "content_preview": "Hey, you got a few minutes?"
+    },
+    {
+      "msg_key": "session-16/turn-1",
+      "proxy_surprisal": 0.4182,
+      "content_preview": "Yeah, what's up?"
+    },
+    {
+      "msg_key": "session-16/turn-2",
+      "proxy_surprisal": 0.3888,
+      "content_preview": "So I've been thinking about how to handle prioritization better since the promot"
+    },
+    {
+      "msg_key": "session-16/turn-3",
+      "proxy_surprisal": 0.549,
+      "content_preview": "That makes sense. What are the main things competing for attention right now?"
+    },
+    {
+      "msg_key": "session-16/turn-4",
+      "proxy_surprisal": 0.3989,
+      "content_preview": "Inference pipeline optimization, batch processing feature, and cleaning up the M"
+    },
+    {
+      "msg_key": "session-16/turn-5",
+      "proxy_surprisal": 0.6021,
+      "content_preview": "All valuable. How are you thinking about impact vs. effort on each?"
+    },
+    {
+      "msg_key": "session-16/turn-6",
+      "proxy_surprisal": 0.5198,
+      "content_preview": "The inference optimization has the biggest customer win. But with my shell prefe"
+    },
+    {
+      "msg_key": "session-16/turn-7",
+      "proxy_surprisal": 0.642,
+      "content_preview": "Do they have dependencies on each other?"
+    },
+    {
+      "msg_key": "session-16/turn-8",
+      "proxy_surprisal": 0.4519,
+      "content_preview": "Good question actually."
+    },
+    {
+      "msg_key": "session-16/turn-9",
+      "proxy_surprisal": 0.4512,
+      "content_preview": "Saw the funniest meme yesterday about ML engineers at 2am, except replace coffee"
+    },
+    {
+      "msg_key": "session-16/turn-10",
+      "proxy_surprisal": 0.4851,
+      "content_preview": "Ha, yeah that checks out."
+    },
+    {
+      "msg_key": "session-16/turn-11",
+      "proxy_surprisal": 0.645,
+      "content_preview": "The refactor probably unblocks some optimization work anyway."
+    },
+    {
+      "msg_key": "session-16/turn-12",
+      "proxy_surprisal": 0.5688,
+      "content_preview": "So maybe the Modal cleanup is actually the right starting point?"
+    },
+    {
+      "msg_key": "session-16/turn-13",
+      "proxy_surprisal": 0.4519,
+      "content_preview": "Yeah, exactly. And honestly it helps with the ADHD too - clear sequential goals "
+    },
+    {
+      "msg_key": "session-16/turn-14",
+      "proxy_surprisal": 0.4632,
+      "content_preview": "Weather's been nice in Seattle lately at least."
+    },
+    {
+      "msg_key": "session-16/turn-15",
+      "proxy_surprisal": 0.5891,
+      "content_preview": "For sure, good timing to get focused."
+    },
+    {
+      "msg_key": "session-16/turn-16",
+      "proxy_surprisal": 0.2661,
+      "content_preview": "Thanks for walking through this with me."
+    },
+    {
+      "msg_key": "session-17/turn-0",
+      "proxy_surprisal": 0.591,
+      "content_preview": "Hey, I need help writing a launch post for meridian, our Kubernetes platform. I'"
+    },
+    {
+      "msg_key": "session-17/turn-1",
+      "proxy_surprisal": 0.5595,
+      "content_preview": "Absolutely! A K8s platform launch is important. Tell me about meridian \u2014 what di"
+    },
+    {
+      "msg_key": "session-17/turn-2",
+      "proxy_surprisal": 0.577,
+      "content_preview": "We're based here in Madrid. Meridian is designed to strip out the complexity tha"
+    },
+    {
+      "msg_key": "session-17/turn-3",
+      "proxy_surprisal": 0.5056,
+      "content_preview": "Smart. GitHub's the right choice for OSS. So the narrative is simplicity for pla"
+    },
+    {
+      "msg_key": "session-17/turn-4",
+      "proxy_surprisal": 0.4882,
+      "content_preview": "Good structure. For the hook, lead with K8s complexity. And for the CTA, we pref"
+    },
+    {
+      "msg_key": "session-17/turn-5",
+      "proxy_surprisal": 0.4172,
+      "content_preview": "Perfect. Async communication is essential. Here's the opening:\n\n**Kubernetes wit"
+    },
+    {
+      "msg_key": "session-17/turn-6",
+      "proxy_surprisal": 0.5043,
+      "content_preview": "That's really solid. Sharp and direct. I like the positioning."
+    },
+    {
+      "msg_key": "session-17/turn-7",
+      "proxy_surprisal": 0.5188,
+      "content_preview": "Thanks! Now let's tackle the 'why now' section. It sounds like internal adoption"
+    },
+    {
+      "msg_key": "session-17/turn-8",
+      "proxy_surprisal": 0.62,
+      "content_preview": "Exactly. From my perspective leading the team here in Madrid, we're at the point"
+    },
+    {
+      "msg_key": "session-17/turn-9",
+      "proxy_surprisal": 0.4593,
+      "content_preview": "That's your perfect launch moment. Here's the why-now:\n\n**Why Meridian, Why Now*"
+    },
+    {
+      "msg_key": "session-17/turn-10",
+      "proxy_surprisal": 0.6732,
+      "content_preview": "Good. Now the technical section \u2014 Go, Terraform, architecture. Keep it tight tho"
+    },
+    {
+      "msg_key": "session-17/turn-11",
+      "proxy_surprisal": 0.4573,
+      "content_preview": "Understood. Tight narrative, links to documentation. Here's the tech section:\n\n*"
+    },
+    {
+      "msg_key": "session-17/turn-12",
+      "proxy_surprisal": 0.6431,
+      "content_preview": "Perfect. One thing \u2014 add a human touch line, something like 'Built by a DevOps t"
+    },
+    {
+      "msg_key": "session-17/turn-13",
+      "proxy_surprisal": 0.6003,
+      "content_preview": "Smart. I'll add that. Here's the full post \u2014 around 750 words, all sections, Git"
+    },
+    {
+      "msg_key": "session-17/turn-14",
+      "proxy_surprisal": 0.6166,
+      "content_preview": "This is exactly what I needed. Handing it to comms now."
+    },
+    {
+      "msg_key": "session-17/turn-15",
+      "proxy_surprisal": 0.5021,
+      "content_preview": "Great! You've given them a solid foundation."
+    },
+    {
+      "msg_key": "session-17/turn-16",
+      "proxy_surprisal": 0.5341,
+      "content_preview": "Thanks. My coffee's been cold for like an hour, but I'm buzzing from momentum so"
+    },
+    {
+      "msg_key": "session-17/turn-17",
+      "proxy_surprisal": 0.6064,
+      "content_preview": "Ha, much better choice anyway. Enjoy!"
+    },
+    {
+      "msg_key": "session-18/turn-0",
+      "proxy_surprisal": 0.5215,
+      "content_preview": "Hey, got a minute? Need to workshop some architecture decisions for the next mer"
+    },
+    {
+      "msg_key": "session-18/turn-1",
+      "proxy_surprisal": 0.5149,
+      "content_preview": "Absolutely, let's dig in. What's on your mind?"
+    },
+    {
+      "msg_key": "session-18/turn-2",
+      "proxy_surprisal": 0.44,
+      "content_preview": "So we're at a crossroads with our deployment model. We're running Go services on"
+    },
+    {
+      "msg_key": "session-18/turn-3",
+      "proxy_surprisal": 0.6875,
+      "content_preview": "That's a significant decision. A few clarifying questions: What's your current t"
+    },
+    {
+      "msg_key": "session-18/turn-4",
+      "proxy_surprisal": 0.5354,
+      "content_preview": "We're running 60-40 between EU and US, both active. Low blast radius tolerance\u2014w"
+    },
+    {
+      "msg_key": "session-18/turn-5",
+      "proxy_surprisal": 0.5558,
+      "content_preview": "Solid approach. PR-based decisions are way cleaner for artifacts. Here's what I'"
+    },
+    {
+      "msg_key": "session-18/turn-6",
+      "proxy_surprisal": 0.7023,
+      "content_preview": "That's exactly what's keeping me up at night. Between Terraform state headaches "
+    },
+    {
+      "msg_key": "session-18/turn-7",
+      "proxy_surprisal": 0.685,
+      "content_preview": "Ouch. At least the Terraform problem has a technical solution."
+    },
+    {
+      "msg_key": "session-18/turn-8",
+      "proxy_surprisal": 0.4929,
+      "content_preview": "Right. Here's what I'm thinking: partition the Terraform state by region and bui"
+    },
+    {
+      "msg_key": "session-18/turn-9",
+      "proxy_surprisal": 0.6133,
+      "content_preview": "Yes, send them over. One thing to vet: how does your control plane handle split-"
+    },
+    {
+      "msg_key": "session-18/turn-10",
+      "proxy_surprisal": 0.6936,
+      "content_preview": "We default to last known good state and page oncall. Safe but not elegant. The r"
+    },
+    {
+      "msg_key": "session-18/turn-11",
+      "proxy_surprisal": 0.4857,
+      "content_preview": "That's fair. Have you considered whether this lives in Kubernetes or if a simple"
+    },
+    {
+      "msg_key": "session-18/turn-12",
+      "proxy_surprisal": 0.4812,
+      "content_preview": "That's actually a really good point I hadn't fully explored. I'll dive into that"
+    },
+    {
+      "msg_key": "session-18/turn-13",
+      "proxy_surprisal": 0.5334,
+      "content_preview": "Perfect. When you draft it, make sure you call out the trade-offs clearly\u2014why op"
+    },
+    {
+      "msg_key": "session-18/turn-14",
+      "proxy_surprisal": 0.4585,
+      "content_preview": "Will do. Thanks for the sanity check\u2014this helped clarify a lot."
+    },
+    {
+      "msg_key": "session-18/turn-15",
+      "proxy_surprisal": 0.6531,
+      "content_preview": "Anytime. Good luck with the design doc. I'll be here if you hit snags."
+    },
+    {
+      "msg_key": "session-19/turn-0",
+      "proxy_surprisal": 0.5719,
+      "content_preview": "Got time for PR #247? Test suite for webhook controller."
+    },
+    {
+      "msg_key": "session-19/turn-1",
+      "proxy_surprisal": 0.5496,
+      "content_preview": "Yeah, let me pull it up. Using envtest?"
+    },
+    {
+      "msg_key": "session-19/turn-2",
+      "proxy_surprisal": 0.5255,
+      "content_preview": "Exactly. I learned early on that mocking the control plane creates divergence be"
+    },
+    {
+      "msg_key": "session-19/turn-3",
+      "proxy_surprisal": 0.5246,
+      "content_preview": "Makes sense. Walk me through the key test scenarios."
+    },
+    {
+      "msg_key": "session-19/turn-4",
+      "proxy_surprisal": 0.5646,
+      "content_preview": "Each test gets its own namespace and defers cleanup. Standard Go pattern. The cr"
+    },
+    {
+      "msg_key": "session-19/turn-5",
+      "proxy_surprisal": 0.5089,
+      "content_preview": "And you have metrics assertions for the requeue backoff?"
+    },
+    {
+      "msg_key": "session-19/turn-6",
+      "proxy_surprisal": 0.5147,
+      "content_preview": "Yeah, subtest specifically for requeue histogram emissions. Okay, grabbing some "
+    },
+    {
+      "msg_key": "session-19/turn-7",
+      "proxy_surprisal": 0.5554,
+      "content_preview": "Fair enough. I'll keep reviewing."
+    },
+    {
+      "msg_key": "session-19/turn-8",
+      "proxy_surprisal": 0.5715,
+      "content_preview": "Back. Check the Terraform fixtures? We're spinning up test clusters in code now "
+    },
+    {
+      "msg_key": "session-19/turn-9",
+      "proxy_surprisal": 0.5783,
+      "content_preview": "Yeah, reduces flakiness. One thing: KUBECONFIG env var check looks like dead cod"
+    },
+    {
+      "msg_key": "session-19/turn-10",
+      "proxy_surprisal": 0.4327,
+      "content_preview": "Total dead code. We use envtest's dynamic client, so tests don't depend on KUBEC"
+    },
+    {
+      "msg_key": "session-19/turn-11",
+      "proxy_surprisal": 0.6604,
+      "content_preview": "Clean it up. I also reviewed TestListWebhooks\u201430+ table-driven cases, pagination"
+    },
+    {
+      "msg_key": "session-19/turn-12",
+      "proxy_surprisal": 0.5981,
+      "content_preview": "Good. Pagination bugs are sneaky in prod, especially with large webhook lists. I"
+    },
+    {
+      "msg_key": "session-19/turn-13",
+      "proxy_surprisal": 0.6424,
+      "content_preview": "This is approvable. One question though: how'd the GitLab migration go earlier t"
+    },
+    {
+      "msg_key": "session-19/turn-14",
+      "proxy_surprisal": 0.4565,
+      "content_preview": "Switched early in the month thinking it'd modernize things, then moved back to G"
+    },
+    {
+      "msg_key": "session-19/turn-15",
+      "proxy_surprisal": 0.6639,
+      "content_preview": "Migrations are rough."
+    },
+    {
+      "msg_key": "session-19/turn-16",
+      "proxy_surprisal": 0.537,
+      "content_preview": "Yeah. Anyway, team lunch next Friday\u2014avoiding shellfish spots since I'm allergic"
+    },
+    {
+      "msg_key": "session-19/turn-17",
+      "proxy_surprisal": 0.2128,
+      "content_preview": "Smart planning."
+    },
+    {
+      "msg_key": "session-19/turn-18",
+      "proxy_surprisal": 0.6066,
+      "content_preview": "Thanks for the thorough review. Cleaning up that code and landing this."
+    },
+    {
+      "msg_key": "session-20/turn-0",
+      "proxy_surprisal": 0.418,
+      "content_preview": "Got a minute? Trying to decide between coffee and tea this morning, but figured "
+    },
+    {
+      "msg_key": "session-20/turn-1",
+      "proxy_surprisal": 0.4886,
+      "content_preview": "Tea's steadier. Let's start with wins, then move to blockers. How'd the first sp"
+    },
+    {
+      "msg_key": "session-20/turn-2",
+      "proxy_surprisal": 0.3819,
+      "content_preview": "Honestly, the biggest thing is the GitLab migration. We moved everything week 1 "
+    },
+    {
+      "msg_key": "session-20/turn-3",
+      "proxy_surprisal": 0.582,
+      "content_preview": "That's a significant reversal. What specifically broke with GitLab's integration"
+    },
+    {
+      "msg_key": "session-20/turn-4",
+      "proxy_surprisal": 0.4898,
+      "content_preview": "The runners were misconfigured, debugging Kubernetes deployments became a nightm"
+    },
+    {
+      "msg_key": "session-20/turn-5",
+      "proxy_surprisal": 0.5602,
+      "content_preview": "That's learning, not failure. For next sprint, stabilize GitHub Actions first?"
+    },
+    {
+      "msg_key": "session-20/turn-6",
+      "proxy_surprisal": 0.446,
+      "content_preview": "Yes. And I want to enforce something: all infrastructure discussions happen in p"
+    },
+    {
+      "msg_key": "session-20/turn-7",
+      "proxy_surprisal": 0.4487,
+      "content_preview": "Got it. So stabilize Actions, enforce PR-based discussions, then plan new work?"
+    },
+    {
+      "msg_key": "session-20/turn-8",
+      "proxy_surprisal": 0.5104,
+      "content_preview": "Exactly. On features: we need the Kubernetes autoscaling config and some Terrafo"
+    },
+    {
+      "msg_key": "session-20/turn-9",
+      "proxy_surprisal": 0.6476,
+      "content_preview": "Fair. How much bandwidth do you have with the family situation?"
+    },
+    {
+      "msg_key": "session-20/turn-10",
+      "proxy_surprisal": 0.668,
+      "content_preview": "The twins have their annual checkups Wednesday and Thursday, so I'm out those af"
+    },
+    {
+      "msg_key": "session-20/turn-11",
+      "proxy_surprisal": 0.6212,
+      "content_preview": "Makes sense. Monday planning session to finalize the sprint two scope?"
+    },
+    {
+      "msg_key": "session-20/turn-12",
+      "proxy_surprisal": 0.5517,
+      "content_preview": "Monday works. Let's scope it tight \u2014 autoscaling, Actions stabilization, VPC pla"
+    },
+    {
+      "msg_key": "session-20/turn-13",
+      "proxy_surprisal": 0.586,
+      "content_preview": "Yerba mate fuel and focused scope. I'll draft the sprint two doc in PR template "
+    },
+    {
+      "msg_key": "session-20/turn-14",
+      "proxy_surprisal": 0.534,
+      "content_preview": "Perfect. Make sure it's all in PRs so comments stay organized."
+    },
+    {
+      "msg_key": "session-20/turn-15",
+      "proxy_surprisal": 0.5929,
+      "content_preview": "You got it. Sprint two plan coming your way by end of day."
+    },
+    {
+      "msg_key": "session-20/turn-16",
+      "proxy_surprisal": 0.4613,
+      "content_preview": "Great. I'll review it in Emacs and get feedback to you tomorrow morning."
+    },
+    {
+      "msg_key": "session-20/turn-17",
+      "proxy_surprisal": 0.5766,
+      "content_preview": "Sounds good. Sprint retro and planning all set."
+    },
+    {
+      "msg_key": "session-21/turn-0",
+      "proxy_surprisal": 0.3634,
+      "content_preview": "Got a minute?"
+    },
+    {
+      "msg_key": "session-21/turn-1",
+      "proxy_surprisal": 0.2735,
+      "content_preview": "We're planning the migration back to GitHub. Moved to GitLab in week 1, but it's"
+    },
+    {
+      "msg_key": "session-21/turn-2",
+      "proxy_surprisal": 0.4979,
+      "content_preview": "What were the main pain points with GitLab? Was it the CI/CD syntax, the runner "
+    },
+    {
+      "msg_key": "session-21/turn-3",
+      "proxy_surprisal": 0.3491,
+      "content_preview": "Mostly the CI/CD conversion\u2014translating our Actions workflows to GitLab CI was b"
+    },
+    {
+      "msg_key": "session-21/turn-4",
+      "proxy_surprisal": 0.5563,
+      "content_preview": "That tracks. What's your timeline for the cutover back to GitHub?"
+    },
+    {
+      "msg_key": "session-21/turn-5",
+      "proxy_surprisal": 0.609,
+      "content_preview": "2-3 weeks before the next release cycle. We can't slip that or we'll miss a cust"
+    },
+    {
+      "msg_key": "session-21/turn-6",
+      "proxy_surprisal": 0.4591,
+      "content_preview": "That's tight but manageable. What's your biggest worry\u2014the runner migration, Ter"
+    },
+    {
+      "msg_key": "session-21/turn-7",
+      "proxy_surprisal": 0.5344,
+      "content_preview": "The runners and making sure our Terraform modules for meridian stay in sync duri"
+    },
+    {
+      "msg_key": "session-21/turn-8",
+      "proxy_surprisal": 0.5686,
+      "content_preview": "I'd suggest a phased approach with both systems running in parallel for a week. "
+    },
+    {
+      "msg_key": "session-21/turn-9",
+      "proxy_surprisal": 0.4679,
+      "content_preview": "That's exactly what I was thinking. Can you help me draft the full plan? I want "
+    },
+    {
+      "msg_key": "session-21/turn-10",
+      "proxy_surprisal": 0.684,
+      "content_preview": "Absolutely. I'll map out the phases, timelines, and rollback procedures."
+    },
+    {
+      "msg_key": "session-21/turn-11",
+      "proxy_surprisal": 0.4102,
+      "content_preview": "Perfect, thanks!"
+    },
+    {
+      "msg_key": "session-22/turn-0",
+      "proxy_surprisal": 0.4214,
+      "content_preview": "Hey, got a minute to help me recap this week's standup notes? Been a busy one fo"
+    },
+    {
+      "msg_key": "session-22/turn-1",
+      "proxy_surprisal": 0.3974,
+      "content_preview": "Absolutely, happy to help. What's on your mind from this week?"
+    },
+    {
+      "msg_key": "session-22/turn-2",
+      "proxy_surprisal": 0.3928,
+      "content_preview": "So we've had quite the journey with our tooling. Week 1 we made the jump to GitL"
+    },
+    {
+      "msg_key": "session-22/turn-3",
+      "proxy_surprisal": 0.5395,
+      "content_preview": "That makes sense\u2014team workflow friction can be a big blocker. How's the transiti"
+    },
+    {
+      "msg_key": "session-22/turn-4",
+      "proxy_surprisal": 0.5081,
+      "content_preview": "Mostly smooth, though this heat in Madrid isn't helping my focus\u2014it's been bruta"
+    },
+    {
+      "msg_key": "session-22/turn-5",
+      "proxy_surprisal": 0.5114,
+      "content_preview": "Could be a timing issue with the DNS resolver startup, or maybe the service's DN"
+    },
+    {
+      "msg_key": "session-22/turn-6",
+      "proxy_surprisal": 0.4008,
+      "content_preview": "Good thought. Here's the thing though\u2014I'm really pushing the team toward async d"
+    },
+    {
+      "msg_key": "session-22/turn-7",
+      "proxy_surprisal": 0.569,
+      "content_preview": "PR-based reviews are definitely the way to go for audit trails. Solid approach."
+    },
+    {
+      "msg_key": "session-22/turn-8",
+      "proxy_surprisal": 0.3569,
+      "content_preview": "Right. So about the GitLab pivot\u2014the bigger lesson was that switching platforms "
+    },
+    {
+      "msg_key": "session-22/turn-9",
+      "proxy_surprisal": 0.536,
+      "content_preview": "Those kinds of corrective decisions are valuable. Want me to help with anything "
+    },
+    {
+      "msg_key": "session-22/turn-10",
+      "proxy_surprisal": 0.3495,
+      "content_preview": "Nah, I think we're good. Thanks for talking through it."
+    },
+    {
+      "msg_key": "session-22/turn-11",
+      "proxy_surprisal": 0.4798,
+      "content_preview": "Anytime. Good luck with the DNS debugging\u2014reach out if you need another set of e"
+    },
+    {
+      "msg_key": "session-23/turn-0",
+      "proxy_surprisal": 0.5473,
+      "content_preview": "Hey, can you help evaluate a dependency for meridian today?"
+    },
+    {
+      "msg_key": "session-23/turn-1",
+      "proxy_surprisal": 0.5657,
+      "content_preview": "Of course! What dependency are you considering?"
+    },
+    {
+      "msg_key": "session-23/turn-2",
+      "proxy_surprisal": 0.3365,
+      "content_preview": "A Go module for improved k8s Terraform provider support. Our team is pretty seri"
+    },
+    {
+      "msg_key": "session-23/turn-3",
+      "proxy_surprisal": 0.5868,
+      "content_preview": "Got it. So you're back on GitHub, and looking for something stable for meridian."
+    },
+    {
+      "msg_key": "session-23/turn-4",
+      "proxy_surprisal": 0.5024,
+      "content_preview": "Looking at [provider-k8s-go] and [terraform-k8s-lib]. Can you check their mainte"
+    },
+    {
+      "msg_key": "session-23/turn-5",
+      "proxy_surprisal": 0.5288,
+      "content_preview": "I'll analyze both for release frequency, maintainer response time, open issues, "
+    },
+    {
+      "msg_key": "session-23/turn-6",
+      "proxy_surprisal": 0.4899,
+      "content_preview": "We're on Go 1.21 and Terraform 1.7. Maintainability is our primary concern over "
+    },
+    {
+      "msg_key": "session-23/turn-7",
+      "proxy_surprisal": 0.2782,
+      "content_preview": "[provider-k8s-go] has 12+ commits in the last month with quick issue resolution,"
+    },
+    {
+      "msg_key": "session-23/turn-8",
+      "proxy_surprisal": 0.6107,
+      "content_preview": "Those numbers are pretty clear. Got our current versions from the CI config too."
+    },
+    {
+      "msg_key": "session-23/turn-9",
+      "proxy_surprisal": 0.5007,
+      "content_preview": "Good. [provider-k8s-go] is also well-used in production k8s environments, and th"
+    },
+    {
+      "msg_key": "session-23/turn-10",
+      "proxy_surprisal": 0.3546,
+      "content_preview": "Perfect. We'll go with [provider-k8s-go] \u2014 let me draft the PR with this analysi"
+    },
+    {
+      "msg_key": "session-23/turn-11",
+      "proxy_surprisal": 0.5331,
+      "content_preview": "Sounds good. Let me know if you need help with implementation details once it's "
+    },
+    {
+      "msg_key": "session-24/turn-0",
+      "proxy_surprisal": 0.303,
+      "content_preview": "Hey, got a minute to design a new feature?"
+    },
+    {
+      "msg_key": "session-24/turn-1",
+      "proxy_surprisal": 0.3469,
+      "content_preview": "Absolutely, what are we building?"
+    },
+    {
+      "msg_key": "session-24/turn-2",
+      "proxy_surprisal": 0.3948,
+      "content_preview": "A quota governance layer for meridian. Right now each team manually configures R"
+    },
+    {
+      "msg_key": "session-24/turn-3",
+      "proxy_surprisal": 0.6133,
+      "content_preview": "Clear picture. Quick design questions: Do you want namespace-level overrides? Ho"
+    },
+    {
+      "msg_key": "session-24/turn-4",
+      "proxy_surprisal": 0.4792,
+      "content_preview": "CRDs for the flexibility. Inheritance with overrides. Audit would be nice but no"
+    },
+    {
+      "msg_key": "session-24/turn-5",
+      "proxy_surprisal": 0.5378,
+      "content_preview": "Makes sense. Roughly:\n\n```go\ntype QuotaPolicy struct {\n  Spec struct {\n    Defau"
+    },
+    {
+      "msg_key": "session-24/turn-6",
+      "proxy_surprisal": 0.5196,
+      "content_preview": "Perfect. Let me grab my yerba mate and review this in emacs for a bit\u2014clearer th"
+    },
+    {
+      "msg_key": "session-24/turn-7",
+      "proxy_surprisal": 0.593,
+      "content_preview": "Good call. Should reconciliation happen on all cluster events or only policy cha"
+    },
+    {
+      "msg_key": "session-24/turn-8",
+      "proxy_surprisal": 0.4898,
+      "content_preview": "Both\u2014policy should override manual quotas. Log the overrides for debugging. My t"
+    },
+    {
+      "msg_key": "session-24/turn-9",
+      "proxy_surprisal": 0.6576,
+      "content_preview": "Ha, they sound like good design partners. Finalizer to prevent accidental policy"
+    },
+    {
+      "msg_key": "session-24/turn-10",
+      "proxy_surprisal": 0.5235,
+      "content_preview": "Good idea. And when we have a first draft, let's open it as a PR. I'm in Madrid "
+    },
+    {
+      "msg_key": "session-24/turn-11",
+      "proxy_surprisal": 0.5474,
+      "content_preview": "Totally. I'll draft the Go controller with tests and we'll do proper design revi"
+    },
+    {
+      "msg_key": "session-24/turn-12",
+      "proxy_surprisal": 0.5615,
+      "content_preview": "Good thinking. Yeah, that'd be useful. Different teams have different tiers anyw"
+    },
+    {
+      "msg_key": "session-24/turn-13",
+      "proxy_surprisal": 0.3798,
+      "content_preview": "Perfect, I'm ready to draft."
+    },
+    {
+      "msg_key": "session-24/turn-14",
+      "proxy_surprisal": 0.3128,
+      "content_preview": "Excellent, thanks."
+    },
+    {
+      "msg_key": "session-24/turn-15",
+      "proxy_surprisal": 0.6608,
+      "content_preview": "On it. Should have a first cut in an hour."
+    },
+    {
+      "msg_key": "session-25/turn-0",
+      "proxy_surprisal": 0.5502,
+      "content_preview": "Hey! Do you have a minute to help me think through some performance issues with "
+    },
+    {
+      "msg_key": "session-25/turn-1",
+      "proxy_surprisal": 0.5721,
+      "content_preview": "Absolutely. tessera is your React Native mobile app, right? What are you seeing?"
+    },
+    {
+      "msg_key": "session-25/turn-2",
+      "proxy_surprisal": 0.5838,
+      "content_preview": "Scrolling and navigation are sluggish, especially with bigger datasets. As a pro"
+    },
+    {
+      "msg_key": "session-25/turn-3",
+      "proxy_surprisal": 0.6506,
+      "content_preview": "That's smart. How much data are we talking about, and where's the lag worse\u2014Andr"
+    },
+    {
+      "msg_key": "session-25/turn-4",
+      "proxy_surprisal": 0.6327,
+      "content_preview": "Android is definitely worse. We're usually rendering 100-300 items from Firestor"
+    },
+    {
+      "msg_key": "session-25/turn-5",
+      "proxy_surprisal": 0.6407,
+      "content_preview": "That data size is manageable. Are you using FlatList with memoization, and how a"
+    },
+    {
+      "msg_key": "session-25/turn-6",
+      "proxy_surprisal": 0.3977,
+      "content_preview": "FlatList yes, memoization I'm not confident about. Honestly, I'm dealing with so"
+    },
+    {
+      "msg_key": "session-25/turn-7",
+      "proxy_surprisal": 0.4578,
+      "content_preview": "I'm so sorry. Take care of yourself. Let's keep this manageable and structured s"
+    },
+    {
+      "msg_key": "session-25/turn-8",
+      "proxy_surprisal": 0.5953,
+      "content_preview": "Thanks. I'm organizing all this in Notion\u2014I've always preferred it to Linear for"
+    },
+    {
+      "msg_key": "session-25/turn-9",
+      "proxy_surprisal": 0.4086,
+      "content_preview": "Notion's good for that. Let's build a performance audit checklist: memoization r"
+    },
+    {
+      "msg_key": "session-25/turn-10",
+      "proxy_surprisal": 0.5911,
+      "content_preview": "Firestore first. We're not using field projection, probably no pagination either"
+    },
+    {
+      "msg_key": "session-25/turn-11",
+      "proxy_surprisal": 0.6078,
+      "content_preview": "Field projection cuts network overhead immediately\u2014huge quick win. Then layer in"
+    },
+    {
+      "msg_key": "session-25/turn-12",
+      "proxy_surprisal": 0.5777,
+      "content_preview": "That makes sense. We're planning to ship tessera updates next month, so this fit"
+    },
+    {
+      "msg_key": "session-25/turn-13",
+      "proxy_surprisal": 0.5895,
+      "content_preview": "Good. Before you start, do you have any performance instrumentation, or should w"
+    },
+    {
+      "msg_key": "session-25/turn-14",
+      "proxy_surprisal": 0.4596,
+      "content_preview": "Just rough timing data from user feedback. I want to set up proper React Native "
+    },
+    {
+      "msg_key": "session-25/turn-15",
+      "proxy_surprisal": 0.5479,
+      "content_preview": "Perfect approach. You'll see exactly how much field projection helps and have a "
+    },
+    {
+      "msg_key": "session-25/turn-16",
+      "proxy_surprisal": 0.5223,
+      "content_preview": "It's almost 2 PM here and I'm avoiding caffeine after lunch, so I'm going to gra"
+    },
+    {
+      "msg_key": "session-25/turn-17",
+      "proxy_surprisal": 0.5749,
+      "content_preview": "Good call. Let me know what you find in the audit."
+    },
+    {
+      "msg_key": "session-25/turn-18",
+      "proxy_surprisal": 0.4845,
+      "content_preview": "Will do! Bangalore weather's been really nice this week at least, which makes th"
+    },
+    {
+      "msg_key": "session-26/turn-0",
+      "proxy_surprisal": 0.401,
+      "content_preview": "Hey! Ready to discuss the interview?"
+    },
+    {
+      "msg_key": "session-26/turn-1",
+      "proxy_surprisal": 0.5797,
+      "content_preview": "Of course, how'd it go?"
+    },
+    {
+      "msg_key": "session-26/turn-2",
+      "proxy_surprisal": 0.3406,
+      "content_preview": "Really strong. She's got excellent React Native experience\u2014tessera runs on React"
+    },
+    {
+      "msg_key": "session-26/turn-3",
+      "proxy_surprisal": 0.6092,
+      "content_preview": "What impressed you most?"
+    },
+    {
+      "msg_key": "session-26/turn-4",
+      "proxy_surprisal": 0.5637,
+      "content_preview": "Her understanding of state management and Firebase real-time sync tradeoffs. She"
+    },
+    {
+      "msg_key": "session-26/turn-5",
+      "proxy_surprisal": 0.4408,
+      "content_preview": "She sounds like a great fit."
+    },
+    {
+      "msg_key": "session-26/turn-6",
+      "proxy_surprisal": 0.4945,
+      "content_preview": "I think so. I'm adding her to my Notion tracker\u2014I use Notion instead of Linear f"
+    },
+    {
+      "msg_key": "session-26/turn-7",
+      "proxy_surprisal": 0.5463,
+      "content_preview": "What's the next step?"
+    },
+    {
+      "msg_key": "session-26/turn-8",
+      "proxy_surprisal": 0.5344,
+      "content_preview": "Let's move to offer stage. She's ready for Senior Mobile Engineer."
+    },
+    {
+      "msg_key": "session-26/turn-9",
+      "proxy_surprisal": 0.6393,
+      "content_preview": "What should the offer emphasize?"
+    },
+    {
+      "msg_key": "session-26/turn-10",
+      "proxy_surprisal": 0.5972,
+      "content_preview": "Leadership opportunity\u2014owning the mobile product vision. Also flexibility. My hu"
+    },
+    {
+      "msg_key": "session-26/turn-11",
+      "proxy_surprisal": 0.7313,
+      "content_preview": "That's a great philosophy."
+    },
+    {
+      "msg_key": "session-26/turn-12",
+      "proxy_surprisal": 0.5388,
+      "content_preview": "Yeah, I've been pretty intentional about it. I use my bullet journal to map out "
+    },
+    {
+      "msg_key": "session-26/turn-13",
+      "proxy_surprisal": 0.4913,
+      "content_preview": "It's been a long week honestly. Pretty wiped out, looking forward to the weekend"
+    },
+    {
+      "msg_key": "session-26/turn-14",
+      "proxy_surprisal": 0.6393,
+      "content_preview": "You deserve a good break."
+    },
+    {
+      "msg_key": "session-26/turn-15",
+      "proxy_surprisal": 0.5108,
+      "content_preview": "Can you draft the offer? Highlight the React Native + Firebase opportunity and t"
+    },
+    {
+      "msg_key": "session-26/turn-16",
+      "proxy_surprisal": 0.3871,
+      "content_preview": "Absolutely. Mention the architecture pairing with you?"
+    },
+    {
+      "msg_key": "session-26/turn-17",
+      "proxy_surprisal": 0.601,
+      "content_preview": "Yes, first two weeks she pairs with me on architecture. That's critical for ramp"
+    },
+    {
+      "msg_key": "session-26/turn-18",
+      "proxy_surprisal": 0.6081,
+      "content_preview": "I'm really encouraged by this hire. The team is finally at a point where I can d"
+    },
+    {
+      "msg_key": "session-26/turn-19",
+      "proxy_surprisal": 0.3779,
+      "content_preview": "That's great. I'll get the draft to you in 15 minutes."
+    },
+    {
+      "msg_key": "session-26/turn-20",
+      "proxy_surprisal": 0.5178,
+      "content_preview": "Perfect. Going to step away now\u2014no caffeine after 2pm for me, trying to protect "
+    },
+    {
+      "msg_key": "session-27/turn-0",
+      "proxy_surprisal": 0.5433,
+      "content_preview": "Hey, I'm tackling tessera documentation this week. It's been a rough few days, s"
+    },
+    {
+      "msg_key": "session-27/turn-1",
+      "proxy_surprisal": 0.6532,
+      "content_preview": "I'm ready to help. What's the current state of your docs?"
+    },
+    {
+      "msg_key": "session-27/turn-2",
+      "proxy_surprisal": 0.5153,
+      "content_preview": "Pretty scattered. We're a React Native + Firebase stack. I've been trying to con"
+    },
+    {
+      "msg_key": "session-27/turn-3",
+      "proxy_surprisal": 0.4222,
+      "content_preview": "That makes sense. I'd organize it as: Getting Started, Architecture Overview, Fe"
+    },
+    {
+      "msg_key": "session-27/turn-4",
+      "proxy_surprisal": 0.5424,
+      "content_preview": "Perfect structure. I work in bullet points\u2014that's how I do my bullet journal too"
+    },
+    {
+      "msg_key": "session-27/turn-5",
+      "proxy_surprisal": 0.4221,
+      "content_preview": "Absolutely. For Getting Started, should it cover local dev setup, cloud Firebase"
+    },
+    {
+      "msg_key": "session-27/turn-6",
+      "proxy_surprisal": 0.5194,
+      "content_preview": "Both, but lead with local since that's first for devs. Keep it lean. I don't hav"
+    },
+    {
+      "msg_key": "session-27/turn-7",
+      "proxy_surprisal": 0.5198,
+      "content_preview": "Got it. Clear, lean, local-first setup guide."
+    },
+    {
+      "msg_key": "session-27/turn-8",
+      "proxy_surprisal": 0.3428,
+      "content_preview": "Can you draft Getting Started with: prerequisites, clone and install, Firebase l"
+    },
+    {
+      "msg_key": "session-27/turn-9",
+      "proxy_surprisal": 0.3725,
+      "content_preview": "Here's the structure:\n- Prerequisites (Node, npm, Xcode, Android SDK)\n- Clone re"
+    },
+    {
+      "msg_key": "session-27/turn-10",
+      "proxy_surprisal": 0.4488,
+      "content_preview": "Yes, make Firebase a reference table with env variables, types, descriptions, an"
+    },
+    {
+      "msg_key": "session-27/turn-11",
+      "proxy_surprisal": 0.3079,
+      "content_preview": "Done. Firebase config table with key, type, description, example. Added Troubles"
+    },
+    {
+      "msg_key": "session-27/turn-12",
+      "proxy_surprisal": 0.553,
+      "content_preview": "Perfect. I'll integrate this into Notion next, then tackle features. Our team is"
+    },
+    {
+      "msg_key": "session-27/turn-13",
+      "proxy_surprisal": 0.4019,
+      "content_preview": "That makes total sense for a lean team. You've got a solid foundation."
+    },
+    {
+      "msg_key": "session-27/turn-14",
+      "proxy_surprisal": 0.3601,
+      "content_preview": "Thanks for the help."
+    },
+    {
+      "msg_key": "session-27/turn-15",
+      "proxy_surprisal": 0.4447,
+      "content_preview": "Happy to help. Cheers."
+    },
+    {
+      "msg_key": "session-28/turn-0",
+      "proxy_surprisal": 0.4985,
+      "content_preview": "Hey! Ready to do a retrospective and plan the next two weeks? I've got my Notion"
+    },
+    {
+      "msg_key": "session-28/turn-1",
+      "proxy_surprisal": 0.5137,
+      "content_preview": "Absolutely, let's walk through it. How do you want to structure this? Should we "
+    },
+    {
+      "msg_key": "session-28/turn-2",
+      "proxy_surprisal": 0.4528,
+      "content_preview": "Yeah, that format works. Honestly, this sprint was supposed to be solid\u2014push on "
+    },
+    {
+      "msg_key": "session-28/turn-3",
+      "proxy_surprisal": 0.5303,
+      "content_preview": "That's understandable. Let's acknowledge that. Looking at the deliverables: Fire"
+    },
+    {
+      "msg_key": "session-28/turn-4",
+      "proxy_surprisal": 0.5997,
+      "content_preview": "Firebase integration hit some latency issues on Android that we didn't catch in "
+    },
+    {
+      "msg_key": "session-28/turn-5",
+      "proxy_surprisal": 0.5105,
+      "content_preview": "Got it. We can address the testing gap before next sprint. So next two weeks: ar"
+    },
+    {
+      "msg_key": "session-28/turn-6",
+      "proxy_surprisal": 0.4536,
+      "content_preview": "I want to nail down what 'done' looks like for the Android latency issue first. "
+    },
+    {
+      "msg_key": "session-28/turn-7",
+      "proxy_surprisal": 0.5252,
+      "content_preview": "Notion is solid for that level of visibility. So sprints two and three: latency "
+    },
+    {
+      "msg_key": "session-28/turn-8",
+      "proxy_surprisal": 0.3528,
+      "content_preview": "Yeah. Quick question though\u2014I'm debating whether to grab coffee or tea this morn"
+    },
+    {
+      "msg_key": "session-28/turn-9",
+      "proxy_surprisal": 0.586,
+      "content_preview": "Tea's a good call. So latency root-cause first, then we can map out stories. Whe"
+    },
+    {
+      "msg_key": "session-28/turn-10",
+      "proxy_surprisal": 0.4927,
+      "content_preview": "I'll pair with them tomorrow. The team has been really supportive\u2014even with ever"
+    },
+    {
+      "msg_key": "session-28/turn-11",
+      "proxy_surprisal": 0.4665,
+      "content_preview": "Absolutely. Should we draft a brief retro summary to share with them today, or w"
+    },
+    {
+      "msg_key": "session-28/turn-12",
+      "proxy_surprisal": 0.4471,
+      "content_preview": "Let's wait until tomorrow. I'll have more concrete wins and action items to shar"
+    },
+    {
+      "msg_key": "session-28/turn-13",
+      "proxy_surprisal": 0.484,
+      "content_preview": "Perfect. You're all set for next sprint planning then. Anything else before we w"
+    },
+    {
+      "msg_key": "session-28/turn-14",
+      "proxy_surprisal": 0.2316,
+      "content_preview": "Nope, this was helpful. Thanks for walking through it with me."
+    },
+    {
+      "msg_key": "session-29/turn-0",
+      "proxy_surprisal": 0.4777,
+      "content_preview": "Hey, I need help writing a launch post for tessera. We're going live on the Play"
+    },
+    {
+      "msg_key": "session-29/turn-1",
+      "proxy_surprisal": 0.5337,
+      "content_preview": "I'm so sorry. That's a lot. Let's create something meaningful for the launch."
+    },
+    {
+      "msg_key": "session-29/turn-2",
+      "proxy_surprisal": 0.4833,
+      "content_preview": "Thanks. I'm working on this in Notion\u2014prefer it over Linear for creative stuff. "
+    },
+    {
+      "msg_key": "session-29/turn-3",
+      "proxy_surprisal": 0.6048,
+      "content_preview": "That structure is solid. To add soul, what's one specific moment or use case tha"
+    },
+    {
+      "msg_key": "session-29/turn-4",
+      "proxy_surprisal": 0.6311,
+      "content_preview": "A nurse juggling scheduling across three apps. That's the moment that drove ever"
+    },
+    {
+      "msg_key": "session-29/turn-5",
+      "proxy_surprisal": 0.4235,
+      "content_preview": "Perfect. Want me to draft opening paragraphs around that, or do you want to writ"
+    },
+    {
+      "msg_key": "session-29/turn-6",
+      "proxy_surprisal": 0.4387,
+      "content_preview": "Could you draft it? I'll refine from there. Also, heads up\u2014I'm avoiding caffeine"
+    },
+    {
+      "msg_key": "session-29/turn-7",
+      "proxy_surprisal": 0.4892,
+      "content_preview": "Got it. Here's a draft for you. Let me know what lands."
+    },
+    {
+      "msg_key": "session-29/turn-8",
+      "proxy_surprisal": 0.2606,
+      "content_preview": "This is exactly what I needed, thanks."
+    },
+    {
+      "msg_key": "session-29/turn-9",
+      "proxy_surprisal": 0.3728,
+      "content_preview": "Happy to help. Good luck with the launch."
+    },
+    {
+      "msg_key": "session-30/turn-0",
+      "proxy_surprisal": 0.4814,
+      "content_preview": "Got a minute? Need another set of eyes on a test PR for the auth flow in tessera"
+    },
+    {
+      "msg_key": "session-30/turn-1",
+      "proxy_surprisal": 0.3716,
+      "content_preview": "Sure, let's look at it."
+    },
+    {
+      "msg_key": "session-30/turn-2",
+      "proxy_surprisal": 0.4815,
+      "content_preview": "So the dev added unit tests using Jest and react-native-testing-library. Thing i"
+    },
+    {
+      "msg_key": "session-30/turn-3",
+      "proxy_surprisal": 0.3079,
+      "content_preview": "Mocking for unit tests is standard. Do you have integration tests running agains"
+    },
+    {
+      "msg_key": "session-30/turn-4",
+      "proxy_surprisal": 0.4107,
+      "content_preview": "Yeah, staging Firebase for integration tests. My real question is whether the to"
+    },
+    {
+      "msg_key": "session-30/turn-5",
+      "proxy_surprisal": 0.4225,
+      "content_preview": "Network failures during refresh are critical to test. Retry logic, timeouts, err"
+    },
+    {
+      "msg_key": "session-30/turn-6",
+      "proxy_surprisal": 0.5692,
+      "content_preview": "Not much on failures. Honestly, the Bangalore heat today is brutal and I'm runni"
+    },
+    {
+      "msg_key": "session-30/turn-7",
+      "proxy_surprisal": 0.5915,
+      "content_preview": "Understandable. For auth, failure cases are non-negotiable anyway. I'd push back"
+    },
+    {
+      "msg_key": "session-30/turn-8",
+      "proxy_surprisal": 0.5729,
+      "content_preview": "Good. I'll flag it to the dev. Honestly, a lot's been happening\u2014usually my wife "
+    },
+    {
+      "msg_key": "session-30/turn-9",
+      "proxy_surprisal": 0.5989,
+      "content_preview": "That PM + technical blend is valuable."
+    },
+    {
+      "msg_key": "session-30/turn-10",
+      "proxy_surprisal": 0.3651,
+      "content_preview": "Thanks for thinking through it with me. This helped a lot."
+    },
+    {
+      "msg_key": "session-30/turn-11",
+      "proxy_surprisal": 0.5154,
+      "content_preview": "Happy to help. Shoot me a message once the tests are updated if you want a secon"
+    },
+    {
+      "msg_key": "session-30/turn-12",
+      "proxy_surprisal": 0.4505,
+      "content_preview": "By the way, you ever work with React Native, or is that not your thing?"
+    },
+    {
+      "msg_key": "session-30/turn-13",
+      "proxy_surprisal": 0.49,
+      "content_preview": "I can definitely help with React Native code review and debugging."
+    },
+    {
+      "msg_key": "session-30/turn-14",
+      "proxy_surprisal": 0.6113,
+      "content_preview": "Handy. We might have more mobile stuff to review soon."
+    },
+    {
+      "msg_key": "session-30/turn-15",
+      "proxy_surprisal": 0.2176,
+      "content_preview": "Sounds good."
+    },
+    {
+      "msg_key": "session-31/turn-0",
+      "proxy_surprisal": 0.435,
+      "content_preview": "Hey, quick question\u2014can you help me evaluate a new Firebase dependency for tesse"
+    },
+    {
+      "msg_key": "session-31/turn-1",
+      "proxy_surprisal": 0.4264,
+      "content_preview": "Sure, happy to help. What's the library?"
+    },
+    {
+      "msg_key": "session-31/turn-2",
+      "proxy_surprisal": 0.4586,
+      "content_preview": "It's firebase-realtime-bridge. The main appeal is offline-first sync, which is c"
+    },
+    {
+      "msg_key": "session-31/turn-3",
+      "proxy_surprisal": 0.4481,
+      "content_preview": "I'm so sorry. Please take your time. We'll work through this at whatever pace yo"
+    },
+    {
+      "msg_key": "session-31/turn-4",
+      "proxy_surprisal": 0.5858,
+      "content_preview": "Thanks. The main questions: does it handle offline queuing well, and what's the "
+    },
+    {
+      "msg_key": "session-31/turn-5",
+      "proxy_surprisal": 0.5697,
+      "content_preview": "Good ones. Check npm for minified size. On queuing, look for explicit retry logi"
+    },
+    {
+      "msg_key": "session-31/turn-6",
+      "proxy_surprisal": 0.4664,
+      "content_preview": "Looking at it now. Last-write-wins for conflicts, solid retry queue. I'm documen"
+    },
+    {
+      "msg_key": "session-31/turn-7",
+      "proxy_surprisal": 0.6738,
+      "content_preview": "Makes sense. LWW should work for single-device scenarios. Any issues with transi"
+    },
+    {
+      "msg_key": "session-31/turn-8",
+      "proxy_surprisal": 0.5272,
+      "content_preview": "Not seeing any. Also, it's gorgeous weather here in Bangalore today\u2014might get ou"
+    },
+    {
+      "msg_key": "session-31/turn-9",
+      "proxy_surprisal": 0.3131,
+      "content_preview": "That sounds nice. Fresh air might help too."
+    },
+    {
+      "msg_key": "session-31/turn-10",
+      "proxy_surprisal": 0.3821,
+      "content_preview": "It should. Oh, and it's getting to 2 PM so I'm wrapping up caffeine for the day\u2014"
+    },
+    {
+      "msg_key": "session-31/turn-11",
+      "proxy_surprisal": 0.5969,
+      "content_preview": "Good discipline. Why don't you finish the bundle size check?"
+    },
+    {
+      "msg_key": "session-31/turn-12",
+      "proxy_surprisal": 0.5216,
+      "content_preview": "Just did\u201445KB minified, transitive deps are clean. No Firebase Core duplicates. "
+    },
+    {
+      "msg_key": "session-31/turn-13",
+      "proxy_surprisal": 0.4416,
+      "content_preview": "Excellent. Sounds like you have your answer. Good luck with implementation!"
+    },
+    {
+      "msg_key": "session-32/turn-0",
+      "proxy_surprisal": 0.3921,
+      "content_preview": "Hey, thanks for making time. We had a production incident on tessera yesterday \u2014"
+    },
+    {
+      "msg_key": "session-32/turn-1",
+      "proxy_surprisal": 0.4724,
+      "content_preview": "Got it. 45 minutes of auth downtime is serious. What happened?"
+    },
+    {
+      "msg_key": "session-32/turn-2",
+      "proxy_surprisal": 0.5323,
+      "content_preview": "Around 1:15 AM, monitoring picked up latency on Firebase auth. By 1:45 AM, the e"
+    },
+    {
+      "msg_key": "session-32/turn-3",
+      "proxy_surprisal": 0.5091,
+      "content_preview": "So a 35-minute gap between incident start and when you noticed via support. Your"
+    },
+    {
+      "msg_key": "session-32/turn-4",
+      "proxy_surprisal": 0.5088,
+      "content_preview": "Exactly. Alert went to Slack but oncall was in meetings. By the time they saw it"
+    },
+    {
+      "msg_key": "session-32/turn-5",
+      "proxy_surprisal": 0.5205,
+      "content_preview": "So the root cause is a timeout value change in the code that wasn't caught durin"
+    },
+    {
+      "msg_key": "session-32/turn-6",
+      "proxy_surprisal": 0.5001,
+      "content_preview": "Immediate: revert the PR, write a better alert for connection pool saturation, b"
+    },
+    {
+      "msg_key": "session-32/turn-7",
+      "proxy_surprisal": 0.4989,
+      "content_preview": "Good plan. Want me to draft the root cause write-up first, or the timeout checkl"
+    },
+    {
+      "msg_key": "session-32/turn-8",
+      "proxy_surprisal": 0.538,
+      "content_preview": "Draft the root cause, please. Keep it blameless \u2014 focus on the conditions that m"
+    },
+    {
+      "msg_key": "session-32/turn-9",
+      "proxy_surprisal": 0.3392,
+      "content_preview": "**Root Cause Summary**\nA 30-line PR deploying a Firebase timeout change (5s \u2192 30"
+    },
+    {
+      "msg_key": "session-32/turn-10",
+      "proxy_surprisal": 0.5877,
+      "content_preview": "Perfect. That's way better than the blame narrative floating around this morning"
+    },
+    {
+      "msg_key": "session-32/turn-11",
+      "proxy_surprisal": 0.5713,
+      "content_preview": "Ha, yeah Friday afternoon code review hits different. Especially on infrastructu"
+    },
+    {
+      "msg_key": "session-32/turn-12",
+      "proxy_surprisal": 0.484,
+      "content_preview": "Right? Anyway, let's build the timeout checklist. I'm thinking: any timeout modi"
+    },
+    {
+      "msg_key": "session-32/turn-13",
+      "proxy_surprisal": 0.3644,
+      "content_preview": "That's solid. Tech lead sign-off is good governance, separate deploy is safer, c"
+    },
+    {
+      "msg_key": "session-32/turn-14",
+      "proxy_surprisal": 0.4615,
+      "content_preview": "Any modification, no exceptions. If someone changes a timeout from 5 to 7 second"
+    },
+    {
+      "msg_key": "session-32/turn-15",
+      "proxy_surprisal": 0.3619,
+      "content_preview": "Fair. Here's the checklist:\n1. Separate PR for any timeout value change\n2. Tech "
+    },
+    {
+      "msg_key": "session-32/turn-16",
+      "proxy_surprisal": 0.4555,
+      "content_preview": "Add one more: include a rollback plan in the PR description. Takes 30 seconds to"
+    },
+    {
+      "msg_key": "session-32/turn-17",
+      "proxy_surprisal": 0.3651,
+      "content_preview": "Honestly, the past few weeks have been really tough, and I'm heading to make tea"
+    },
+    {
+      "msg_key": "session-32/turn-18",
+      "proxy_surprisal": 0.4322,
+      "content_preview": "Completely understand. You've done great work here. Take care of yourself."
+    },
+    {
+      "msg_key": "session-33/turn-0",
+      "proxy_surprisal": 0.5389,
+      "content_preview": "Hey! Need help evaluating a Tauri dependency for quill. I'm a solo indie dev her"
+    },
+    {
+      "msg_key": "session-33/turn-1",
+      "proxy_surprisal": 0.3384,
+      "content_preview": "Sure, what's the dependency?"
+    },
+    {
+      "msg_key": "session-33/turn-2",
+      "proxy_surprisal": 0.5675,
+      "content_preview": "tauri-plugin-sqlite vs building my own wrapper. The plugin handles migrations an"
+    },
+    {
+      "msg_key": "session-33/turn-3",
+      "proxy_surprisal": 0.4952,
+      "content_preview": "Good instinct. What's your timeline and bandwidth like?"
+    },
+    {
+      "msg_key": "session-33/turn-4",
+      "proxy_surprisal": 0.6148,
+      "content_preview": "Tight. Just hit 1k paying users after launching on Product Hunt last week. I nee"
+    },
+    {
+      "msg_key": "session-33/turn-5",
+      "proxy_surprisal": 0.5034,
+      "content_preview": "Wow, congrats on the milestone! That definitely tips toward a battle-tested solu"
+    },
+    {
+      "msg_key": "session-33/turn-6",
+      "proxy_surprisal": 0.6094,
+      "content_preview": "Thanks! I write at 5am and prefer reliable dependencies\u2014no time to debug third-p"
+    },
+    {
+      "msg_key": "session-33/turn-7",
+      "proxy_surprisal": 0.5317,
+      "content_preview": "Makes sense. Let me check the maintenance status and community adoption."
+    },
+    {
+      "msg_key": "session-33/turn-8",
+      "proxy_surprisal": 0.5815,
+      "content_preview": "Austin weather's been perfect for early mornings, honestly."
+    },
+    {
+      "msg_key": "session-33/turn-9",
+      "proxy_surprisal": 0.5074,
+      "content_preview": "Nice! tauri-plugin-sqlite is actively maintained by the Tauri team."
+    },
+    {
+      "msg_key": "session-33/turn-10",
+      "proxy_surprisal": 0.6161,
+      "content_preview": "That's reassuring. Easy to integrate?"
+    },
+    {
+      "msg_key": "session-33/turn-11",
+      "proxy_surprisal": 0.5183,
+      "content_preview": "Yep, it's Rust, so it fits right into your stack."
+    },
+    {
+      "msg_key": "session-33/turn-12",
+      "proxy_surprisal": 0.6138,
+      "content_preview": "Good. I prefer Sublime over VS Code\u2014just want tools that work."
+    },
+    {
+      "msg_key": "session-33/turn-13",
+      "proxy_surprisal": 0.6691,
+      "content_preview": "Based on all this, I'd recommend the plugin. Lets you focus on quill."
+    },
+    {
+      "msg_key": "session-33/turn-14",
+      "proxy_surprisal": 0.1722,
+      "content_preview": "Sounds good. Thanks!"
+    },
+    {
+      "msg_key": "session-34/turn-0",
+      "proxy_surprisal": 0.5062,
+      "content_preview": "Hey! Got a minute? Need to talk through post-launch priorities\u2014it's only day 4 a"
+    },
+    {
+      "msg_key": "session-34/turn-1",
+      "proxy_surprisal": 0.5267,
+      "content_preview": "Of course! Congrats on the launch momentum. What's on your mind?"
+    },
+    {
+      "msg_key": "session-34/turn-2",
+      "proxy_surprisal": 0.4579,
+      "content_preview": "So the Product Hunt week was huge, and we're at 1k paying users now. But I'm rea"
+    },
+    {
+      "msg_key": "session-34/turn-3",
+      "proxy_surprisal": 0.5229,
+      "content_preview": "Classic post-launch tension. What's driving the database strain? Are users hitti"
+    },
+    {
+      "msg_key": "session-34/turn-4",
+      "proxy_surprisal": 0.4982,
+      "content_preview": "More preventative. Response times are still good, but query complexity is growin"
+    },
+    {
+      "msg_key": "session-34/turn-5",
+      "proxy_surprisal": 0.5593,
+      "content_preview": "That's smart self-awareness. 5am focus time is precious. You're essentially work"
+    },
+    {
+      "msg_key": "session-34/turn-6",
+      "proxy_surprisal": 0.5248,
+      "content_preview": "Haven't done that yet. But now that you mention it, the high-touch requests are "
+    },
+    {
+      "msg_key": "session-34/turn-7",
+      "proxy_surprisal": 0.5246,
+      "content_preview": "There absolutely is. Mid-tier is your growth engine\u2014they're invested enough to h"
+    },
+    {
+      "msg_key": "session-34/turn-8",
+      "proxy_surprisal": 0.5351,
+      "content_preview": "Right. So the decision: Stabilize infrastructure first, then build for mid-tier "
+    },
+    {
+      "msg_key": "session-34/turn-9",
+      "proxy_surprisal": 0.5557,
+      "content_preview": "Exactly. 3-4 days on DB optimization, then you've got a week-plus to ship high-l"
+    },
+    {
+      "msg_key": "session-34/turn-10",
+      "proxy_surprisal": 0.5378,
+      "content_preview": "Query indexing, some caching logic. The Rust backend is solid, just needs some o"
+    },
+    {
+      "msg_key": "session-34/turn-11",
+      "proxy_surprisal": 0.5122,
+      "content_preview": "Do that. Then come back with user data and build the top 2-3 wins for mid-tier. "
+    },
+    {
+      "msg_key": "session-34/turn-12",
+      "proxy_surprisal": 0.401,
+      "content_preview": "This is really helpful, thanks. Gives me a clear north star for the week."
+    },
+    {
+      "msg_key": "session-34/turn-13",
+      "proxy_surprisal": 0.5597,
+      "content_preview": "Happy to help. You've built something special\u2014now it's about sustaining momentum"
+    },
+    {
+      "msg_key": "session-34/turn-14",
+      "proxy_surprisal": 0.6401,
+      "content_preview": "Appreciate that. I'll wrap the optimization work by Friday and share the results"
+    },
+    {
+      "msg_key": "session-34/turn-15",
+      "proxy_surprisal": 0.2562,
+      "content_preview": "Sounds good. Looking forward to it."
+    },
+    {
+      "msg_key": "session-35/turn-0",
+      "proxy_surprisal": 0.4589,
+      "content_preview": "Hey, CI's failing on the latest build and I can't figure out why"
+    },
+    {
+      "msg_key": "session-35/turn-1",
+      "proxy_surprisal": 0.5287,
+      "content_preview": "Oh no, what's happening?"
+    },
+    {
+      "msg_key": "session-35/turn-2",
+      "proxy_surprisal": 0.4799,
+      "content_preview": "So we hit 1k paying users last week after the Product Hunt launch, which is amaz"
+    },
+    {
+      "msg_key": "session-35/turn-3",
+      "proxy_surprisal": 0.4788,
+      "content_preview": "That's great news on hitting the user milestone! Can you paste the CI error or d"
+    },
+    {
+      "msg_key": "session-35/turn-4",
+      "proxy_surprisal": 0.4713,
+      "content_preview": "Yeah, it's during the Rust compilation phase. The error is about a missing SQLit"
+    },
+    {
+      "msg_key": "session-35/turn-5",
+      "proxy_surprisal": 0.4394,
+      "content_preview": "That's interesting. Did you change anything in your Cargo.toml or update Rust ve"
+    },
+    {
+      "msg_key": "session-35/turn-6",
+      "proxy_surprisal": 0.5252,
+      "content_preview": "It's 5 in the morning here in Austin and I haven't even had breakfast yet. Grabb"
+    },
+    {
+      "msg_key": "session-35/turn-7",
+      "proxy_surprisal": 0.7217,
+      "content_preview": "You're an early riser. At least you caught it before the daily builds pile up."
+    },
+    {
+      "msg_key": "session-35/turn-8",
+      "proxy_surprisal": 0.4337,
+      "content_preview": "Yeah, 5am is my sweet spot\u2014always have written best then. But with 1k users rely"
+    },
+    {
+      "msg_key": "session-35/turn-9",
+      "proxy_surprisal": 0.4249,
+      "content_preview": "Right, so you need to either add SQLite dev headers to the CI runner, or use the"
+    },
+    {
+      "msg_key": "session-35/turn-10",
+      "proxy_surprisal": 0.4429,
+      "content_preview": "We're on rusqlite with 'bundled' disabled. I think enabling 'bundled' is cleaner"
+    },
+    {
+      "msg_key": "session-35/turn-11",
+      "proxy_surprisal": 0.3386,
+      "content_preview": "That's the right call. Bundled SQLite removes that environment dependency entire"
+    },
+    {
+      "msg_key": "session-35/turn-12",
+      "proxy_surprisal": 0.5408,
+      "content_preview": "Adding the feature flag now, pushing to test."
+    },
+    {
+      "msg_key": "session-35/turn-13",
+      "proxy_surprisal": 0.5046,
+      "content_preview": "These early mornings with loose-leaf tea are what keep me sharp for this stuff. "
+    },
+    {
+      "msg_key": "session-35/turn-14",
+      "proxy_surprisal": 0.4846,
+      "content_preview": "Excellent, crisis averted."
+    },
+    {
+      "msg_key": "session-35/turn-15",
+      "proxy_surprisal": 0.4062,
+      "content_preview": "Yeah, glad we caught it. I actually prefer Sublime for quick config edits like t"
+    },
+    {
+      "msg_key": "session-36/turn-0",
+      "proxy_surprisal": 0.4636,
+      "content_preview": "Hey, so I hit 1k paying users over the weekend and suddenly I'm seeing real perf"
+    },
+    {
+      "msg_key": "session-36/turn-1",
+      "proxy_surprisal": 0.3718,
+      "content_preview": "Congrats on hitting that milestone! Let's dig in."
+    },
+    {
+      "msg_key": "session-36/turn-2",
+      "proxy_surprisal": 0.4323,
+      "content_preview": "Should I start by profiling the Rust backend or optimizing the SQLite queries fi"
+    },
+    {
+      "msg_key": "session-36/turn-3",
+      "proxy_surprisal": 0.6236,
+      "content_preview": "Profile the hot path first\u2014check where the bottleneck actually is. Given you're "
+    },
+    {
+      "msg_key": "session-36/turn-4",
+      "proxy_surprisal": 0.3427,
+      "content_preview": "Can't decide if I should grab coffee or loose-leaf tea this morning\u2014leaning tea,"
+    },
+    {
+      "msg_key": "session-36/turn-5",
+      "proxy_surprisal": 0.4756,
+      "content_preview": "Tea's the way."
+    },
+    {
+      "msg_key": "session-36/turn-6",
+      "proxy_surprisal": 0.6401,
+      "content_preview": "Okay, I profiled it. Every document open triggers a full table scan on the metad"
+    },
+    {
+      "msg_key": "session-36/turn-7",
+      "proxy_surprisal": 0.577,
+      "content_preview": "Absolutely\u2014that's your culprit. Add indices on modified_at and created_at, and c"
+    },
+    {
+      "msg_key": "session-36/turn-8",
+      "proxy_surprisal": 0.5512,
+      "content_preview": "The index should be a quick win. But longer term, I'm thinking about whether to "
+    },
+    {
+      "msg_key": "session-36/turn-9",
+      "proxy_surprisal": 0.558,
+      "content_preview": "Let's see what the indices do first."
+    },
+    {
+      "msg_key": "session-36/turn-10",
+      "proxy_surprisal": 0.5496,
+      "content_preview": "Austin's finally cooling off after that heat wave last week\u2014should be a good mor"
+    },
+    {
+      "msg_key": "session-36/turn-11",
+      "proxy_surprisal": 0.4974,
+      "content_preview": "Perfect timing for load tests."
+    },
+    {
+      "msg_key": "session-36/turn-12",
+      "proxy_surprisal": 0.5766,
+      "content_preview": "Just ran the tests with the new indices. Query time dropped from 200ms to 15ms. "
+    },
+    {
+      "msg_key": "session-36/turn-13",
+      "proxy_surprisal": 0.5595,
+      "content_preview": "That's massive. Your 1k users will definitely feel it."
+    },
+    {
+      "msg_key": "session-36/turn-14",
+      "proxy_surprisal": 0.5024,
+      "content_preview": "Yeah, much better. Next I want to tackle the search indexing\u2014that's still a bott"
+    },
+    {
+      "msg_key": "session-37/turn-0",
+      "proxy_surprisal": 0.3695,
+      "content_preview": "Hey, got a few minutes? Want to bounce around a feature idea for quill."
+    },
+    {
+      "msg_key": "session-37/turn-1",
+      "proxy_surprisal": 0.2411,
+      "content_preview": "Absolutely! Always happy to brainstorm. What's on your mind?"
+    },
+    {
+      "msg_key": "session-37/turn-2",
+      "proxy_surprisal": 0.4524,
+      "content_preview": "So the Product Hunt launch two weeks ago went INCREDIBLY well. Like, I'm still r"
+    },
+    {
+      "msg_key": "session-37/turn-3",
+      "proxy_surprisal": 0.4013,
+      "content_preview": "Wow, congrats! That's huge! A thousand paying users in one week is incredible. W"
+    },
+    {
+      "msg_key": "session-37/turn-4",
+      "proxy_surprisal": 0.5094,
+      "content_preview": "So I want to add collaborative features. Let writers invite others to edit or co"
+    },
+    {
+      "msg_key": "session-37/turn-5",
+      "proxy_surprisal": 0.4755,
+      "content_preview": "That's a solid feature for retention. A few questions: would you want real-time "
+    },
+    {
+      "msg_key": "session-37/turn-6",
+      "proxy_surprisal": 0.4673,
+      "content_preview": "You know how I write at 5am every morning? I'm pretty rigid about my workflow. I"
+    },
+    {
+      "msg_key": "session-37/turn-7",
+      "proxy_surprisal": 0.46,
+      "content_preview": "Got it\u2014keep the collab UI minimal and non-intrusive. Given that you're in Rust a"
+    },
+    {
+      "msg_key": "session-37/turn-8",
+      "proxy_surprisal": 0.5124,
+      "content_preview": "Yeah, I'm using SQLite already for the doc storage. I'm thinking of adding a com"
+    },
+    {
+      "msg_key": "session-37/turn-9",
+      "proxy_surprisal": 0.5488,
+      "content_preview": "Smart. With SQLite, you could either version the text snapshot at comment time, "
+    },
+    {
+      "msg_key": "session-37/turn-10",
+      "proxy_surprisal": 0.5068,
+      "content_preview": "Yeah, that makes sense. Snapshots probably make more sense for now."
+    },
+    {
+      "msg_key": "session-37/turn-11",
+      "proxy_surprisal": 0.5055,
+      "content_preview": "Cool. I'd start with a basic comments table, build out the UI to match your mini"
+    },
+    {
+      "msg_key": "session-37/turn-12",
+      "proxy_surprisal": 0.5239,
+      "content_preview": "Right, exactly. With 1000 paying users depending on me now, I can't just push so"
+    },
+    {
+      "msg_key": "session-37/turn-13",
+      "proxy_surprisal": 0.528,
+      "content_preview": "Good thinking. You could use a migration script that runs once per user on first"
+    },
+    {
+      "msg_key": "session-37/turn-14",
+      "proxy_surprisal": 0.1096,
+      "content_preview": "Perfect. This is exactly what I needed to hear. Thanks!"
+    },
+    {
+      "msg_key": "session-38/turn-0",
+      "proxy_surprisal": 0.3831,
+      "content_preview": "hey, up early working on the launch post for quill. it's 5am and already 85 degr"
+    },
+    {
+      "msg_key": "session-38/turn-1",
+      "proxy_surprisal": 0.3064,
+      "content_preview": "Congrats on hitting that milestone! 1k paying users is huge. I'd love to help wi"
+    },
+    {
+      "msg_key": "session-38/turn-2",
+      "proxy_surprisal": 0.5195,
+      "content_preview": "I'm leaning toward a mix\u2014show the product, but also be honest about the journey."
+    },
+    {
+      "msg_key": "session-38/turn-3",
+      "proxy_surprisal": 0.5966,
+      "content_preview": "Makes sense. How about this structure:\n\n1. **Hook** \u2014 Why you built quill\n2. **T"
+    },
+    {
+      "msg_key": "session-38/turn-4",
+      "proxy_surprisal": 0.5221,
+      "content_preview": "Yeah, that's solid. For the hook, I want to emphasize that I built quill for peo"
+    },
+    {
+      "msg_key": "session-38/turn-5",
+      "proxy_surprisal": 0.5446,
+      "content_preview": "Strong angle. When you pitch the offline-first and syncing, are you getting into"
+    },
+    {
+      "msg_key": "session-38/turn-6",
+      "proxy_surprisal": 0.5623,
+      "content_preview": "experience-focused, yeah. most people don't care about the stack."
+    },
+    {
+      "msg_key": "session-38/turn-7",
+      "proxy_surprisal": 0.4023,
+      "content_preview": "Good call."
+    },
+    {
+      "msg_key": "session-38/turn-8",
+      "proxy_surprisal": 0.4562,
+      "content_preview": "Man, it's getting hot today. I had to make iced tea instead of my usual loose-le"
+    },
+    {
+      "msg_key": "session-38/turn-9",
+      "proxy_surprisal": 0.6144,
+      "content_preview": "That's a great story for the \"What's Surprised Me\" section. It shows authenticit"
+    },
+    {
+      "msg_key": "session-38/turn-10",
+      "proxy_surprisal": 0.4475,
+      "content_preview": "Yep, will do. Let me draft the hook section and send it over."
+    },
+    {
+      "msg_key": "session-38/turn-11",
+      "proxy_surprisal": 0.0,
+      "content_preview": "Sounds good."
+    },
+    {
+      "msg_key": "session-38/turn-12",
+      "proxy_surprisal": 0.5228,
+      "content_preview": "\"I built quill because I couldn't find a writing app that respected my time and "
+    },
+    {
+      "msg_key": "session-38/turn-13",
+      "proxy_surprisal": 0.5742,
+      "content_preview": "That's strong. Clear, direct, conviction. Perfect for the hook. Want to move to "
+    },
+    {
+      "msg_key": "session-38/turn-14",
+      "proxy_surprisal": 0.5943,
+      "content_preview": "I think it's solid. For the product section, should I include a screenshot? or j"
+    },
+    {
+      "msg_key": "session-38/turn-15",
+      "proxy_surprisal": 0.5006,
+      "content_preview": "Include a screenshot of the core writing interface. Visual proof of \"gets out of"
+    },
+    {
+      "msg_key": "session-38/turn-16",
+      "proxy_surprisal": 0.4613,
+      "content_preview": "got it. I'll grab a good screenshot and write up the product section. Thanks for"
+    },
+    {
+      "msg_key": "session-38/turn-17",
+      "proxy_surprisal": 0.5588,
+      "content_preview": "Happy to help. You've got a solid story. Let me know if you hit any rough patche"
+    },
+    {
+      "msg_key": "session-39/turn-0",
+      "proxy_surprisal": 0.3626,
+      "content_preview": "morning, ready for sprint retro?"
+    },
+    {
+      "msg_key": "session-39/turn-1",
+      "proxy_surprisal": 0.4115,
+      "content_preview": "yep, let's go"
+    },
+    {
+      "msg_key": "session-39/turn-2",
+      "proxy_surprisal": 0.346,
+      "content_preview": "week 3 was unreal. we hit 1k paying users right on the heels of the product hunt"
+    },
+    {
+      "msg_key": "session-39/turn-3",
+      "proxy_surprisal": 0.6365,
+      "content_preview": "that's huge! what drove the conversion?"
+    },
+    {
+      "msg_key": "session-39/turn-4",
+      "proxy_surprisal": 0.5363,
+      "content_preview": "the PH boost definitely kickstarted it, but it's held \u2014 churn's staying low and "
+    },
+    {
+      "msg_key": "session-39/turn-5",
+      "proxy_surprisal": 0.592,
+      "content_preview": "what about pain points? anything breaking?"
+    },
+    {
+      "msg_key": "session-39/turn-6",
+      "proxy_surprisal": 0.6288,
+      "content_preview": "sync is unreliable when users switch devices. parser performance tanks on really"
+    },
+    {
+      "msg_key": "session-39/turn-7",
+      "proxy_surprisal": 0.6988,
+      "content_preview": "which one's killing adoption?"
+    },
+    {
+      "msg_key": "session-39/turn-8",
+      "proxy_surprisal": 0.64,
+      "content_preview": "definitely sync. conflicts actually scare people away."
+    },
+    {
+      "msg_key": "session-39/turn-9",
+      "proxy_surprisal": 0.3688,
+      "content_preview": "okay, what's the sprint plan?"
+    },
+    {
+      "msg_key": "session-39/turn-10",
+      "proxy_surprisal": 0.4861,
+      "content_preview": "next two weeks: sync is priority 1, parser optimization is 2. i'm keeping scope "
+    },
+    {
+      "msg_key": "session-39/turn-11",
+      "proxy_surprisal": 0.5611,
+      "content_preview": "solid. how long for the sync fix?"
+    },
+    {
+      "msg_key": "session-39/turn-12",
+      "proxy_surprisal": 0.5166,
+      "content_preview": "few days if i keep it simple with lamport clocks. been up at 5am debugging edge "
+    },
+    {
+      "msg_key": "session-39/turn-13",
+      "proxy_surprisal": 0.5562,
+      "content_preview": "that's a grind. maybe ease off after this sprint?"
+    },
+    {
+      "msg_key": "session-39/turn-14",
+      "proxy_surprisal": 0.5343,
+      "content_preview": "yeah, gonna take this weekend completely off. need to recharge."
+    },
+    {
+      "msg_key": "session-39/turn-15",
+      "proxy_surprisal": 0.4658,
+      "content_preview": "well deserved with 1k users. let's ship it."
+    },
+    {
+      "msg_key": "session-40/turn-0",
+      "proxy_surprisal": 0.3517,
+      "content_preview": "Hey! Got a moment to think through some architecture stuff? We're at 1k paying u"
+    },
+    {
+      "msg_key": "session-40/turn-1",
+      "proxy_surprisal": 0.3208,
+      "content_preview": "Congrats on hitting 1k! That's huge. Absolutely, let's dig into it. What's the m"
+    },
+    {
+      "msg_key": "session-40/turn-2",
+      "proxy_surprisal": 0.3824,
+      "content_preview": "So right now the app is pretty monolithic - all the Rust logic is handling sync,"
+    },
+    {
+      "msg_key": "session-40/turn-3",
+      "proxy_surprisal": 0.5556,
+      "content_preview": "Got it. Before we jump to solutions - what's your deployment model like? Are use"
+    },
+    {
+      "msg_key": "session-40/turn-4",
+      "proxy_surprisal": 0.3229,
+      "content_preview": "Pure local Tauri desktop app. Everything runs on the user's machine with SQLite."
+    },
+    {
+      "msg_key": "session-40/turn-5",
+      "proxy_surprisal": 0.6081,
+      "content_preview": "All solid. Option 1 is lower risk but might hit a ceiling. Options 2 and 3 give "
+    },
+    {
+      "msg_key": "session-40/turn-6",
+      "proxy_surprisal": 0.5531,
+      "content_preview": "Right."
+    },
+    {
+      "msg_key": "session-40/turn-7",
+      "proxy_surprisal": 0.7284,
+      "content_preview": "That'll help us figure out which path scales best for your use case."
+    },
+    {
+      "msg_key": "session-40/turn-8",
+      "proxy_surprisal": 0.4335,
+      "content_preview": "I'm doing full-text search with a SQLite FTS table. Works great on small librari"
+    },
+    {
+      "msg_key": "session-40/turn-9",
+      "proxy_surprisal": 0.4753,
+      "content_preview": "FTS can definitely bottleneck at scale. The good news is there are quick wins: b"
+    },
+    {
+      "msg_key": "session-40/turn-10",
+      "proxy_surprisal": 0.5573,
+      "content_preview": "What would that look like? New indexes on the documents table, or restructuring "
+    },
+    {
+      "msg_key": "session-40/turn-11",
+      "proxy_surprisal": 0.4131,
+      "content_preview": "Both. Add covering indexes on frequently-filtered columns (date, status, tags), "
+    },
+    {
+      "msg_key": "session-40/turn-12",
+      "proxy_surprisal": 0.527,
+      "content_preview": "I saw this meme yesterday about Rust developers choosing between 'elegant archit"
+    },
+    {
+      "msg_key": "session-40/turn-13",
+      "proxy_surprisal": 0.5076,
+      "content_preview": "Smart call. Get the win, validate it with your users, then plan the next phase."
+    },
+    {
+      "msg_key": "session-40/turn-14",
+      "proxy_surprisal": 0.4848,
+      "content_preview": "Thanks for talking through this. Way clearer on the path now."
+    },
+    {
+      "msg_key": "session-41/turn-0",
+      "proxy_surprisal": 0.582,
+      "content_preview": "Hi! I'm Marcus Webb, Staff engineer at a startup called pilot here in San Franci"
+    },
+    {
+      "msg_key": "session-41/turn-1",
+      "proxy_surprisal": 0.3622,
+      "content_preview": "Congratulations on the Series B! That's great news. Happy to help."
+    },
+    {
+      "msg_key": "session-41/turn-2",
+      "proxy_surprisal": 0.5437,
+      "content_preview": "Thanks! So pilot helps companies automate compliance workflows \u2014 SOC 2, ISO 2700"
+    },
+    {
+      "msg_key": "session-41/turn-3",
+      "proxy_surprisal": 0.6345,
+      "content_preview": "Got it. So pulling evidence from multiple sources at scale. How are you thinking"
+    },
+    {
+      "msg_key": "session-41/turn-4",
+      "proxy_surprisal": 0.4776,
+      "content_preview": "We're TypeScript and Postgres on the backend, Temporal for orchestration. I'm th"
+    },
+    {
+      "msg_key": "session-41/turn-5",
+      "proxy_surprisal": 0.5728,
+      "content_preview": "Temporal fits well. One thing to nail: credential management for the integration"
+    },
+    {
+      "msg_key": "session-41/turn-6",
+      "proxy_surprisal": 0.5755,
+      "content_preview": "Credentials encrypted in Postgres with AWS Secrets Manager, rotated quarterly. A"
+    },
+    {
+      "msg_key": "session-41/turn-7",
+      "proxy_surprisal": 0.5101,
+      "content_preview": "Smart isolation. That's a solid approach."
+    },
+    {
+      "msg_key": "session-41/turn-8",
+      "proxy_surprisal": 0.568,
+      "content_preview": "Thanks. We lost a senior engineer to Stripe last week, so the team is lean. I'm "
+    },
+    {
+      "msg_key": "session-41/turn-9",
+      "proxy_surprisal": 0.352,
+      "content_preview": "Got it. That makes sense."
+    },
+    {
+      "msg_key": "session-41/turn-10",
+      "proxy_surprisal": 0.5253,
+      "content_preview": "For MVP, I'm thinking GitHub, Okta, and AWS CloudTrail as the first integrations"
+    },
+    {
+      "msg_key": "session-41/turn-11",
+      "proxy_surprisal": 0.5036,
+      "content_preview": "Good scope. Before you lock the schema though \u2014 how are you versioning the conne"
+    },
+    {
+      "msg_key": "session-41/turn-12",
+      "proxy_surprisal": 0.5329,
+      "content_preview": "Immutable bundles with schema versions baked in. New API versions ship as new co"
+    },
+    {
+      "msg_key": "session-41/turn-13",
+      "proxy_surprisal": 0.6717,
+      "content_preview": "That's solid. Forward and backward compatibility without migrations."
+    },
+    {
+      "msg_key": "session-41/turn-14",
+      "proxy_surprisal": 0.5177,
+      "content_preview": "Right. Next I want to work out the data schema and query patterns so compliance "
+    },
+    {
+      "msg_key": "session-42/turn-0",
+      "proxy_surprisal": 0.485,
+      "content_preview": "Hey, need your thoughts on something. We're in sprint planning for the next mile"
+    },
+    {
+      "msg_key": "session-42/turn-1",
+      "proxy_surprisal": 0.5419,
+      "content_preview": "Congrats on closing Series B! That's huge. What's the main architectural piece y"
+    },
+    {
+      "msg_key": "session-42/turn-2",
+      "proxy_surprisal": 0.3129,
+      "content_preview": "We want to scale up our workflow processing 10x by end of Q3. Current setup is T"
+    },
+    {
+      "msg_key": "session-42/turn-3",
+      "proxy_surprisal": 0.6135,
+      "content_preview": "That's a solid growth target. Tell me more about your bottlenecks - are you hitt"
+    },
+    {
+      "msg_key": "session-42/turn-4",
+      "proxy_surprisal": 0.4846,
+      "content_preview": "Postgres is definitely the constraint. We're hitting connection pooling limits u"
+    },
+    {
+      "msg_key": "session-42/turn-5",
+      "proxy_surprisal": 0.5827,
+      "content_preview": "Audit logs at that scale are tricky. You're probably looking at partitioning, re"
+    },
+    {
+      "msg_key": "session-42/turn-6",
+      "proxy_surprisal": 0.466,
+      "content_preview": "Our main tables are workflows, tasks, and audit logs. We use pnpm for the monore"
+    },
+    {
+      "msg_key": "session-42/turn-7",
+      "proxy_surprisal": 0.434,
+      "content_preview": "pnpm workspaces are great for that. For the audit log specifically, date-based p"
+    },
+    {
+      "msg_key": "session-42/turn-8",
+      "proxy_surprisal": 0.5791,
+      "content_preview": "Mostly for monthly and quarterly compliance reports. Also, full transparency - I"
+    },
+    {
+      "msg_key": "session-42/turn-9",
+      "proxy_surprisal": 0.5306,
+      "content_preview": "That's important context. I'd suggest splitting this into phases: Phase 1 is aud"
+    },
+    {
+      "msg_key": "session-42/turn-10",
+      "proxy_surprisal": 0.6723,
+      "content_preview": "I like that breakdown."
+    },
+    {
+      "msg_key": "session-42/turn-11",
+      "proxy_surprisal": 0.5449,
+      "content_preview": "For the read model, you could populate it from Temporal events without touching "
+    },
+    {
+      "msg_key": "session-42/turn-12",
+      "proxy_surprisal": 0.4707,
+      "content_preview": "So for that read model - should we use Postgres materialized views or spin up so"
+    },
+    {
+      "msg_key": "session-42/turn-13",
+      "proxy_surprisal": 0.3457,
+      "content_preview": "I'd go with Postgres materialized views. Fits your current stack, less to operat"
+    },
+    {
+      "msg_key": "session-42/turn-14",
+      "proxy_surprisal": 0.5685,
+      "content_preview": "That makes sense. I think we can execute that - pnpm workspaces make it easy to "
+    },
+    {
+      "msg_key": "session-42/turn-15",
+      "proxy_surprisal": 0.5519,
+      "content_preview": "Sounds good. Once you have timeline, we can formalize the spec."
+    },
+    {
+      "msg_key": "session-42/turn-16",
+      "proxy_surprisal": 0.2483,
+      "content_preview": "Perfect, thanks for thinking through this with me."
+    },
+    {
+      "msg_key": "session-43/turn-0",
+      "proxy_surprisal": 0.5534,
+      "content_preview": "Morning, got a sec?"
+    },
+    {
+      "msg_key": "session-43/turn-1",
+      "proxy_surprisal": 0.21,
+      "content_preview": "Morning! Yeah, what's up?"
+    },
+    {
+      "msg_key": "session-43/turn-2",
+      "proxy_surprisal": 0.5156,
+      "content_preview": "Want to dive into some competitor research. I got access to their product this w"
+    },
+    {
+      "msg_key": "session-43/turn-3",
+      "proxy_surprisal": 0.5109,
+      "content_preview": "Makes sense. Which competitor? And what areas are most critical to dig into?"
+    },
+    {
+      "msg_key": "session-43/turn-4",
+      "proxy_surprisal": 0.5309,
+      "content_preview": "It's ComplianceFlow. Their auth implementation, policy management, and especiall"
+    },
+    {
+      "msg_key": "session-43/turn-5",
+      "proxy_surprisal": 0.4669,
+      "content_preview": "Good targets. I'd suggest pulling some screenshots, mapping their feature flow, "
+    },
+    {
+      "msg_key": "session-43/turn-6",
+      "proxy_surprisal": 0.4946,
+      "content_preview": "Audit logging first\u2014that's our biggest differentiator. And yeah, Linear is perfe"
+    },
+    {
+      "msg_key": "session-43/turn-7",
+      "proxy_surprisal": 0.6348,
+      "content_preview": "Perfect. Once you have those, I can help structure the comparison. Worth tagging"
+    },
+    {
+      "msg_key": "session-43/turn-8",
+      "proxy_surprisal": 0.6812,
+      "content_preview": "Good call. Stepping away for a quick macchiato\u2014be back in 5."
+    },
+    {
+      "msg_key": "session-43/turn-9",
+      "proxy_surprisal": 0.4894,
+      "content_preview": "Nice, take your time."
+    },
+    {
+      "msg_key": "session-43/turn-10",
+      "proxy_surprisal": 0.5384,
+      "content_preview": "OK, back. So their audit log UI shows a timeline with filter-as-you-type on acto"
+    },
+    {
+      "msg_key": "session-43/turn-11",
+      "proxy_surprisal": 0.5634,
+      "content_preview": "Simpler is interesting. Do you know how they're handling real-time updates? Poll"
+    },
+    {
+      "msg_key": "session-43/turn-12",
+      "proxy_surprisal": 0.4854,
+      "content_preview": "Looks like polling. Honestly, that might be the right call for us too\u2014less infra"
+    },
+    {
+      "msg_key": "session-43/turn-13",
+      "proxy_surprisal": 0.6163,
+      "content_preview": "That's solid. Before/after deltas would require state snapshots though. Should w"
+    },
+    {
+      "msg_key": "session-43/turn-14",
+      "proxy_surprisal": 0.4853,
+      "content_preview": "Definitely. So we adopt their delta approach for audit, keep our event sourcing "
+    },
+    {
+      "msg_key": "session-43/turn-15",
+      "proxy_surprisal": 0.5379,
+      "content_preview": "Makes sense. Should we document audit findings in Linear first, then move to pol"
+    },
+    {
+      "msg_key": "session-43/turn-16",
+      "proxy_surprisal": 0.5,
+      "content_preview": "Yeah, let me organize the audit piece in Linear with tags, then we can hit polic"
+    },
+    {
+      "msg_key": "session-43/turn-17",
+      "proxy_surprisal": 0.5172,
+      "content_preview": "Sounds good. I'll help structure everything once it's logged. Should move quick "
+    },
+    {
+      "msg_key": "session-44/turn-0",
+      "proxy_surprisal": 0.5349,
+      "content_preview": "Hey, I want to evaluate this new Temporal worker library before we commit to usi"
+    },
+    {
+      "msg_key": "session-44/turn-1",
+      "proxy_surprisal": 0.4353,
+      "content_preview": "Sure, happy to help. What's the main concern\u2014compatibility issues, or stability "
+    },
+    {
+      "msg_key": "session-44/turn-2",
+      "proxy_surprisal": 0.4838,
+      "content_preview": "Both, really. Temporal runs our compliance workflow engine, so any instability d"
+    },
+    {
+      "msg_key": "session-44/turn-3",
+      "proxy_surprisal": 0.3474,
+      "content_preview": "That makes sense\u2014compliance workflows are mission-critical. What version of Temp"
+    },
+    {
+      "msg_key": "session-44/turn-4",
+      "proxy_surprisal": 0.4496,
+      "content_preview": "Not gonna lie, I'm torn between coffee or tea this morning. Espresso macchiato i"
+    },
+    {
+      "msg_key": "session-44/turn-5",
+      "proxy_surprisal": 0.606,
+      "content_preview": "Ha, fair enough. Coffee first, code second."
+    },
+    {
+      "msg_key": "session-44/turn-6",
+      "proxy_surprisal": 0.6463,
+      "content_preview": "So the library exposes a `WorkerPool` class that supposedly handles batching and"
+    },
+    {
+      "msg_key": "session-44/turn-7",
+      "proxy_surprisal": 0.5166,
+      "content_preview": "Good instinct. I'd check whether the pool's retry logic fully replaces your curr"
+    },
+    {
+      "msg_key": "session-44/turn-8",
+      "proxy_surprisal": 0.5062,
+      "content_preview": "Right. I also want to measure latency and throughput under load, and verify it w"
+    },
+    {
+      "msg_key": "session-44/turn-9",
+      "proxy_surprisal": 0.5298,
+      "content_preview": "Smart move. For perf testing, I'd set up a staging environment with realistic wo"
+    },
+    {
+      "msg_key": "session-44/turn-10",
+      "proxy_surprisal": 0.4852,
+      "content_preview": "Yeah, that's the plan. Look, I should be transparent\u2014we just lost a senior engin"
+    },
+    {
+      "msg_key": "session-44/turn-11",
+      "proxy_surprisal": 0.6466,
+      "content_preview": "Understood. That's a real constraint."
+    },
+    {
+      "msg_key": "session-44/turn-12",
+      "proxy_surprisal": 0.541,
+      "content_preview": "Exactly. If the library turns out to be more trouble than it's worth, I'll docum"
+    },
+    {
+      "msg_key": "session-44/turn-13",
+      "proxy_surprisal": 0.4956,
+      "content_preview": "Smart plan. So for your evaluation, I'd focus on: active maintenance, community "
+    },
+    {
+      "msg_key": "session-44/turn-14",
+      "proxy_surprisal": 0.5355,
+      "content_preview": "Perfect. I'll put together that checklist this afternoon."
+    },
+    {
+      "msg_key": "session-44/turn-15",
+      "proxy_surprisal": 0.3433,
+      "content_preview": "Sounds good. Want me to review your findings?"
+    },
+    {
+      "msg_key": "session-44/turn-16",
+      "proxy_surprisal": 0.6099,
+      "content_preview": "Yeah. I prefer to run big dependency decisions through you before pitching to th"
+    },
+    {
+      "msg_key": "session-44/turn-17",
+      "proxy_surprisal": 0.5172,
+      "content_preview": "Got it. I'll be ready whenever you have your analysis."
+    },
+    {
+      "msg_key": "session-45/turn-0",
+      "proxy_surprisal": 0.4236,
+      "content_preview": "Morning! Got a standup recap to walk through."
+    },
+    {
+      "msg_key": "session-45/turn-1",
+      "proxy_surprisal": 0.5069,
+      "content_preview": "Sure, what's the update?"
+    },
+    {
+      "msg_key": "session-45/turn-2",
+      "proxy_surprisal": 0.5392,
+      "content_preview": "Series B closed week 2. Fifty million. It's surreal, honestly. The board wants a"
+    },
+    {
+      "msg_key": "session-45/turn-3",
+      "proxy_surprisal": 0.6147,
+      "content_preview": "That's a huge shift. How are you sequencing the work?"
+    },
+    {
+      "msg_key": "session-45/turn-4",
+      "proxy_surprisal": 0.5169,
+      "content_preview": "Audit tooling moves to P0. Updated Linear with the new order. Temporal workflows"
+    },
+    {
+      "msg_key": "session-45/turn-5",
+      "proxy_surprisal": 0.4733,
+      "content_preview": "What's the team bandwidth looking like with those priorities?"
+    },
+    {
+      "msg_key": "session-45/turn-6",
+      "proxy_surprisal": 0.5966,
+      "content_preview": "This is the hard part. Sarah moved to Stripe last week. She was running point on"
+    },
+    {
+      "msg_key": "session-45/turn-7",
+      "proxy_surprisal": 0.5687,
+      "content_preview": "Rough timing. What's the target date for the audit system migration?"
+    },
+    {
+      "msg_key": "session-45/turn-8",
+      "proxy_surprisal": 0.5628,
+      "content_preview": "Should ship by EOW if everything stays aligned. We broke Temporal into smaller p"
+    },
+    {
+      "msg_key": "session-45/turn-9",
+      "proxy_surprisal": 0.5898,
+      "content_preview": "Still standardizing on pnpm and TypeScript strict mode for all the new code?"
+    },
+    {
+      "msg_key": "session-45/turn-10",
+      "proxy_surprisal": 0.4783,
+      "content_preview": "Yeah, pnpm especially. I prefer it for projects at our scale\u2014cleaner lockfiles, "
+    },
+    {
+      "msg_key": "session-45/turn-11",
+      "proxy_surprisal": 0.5645,
+      "content_preview": "Want me to draft a pnpm migration guide for the team?"
+    },
+    {
+      "msg_key": "session-45/turn-12",
+      "proxy_surprisal": 0.4886,
+      "content_preview": "Please. And review the TypeScript config tightening we're doing across the codeb"
+    },
+    {
+      "msg_key": "session-45/turn-13",
+      "proxy_surprisal": 0.4851,
+      "content_preview": "I've got Ben this weekend, so I'm out Friday afternoon."
+    },
+    {
+      "msg_key": "session-45/turn-14",
+      "proxy_surprisal": 0.5852,
+      "content_preview": "No problem."
+    },
+    {
+      "msg_key": "session-45/turn-15",
+      "proxy_surprisal": 0.5197,
+      "content_preview": "The San Francisco heat is brutal today. Definitely grabbing an espresso macchiat"
+    },
+    {
+      "msg_key": "session-45/turn-16",
+      "proxy_surprisal": 0.494,
+      "content_preview": "Enjoy. Talk soon."
+    },
+    {
+      "msg_key": "session-46/turn-0",
+      "proxy_surprisal": 0.4423,
+      "content_preview": "Hey. Got a CI failure on main\u2014Postgres migrations failing in CI but passing loca"
+    },
+    {
+      "msg_key": "session-46/turn-1",
+      "proxy_surprisal": 0.5376,
+      "content_preview": "I can help. CI/local differences are usually environmental. What's the actual er"
+    },
+    {
+      "msg_key": "session-46/turn-2",
+      "proxy_surprisal": 0.5189,
+      "content_preview": "ENOENT trying to read the migration file. File exists in the repo but CI can't f"
+    },
+    {
+      "msg_key": "session-46/turn-3",
+      "proxy_surprisal": 0.6005,
+      "content_preview": "Path issue. How's the script reading it, and what path are you using?"
+    },
+    {
+      "msg_key": "session-46/turn-4",
+      "proxy_surprisal": 0.5117,
+      "content_preview": "We switched to pnpm workspaces a few weeks back when our key engineer left for S"
+    },
+    {
+      "msg_key": "session-46/turn-5",
+      "proxy_surprisal": 0.5279,
+      "content_preview": "That's your problem. pnpm's node_modules layout breaks the relative path resolut"
+    },
+    {
+      "msg_key": "session-46/turn-6",
+      "proxy_surprisal": 0.5764,
+      "content_preview": "Perfect. Just so you know, we track bugs in Linear."
+    },
+    {
+      "msg_key": "session-46/turn-7",
+      "proxy_surprisal": 0.4988,
+      "content_preview": "Good to know."
+    },
+    {
+      "msg_key": "session-46/turn-8",
+      "proxy_surprisal": 0.5771,
+      "content_preview": "And yeah, this weather's been absolutely miserable\u2014grey drizzle all week."
+    },
+    {
+      "msg_key": "session-46/turn-9",
+      "proxy_surprisal": 0.5935,
+      "content_preview": "I hear that. San Francisco's been moody. Anyway, fix is done\u2014tests pass from any"
+    },
+    {
+      "msg_key": "session-46/turn-10",
+      "proxy_surprisal": 0.4226,
+      "content_preview": "Awesome, thanks for the quick turnaround."
+    },
+    {
+      "msg_key": "session-46/turn-11",
+      "proxy_surprisal": 0.5053,
+      "content_preview": "Happy to help. Anything else blocking the deploy?"
+    },
+    {
+      "msg_key": "session-46/turn-12",
+      "proxy_surprisal": 0.5447,
+      "content_preview": "Nope, all clear. Going forward though, I'm fully committed to pnpm\u2014better DX, fe"
+    },
+    {
+      "msg_key": "session-46/turn-13",
+      "proxy_surprisal": 0.4692,
+      "content_preview": "Noted. pnpm it is."
+    },
+    {
+      "msg_key": "session-46/turn-14",
+      "proxy_surprisal": 0.301,
+      "content_preview": "Cheers. Grabbing an espresso macchiato."
+    },
+    {
+      "msg_key": "session-46/turn-15",
+      "proxy_surprisal": 0.6367,
+      "content_preview": "Enjoy. You earned it."
+    },
+    {
+      "msg_key": "session-46/turn-16",
+      "proxy_surprisal": 0.4699,
+      "content_preview": "Thanks again, mate."
+    },
+    {
+      "msg_key": "session-47/turn-0",
+      "proxy_surprisal": 0.6487,
+      "content_preview": "Hey, can you jump on the pilot perf issues?"
+    },
+    {
+      "msg_key": "session-47/turn-1",
+      "proxy_surprisal": 0.4702,
+      "content_preview": "Absolutely, what's the bottleneck?"
+    },
+    {
+      "msg_key": "session-47/turn-2",
+      "proxy_surprisal": 0.4709,
+      "content_preview": "Audit trail queries are hitting 400ms+ on the workflow status lookups. It's bloc"
+    },
+    {
+      "msg_key": "session-47/turn-3",
+      "proxy_surprisal": 0.4991,
+      "content_preview": "That's bad. Let me look at the schema and query plans."
+    },
+    {
+      "msg_key": "session-47/turn-4",
+      "proxy_surprisal": 0.4642,
+      "content_preview": "Honestly, it's been a rough couple weeks. We closed Series B last week which is "
+    },
+    {
+      "msg_key": "session-47/turn-5",
+      "proxy_surprisal": 0.5941,
+      "content_preview": "Oh man, that's really tough timing after closing such a big round."
+    },
+    {
+      "msg_key": "session-47/turn-6",
+      "proxy_surprisal": 0.473,
+      "content_preview": "Yeah, his absence is definitely showing on stuff like this. We're using pnpm on "
+    },
+    {
+      "msg_key": "session-47/turn-7",
+      "proxy_surprisal": 0.5786,
+      "content_preview": "Got it. I see the problem - missing composite index on (user_id, workflow_status"
+    },
+    {
+      "msg_key": "session-47/turn-8",
+      "proxy_surprisal": 0.5804,
+      "content_preview": "Perfect. How long to get this tested and deployed? We really need it live before"
+    },
+    {
+      "msg_key": "session-47/turn-9",
+      "proxy_surprisal": 0.5758,
+      "content_preview": "Maybe 10 mins of testing locally. Let me write the migration now."
+    },
+    {
+      "msg_key": "session-47/turn-10",
+      "proxy_surprisal": 0.4932,
+      "content_preview": "Thanks for jumping on this so fast."
+    },
+    {
+      "msg_key": "session-47/turn-11",
+      "proxy_surprisal": 0.3056,
+      "content_preview": "Happy to help. That's what I'm here for."
+    },
+    {
+      "msg_key": "session-47/turn-12",
+      "proxy_surprisal": 0.4415,
+      "content_preview": "By the way, the weather in SF has been absolutely brutal lately."
+    },
+    {
+      "msg_key": "session-47/turn-13",
+      "proxy_surprisal": 0.5829,
+      "content_preview": "April heat in the Bay is no joke. Anyway, migration's ready - let me show you th"
+    },
+    {
+      "msg_key": "session-47/turn-14",
+      "proxy_surprisal": 0.5304,
+      "content_preview": "Before we go live, did you spot any other slow queries in the audit trail code?"
+    },
+    {
+      "msg_key": "session-47/turn-15",
+      "proxy_surprisal": 0.5171,
+      "content_preview": "Good thinking - found another one actually. Let me add that index too."
+    },
+    {
+      "msg_key": "session-47/turn-16",
+      "proxy_surprisal": 0.3919,
+      "content_preview": "Awesome, this should really help with the demo prep. Thanks again."
+    },
+    {
+      "msg_key": "session-48/turn-0",
+      "proxy_surprisal": 0.432,
+      "content_preview": "Hey, let's structure a sprint retro. Series B closed two weeks ago ($50M), but w"
+    },
+    {
+      "msg_key": "session-48/turn-1",
+      "proxy_surprisal": 0.5563,
+      "content_preview": "Congrats on the Series B. Losing a key engineer right after is rough. What's you"
+    },
+    {
+      "msg_key": "session-48/turn-2",
+      "proxy_surprisal": 0.5927,
+      "content_preview": "32 points, down from 45. We use Linear for tracking. Main blocker is Postgres mi"
+    },
+    {
+      "msg_key": "session-48/turn-3",
+      "proxy_surprisal": 0.6506,
+      "content_preview": "Down but manageable. Is that a skills gap or capacity?"
+    },
+    {
+      "msg_key": "session-48/turn-4",
+      "proxy_surprisal": 0.6333,
+      "content_preview": "Capacity \u2014 that engineer was our Postgres expert. Anyway, saw this meme about a "
+    },
+    {
+      "msg_key": "session-48/turn-5",
+      "proxy_surprisal": 0.5411,
+      "content_preview": "Ha, yeah. Reality check."
+    },
+    {
+      "msg_key": "session-48/turn-6",
+      "proxy_surprisal": 0.4464,
+      "content_preview": "For the next two weeks, I want to stabilize the data layer first. We're using Ty"
+    },
+    {
+      "msg_key": "session-48/turn-7",
+      "proxy_surprisal": 0.5571,
+      "content_preview": "Smart. What's your deployment cadence?"
+    },
+    {
+      "msg_key": "session-48/turn-8",
+      "proxy_surprisal": 0.4954,
+      "content_preview": "Daily when ready. We've got good iteration speed."
+    },
+    {
+      "msg_key": "session-48/turn-9",
+      "proxy_surprisal": 0.4638,
+      "content_preview": "Good. Let's structure the retro as: what went well, what didn't, action items fo"
+    },
+    {
+      "msg_key": "session-48/turn-10",
+      "proxy_surprisal": 0.3386,
+      "content_preview": "Perfect, that's exactly what I had in mind."
+    },
+    {
+      "msg_key": "session-48/turn-11",
+      "proxy_surprisal": 0.5369,
+      "content_preview": "Great. Let me draft some talking points to frame things."
+    },
+    {
+      "msg_key": "session-48/turn-12",
+      "proxy_surprisal": 0.2865,
+      "content_preview": "Awesome, thanks."
+    }
+  ]
+}

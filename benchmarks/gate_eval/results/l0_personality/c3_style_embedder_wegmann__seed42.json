@@ -1,0 +1,106 @@
+{
+  "meta": {
+    "candidate": "c3_style_embedder_wegmann",
+    "tier": "base",
+    "seed": 42,
+    "top_k": 5,
+    "timestamp": "2026-04-23T14:39:05Z",
+    "commit": "9b7af17"
+  },
+  "build_wall_s": 0.002,
+  "profile_bytes_avg": 3136.0,
+  "profile_readable": true,
+  "intra_persona_consistency": 1.0,
+  "slop_transfer_gap": null,
+  "human_probe_scores": {
+    "skipped": false,
+    "pool_size": 100,
+    "retrieval_wall_s": 0.009,
+    "a_b_accuracy": 0.6,
+    "speaker_id_accuracy": 1.0,
+    "leakage_failure_rate": 0.0,
+    "mean_leakage_rate_top_k": 0.0,
+    "counts": {
+      "A_B": 70,
+      "C": 15,
+      "D": 15
+    },
+    "per_query_sample": [
+      {
+        "query_id": "P1_A_001",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_002",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_003",
+        "query_type": "A",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_A_004",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-0"
+      },
+      {
+        "query_id": "P1_A_005",
+        "query_type": "A",
+        "correct": true,
+        "notes": "matched rank-1"
+      },
+      {
+        "query_id": "P1_B_001",
+        "query_type": "B",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_B_002",
+        "query_type": "B",
+        "correct": false,
+        "notes": "no in-topk result passed persona+content filters"
+      },
+      {
+        "query_id": "P1_C_001",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_C_002",
+        "query_type": "C",
+        "correct": true,
+        "notes": "predicted P1 gold P1"
+      },
+      {
+        "query_id": "P1_D_001",
+        "query_type": "D",
+        "correct": true,
+        "notes": "0/5 leaked"
+      }
+    ]
+  },
+  "synthetic_scores": {
+    "skipped": true,
+    "note": "synthetic pool empty"
+  },
+  "cold_start_curve": {
+    "5": 0.6,
+    "20": 0.6
+  },
+  "profile_summaries": {
+    "P1": "P1 · style_vec(768d) · model=UNAVAILABLE",
+    "P2": "P2 · style_vec(768d) · model=UNAVAILABLE",
+    "P3": "P3 · style_vec(768d) · model=UNAVAILABLE",
+    "P4": "P4 · style_vec(768d) · model=UNAVAILABLE",
+    "P5": "P5 · style_vec(768d) · model=UNAVAILABLE"
+  }
+}
