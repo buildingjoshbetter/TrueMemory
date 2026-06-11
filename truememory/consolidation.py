@@ -102,7 +102,7 @@ def _get_all_messages_chrono(conn: sqlite3.Connection) -> list[dict]:
     """Fetch all messages ordered by timestamp."""
     rows = conn.execute(
         "SELECT id, content, sender, recipient, timestamp, category, modality "
-        "FROM messages WHERE directive = 0 ORDER BY timestamp"
+        "FROM messages WHERE (directive = 0 OR directive IS NULL) ORDER BY timestamp"
     ).fetchall()
     return [
         {
@@ -1391,7 +1391,8 @@ def build_entity_summary_sheets(conn):
     # Get all entities with significant message counts
     entities = conn.execute(
         "SELECT sender, COUNT(*) as cnt FROM messages "
-        "WHERE sender != '' AND directive = 0 GROUP BY sender HAVING cnt >= 5 "
+        "WHERE sender != '' AND (directive = 0 OR directive IS NULL) "
+        "GROUP BY sender HAVING cnt >= 5 "
         "ORDER BY cnt DESC"
     ).fetchall()
 
@@ -1403,7 +1404,7 @@ def build_entity_summary_sheets(conn):
         rows = conn.execute(
             "SELECT id, content, sender, recipient, timestamp, category, modality "
             "FROM messages WHERE (LOWER(sender) = LOWER(?) OR LOWER(recipient) = LOWER(?)) "
-            "AND directive = 0 ORDER BY timestamp",
+            "AND (directive = 0 OR directive IS NULL) ORDER BY timestamp",
             (entity_name, entity_name)
         ).fetchall()
 

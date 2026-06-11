@@ -833,6 +833,30 @@ def directive_filter_sql(
     return f" AND ({prefix}directive = 0 OR {prefix}directive IS NULL)"
 
 
+def find_directive_by_content(
+    conn: sqlite3.Connection,
+    content: str,
+    sender: str = "",
+) -> int | None:
+    """Return the id of an existing directive with identical content, or None.
+
+    Issue #638 (M-93): directives had no directive-to-directive dedup, so exact
+    duplicates accumulated and crowded out the injection cap. This cheap
+    exact-match lookup lets the store path skip inserting a duplicate. Matched
+    on trimmed content within the same sender scope (directives default to an
+    empty sender).
+    """
+    if "directive" not in _message_columns(conn):
+        return None
+    row = conn.execute(
+        "SELECT id FROM messages "
+        "WHERE directive = 1 AND TRIM(content) = TRIM(?) AND sender = ? "
+        "ORDER BY id LIMIT 1",
+        (content, sender),
+    ).fetchone()
+    return int(row[0]) if row else None
+
+
 def get_message(conn: sqlite3.Connection, msg_id: int) -> dict | None:
     """
     Retrieve a single message by its primary key.

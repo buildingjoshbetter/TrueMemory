@@ -99,6 +99,27 @@ class Memory:
                 "created_at": None,
             }
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        # Issue #638 (M-93): exact-content directive dedup. Without this,
+        # duplicate directives accumulate and crowd out the injection cap.
+        # Skip the insert when an identical directive already exists in scope.
+        if directive:
+            try:
+                from truememory.storage import find_directive_by_content
+                self._engine._ensure_connection()
+                existing_id = find_directive_by_content(
+                    self._engine.conn, content, sender=user_id or ""
+                )
+            except Exception:
+                existing_id = None
+            if existing_id is not None:
+                return {
+                    "id": existing_id,
+                    "content": content,
+                    "user_id": user_id or "",
+                    "created_at": now,
+                    "metadata": metadata or {},
+                    "deduplicated": True,
+                }
         result = self._engine.add(
             content=content,
             sender=user_id or "",

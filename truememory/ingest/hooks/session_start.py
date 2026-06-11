@@ -24,6 +24,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -758,6 +759,45 @@ def _first_run_context() -> str:
     return "\n".join(lines)
 
 
+# Directive injection sub-budget (issue #638, M-61): #589 capped directive
+# *count* (50) but not bytes, so 50 large directives could inject megabytes and
+# evict the entire <truememory-context> block. Cap the rendered directive block
+# at half the recall budget with a truncation marker.
+_DIRECTIVE_BUDGET_FRACTION = 0.5
+
+# Control/ANSI characters to strip from injected directive text (issue #638,
+# G2-2): an ESC sequence or NUL embedded in a directive corrupts the rendered
+# XML / terminal. Keep tab/newline (harmless, sometimes intentional).
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _sanitize_directive(content: str) -> str:
+    """Neutralize a directive before interpolating it into injected XML.
+
+    Issue #638 (M-28): directive text is interpolated verbatim into the
+    ``<truememory-directives>`` block. A poisoned directive containing
+    ``</truememory-directives>`` plus a fake ``<truememory-context>`` block can
+    forge memory context, suppress real directives, and stays invisible to
+    search/dedup. Neutralize any ``<truememory-`` / ``</truememory-`` wrapper
+    token so directive content can never open or close an injection block, and
+    strip control/ANSI characters (G2-2).
+    """
+    if not content:
+        return content
+    # Strip control/ANSI chars first.
+    content = _CONTROL_CHARS_RE.sub("", content)
+    # Neutralize the XML wrapper tokens (case-insensitive) by escaping the
+    # leading angle bracket of any ``<truememory-`` / ``</truememory-``
+    # sequence. The resulting ``&lt;truememory-...`` is inert text — it can
+    # neither open nor close a real injection block.
+    content = re.sub(
+        r"(?i)<(/?truememory-)",
+        r"&lt;\1",
+        content,
+    )
+    return content
+
+
 def _directive_scope_sql(user_id: str) -> tuple[str, list]:
     """WHERE-clause suffix + params for directive queries.
 
@@ -794,8 +834,11 @@ def _load_directives(memory, user_id: str = "") -> list[dict]:
         query = "SELECT id, content, sender, timestamp, category FROM messages WHERE directive = 1"
         scope_sql, params = _directive_scope_sql(user_id)
         query += scope_sql
-        # LIMIT cap+1 so truncation is detectable without an unbounded fetch.
-        query += " ORDER BY id LIMIT ?"
+        # Issue #638 (M-92): keep the NEWEST DIRECTIVE_LIMIT directives, not
+        # the oldest. ``ORDER BY id ASC LIMIT`` silently dropped a freshly
+        # stored directive once the cap was hit. Fetch newest-first (cap+1 so
+        # truncation is detectable) then re-sort ascending for stable display.
+        query += " ORDER BY id DESC LIMIT ?"
         params.append(DIRECTIVE_LIMIT + 1)
         rows = memory._engine.conn.execute(query, params).fetchall()
         if len(rows) > DIRECTIVE_LIMIT:
@@ -806,6 +849,8 @@ def _load_directives(memory, user_id: str = "") -> list[dict]:
                 DIRECTIVE_LIMIT,
             )
             rows = rows[:DIRECTIVE_LIMIT]
+        # Re-sort ascending by id so display order matches insertion order.
+        rows = sorted(rows, key=lambda r: r[0])
         return [{"id": r[0], "content": r[1], "sender": r[2]} for r in rows]
     except Exception:
         log.warning("Failed to load directives for session injection", exc_info=True)
@@ -909,17 +954,37 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "", budg
     parts = []
 
     if directives:
+        # Issue #638 (M-61): hard byte sub-budget for the directive block so it
+        # cannot evict the <truememory-context> block. Reserve a marker line.
+        effective_budget = budget if budget > 0 else RECALL_BUDGET_CHARS
+        directive_budget = int(effective_budget * _DIRECTIVE_BUDGET_FRACTION)
+        _TRUNC_MARKER = "- [directives truncated — over budget; prune with truememory_forget]"
+
         dir_lines = [
             "<truememory-directives>",
             "## User Directives (always loaded)",
             "These directives override defaults and apply to every session:",
             "",
         ]
+        # Fixed wrapper cost (header + closing tag + truncation marker headroom).
+        used = sum(len(line) + 1 for line in dir_lines)
+        used += len("</truememory-directives>") + 1 + len(_TRUNC_MARKER) + 1
+        truncated = False
         for d in directives:
-            content = d.get("content", "").strip()
-            if content:
-                dir_lines.append(f"- {content}")
-        if len(directives) >= DIRECTIVE_LIMIT:
+            # Issue #638 (M-28 / G2-2): neutralize wrapper tokens + strip
+            # control/ANSI chars before interpolation.
+            content = _sanitize_directive(d.get("content", "")).strip()
+            if not content:
+                continue
+            line = f"- {content}"
+            if used + len(line) + 1 > directive_budget:
+                truncated = True
+                break
+            dir_lines.append(line)
+            used += len(line) + 1
+        if truncated:
+            dir_lines.append(_TRUNC_MARKER)
+        elif len(directives) >= DIRECTIVE_LIMIT:
             total = _count_directives(memory, user_id=user_id)
             if total > len(directives):
                 dir_lines.append(
