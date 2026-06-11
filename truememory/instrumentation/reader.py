@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from truememory.instrumentation.writer import _resolve_db_path
+from truememory.storage import DEFAULT_BUSY_TIMEOUT_MS
 
 
 def query_telemetry(
@@ -41,6 +42,9 @@ def query_telemetry(
         return []
 
     try:
+        # M-86: align busy_timeout with the single-source constant used by the
+        # writer so a concurrent prune/insert does not immediately error out.
+        conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
         cutoff = time.time() - (since_hours * 3600)
         if signal:
             rows = conn.execute(

@@ -422,17 +422,27 @@ def _preflight_writable_target(target: str | None, *, kind: str) -> bool:
         except OSError:
             pass
 
-    # For DBs, also confirm we can actually open/create the sqlite file.
-    # This catches corrupted existing DBs, bad permissions on an existing
-    # file, and any other OperationalError that would surface later deep
-    # in the storage layer — BEFORE we spend an LLM call.
-    if kind == "db":
+    # For DBs, validate an EXISTING file only. M-85: the previous probe called
+    # sqlite3.connect(path) unconditionally, which CREATES an empty file as a
+    # side effect when the path does not exist (and validated only the header
+    # via PRAGMA user_version). Creatability of a missing file is already
+    # covered by the parent-dir writability probe above, so here we only open
+    # files that already exist, and we run a real integrity check.
+    if kind == "db" and path.exists():
         import sqlite3
         try:
             conn = sqlite3.connect(str(path))
-            conn.execute("PRAGMA user_version")
-            conn.close()
-        except sqlite3.OperationalError as e:
+            try:
+                qc = conn.execute("PRAGMA quick_check(1)").fetchone()
+            finally:
+                conn.close()
+            if qc is not None and qc[0] != "ok":
+                print(
+                    f"ERROR: {kind} at {path} failed integrity check: {qc[0]}",
+                    file=sys.stderr,
+                )
+                return False
+        except sqlite3.DatabaseError as e:
             print(
                 f"ERROR: cannot open {kind} at {path}: {e}",
                 file=sys.stderr,
