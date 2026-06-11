@@ -97,6 +97,23 @@ def _is_correction(fact: str, category: str = "") -> bool:
     return _has_update_markers(fact)
 
 
+_NUMBER_RE = re.compile(r"\d+")
+
+
+def _has_divergent_numbers(a: str, b: str) -> bool:
+    """True if *a* and *b* contain different multisets of digit runs.
+
+    C2-DEDUP (#687): on real Base/Pro embeddings two factually DISTINCT memories
+    that differ only by a number — a date digit ("October 15th" vs "16th"), a
+    dollar amount, a version, a count, an id — embed to cosine well above the
+    0.92 dedup threshold. Treating them as duplicates silently drops one fact.
+    A difference in the digit runs is a strong signal the facts are distinct and
+    must not be auto-SKIPped. Returns False when both sides have the same numbers
+    (or none), so genuine paraphrases still take the fast duplicate path.
+    """
+    return sorted(_NUMBER_RE.findall(a or "")) != sorted(_NUMBER_RE.findall(b or ""))
+
+
 def check_duplicate(
     fact: str,
     memory,
@@ -175,6 +192,26 @@ def check_duplicate(
                 return _llm_dedup(fact, top_content, top_id, config)
             return _heuristic_dedup(
                 fact, top_content, top_id, top_score, is_correction=True
+            )
+        # C2-DEDUP (#687): a >0.92 cosine match is NOT proof of the same fact —
+        # near-token differences (a date digit, dollar amount, version, id)
+        # embed this close yet are distinct. Don't silently SKIP:
+        #  - with an LLM config, let it arbitrate (canonical paraphrase
+        #    authority), exactly as the relative-score path below already does;
+        #  - without one, only fast-SKIP genuine paraphrases (identical digit
+        #    runs) and keep both facts when the numbers diverge.
+        if config:
+            return _llm_dedup(fact, top_content, top_id, config)
+        if _has_divergent_numbers(fact, top_content):
+            log.debug(
+                "High-similarity candidate (%.2f) has divergent numbers vs "
+                "existing — keeping as a distinct fact instead of SKIP",
+                top_score,
+            )
+            return DedupDecision(
+                action=DedupAction.ADD,
+                fact=fact,
+                reason=f"numeric divergence at high similarity ({top_score:.2f})",
             )
         return DedupDecision(
             action=DedupAction.SKIP,
