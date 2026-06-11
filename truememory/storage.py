@@ -15,6 +15,7 @@ Schema overview:
 
 import json
 import logging
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -260,6 +261,28 @@ class DatabaseOpenError(sqlite3.DatabaseError):
     TrueMemory processes) instead of surfacing a raw "database disk image is
     malformed" / "disk I/O error" string.
     """
+
+
+def _validate_db_path(db_path) -> str:
+    """Validate that *db_path* is a real filesystem path, not a misused object.
+
+    M-33: ``sqlite3.connect(str(db_path))`` will happily stringify ANY object.
+    Passing a live ``sqlite3.Connection`` (a common copy/paste slip) produced a
+    file literally named ``<sqlite3.Connection object at 0x...>`` in the repo
+    root. Reject anything that is not a ``str``/``os.PathLike`` up front with a
+    clear ``TypeError`` instead of silently creating a garbage file.
+
+    Returns the path coerced to ``str`` (via ``os.fspath``) for connect().
+    """
+    if isinstance(db_path, str):
+        return db_path
+    if isinstance(db_path, os.PathLike):
+        return os.fspath(db_path)
+    raise TypeError(
+        f"db_path must be a str or os.PathLike, got {type(db_path).__name__}. "
+        "Passing a sqlite3.Connection (or other object) here would stringify "
+        "into a bogus filename like '<sqlite3.Connection object at 0x...>'."
+    )
 
 
 def _check_dir_writable(db_path: str | Path) -> None:
@@ -526,6 +549,10 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
         An open ``sqlite3.Connection`` with row_factory left at default
         (callers choose their own access pattern).
     """
+    # M-33: reject non-path objects (e.g. a sqlite3.Connection) before they
+    # stringify into a bogus filename.
+    db_path = _validate_db_path(db_path)
+
     # M-57: preflight directory writability before SQLite produces a
     # misleading raw error on the first WAL write.
     _check_dir_writable(db_path)

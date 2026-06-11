@@ -256,6 +256,12 @@ def search_fts_in_range(
     after = _validate_iso_date(after)
     before = _validate_iso_date(before)
 
+    # M-70: empty-timestamp rows have no comparable date. ``"" < before`` is
+    # True and ``"" >= after`` is False, so an upper-bound-only filter would
+    # silently let them through. Drop them uniformly whenever any temporal
+    # bound is active.
+    if after is not None or before is not None:
+        results = [r for r in results if r["timestamp"]]
     if after is not None:
         results = [r for r in results if r["timestamp"] >= after]
     if before is not None:

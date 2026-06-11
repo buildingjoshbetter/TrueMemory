@@ -121,3 +121,20 @@ benchmarks/gate_eval/run_weight_threshold_sweep.py
 benchmarks/locomo/results/truememory_pro_v3_modal.json
 benchmarks/locomo/scripts/modal_benchmark.py
 benchmarks/longmemeval/data/*.json
+
+# M-33: stray DB files from a Connection object stringified into a path
+# (e.g. `<sqlite3.Connection object at 0x10abc>`). Now guarded in code; ignore
+# any that pre-date the fix so they can never be committed.
+<sqlite3.Connection object*
+
+# DB backups + migration artifacts — never commit
+*.db.backup-*
+*.db.backup-pre-migration-*
+truememory.db.backup-*
+
+# Build/loop scratch docs — local only, never commit
+BUILD_PROMPT*.md
+DRAIN_REPORT*.md
+
+# M-96: orphan dashboard build (17MB node_modules) — never tracked, never commit
+truememory/dashboard/

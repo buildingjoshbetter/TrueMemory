@@ -109,9 +109,17 @@ class TestEdgeCaseInputs:
         eng.close()
 
     def test_very_long_content_add(self):
+        # Issue #653 (M-60): Engine.add enforces a 50KB content cap so all
+        # entry points (client/hook/library) are protected from poison-large
+        # rows, not just the MCP layer. Oversized content must raise cleanly.
         eng, td = _make_engine()
-        long_content = "x" * 100_000
-        result = eng.add(content=long_content, sender="alice")
+        from truememory.engine import MAX_CONTENT_LENGTH
+
+        with pytest.raises(ValueError, match="too large"):
+            eng.add(content="x" * 100_000, sender="alice")
+
+        # Content right at the cap is still accepted.
+        result = eng.add(content="x" * MAX_CONTENT_LENGTH, sender="alice")
         assert result is not None
         eng.close()
 

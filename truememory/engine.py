@@ -66,6 +66,10 @@ _ALLOWED_COLUMNS = frozenset({
 
 _SQLITE_IN_CHUNK = 500
 
+# M-60: maximum stored content length (chars). Enforced in Engine.add so every
+# entry point inherits the cap. Kept in sync with mcp_server's value.
+MAX_CONTENT_LENGTH = 50_000
+
 
 def _resolve_vec_tables(conn: sqlite3.Connection) -> tuple[str, str]:
     """Resolve the active tier's (vec, sep) table names for delete/update.
@@ -381,7 +385,12 @@ class TrueMemoryEngine:
             # Create parent directory if using a real path
             db_str = str(self.db_path)
             if db_str != ":memory:":
+                # M-89: the DB dir holds real memories/PII — owner-only (0700).
                 self.db_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    self.db_path.parent.chmod(0o700)
+                except OSError:
+                    pass
 
             self.conn = create_db(self.db_path)
 
@@ -679,6 +688,16 @@ class TrueMemoryEngine:
         """
         if not isinstance(content, str):
             raise TypeError(f"content must be a string, got {type(content).__name__}")
+
+        # M-60: enforce the store size cap at the engine level so ALL entry
+        # points (client.add, hooks, direct Engine.add) inherit it — not just
+        # mcp_server. Unbounded content means unbounded embed latency and
+        # poison-large rows. Mirror the mcp_server limit.
+        if len(content) > MAX_CONTENT_LENGTH:
+            raise ValueError(
+                f"Content too large ({len(content)} chars). "
+                f"Maximum is {MAX_CONTENT_LENGTH}."
+            )
 
         self._ensure_connection()
 
@@ -1246,7 +1265,10 @@ class TrueMemoryEngine:
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found: {self.db_path}")
 
-        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        from truememory.storage import _validate_db_path
+        self.conn = sqlite3.connect(
+            _validate_db_path(self.db_path), check_same_thread=False
+        )
         self.conn.row_factory = None  # Use default tuple rows
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")

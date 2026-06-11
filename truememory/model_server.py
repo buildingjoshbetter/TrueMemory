@@ -862,7 +862,12 @@ class ModelServer:
         return fd
 
     def run(self):
+        # M-89: keep ~/.truememory owner-only (0700) — it holds memories/PII.
         _TRUEMEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            _TRUEMEMORY_DIR.chmod(0o700)
+        except OSError:
+            pass
 
         # Exclusive bind lock BEFORE touching socket/pid artifacts (M-20).
         self._lock_fd = self._acquire_bind_lock()

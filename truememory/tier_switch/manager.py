@@ -56,10 +56,10 @@ def _get_db_path() -> Path:
 
 def _open_db(db_path: Path | None = None) -> sqlite3.Connection:
     """Open a new SQLite connection (thread-safe: each thread gets its own)."""
-    from truememory.storage import DEFAULT_BUSY_TIMEOUT_MS
+    from truememory.storage import DEFAULT_BUSY_TIMEOUT_MS, _validate_db_path
 
     path = db_path or _get_db_path()
-    conn = sqlite3.connect(str(path), check_same_thread=False)
+    conn = sqlite3.connect(_validate_db_path(path), check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA foreign_keys=ON")
