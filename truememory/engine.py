@@ -1837,7 +1837,12 @@ class TrueMemoryEngine:
             try:
                 contradiction_results = search_contradictions(self.conn, query)
                 if contradiction_results:
-                    existing_ids = {r["id"] for r in results}
+                    # Use .get(): supplement rows (personality/profile) may
+                    # lack an "id" key — bracket access raised KeyError that
+                    # the blanket except silently swallowed, discarding ALL
+                    # contradiction supplements on personality queries
+                    # (#630 M-05).
+                    existing_ids = {r.get("id") for r in results if r.get("id")}
                     # Score contradictions competitively so they survive
                     # the top-K slice and reach the reranker (#581).
                     max_existing = max(
@@ -1866,7 +1871,8 @@ class TrueMemoryEngine:
             try:
                 consolidated = search_consolidated(self.conn, query, limit=3)
                 if consolidated:
-                    existing_ids = {r["id"] for r in results}
+                    # .get() guard (#630 M-05): see contradiction block above.
+                    existing_ids = {r.get("id") for r in results if r.get("id")}
                     for sr in consolidated:
                         sr["source"] = sr.get("source", "summary")
                         if sr.get("id") and sr["id"] not in existing_ids:
@@ -1944,7 +1950,10 @@ class TrueMemoryEngine:
                 score = 0.0
 
             cleaned.append({
-                "id": rid if rid else 0,
+                # Preserve None for id-less supplement rows (#630 M-67).
+                # Rewriting to 0 made #606's id-keyed RRF collapse multiple
+                # distinct id-less rows into one fabricated id=0 document.
+                "id": rid,
                 "content": content,
                 "sender": r.get("sender", ""),
                 "recipient": r.get("recipient", ""),
@@ -1960,8 +1969,10 @@ class TrueMemoryEngine:
                 seen_ids.add(rid)
             seen_content.add(content_key)
 
-        # Sort by score descending, then by id for determinism.
-        cleaned.sort(key=lambda d: (-d["score"], d["id"]))
+        # Sort by score descending, then by str(id) for determinism.
+        # str() is type-stable even when ids mix int message ids with
+        # "summary_N" / None supplement ids (#630 M-01).
+        cleaned.sort(key=lambda d: (-d["score"], str(d.get("id", ""))))
         return cleaned[:limit]
 
     # ──────────────────────────────────────────────────────────────────────

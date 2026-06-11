@@ -255,7 +255,9 @@ def clean_results(
             score = 0.0
 
         cleaned.append({
-            "id": rid if rid else 0,
+            # Preserve None for id-less rows (#630 M-67): rewriting to 0
+            # collapsed distinct supplement rows under id-keyed RRF.
+            "id": rid,
             "content": content,
             "sender": r.get("sender", ""),
             "recipient": r.get("recipient", ""),
@@ -271,7 +273,9 @@ def clean_results(
             seen_ids.add(rid)
         seen_content.add(content_key)
 
-    cleaned.sort(key=lambda d: (-d["score"], d["id"]))
+    # Tie-break on str(id): type-stable across int / "summary_N" / None
+    # supplement ids (#630 M-01).
+    cleaned.sort(key=lambda d: (-d["score"], str(d.get("id", ""))))
 
     if max_per_session > 0 and len(cleaned) > limit:
         diverse: list[dict] = []
