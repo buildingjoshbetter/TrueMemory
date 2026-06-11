@@ -89,6 +89,10 @@ class GeminiAdapter(CLIAdapter):
     """Adapter for Google Gemini CLI."""
 
     @property
+    def has_hooks(self) -> bool:
+        return True
+
+    @property
     def name(self) -> str:
         return "Gemini CLI"
 

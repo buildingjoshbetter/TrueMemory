@@ -88,6 +88,10 @@ class CursorAdapter(CLIAdapter):
     """Adapter for Cursor IDE."""
 
     @property
+    def has_hooks(self) -> bool:
+        return True
+
+    @property
     def name(self) -> str:
         return "Cursor"
 

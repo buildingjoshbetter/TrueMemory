@@ -13,6 +13,21 @@ from pathlib import Path
 class CLIAdapter(ABC):
     """Base interface for CLI-specific TrueMemory integration."""
 
+    # --- Capability flags -------------------------------------------------
+    # Hook-less adapters (Antigravity, ChatGPT, Cursor, ...) expose MCP tools
+    # but cannot register lifecycle hooks. Their system prompt MUST NOT promise
+    # auto-loading directives or SessionEnd transcript capture, because nothing
+    # delivers those. Adapters that DO install hooks override these to True.
+    @property
+    def has_hooks(self) -> bool:
+        """True if install_hooks registers real lifecycle hooks."""
+        return False
+
+    @property
+    def has_session_start(self) -> bool:
+        """True if a SessionStart hook injects directives every session."""
+        return self.has_hooks
+
     @property
     @abstractmethod
     def name(self) -> str:
@@ -68,26 +83,51 @@ class CLIAdapter(ABC):
 
 # Served when CLAUDE_TEMPLATE.md is missing or unreadable. Must carry the
 # same directive guidance as the template (issue #589, D-7) so directives
-# stay discoverable even on broken installs.
+# stay discoverable even on broken installs. The auto-load / store-manually
+# sentence is appended per the host's hook capability (issue #651, M-62).
 _FALLBACK_PROMPT = (
     "# TrueMemory — Persistent Memory\n\n"
     "You have access to TrueMemory MCP tools for persistent memory.\n"
     "- Use `truememory_store` to save user facts, preferences, and decisions.\n"
     '- When the user gives a standing instruction ("always do X", "never do Y", '
     '"from now on..."), store it as a directive: '
-    '`truememory_store(content="...", directive=True)`. Directives auto-load '
-    "at the start of every session — regular memories do not.\n"
+    '`truememory_store(content="...", directive=True)`.\n'
     "- Use `truememory_search` to recall stored memories before answering.\n"
-    "- Directives are injected automatically at session start — you do not "
-    "need to search for them.\n"
     "- Search TrueMemory FIRST on any 'do you remember' question.\n"
 )
 
+# Appended only for hosts with a SessionStart hook — they get directives
+# injected automatically. Hook-less hosts must be told to fetch them.
+_FALLBACK_AUTOLOAD = (
+    "- Directives are injected automatically at the start of every session — "
+    "you do not need to search for them.\n"
+)
+_FALLBACK_NO_AUTOLOAD = (
+    "- This host has no session-start hook, so directives are NOT auto-injected. "
+    "At the start of a session, call `truememory_search` for standing "
+    "instructions and follow any directives it returns.\n"
+)
 
-def get_generic_system_prompt() -> str:
-    """Return the TrueMemory system prompt for non-Claude CLIs."""
+
+def get_generic_system_prompt(
+    has_hooks: bool = False,
+    has_session_start: bool | None = None,
+) -> str:
+    """Return the TrueMemory system prompt for non-Claude CLIs.
+
+    The base template (CLAUDE_TEMPLATE.md) is written for Claude Code, which
+    installs SessionStart/SessionEnd hooks and uses MEMORY.md. Hook-less
+    adapters (Antigravity, ChatGPT) must NOT inherit those promises — there is
+    no hook to auto-load directives or capture the transcript, and they have no
+    MEMORY.md. Pass the adapter's capability flags so the prompt is honest.
+    """
+    if has_session_start is None:
+        has_session_start = has_hooks
+
     template = Path(__file__).parent.parent.parent / "ingest" / "CLAUDE_TEMPLATE.md"
-    if template.exists():
+    if has_hooks and template.exists():
+        # Hook-capable non-Claude host: the template's hook-based guarantees
+        # hold, just relabel Claude-specific bits.
         try:
             content = template.read_text(encoding="utf-8").strip()
             content = content.replace("Claude Code's built-in auto-memory", "The host CLI's built-in memory")
@@ -95,4 +135,16 @@ def get_generic_system_prompt() -> str:
             return content
         except OSError:
             pass
-    return _FALLBACK_PROMPT
+
+    # Hook-less host (or unreadable template): build an honest prompt that does
+    # not claim auto-load / SessionEnd capture / MEMORY.md.
+    prompt = _FALLBACK_PROMPT
+    prompt += _FALLBACK_AUTOLOAD if has_session_start else _FALLBACK_NO_AUTOLOAD
+    if not has_hooks:
+        prompt += (
+            "- This host does NOT capture the transcript at session end. "
+            "TrueMemory cannot extract memories automatically here, so store "
+            "important facts, preferences, decisions, and corrections yourself "
+            "with `truememory_store` as the conversation happens.\n"
+        )
+    return prompt

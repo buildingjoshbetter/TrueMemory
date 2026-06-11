@@ -48,6 +48,10 @@ class KimiAdapter(CLIAdapter):
     """Adapter for Kimi CLI (Moonshot AI)."""
 
     @property
+    def has_hooks(self) -> bool:
+        return True
+
+    @property
     def name(self) -> str:
         return "Kimi CLI"
 
@@ -146,7 +150,10 @@ class KimiAdapter(CLIAdapter):
 
     def get_system_prompt_content(self) -> str:
         from truememory.hooks.adapters.base import get_generic_system_prompt
-        return get_generic_system_prompt()
+        return get_generic_system_prompt(
+            has_hooks=self.has_hooks,
+            has_session_start=self.has_session_start,
+        )
 
     # -- Private helpers --
 

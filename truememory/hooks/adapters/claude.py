@@ -6,6 +6,7 @@ The existing `truememory-ingest install` command continues working unchanged.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -15,6 +16,10 @@ from truememory.hooks.adapters.base import CLIAdapter
 
 class ClaudeAdapter(CLIAdapter):
     """Adapter for Claude Code CLI."""
+
+    @property
+    def has_hooks(self) -> bool:
+        return True
 
     @property
     def name(self) -> str:
@@ -55,31 +60,72 @@ class ClaudeAdapter(CLIAdapter):
             pass
         return False
 
+    @property
+    def mcp_config_path(self) -> Path:
+        # `claude mcp add --scope user` writes the server entry to ~/.claude.json,
+        # NOT ~/.claude/settings.json. The alwaysLoad patch must target the same
+        # file the CLI actually reads, or it's a silent no-op.
+        return Path.home() / ".claude.json"
+
     def install_mcp(self, python_path: str | None = None) -> None:
         py = python_path or sys.executable
+        added = False
         try:
             import subprocess
-            subprocess.run(
+            result = subprocess.run(
                 ["claude", "mcp", "add", "--scope", "user", "truememory",
                  "--", py, "-m", "truememory.mcp_server"],
                 check=False,
                 capture_output=True,
             )
+            if result.returncode == 0:
+                added = True
+            else:
+                stderr = (result.stderr or b"").decode("utf-8", "replace").strip()
+                print(
+                    f"\033[33m⚠ `claude mcp add` exited {result.returncode}"
+                    f"{f': {stderr}' if stderr else ''}.\033[0m",
+                    file=sys.stderr,
+                )
         except FileNotFoundError:
-            pass
+            print(
+                "\033[33m⚠ `claude` CLI not found on PATH; skipping MCP "
+                "registration.\033[0m",
+                file=sys.stderr,
+            )
 
-        # `claude mcp add` doesn't support alwaysLoad, so patch it in directly.
+        # `claude mcp add` doesn't support alwaysLoad, so patch it into the file
+        # the CLI wrote (~/.claude.json). Only bother if the add succeeded;
+        # otherwise there is no entry to patch.
+        if not added:
+            return
+        mcp_path = self.mcp_config_path
         try:
-            if self.config_path.exists():
-                cfg = json.loads(self.config_path.read_text(encoding="utf-8"))
-                mcp = cfg.get("mcpServers", {})
-                if "truememory" in mcp and not mcp["truememory"].get("alwaysLoad"):
-                    mcp["truememory"]["alwaysLoad"] = True
-                    self.config_path.write_text(
-                        json.dumps(cfg, indent=2), encoding="utf-8",
-                    )
+            if mcp_path.exists():
+                cfg = json.loads(mcp_path.read_text(encoding="utf-8"))
+                if isinstance(cfg, dict):
+                    mcp = cfg.get("mcpServers", {})
+                    if (
+                        isinstance(mcp, dict)
+                        and isinstance(mcp.get("truememory"), dict)
+                        and not mcp["truememory"].get("alwaysLoad")
+                    ):
+                        mcp["truememory"]["alwaysLoad"] = True
+                        self._atomic_write_json(mcp_path, cfg)
         except (json.JSONDecodeError, OSError):
             pass
+
+    @staticmethod
+    def _atomic_write_json(path: Path, data: dict) -> None:
+        # tmp-in-same-dir + replace: a crash mid-write must never truncate the
+        # user's config. A bare write_text() can leave a half-written file.
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        try:
+            tmp.replace(path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
 
     def install_hooks(
         self,
@@ -236,9 +282,14 @@ class ClaudeAdapter(CLIAdapter):
             existing["hooks"].setdefault(event, [])
             if not isinstance(existing["hooks"][event], list):
                 existing["hooks"][event] = []
-            # Don't add duplicates (match on stop.py / session_start.py etc.)
+            # Don't add duplicates. Match on the "truememory" substring rather
+            # than the absolute .py file path: _build_command emits module-form
+            # commands ("-m truememory.ingest.hooks.X"), so the .py path never
+            # appears in the command and the old check matched nothing — every
+            # re-install appended another entry. The "truememory" needle is the
+            # same one the migration/uninstall code already uses, keeping
+            # install idempotent across upgrades.
             for hook in hooks:
-                hook_file = str(hook_files[event])
                 already_present = False
                 for h in existing["hooks"][event]:
                     if not isinstance(h, dict):
@@ -246,10 +297,10 @@ class ClaudeAdapter(CLIAdapter):
                     inner_hooks = h.get("hooks", [])
                     if isinstance(inner_hooks, list):
                         for ih in inner_hooks:
-                            if isinstance(ih, dict) and hook_file in ih.get("command", ""):
+                            if isinstance(ih, dict) and "truememory" in str(ih.get("command", "")).lower():
                                 already_present = True
                                 break
-                    if hook_file in h.get("command", ""):
+                    if "truememory" in str(h.get("command", "")).lower():
                         already_present = True
                     if already_present:
                         break
@@ -312,14 +363,31 @@ class ClaudeAdapter(CLIAdapter):
                 del mcp_servers["truememory"]
                 settings["mcpServers"] = mcp_servers
 
-            self.config_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+            self._atomic_write_json(self.config_path, settings)
         except (json.JSONDecodeError, OSError):
             pass
 
+    def _mcp_registered(self) -> bool:
+        # The MCP server entry lives in ~/.claude.json (written by
+        # `claude mcp add`), not in settings.json. Check the real target.
+        mcp_path = self.mcp_config_path
+        if not mcp_path.exists():
+            return False
+        try:
+            cfg = json.loads(mcp_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return False
+        if not isinstance(cfg, dict):
+            return False
+        return "truememory" in cfg.get("mcpServers", {})
+
     def verify(self) -> bool:
+        # A complete install is hooks (settings.json) AND the MCP server entry
+        # (~/.claude.json). The old verify() only checked hooks, so a half
+        # install where `claude mcp add` failed still reported success.
         if not self.config_path.exists():
             return False
-        return self.is_configured()
+        return self.is_configured() and self._mcp_registered()
 
     def get_system_prompt_path(self) -> Path | None:
         return Path.home() / ".claude" / "CLAUDE.md"

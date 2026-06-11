@@ -94,6 +94,10 @@ class CodexAdapter(CLIAdapter):
     """Adapter for OpenAI Codex CLI."""
 
     @property
+    def has_hooks(self) -> bool:
+        return True
+
+    @property
     def name(self) -> str:
         return "Codex CLI"
 

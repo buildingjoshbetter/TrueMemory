@@ -1,7 +1,17 @@
 """Antigravity adapter -- MCP config for the Antigravity AI CLI.
 
-Antigravity uses a JSON MCP config file at ~/.antigravity/mcp.json,
-following the same mcpServers format as Claude Desktop / ChatGPT Desktop.
+Antigravity reads its MCP config from a JSON file named ``mcp_config.json``
+(the filename its docs and "View raw config" UI use), following the same
+mcpServers format as Claude Desktop / ChatGPT Desktop. Earlier versions of
+this adapter wrote ``~/.antigravity/mcp.json`` — a filename the host does not
+read — and verify() re-read that same file, so a broken install still reported
+success. We now write/verify ``mcp_config.json``.
+
+NOTE (uncertainty): community docs also place this file under ``~/.gemini/``
+(e.g. ``~/.gemini/config/mcp_config.json`` or ``~/.gemini/antigravity/``)
+rather than ``~/.antigravity/``. The directory is left as ``~/.antigravity``
+pending confirmation; the filename fix is the high-confidence change. See PR
+notes for M-66.
 """
 from __future__ import annotations
 
@@ -17,7 +27,7 @@ from pathlib import Path
 from truememory.hooks.adapters.base import CLIAdapter, get_generic_system_prompt
 
 _ANTIGRAVITY_DIR = Path.home() / ".antigravity"
-_MCP_CONFIG = _ANTIGRAVITY_DIR / "mcp.json"
+_MCP_CONFIG = _ANTIGRAVITY_DIR / "mcp_config.json"
 
 _TRUEMEMORY_MARKER = "truememory"
 
@@ -155,7 +165,13 @@ class AntigravityAdapter(CLIAdapter):
         return _ANTIGRAVITY_DIR / "ANTIGRAVITY.md"
 
     def get_system_prompt_content(self) -> str:
-        return get_generic_system_prompt()
+        # Antigravity has no lifecycle hooks: pass capability flags so the
+        # prompt does not falsely promise auto-loaded directives or SessionEnd
+        # transcript capture.
+        return get_generic_system_prompt(
+            has_hooks=self.has_hooks,
+            has_session_start=self.has_session_start,
+        )
 
     def _has_mcp_entry(self) -> bool:
         if not _MCP_CONFIG.exists():

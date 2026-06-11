@@ -31,7 +31,8 @@ def test_antigravity_adapter_properties():
     assert adapter.name == "Antigravity"
     assert adapter.cli_id == "antigravity"
     assert isinstance(adapter.config_path, Path)
-    assert adapter.config_path.name == "mcp.json"
+    # Antigravity reads mcp_config.json (issue #651 / M-66), not mcp.json.
+    assert adapter.config_path.name == "mcp_config.json"
 
 
 def test_antigravity_implements_all_abstract_methods():
