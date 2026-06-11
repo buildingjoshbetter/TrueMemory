@@ -1043,23 +1043,19 @@ def build_summaries(conn: sqlite3.Connection) -> int:
                 now,
             ))
 
-    # Short, explicit, atomic write: hold the write lock only for the clear +
-    # bulk insert, not the computation above. We drive the transaction manually
-    # and switch the connection to autocommit (isolation_level=None) for the
-    # duration so pysqlite does NOT also manage transactions implicitly — this
-    # makes our BEGIN IMMEDIATE / COMMIT / ROLLBACK authoritative regardless of
-    # the connection's configured isolation_level (avoids both "cannot start a
-    # transaction within a transaction" and pysqlite's commit()/rollback()
-    # becoming no-ops after a manual BEGIN). Any pending implicit transaction is
-    # flushed first so the write lock is acquired cleanly, and isolation_level
-    # is always restored. Rollback-on-error guarantees the summaries table is
-    # never left emptied without its replacement rows.
-    if conn.in_transaction:
-        conn.commit()
-    prev_isolation = conn.isolation_level
-    try:
-        conn.isolation_level = None
-        conn.execute("BEGIN IMMEDIATE")
+    # Short, atomic write: hold the write lock only for the clear + bulk insert,
+    # not the computation above.
+    #
+    # D1-4 (#692): complete the #649 transaction-hygiene fix. This used to
+    # `conn.commit()` the CALLER's open transaction (committing writes they may
+    # have intended to roll back — the leaked-txn root cause behind a live lock)
+    # and mutate the shared connection's isolation_level. Use the same
+    # _consolidation_write SAVEPOINT wrapper as detect_contradictions /
+    # build_structured_facts: it nests inside the caller's transaction WITHOUT
+    # committing it, rolls back ONLY our own rows on error (so the summaries
+    # table is never left emptied without its replacement), and never touches
+    # isolation_level.
+    with _consolidation_write(conn, "summaries"):
         conn.execute("DELETE FROM summaries")
         if rows:
             conn.executemany(
@@ -1069,15 +1065,6 @@ def build_summaries(conn: sqlite3.Connection) -> int:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
-        conn.execute("COMMIT")
-    except Exception:
-        try:
-            conn.execute("ROLLBACK")
-        except Exception:
-            pass
-        raise
-    finally:
-        conn.isolation_level = prev_isolation
     return len(rows)
 
 
