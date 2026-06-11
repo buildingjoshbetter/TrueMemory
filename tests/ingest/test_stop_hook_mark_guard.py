@@ -16,6 +16,15 @@ from __future__ import annotations
 import io
 import json
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _allow_tmp_transcripts(tmp_path, monkeypatch):
+    # BLAST OFF v3 (A1-2): stop hook now requires transcript_path inside an
+    # allowed transcripts root; these tests stage transcripts under tmp_path.
+    monkeypatch.setenv("TRUEMEMORY_TRANSCRIPT_DIR", str(tmp_path))
+
 
 def _make_transcript(tmp_path, n=6):
     p = tmp_path / "transcript.jsonl"

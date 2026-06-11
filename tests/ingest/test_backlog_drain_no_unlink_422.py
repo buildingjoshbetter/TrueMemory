@@ -29,6 +29,14 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _allow_tmp_transcripts(tmp_path, monkeypatch):
+    # BLAST OFF v3 (A1-2): the stop hook + backlog drain now require
+    # transcript_path to resolve inside an allowed transcripts root. These
+    # tests stage transcripts under tmp_path, so point the allowlist there.
+    monkeypatch.setenv("TRUEMEMORY_TRANSCRIPT_DIR", str(tmp_path))
+
+
 @contextmanager
 def _gate_allows():
     yield True

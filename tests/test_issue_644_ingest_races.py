@@ -30,6 +30,13 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _allow_tmp_transcripts(tmp_path, monkeypatch):
+    # BLAST OFF v3 (A1-2): stop/drain now require transcript_path inside an
+    # allowed transcripts root; these tests stage transcripts under tmp_path.
+    monkeypatch.setenv("TRUEMEMORY_TRANSCRIPT_DIR", str(tmp_path))
+
+
 @contextmanager
 def _gate_allows():
     yield True
