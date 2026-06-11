@@ -31,6 +31,11 @@ _TRUEMEMORY_DIR = Path.home() / ".truememory"
 _LOCK_PATH = _TRUEMEMORY_DIR / "rebuild.lock"
 
 
+class TierSwitchUnsupportedError(RuntimeError):
+    """Raised when a tier switch cannot proceed because the sqlite-vec
+    extension cannot be loaded on this platform/Python (M-23)."""
+
+
 def _detect_device() -> str:
     """Detect the best available compute device."""
     try:
@@ -60,10 +65,27 @@ def _open_db(db_path: Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA synchronous=NORMAL")
 
-    import sqlite_vec
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
+    # M-23: guard the sqlite-vec load. On macOS system Python (and any build
+    # compiled without SQLITE_ENABLE_LOAD_EXTENSION) ``enable_load_extension``
+    # is absent → bare access raised AttributeError, crashing the tier switch
+    # (reached from truememory_configure, the CLI upgrade-tier path, and a
+    # background thread that swallowed it). A tier switch is meaningless
+    # without vec support, so fail with actionable platform guidance instead.
+    try:
+        import sqlite_vec
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+    except (AttributeError, ImportError, OSError, sqlite3.OperationalError) as exc:
+        conn.close()
+        raise TierSwitchUnsupportedError(
+            "Tier switching requires the sqlite-vec extension, but this "
+            "Python's sqlite3 cannot load it "
+            f"({type(exc).__name__}: {exc}). This commonly happens with the "
+            "macOS system Python, which is built without "
+            "SQLITE_ENABLE_LOAD_EXTENSION. Install a Python with extension "
+            "support (e.g. python.org, Homebrew, or pyenv) and retry."
+        ) from exc
 
     return conn
 
@@ -85,6 +107,10 @@ class RebuildManager:
     def __init__(self):
         self._active_worker: RebuildWorker | None = None
         self._active_thread: threading.Thread | None = None
+        # M-51: True while start_rebuild() is mid-preflight (before the worker
+        # Thread exists) so a concurrent call can't double-start, yet a
+        # pre-thread failure clears it instead of bricking the manager.
+        self._claimed: bool = False
         self._active_status_id: int = 0
         self._state_lock = threading.Lock()
 
@@ -99,47 +125,67 @@ class RebuildManager:
 
         Returns a status_id for progress queries.
         """
+        # M-51: reserve the slot with a claim flag rather than parking the
+        # long-lived MCP caller thread in ``_active_thread``. Previously a raise
+        # in any pre-thread step below (e.g. M-23 in _open_db, preflight) left
+        # ``_active_thread = current_thread()`` set; since that thread stays
+        # alive for the process lifetime, ``is_alive()`` was permanently True
+        # and every subsequent start_rebuild no-op'd — bricking tier switching.
+        # Only the real worker Thread should occupy the slot; release the claim
+        # on any pre-thread failure.
         with self._state_lock:
             if self._active_thread and self._active_thread.is_alive():
                 return self._active_status_id
-            self._active_thread = threading.current_thread()
+            if self._claimed:
+                return self._active_status_id
+            self._claimed = True
 
-        conn = _open_db(db_path)
-        to_group = tier_group(target_tier)
+        try:
+            conn = _open_db(db_path)
+            to_group = tier_group(target_tier)
 
-        ok, msg = preflight_ram_check(to_group)
-        if not ok:
+            ok, msg = preflight_ram_check(to_group)
+            if not ok:
+                conn.close()
+                raise RuntimeError(msg)
+
+            action = resolve_rebuild_action(conn, to_group, force)
+            messages, is_full = get_messages_to_embed(conn, to_group, force)
+
+            if not messages and not is_full:
+                self._apply_config_switch(target_tier, conn)
+                conn.close()
+                with self._state_lock:
+                    self._claimed = False
+                return 0
+
+            status_id = self._create_status_row(
+                conn, to_group, target_tier, action, len(messages),
+            )
+            self._active_status_id = status_id
+
+            if backup_path is None and is_full:
+                backup_path = backup_db(db_path)
+
             conn.close()
-            raise RuntimeError(msg)
 
-        action = resolve_rebuild_action(conn, to_group, force)
-        messages, is_full = get_messages_to_embed(conn, to_group, force)
-
-        if not messages and not is_full:
-            self._apply_config_switch(target_tier, conn)
-            conn.close()
-            return 0
-
-        status_id = self._create_status_row(
-            conn, to_group, target_tier, action, len(messages),
-        )
-        self._active_status_id = status_id
-
-        if backup_path is None and is_full:
-            backup_path = backup_db(db_path)
-
-        conn.close()
-
-        thread = threading.Thread(
-            target=self._rebuild_thread,
-            args=(target_tier, to_group, messages, is_full, status_id,
-                  backup_path, db_path),
-            daemon=True,
-            name=f"tier-switch-{to_group}",
-        )
-        with self._state_lock:
-            self._active_thread = thread
-        thread.start()
+            thread = threading.Thread(
+                target=self._rebuild_thread,
+                args=(target_tier, to_group, messages, is_full, status_id,
+                      backup_path, db_path),
+                daemon=True,
+                name=f"tier-switch-{to_group}",
+            )
+            with self._state_lock:
+                self._active_thread = thread
+                self._claimed = False
+            thread.start()
+        except BaseException:
+            # Pre-thread failure: release the claim so the next call can retry.
+            # The worker Thread never started, so it never occupied the slot.
+            with self._state_lock:
+                self._claimed = False
+            raise
 
         return status_id
 

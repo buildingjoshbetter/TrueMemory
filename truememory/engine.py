@@ -386,12 +386,20 @@ class TrueMemoryEngine:
             self.conn = create_db(self.db_path)
 
             # Load sqlite-vec extension
+            global _vectors_load_error
             if _HAS_VECTOR:
                 try:
                     import sqlite_vec
                     self.conn.enable_load_extension(True)
                     sqlite_vec.load(self.conn)
                     self.conn.enable_load_extension(False)
+                    # init_vec_table() runs _check_embedder_compatibility(),
+                    # which raises TrueMemoryMigrationError on a dim/model
+                    # mismatch. That must NOT be swallowed as a generic
+                    # FTS-only fallback (M-12/M-46): a silent drop to FTS hides
+                    # the degradation from truememory_stats.health and lets
+                    # add() silently fail vec INSERTs. Surface the migration
+                    # guidance so the user can re-embed instead.
                     init_vec_table(self.conn)
                     try:
                         from truememory.vector_search import migrate_legacy_vec_tables
@@ -399,8 +407,14 @@ class TrueMemoryEngine:
                     except Exception:
                         logger.debug("Legacy vec table migration skipped", exc_info=True)
                     self._has_vectors = True
+                except TrueMemoryMigrationError as exc:
+                    # M-12/M-46: record the degradation in module state so
+                    # health surfaces it, then propagate the actionable
+                    # migration guidance instead of falling back to FTS-only.
+                    _vectors_load_error = f"{type(exc).__name__}: {exc}"
+                    self._has_vectors = False
+                    raise
                 except Exception as exc:
-                    global _vectors_load_error
                     _vectors_load_error = f"{type(exc).__name__}: {exc}"
                     logger.warning("Failed to load sqlite-vec — FTS-only mode: %s", exc)
                     self._has_vectors = False
@@ -1304,6 +1318,7 @@ class TrueMemoryEngine:
         if _HAS_VECTOR:
             from truememory.vector_search import (
                 _active_vec_table,
+                _check_embedder_compatibility,
                 vectors_are_built,
             )
             vec_tbl = _active_vec_table(self.conn)
@@ -1311,7 +1326,21 @@ class TrueMemoryEngine:
             # by an interrupted build (issue #647) — so a partial/empty table is
             # rebuilt rather than trusted, not just one that's missing.
             if vectors_are_built(self.conn, vec_tbl):
-                self._has_vectors = True
+                # M-12: the exists-path previously trusted the table on a bare
+                # SELECT 1 and never checked embedder/dim compatibility. A dim
+                # mismatch then surfaced only as a per-query OperationalError
+                # caught at DEBUG → permanent silent FTS-only with
+                # _vectors_load_error=None (health reports vectors healthy) and
+                # silent vec-INSERT failures in add(). Run the compatibility
+                # check here so a mismatch surfaces as actionable migration
+                # guidance instead.
+                try:
+                    _check_embedder_compatibility(self.conn)
+                    self._has_vectors = True
+                except TrueMemoryMigrationError as exc:
+                    _vectors_load_error = f"{type(exc).__name__}: {exc}"
+                    self._has_vectors = False
+                    raise
             else:
                 logger.warning(
                     "Vector table %r missing or unreadable; attempting rebuild "
@@ -2142,7 +2171,14 @@ class TrueMemoryEngine:
         # than RRF scores; we normalize them independently and tag each
         # result with its diversity position so downstream sorts can
         # preserve the cluster-sampling order.
-        if use_clustering and self._has_clustering:
+        # M-78: gate cluster-supplement on live vector health. _has_clustering
+        # only reflects that the message_clusters table exists — not that the
+        # current embedder matches the centroids. With a same-dim/different-
+        # model DB the table reads fine but query embeddings live in a
+        # different vector space, so comparing them to stale centroids yields
+        # garbage ``+cluster_supp`` similarities. Skip when vectors are
+        # unavailable rather than surfacing misleading matches.
+        if use_clustering and self._has_clustering and self._has_vectors:
             try:
                 cluster_results = search_clustered(
                     self.conn, query, limit=limit, top_clusters=3,
