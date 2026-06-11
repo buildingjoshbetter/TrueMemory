@@ -1222,6 +1222,23 @@ def search_consolidated(conn: sqlite3.Connection, query: str,
     results: list[dict] = []
     lower_query = query.lower()
 
+    # PERF-01 (#689): search_consolidated is a SUPPLEMENT that surfaces
+    # consolidated artifacts (summaries / fact_timeline). When NEITHER table has
+    # any rows — the default until consolidate() runs, and always in FTS-only
+    # mode — there is nothing to surface, and the FTS fallback at the bottom
+    # would otherwise re-run the same broad-OR query the primary search pipeline
+    # already ran, doubling recall latency (≈44% of search cost at scale). Skip
+    # all of it when there's no consolidated data.
+    try:
+        has_consolidated = conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM summaries) "
+            "OR EXISTS(SELECT 1 FROM fact_timeline)"
+        ).fetchone()[0]
+    except sqlite3.OperationalError:
+        has_consolidated = 0
+    if not has_consolidated:
+        return []
+
     # ---- Search summaries table ----
     # Check for entity mentions in query to filter entity summaries
     target_entity = None
