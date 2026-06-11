@@ -248,15 +248,23 @@ def _normalize_and_fuse(
         return []
     rerank_scores = [r["rerank_score"] for r in reranked]
     rr_min, rr_max = min(rerank_scores), max(rerank_scores)
+    # Degenerate case (all rerank scores identical): map to neutral 0.5 like
+    # normalize_scores, not 0.0, so a uniform-rerank pool does not collapse
+    # the rerank component to zero (#633 M-77).
+    rr_degenerate = rr_max <= rr_min
     rr_range = rr_max - rr_min if rr_max > rr_min else 1.0
 
     orig_scores = [r.get("score", r.get("rrf_score", 0)) for r in reranked]
     orig_min, orig_max = min(orig_scores), max(orig_scores)
+    orig_degenerate = orig_max <= orig_min
     orig_range = orig_max - orig_min if orig_max > orig_min else 1.0
 
     for r in reranked:
-        norm_rerank = (r["rerank_score"] - rr_min) / rr_range
-        norm_orig = (r.get("score", r.get("rrf_score", 0)) - orig_min) / orig_range
+        norm_rerank = 0.5 if rr_degenerate else (r["rerank_score"] - rr_min) / rr_range
+        norm_orig = (
+            0.5 if orig_degenerate
+            else (r.get("score", r.get("rrf_score", 0)) - orig_min) / orig_range
+        )
         r["fused_score"] = rerank_weight * norm_rerank + rrf_weight * norm_orig
         r["score"] = r["fused_score"]
 

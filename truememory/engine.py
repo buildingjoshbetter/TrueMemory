@@ -1789,9 +1789,21 @@ class TrueMemoryEngine:
                             )
                             if range_results:
                                 existing_ids = {r.get("id") for r in results if r.get("id")}
+                                # Rescoped rows arrive in [0,1] FTS space and
+                                # would dominate the RRF-scored pool (cap
+                                # ~0.05). Rescale them to the local max so
+                                # they compete fairly (#633 M-10).
+                                _resc_max = max(
+                                    (r.get("score", r.get("rrf_score", 0)) for r in results),
+                                    default=0.05,
+                                )
                                 for rr in range_results:
                                     if rr.get("id") and rr["id"] not in existing_ids:
                                         rr["source"] = "temporal_rescoped"
+                                        _rs = rr.get("score", 1.0)
+                                        if not isinstance(_rs, (int, float)):
+                                            _rs = 1.0
+                                        rr["score"] = _resc_max * 0.8 * max(0.0, min(_rs, 1.0))
                                         results.append(rr)
                                         existing_ids.add(rr["id"])
                         except Exception:
@@ -1873,8 +1885,28 @@ class TrueMemoryEngine:
                 if consolidated:
                     # .get() guard (#630 M-05): see contradiction block above.
                     existing_ids = {r.get("id") for r in results if r.get("id")}
+                    # Consolidated rows carry RAW integer keyword-overlap
+                    # scores (e.g. relevance*2) that dwarf RRF scores
+                    # (~0.0167); any overlap >= 2 would outrank every
+                    # organic hit. Rescale them to the local pool before
+                    # appending so they compete fairly (#633 M-09).
+                    _cons_max = max(
+                        (r.get("score", r.get("rrf_score", 0)) for r in results),
+                        default=0.05,
+                    )
+                    _raw_max = max(
+                        (s.get("score", 0) for s in consolidated
+                         if isinstance(s.get("score"), (int, float))),
+                        default=0.0,
+                    )
                     for sr in consolidated:
                         sr["source"] = sr.get("source", "summary")
+                        _raw = sr.get("score", 0)
+                        if not isinstance(_raw, (int, float)) or _raw_max <= 0:
+                            _rel = 1.0
+                        else:
+                            _rel = _raw / _raw_max
+                        sr["score"] = _cons_max * 0.8 * max(0.0, min(_rel, 1.0))
                         if sr.get("id") and sr["id"] not in existing_ids:
                             results.append(sr)
                             existing_ids.add(sr["id"])
@@ -1913,6 +1945,17 @@ class TrueMemoryEngine:
         if not _skip_reranker and self._has_reranker and len(results) > 1:
             try:
                 from truememory.reranker import rerank_with_modality_fusion
+                # Re-sort by score desc BEFORE the candidate slice so that
+                # supplements appended at the tail (contradiction / summary /
+                # temporal_rescoped) are not sliced off before the reranker
+                # ever sees them. search_agentic already re-sorts; this makes
+                # the main path consistent (#633 M-11, restores #581).
+                results.sort(
+                    key=lambda r: (
+                        -(r.get("score", r.get("rrf_score", r.get("raw_score", 0))) or 0),
+                        str(r.get("id", "")),
+                    )
+                )
                 results = rerank_with_modality_fusion(
                     query, results[:limit * 3],
                     top_k=limit,
@@ -2106,19 +2149,52 @@ class TrueMemoryEngine:
         try:
             entity_results = self._entity_focused_search(query, limit * 2)
             if entity_results and primary_results:
+                # Detect the query's temporal window so the entity boost and
+                # entity_new rows do not invert in-window temporal ordering
+                # by appending out-of-window rows at up to 1.0 (#633 M-68).
+                _ent_after = _ent_before = None
+                try:
+                    from truememory.temporal import (
+                        detect_temporal_intent,
+                        _validate_iso_date,
+                        _exclusive_upper_bound,
+                    )
+                    _ent_intent = detect_temporal_intent(query)
+                    _ent_after = _validate_iso_date(_ent_intent.get("after"))
+                    _eb = _validate_iso_date(_ent_intent.get("before"))
+                    _ent_before = _exclusive_upper_bound(_eb) if _eb else None
+                except Exception:
+                    logger.debug("Entity temporal-window detection failed", exc_info=True)
+
+                def _in_window(row: dict) -> bool:
+                    # No window detected -> every row is "in window".
+                    if _ent_after is None and _ent_before is None:
+                        return True
+                    ts = row.get("timestamp") or ""
+                    if not ts:
+                        return False
+                    if _ent_after is not None and ts < _ent_after:
+                        return False
+                    if _ent_before is not None and ts >= _ent_before:
+                        return False
+                    return True
+
                 # Normalize entity scores to [0, 1] independently
                 normalize_scores(entity_results)
 
                 entity_ids = {r.get("id") for r in entity_results if r.get("id")}
 
-                # Boost primary results that overlap with entity search
+                # Boost primary results that overlap with entity search.
+                # Gate the 1.5x boost on window membership so out-of-window
+                # evidence is not promoted over in-window rows (#633 M-68).
                 for pr in primary_results:
                     pid = pr.get("id")
                     if pid and pid in entity_ids and not pr.get("_entity_boosted"):
-                        pr["score"] = pr.get("score", pr.get("rrf_score", 0)) * 1.5
-                        pr["_entity_boosted"] = True
-                        if "entity_boost" not in pr.get("source", ""):
-                            pr["source"] = pr.get("source", "") + "+entity_boost"
+                        if _in_window(pr):
+                            pr["score"] = pr.get("score", pr.get("rrf_score", 0)) * 1.5
+                            pr["_entity_boosted"] = True
+                            if "entity_boost" not in pr.get("source", ""):
+                                pr["source"] = pr.get("source", "") + "+entity_boost"
 
                 existing_ids = {r.get("id") for r in primary_results if r.get("id")}
                 added = 0
@@ -2126,7 +2202,14 @@ class TrueMemoryEngine:
                     eid = er.get("id")
                     if eid and eid not in existing_ids:
                         er["source"] = er.get("source", "") + "+entity_new"
-                        er["_entity_boosted"] = True
+                        # Only in-window entity_new rows are exempt from the
+                        # salience floor and keep their full normalized score;
+                        # out-of-window rows are demoted so they cannot
+                        # outrank in-window temporal evidence (#633 M-68).
+                        if _in_window(er):
+                            er["_entity_boosted"] = True
+                        else:
+                            er["score"] = er.get("score", 0) * 0.1
                         primary_results.append(er)
                         existing_ids.add(eid)
                         added += 1

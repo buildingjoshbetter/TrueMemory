@@ -256,10 +256,11 @@ def search_fts_in_range(
         before_excl = _exclusive_upper_bound(before)
         results = [r for r in results if r["timestamp"] < before_excl]
 
-    # Trim to requested limit, then normalize scores across the final set
-    results = results[:limit]
+    # Normalize across the full in-range candidate set BEFORE trimming so a
+    # single survivor of the limit slice does not normalize to exactly 1.0
+    # and dominate the RRF-scored pool it is merged into (#633 M-10).
     _normalize_scores(results)
-    return results
+    return results[:limit]
 
 
 def _fts_search(conn: sqlite3.Connection, fts_query: str,

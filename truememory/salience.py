@@ -391,7 +391,17 @@ def filter_by_salience(
             r.get("modality", ""),
         )
         r["salience"] = salience
-        if salience >= min_salience or r.get("id") in _rescue:
+        # Contradiction-source rows carry the current value of a fact and
+        # are often short noun phrases (e.g. "ClickHouse", salience ~0.043)
+        # that fall below the 0.05 spotlight floor. Exempt them from the
+        # floor so corrected current facts are not silently dropped
+        # (#633 M-30, mirrors the entity_rescue exemption above). The
+        # exemption requires actual content (salience > 0) so truly empty
+        # rows are still dropped (#581 test invariant).
+        _is_contradiction = (
+            salience > 0.0 and "contradiction" in (r.get("source") or "")
+        )
+        if salience >= min_salience or r.get("id") in _rescue or _is_contradiction:
             filtered.append(r)
     return filtered
 
