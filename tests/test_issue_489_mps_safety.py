@@ -125,7 +125,12 @@ class TestModelServerMpsRestore(unittest.TestCase):
         """
         import inspect
         from truememory import model_server
-        handler_source = inspect.getsource(model_server.ModelServer.handle_request)
+        # Issue #646 split in-flight bookkeeping (handle_request) from op
+        # dispatch (_handle_request_inner); the embed OOM path lives in the
+        # latter now.
+        handler_source = inspect.getsource(
+            model_server.ModelServer._handle_request_inner
+        )
         recovery_source = inspect.getsource(
             model_server.ModelServer._recover_embed_oom_locked
         )

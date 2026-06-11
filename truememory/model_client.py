@@ -45,6 +45,15 @@ _HEADER_FMT = ">I"
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
 _MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
 
+# Issue #646 (M-53): wire protocol version. Must match
+# ``model_server.PROTOCOL_VERSION``. On mismatch / non-JSON the client raises
+# a clear ConnectionError instead of an inscrutable UnicodeDecodeError.
+PROTOCOL_VERSION = 1
+
+
+class ProtocolMismatchError(ConnectionError):
+    """Raised when the server speaks an incompatible/foreign protocol."""
+
 _SERVER_START_TIMEOUT = 30.0
 _REQUEST_TIMEOUT = 120.0
 
@@ -281,12 +290,34 @@ def _start_server(wait_timeout: float | None = None) -> bool:
     return False
 
 
-def _connect(timeout: float | None = None) -> socket.socket:
-    """Open a connection to the model server (Unix or TCP)."""
-    request_timeout = _REQUEST_TIMEOUT if timeout is None else timeout
+def _remaining(deadline: float | None) -> float | None:
+    """Seconds left until *deadline* (a time.monotonic() value), or None.
+
+    Raises :class:`TimeoutError` if the deadline has already passed (M-76).
+    """
+    if deadline is None:
+        return None
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise TimeoutError("model server request deadline exceeded")
+    return left
+
+
+def _connect(
+    deadline: float | None = None, timeout: float | None = None
+) -> socket.socket:
+    """Open a connection to the model server (Unix or TCP).
+
+    *deadline* is an absolute ``time.monotonic()`` value bounding the TOTAL
+    request, not just this op (issue #646, M-76). *timeout* is a legacy
+    relative-seconds alias (converted to a deadline) kept for callers/tests
+    that predate the total-deadline change.
+    """
+    if deadline is None and timeout is not None:
+        deadline = time.monotonic() + timeout
     if _USE_UNIX:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(request_timeout)
+        sock.settimeout(_remaining(deadline) if deadline is not None else _REQUEST_TIMEOUT)
         try:
             sock.connect(str(SOCK_PATH))
         except OSError:
@@ -303,7 +334,7 @@ def _connect(timeout: float | None = None) -> socket.socket:
         raise ConnectionError("Model server token file not found")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(request_timeout)
+    sock.settimeout(_remaining(deadline) if deadline is not None else _REQUEST_TIMEOUT)
     try:
         sock.connect((_LOOPBACK_HOST, port))
         sock.sendall(token)
@@ -314,25 +345,71 @@ def _connect(timeout: float | None = None) -> socket.socket:
 
 
 def _send_request(request: dict, timeout: float | None = None) -> dict:
-    """Send a request to the model server and return the response."""
-    sock = _connect(timeout)
+    """Send a request to the model server and return the response.
+
+    *timeout* bounds the TOTAL request (connect + send + recv), not each
+    socket op (issue #646, M-76): the old per-op settimeout could blow ~4x
+    the intended budget in the worst case. A single ``time.monotonic()``
+    deadline is computed once and the remaining budget is re-applied before
+    each blocking op.
+
+    The deadline is also shipped to the server in the payload (M-44) so an
+    already-expired request fails cheaply server-side, before the global
+    lock and a full encode.
+    """
+    deadline = None if timeout is None else time.monotonic() + timeout
+    sock = _connect(deadline)
     try:
-        data = json.dumps(request).encode("utf-8")
+        payload = request
+        if timeout is not None and "deadline" not in payload:
+            # Server checks this wall-clock epoch deadline before encode (M-44).
+            payload = {**request, "deadline": time.time() + max(_remaining(deadline), 0.0)}
+        data = json.dumps(payload).encode("utf-8")
         header = struct.pack(_HEADER_FMT, len(data))
+        sock.settimeout(_remaining(deadline) if deadline is not None else _REQUEST_TIMEOUT)
         sock.sendall(header + data)
 
+        sock.settimeout(_remaining(deadline) if deadline is not None else _REQUEST_TIMEOUT)
         resp_header = _recv_exact(sock, _HEADER_SIZE)
         if not resp_header:
             raise ConnectionError("Server closed connection")
         resp_len = struct.unpack(_HEADER_FMT, resp_header)[0]
         if resp_len > _MAX_MESSAGE_SIZE:
             raise ConnectionError(f"Response too large: {resp_len} bytes")
+        sock.settimeout(_remaining(deadline) if deadline is not None else _REQUEST_TIMEOUT)
         resp_data = _recv_exact(sock, resp_len)
         if not resp_data:
             raise ConnectionError("Incomplete response")
-        return json.loads(resp_data, object_hook=_json_object_hook)
+        return _decode_response(resp_data)
     finally:
         sock.close()
+
+
+def _decode_response(resp_data: bytes) -> dict:
+    """Decode a server response, detecting a foreign/stale protocol (M-53).
+
+    A stale pickle-era daemon (or any non-JSON producer) returns bytes that
+    aren't valid UTF-8 JSON; previously that surfaced as an inscrutable
+    UnicodeDecodeError. Detect it and raise a clear, actionable error. A
+    well-formed JSON response carrying an incompatible ``protocol`` version
+    is rejected the same way.
+    """
+    try:
+        resp = json.loads(resp_data, object_hook=_json_object_hook)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
+        raise ProtocolMismatchError(
+            "protocol mismatch — old model server running; restart it"
+        ) from e
+    if not isinstance(resp, dict):
+        raise ProtocolMismatchError(
+            "protocol mismatch — old model server running; restart it"
+        )
+    proto = resp.get("protocol")
+    if proto is not None and proto != PROTOCOL_VERSION:
+        raise ProtocolMismatchError(
+            "protocol mismatch — old model server running; restart it"
+        )
+    return resp
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes | None:
@@ -368,6 +445,11 @@ def _request_with_autostart(request: dict, timeout: float | None = None) -> dict
 
     try:
         return _send_request(request, timeout=timeout)
+    except ProtocolMismatchError:
+        # A stale/foreign server is bound (M-53). Restarting won't help until
+        # it's killed — surface the clear, actionable error rather than spin
+        # through an autostart retry (which can't bind anyway).
+        raise
     except TimeoutError:
         # socket.timeout is TimeoutError on Python >= 3.10.
         if has_deadline:

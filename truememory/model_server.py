@@ -71,9 +71,38 @@ PORT_PATH = _TRUEMEMORY_DIR / "model_server.port"
 TOKEN_PATH = _TRUEMEMORY_DIR / "model_server.token"
 IDLE_TIMEOUT = int(os.environ.get("TRUEMEMORY_MODEL_SERVER_IDLE", "300"))
 
+LOCK_PATH = _TRUEMEMORY_DIR / "model_server.lock"
+
+# Issue #646 (M-53): protocol/version handshake. Bumped whenever the wire
+# format changes incompatibly. The client echoes this back on mismatch.
+PROTOCOL_VERSION = 1
+
 _HEADER_FMT = ">I"
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
 _MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
+
+
+def _safe_to_cleanup_artifacts() -> bool:
+    """Return True when this process may remove the shared artifacts (M-20).
+
+    ``_cleanup`` must NOT unlink a live successor's socket/pid/port/token:
+    after a crash a fresh server can already hold the bind lock and have
+    rewritten PID_PATH, and tearing down its files lets concurrent hooks
+    cycle servers indefinitely.
+
+    It is safe to clean when PID_PATH names *this* process, or when it names
+    nothing live (missing file, unparseable, or a dead PID — a stale crash
+    artifact). The ONLY case we refuse is PID_PATH naming a *different live*
+    process — the successor that now owns the artifacts.
+    """
+    try:
+        on_disk = int(PID_PATH.read_text().strip())
+    except (ValueError, OSError):
+        return True  # missing / unparseable — nothing live owns it
+    if on_disk == os.getpid():
+        return True
+    # A different PID is recorded — only refuse if it's actually alive.
+    return not pid_is_alive(on_disk)
 
 
 def _json_default(obj):
@@ -162,6 +191,12 @@ class ModelServer:
         self._fast_encoder = None
         self._fast_model_id: str | None = None
         self._fast_lock = threading.Lock()
+        # Issue #646 (M-20): exclusive bind-lock fd, held for the process
+        # lifetime; released in _cleanup. None until run() acquires it.
+        self._lock_fd: int | None = None
+        # Issue #646 (M-74): in-flight request counter so idle shutdown never
+        # kills a request mid-encode. Guarded by _activity_lock.
+        self._inflight = 0
 
     def _mark_sticky_cpu(self, kind: str) -> bool:
         """Permanently degrade *kind* ("embed"/"rerank") to CPU after an
@@ -426,12 +461,39 @@ class ModelServer:
             return None
 
     def handle_request(self, request: dict) -> dict:
+        # Issue #646 (M-74): count this request as in-flight and stamp
+        # activity at START *and* completion. The in-flight counter keeps the
+        # idle checker from shutting the server down mid-encode; re-stamping
+        # at completion means a long encode that finishes near the idle
+        # horizon isn't reaped the instant it returns.
         with self._activity_lock:
             self._last_activity = time.time()
+            self._inflight += 1
+        try:
+            return self._handle_request_inner(request)
+        finally:
+            with self._activity_lock:
+                self._inflight -= 1
+                self._last_activity = time.time()
+
+    def _handle_request_inner(self, request: dict) -> dict:
         op = request.get("op")
 
         if op == "ping":
             return {"ok": True}
+
+        # Issue #646 (M-44): server-side deadline. The client ships an
+        # absolute monotonic-equivalent deadline as wall-clock epoch seconds
+        # ("deadline"). If it has already passed, fail cheap BEFORE acquiring
+        # the global lock or running a full encode — the client has already
+        # abandoned the request and fallen back to FTS-only.
+        deadline = request.get("deadline")
+        if deadline is not None:
+            try:
+                if time.time() >= float(deadline):
+                    return {"ok": False, "error": "deadline exceeded before encode"}
+            except (TypeError, ValueError):
+                pass
 
         if op == "embed":
             texts = request["texts"]
@@ -457,10 +519,17 @@ class ModelServer:
                 )
 
             if should_activate:
-                self._activate_throttler()
+                with self._lock:
+                    self._activate_throttler()
 
-            if self._throttler_active and self._throttler:
-                self._throttler.before_batch()
+            # Issue #646 (M-43): capture the throttler to a local under the
+            # lock. Reading self._throttler_active then self._throttler
+            # separately raced _deactivate_throttler nulling the attribute
+            # between the two reads (AttributeError on before_batch()).
+            with self._lock:
+                throttler = self._throttler if self._throttler_active else None
+            if throttler is not None:
+                throttler.before_batch()
 
             encode_start = time.time()
             # `vectors` is assigned on exactly one of two paths: inside the
@@ -493,15 +562,18 @@ class ModelServer:
                 vectors = model.encode(texts, show_progress_bar=False)
             encode_time = time.time() - encode_start
 
-            if self._throttler_active and self._throttler:
-                self._throttler.after_batch(len(texts), encode_time)
-                if self._throttler.should_flush_cache():
+            # M-43: re-capture under the lock for the same reason as above.
+            with self._lock:
+                throttler = self._throttler if self._throttler_active else None
+            if throttler is not None:
+                throttler.after_batch(len(texts), encode_time)
+                if throttler.should_flush_cache():
                     self._flush_mps_cache()
 
             with self._lock:
                 should_deactivate = self._throttler_active and len(self._embed_timestamps) < 3
-            if should_deactivate:
-                self._deactivate_throttler()
+                if should_deactivate:
+                    self._deactivate_throttler()
 
             return {"ok": True, "vectors": np.asarray(vectors, dtype=np.float32)}
 
@@ -543,7 +615,12 @@ class ModelServer:
         return {"ok": False, "error": f"Unknown op: {op}"}
 
     def _activate_throttler(self):
-        """Start adaptive throttling for sustained workload."""
+        """Start adaptive throttling for sustained workload.
+
+        Caller must hold ``self._lock`` (issue #646, M-43): activate and
+        deactivate mutate ``_throttler`` / ``_throttler_active`` together and
+        must not interleave with the lock-free readers in ``handle_request``.
+        """
         try:
             from truememory.tier_switch.throttler import DynamicThrottler
         except ImportError:
@@ -572,7 +649,10 @@ class ModelServer:
         )
 
     def _deactivate_throttler(self):
-        """Stop adaptive throttling — workload ended."""
+        """Stop adaptive throttling — workload ended.
+
+        Caller must hold ``self._lock`` (issue #646, M-43).
+        """
         self._throttler = None
         self._throttler_active = False
         self._embed_timestamps.clear()
@@ -650,6 +730,11 @@ class ModelServer:
         return bytes(buf)
 
     def _send_response(self, conn: socket.socket, response: dict):
+        # Issue #646 (M-53): tag every response with the protocol version so
+        # a newer client can detect a version mismatch instead of choking on
+        # an unexpected payload shape.
+        if "protocol" not in response:
+            response = {**response, "protocol": PROTOCOL_VERSION}
         data = json.dumps(response, default=_json_default).encode("utf-8")
         if len(data) > _MAX_MESSAGE_SIZE:
             data = json.dumps({"ok": False, "error": "Response too large"}).encode("utf-8")
@@ -663,8 +748,12 @@ class ModelServer:
                 break
             with self._activity_lock:
                 last = self._last_activity
+                inflight = self._inflight
             elapsed = time.time() - last
-            if elapsed >= IDLE_TIMEOUT:
+            # Issue #646 (M-74): never idle-shut-down while a request is
+            # mid-flight, even if its start timestamp is older than the idle
+            # horizon (a long batch encode can outlast IDLE_TIMEOUT).
+            if elapsed >= IDLE_TIMEOUT and inflight == 0:
                 log.info(
                     "Idle timeout (%.0fs), shutting down model server", elapsed
                 )
@@ -713,12 +802,43 @@ class ModelServer:
                 f2.write(text)
             tmp.unlink(missing_ok=True)
 
+    def _acquire_bind_lock(self):
+        """Take an exclusive lock BEFORE binding (issue #646, M-20).
+
+        The previous design wrote PID_PATH then bound, leaving a multi-second
+        TOCTOU window (PID written before imports finish) during which a
+        second concurrent starter would also bind and the two servers would
+        cycle each other's artifacts indefinitely. Holding an OS-level
+        exclusive lock for the process lifetime makes "only one server binds"
+        atomic. On POSIX we use ``flock``; on Windows ``msvcrt.locking``. The
+        fd is kept open (and stored on ``self``) until the process exits.
+
+        Returns the lock fd, or raises ``RuntimeError`` if another live
+        server holds the lock.
+        """
+        fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            raise RuntimeError("another model server holds the bind lock")
+        return fd
+
     def run(self):
         _TRUEMEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
-        PID_PATH.write_text(str(os.getpid()))
+        # Exclusive bind lock BEFORE touching socket/pid artifacts (M-20).
+        self._lock_fd = self._acquire_bind_lock()
 
         if _USE_UNIX:
+            # We hold the exclusive lock, so any socket file here is stale
+            # (a crashed predecessor); safe to remove now that no live peer
+            # can own it.
             if SOCK_PATH.exists():
                 SOCK_PATH.unlink()
             srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -733,6 +853,9 @@ class ModelServer:
             self._atomic_write_text(TOKEN_PATH, self._token.hex(), mode=0o600)
             self._atomic_write_text(PORT_PATH, str(self._bound_port), mode=0o600)
             transport_desc = f"tcp={_LOOPBACK_HOST}:{self._bound_port}"
+        # PID written only AFTER a successful bind — never advertises a
+        # not-yet-listening server (M-20). We own the artifacts from here.
+        PID_PATH.write_text(str(os.getpid()))
         srv.listen(16)
         srv.settimeout(2.0)
 
@@ -767,11 +890,24 @@ class ModelServer:
         if getattr(self, "_cleaned_up", False):
             return
         self._cleaned_up = True
-        for p in (SOCK_PATH, PID_PATH, PORT_PATH, TOKEN_PATH):
+        # Only remove artifacts THIS process owns (issue #646, M-20). After a
+        # crash a fresh server may already hold the lock and have rewritten
+        # PID_PATH; unlinking its live socket/token here would let concurrent
+        # hooks cycle servers indefinitely.
+        if _safe_to_cleanup_artifacts():
+            for p in (SOCK_PATH, PID_PATH, PORT_PATH, TOKEN_PATH):
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        # Release the bind lock (lock fd is process-owned, always safe).
+        lock_fd = getattr(self, "_lock_fd", None)
+        if lock_fd is not None:
             try:
-                p.unlink(missing_ok=True)
+                os.close(lock_fd)
             except OSError:
                 pass
+            self._lock_fd = None
         # Reset the embed snapshot and fast-lane identity so no stale model
         # identity survives a stop (issue #577, panel round 2).
         self._embed_state = None
@@ -806,6 +942,11 @@ def main():
     if hasattr(signal, "SIGHUP"):
         signal.signal(signal.SIGHUP, _handle_signal)
 
+    # Fast pre-check: a live PID means a server is (probably) already up.
+    # This is advisory only — the authoritative guard is the exclusive bind
+    # lock taken inside run() (issue #646, M-20), which closes the TOCTOU
+    # window this check alone left open. Stale artifacts from a crashed
+    # predecessor are reclaimed under the lock in run(), not here.
     if PID_PATH.exists():
         try:
             old_pid = int(PID_PATH.read_text().strip())
@@ -814,18 +955,19 @@ def main():
                 sys.exit(1)
         except (ValueError, OSError):
             pass
-        PID_PATH.unlink(missing_ok=True)
-        if SOCK_PATH.exists():
-            SOCK_PATH.unlink(missing_ok=True)
-        PORT_PATH.unlink(missing_ok=True)
-        TOKEN_PATH.unlink(missing_ok=True)
 
     server = ModelServer()
 
     # Ensure cleanup runs even on unhandled exit.
     atexit.register(server._cleanup)
 
-    server.run()
+    try:
+        server.run()
+    except RuntimeError as e:
+        # Lost the bind-lock race to a concurrent starter (M-20). Exit
+        # cleanly without touching the winner's artifacts.
+        log.error("Model server start aborted: %s", e)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
