@@ -357,38 +357,51 @@ class RebuildManager:
     def _apply_config_switch(
         self, target_tier: str, conn: sqlite3.Connection,
     ):
-        """Update config.json with the new tier (atomic write)."""
+        """Update config.json with the new tier (atomic write).
+
+        M-58 (#641): the read-modify-replace below previously ran with NO
+        cross-process lock, so a concurrent writer (telemetry user_id, CLI
+        setup) could land its update in the window between our read and our
+        ``os.replace`` and have it silently clobbered (e.g. a freshly-stored API
+        key dropped). Hold the shared ``_config_file_lock`` (same fcntl/msvcrt
+        primitive used by ``run_rebuild_sync`` and ``_save_config``) across the
+        WHOLE read-modify-write so the tier write composes with — instead of
+        racing — other config writers.
+        """
         import tempfile
 
-        config_path = _TRUEMEMORY_DIR / "config.json"
-        config = {}
-        if config_path.exists():
-            try:
-                # utf-8-sig tolerates a BOM; isinstance guard discards a
-                # valid-JSON non-object config so the tier write starts from a
-                # clean dict instead of crashing on config["tier"] (#640).
-                loaded = json.loads(config_path.read_text(encoding="utf-8-sig"))
-                if isinstance(loaded, dict):
-                    config = loaded
-            except (json.JSONDecodeError, OSError):
-                pass
+        from truememory.mcp_server import _config_file_lock
 
-        config["tier"] = target_tier
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(
-            prefix=".config.tmp.", suffix=".json",
-            dir=str(_TRUEMEMORY_DIR),
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=2)
-            os.replace(tmp_path, str(config_path))
-        except BaseException:
+        config_path = _TRUEMEMORY_DIR / "config.json"
+        with _config_file_lock():
+            config = {}
+            if config_path.exists():
+                try:
+                    # utf-8-sig tolerates a BOM; isinstance guard discards a
+                    # valid-JSON non-object config so the tier write starts from
+                    # a clean dict instead of crashing on config["tier"] (#640).
+                    loaded = json.loads(config_path.read_text(encoding="utf-8-sig"))
+                    if isinstance(loaded, dict):
+                        config = loaded
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            config["tier"] = target_tier
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=".config.tmp.", suffix=".json",
+                dir=str(_TRUEMEMORY_DIR),
+            )
             try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(config, f, indent=2)
+                os.replace(tmp_path, str(config_path))
+            except BaseException:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
 
         os.environ["TRUEMEMORY_EMBED_MODEL"] = target_tier
 

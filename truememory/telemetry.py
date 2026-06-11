@@ -318,13 +318,21 @@ def _is_real_upgrade(latest: str | None, current: str | None) -> bool:
 
 
 def _save_user_id(config: dict) -> None:
-    """Persist user_id back to config.json."""
+    """Persist user_id back to config.json.
+
+    M-26 (#641): this runs at EVERY server start when user_id is missing. The
+    old bare ``write_text`` truncated config.json in place, so a concurrent
+    ``_load_config`` reading the empty window renamed it to ``.corrupt.<ts>``
+    and the writer's bytes landed in the orphaned inode -> tier + API keys
+    vanished. Route through the shared atomic + cross-process-locked
+    ``_save_config`` (mkstemp + os.replace) instead. Imported lazily to avoid a
+    circular import: ``mcp_server`` imports this module at top level, and by the
+    time ``_save_user_id`` runs (inside ``init``) ``mcp_server`` is fully
+    loaded.
+    """
     try:
-        config_path = Path.home() / ".truememory" / "config.json"
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.parent.chmod(0o700)
-        config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
-        config_path.chmod(0o600)
+        from truememory.mcp_server import _save_config
+        _save_config(config)
     except Exception:
         pass
 

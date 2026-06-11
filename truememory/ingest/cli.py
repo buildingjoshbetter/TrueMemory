@@ -469,24 +469,16 @@ def _load_truememory_config() -> dict:
 def _save_truememory_config(config: dict) -> None:
     """Save config to ~/.truememory/config.json.
 
-    chmod calls below are silent no-ops on Windows. When an
-    API key is being persisted on Windows we warn to stderr so the user
-    knows the plaintext file is readable by other local users and can
-    route keys through env vars instead on shared machines.
+    M-26 (#641): the previous bare ``write_text`` truncated config.json in
+    place. A concurrent ``_load_config`` reading the empty window renamed it to
+    ``.corrupt.<ts>`` and this writer finished into the orphaned inode -> tier +
+    API keys vanished, setup_required again. Route through the shared atomic +
+    cross-process-locked ``_save_config`` (mkstemp + os.replace) instead, which
+    also emits the Windows plaintext-permissions warning. Imported lazily so the
+    CLI's fast paths do not eagerly pull in the MCP server module.
     """
-    _TRUEMEMORY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _TRUEMEMORY_CONFIG_PATH.parent.chmod(0o700)
-    _TRUEMEMORY_CONFIG_PATH.write_text(json.dumps(config, indent=2), encoding="utf-8")
-    _TRUEMEMORY_CONFIG_PATH.chmod(0o600)
-    if sys.platform == "win32" and any(k.endswith("_api_key") for k in config):
-        print(
-            "truememory: warning — on Windows, ~/.truememory/config.json "
-            "permissions are inherited from the parent directory and may be "
-            "readable by other local users. If this is a shared machine, set "
-            "the API key via the ANTHROPIC_API_KEY / OPENROUTER_API_KEY / "
-            "OPENAI_API_KEY environment variable instead.",
-            file=sys.stderr,
-        )
+    from truememory.mcp_server import _save_config
+    _save_config(config)
 
 
 def _setup_cli_integrations(args, config):
