@@ -17,15 +17,15 @@ _ROOT = Path(__file__).resolve().parents[1]
 # ── X1: docs report the real MCP tool count (11) ─────────────────────────────
 
 def _actual_tool_count() -> int:
-    src = (_ROOT / "truememory" / "mcp_server.py").read_text()
+    src = (_ROOT / "truememory" / "mcp_server.py").read_text(encoding="utf-8")
     return len(set(re.findall(r"def (truememory_[a-z_]+)\(", src)))
 
 
 def test_docs_report_correct_tool_count():
     n = _actual_tool_count()
     assert n == 11, f"expected 11 truememory_* tools, found {n} — update this test + the docs"
-    readme = (_ROOT / "README.md").read_text()
-    mcp_doc = (_ROOT / "docs" / "mcp-tools.md").read_text()
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    mcp_doc = (_ROOT / "docs" / "mcp-tools.md").read_text(encoding="utf-8")
     assert "8 MCP tools" not in readme, "README still claims 8 MCP tools"
     assert "exposes 9 tools" not in mcp_doc, "docs/mcp-tools.md still claims 9 tools"
     assert f"{n} MCP tools" in readme or f"All {n} MCP tools" in readme
@@ -33,7 +33,7 @@ def test_docs_report_correct_tool_count():
 
 
 def test_python_api_doc_metadata_not_reserved():
-    doc = (_ROOT / "docs" / "python-api.md").read_text()
+    doc = (_ROOT / "docs" / "python-api.md").read_text(encoding="utf-8")
     assert "Reserved for future use" not in doc, "metadata is a live field, not reserved"
     assert "directive" in doc, "m.add docs should mention the directive param"
 
@@ -41,7 +41,7 @@ def test_python_api_doc_metadata_not_reserved():
 # ── A2-4: sdist excludes tests/ ──────────────────────────────────────────────
 
 def test_sdist_excludes_tests():
-    text = (_ROOT / "pyproject.toml").read_text()
+    text = (_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     # the hatch sdist exclude list must contain "/tests"
     assert '"/tests"' in text, "sdist must exclude /tests"
 
@@ -59,7 +59,7 @@ def test_no_test_module_sets_hf_offline_at_import():
         name = os.path.basename(f)
         if name == "conftest.py":
             continue  # conftest is the sanctioned single source
-        if pat.search(Path(f).read_text()):
+        if pat.search(Path(f).read_text(encoding="utf-8")):
             offenders.append(os.path.relpath(f, _ROOT))
     assert not offenders, (
         "these test modules set offline mode at import (move it to conftest.py): " + ", ".join(offenders)

@@ -11,7 +11,7 @@ from pathlib import Path
 
 def test_hdbscan_declared_as_extra():
     # Text-based (no tomllib — that's 3.11+, but the matrix includes 3.10).
-    text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
     assert "clustering = [" in text, "a 'clustering' extra must exist"
     # the clustering extra line must name hdbscan
     line = next(ln for ln in text.splitlines() if ln.strip().startswith("clustering = ["))
