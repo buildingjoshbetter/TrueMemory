@@ -1,14 +1,8 @@
 """Regression locks for #696: hdbscan declared as an optional extra (A2-1) and
 log sanitization of untrusted content (S1-3).
 
-No model loads.
+No model loads. Offline mode is set in conftest.py (#697), not here.
 """
-import os
-
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-
-import tomllib
 from pathlib import Path
 
 
@@ -16,13 +10,12 @@ from pathlib import Path
 # ── A2-1: hdbscan declared as an extra ───────────────────────────────────────
 
 def test_hdbscan_declared_as_extra():
-    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
-    data = tomllib.loads(pyproject.read_text())
-    extras = data["project"]["optional-dependencies"]
-    assert "clustering" in extras, "a 'clustering' extra must exist"
-    assert any("hdbscan" in dep for dep in extras["clustering"]), (
-        "the clustering extra must declare hdbscan"
-    )
+    # Text-based (no tomllib — that's 3.11+, but the matrix includes 3.10).
+    text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    assert "clustering = [" in text, "a 'clustering' extra must exist"
+    # the clustering extra line must name hdbscan
+    line = next(ln for ln in text.splitlines() if ln.strip().startswith("clustering = ["))
+    assert "hdbscan" in line, "the clustering extra must declare hdbscan"
 
 
 # ── S1-3: log sanitization ───────────────────────────────────────────────────
