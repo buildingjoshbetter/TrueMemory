@@ -305,15 +305,24 @@ def _queue_to_backlog(
         from datetime import datetime, timezone
         BACKLOG_DIR.mkdir(parents=True, exist_ok=True)
         BACKLOG_DIR.chmod(0o700)
-        marker = BACKLOG_DIR / f"{_sanitize_session_id(session_id)}.json"
-        marker.write_text(json.dumps({
+        from truememory.ingest.hooks._shared import _atomic_write_text
+        safe_sid = _sanitize_session_id(session_id)
+        # M-15: never clobber a live worker's in-flight claim. If a
+        # .processing marker exists for this session, a worker is already
+        # ingesting (or the stale watcher will recover it); re-queuing would
+        # race two workers onto one transcript.
+        if (BACKLOG_DIR / f"{safe_sid}.processing").exists():
+            log.info("stop hook: backlog claim in-flight for %r; not re-queueing", session_id)
+            return
+        marker = BACKLOG_DIR / f"{safe_sid}.json"
+        _atomic_write_text(marker, json.dumps({
             "transcript_path": transcript_path,
             "session_id": session_id,
             "user_id": user_id,
             "db_path": db_path,
             "queued_at": datetime.now(timezone.utc).isoformat(),
             "reason": reason,
-        }), encoding="utf-8")
+        }))
     except Exception as e:
         # Best-effort: if we can't write the backlog marker, the session's
         # memories are lost — log and move on. Must not raise.

@@ -268,7 +268,14 @@ def _cascade_next() -> None:
     if not backlog_dir.exists():
         return
 
-    from truememory.ingest.hooks._shared import cleanup_stale_processing, check_extraction_budget, record_stale_processing_pid
+    from truememory.ingest.hooks._shared import (
+        cleanup_stale_processing,
+        check_extraction_budget,
+        refund_extraction_budget,
+        record_stale_processing_pid,
+        mark_session_extracted,
+        _quarantine_marker,
+    )
     cleanup_stale_processing(backlog_dir)
 
     try:
@@ -291,9 +298,23 @@ def _cascade_next() -> None:
         except (FileNotFoundError, OSError):
             continue
 
+        import json as _json
+        # M-14: quarantine a corrupt marker instead of recycling it forever.
         try:
-            import json as _json
-            data = _json.loads(claimed_path.read_text(encoding="utf-8"))
+            raw = claimed_path.read_text(encoding="utf-8")
+        except OSError:
+            try:
+                claimed_path.rename(marker_path)
+            except OSError:
+                pass
+            continue
+        try:
+            data = _json.loads(raw)
+        except _json.JSONDecodeError:
+            _quarantine_marker(claimed_path)
+            continue
+
+        try:
             transcript = data.get("transcript_path", "")
             if not transcript or not Path(transcript).exists():
                 claimed_path.unlink(missing_ok=True)
@@ -308,6 +329,8 @@ def _cascade_next() -> None:
 
             with spawn_gate() as allowed:
                 if not allowed:
+                    # M-71: refund the consumed slot when the gate denies.
+                    refund_extraction_budget()
                     try:
                         claimed_path.rename(marker_path)
                     except OSError:
@@ -333,6 +356,10 @@ def _cascade_next() -> None:
                 )
                 register_spawned_pid(proc.pid)
                 record_stale_processing_pid(claimed_path, proc.pid)
+                # M-34: optimistic EXTRACTED_DIR marker tagged with the worker
+                # PID so the Stop hook does not spawn a parallel ingest.
+                if session_id:
+                    mark_session_extracted(session_id, transcript, spawned_pid=proc.pid)
 
             # NOTE (issue #422): do NOT unlink the .processing claim on spawn.
             # The claim stays until the spawned worker confirms success (the

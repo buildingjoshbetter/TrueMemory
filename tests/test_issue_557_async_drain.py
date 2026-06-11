@@ -44,8 +44,14 @@ def test_maintenance_spawns_background_subprocess(tmp_path, monkeypatch):
     assert env.get("TRUEMEMORY_MAINTENANCE_CHILD") == "1"
 
 
-def test_maintenance_fallback_on_popen_failure(tmp_path, monkeypatch):
-    """If Popen fails, fall back to synchronous drain + scan."""
+def test_maintenance_skipped_on_popen_failure(tmp_path, monkeypatch):
+    """If Popen fails, maintenance is SKIPPED, not run inline (issue #644 / M-38).
+
+    Spawn failures happen precisely when the system is unhealthy (fd
+    exhaustion, OOM, disk full); running drain+scan synchronously here would
+    block SessionStart and delay recall injection at the worst time. The next
+    session retries maintenance via its own spawn.
+    """
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     (tmp_path / ".truememory" / "logs").mkdir(parents=True)
 
@@ -57,8 +63,7 @@ def test_maintenance_fallback_on_popen_failure(tmp_path, monkeypatch):
         from truememory.ingest.hooks.session_start import _run_maintenance_background
         _run_maintenance_background()
 
-    assert "drain" in calls, "Fallback should call _drain_backlog synchronously"
-    assert "scan" in calls, "Fallback should call _scan_stale_sessions synchronously"
+    assert calls == [], "maintenance must NOT run inline on spawn failure (M-38)"
 
 
 def test_session_start_returns_quickly(tmp_path, monkeypatch):

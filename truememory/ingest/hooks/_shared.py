@@ -70,6 +70,26 @@ def _safe_session_id(session_id: str) -> str:
     return "".join(c for c in session_id if c.isalnum() or c in "-_")[:64]
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically via tmp file + os.replace.
+
+    A reader can never observe a torn / partially-written marker: it sees
+    either the old contents or the fully-written new contents. The tmp file
+    is unique per-process so concurrent writers do not clobber each other's
+    temp file before the rename (issue #644 / M-14).
+    """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def should_extract_session(session_id: str, transcript_path: str) -> bool:
     """Check if a session's transcript has new content since last extraction.
 
@@ -189,12 +209,57 @@ def check_extraction_budget() -> bool:
                 pass
 
 
+def refund_extraction_budget() -> None:
+    """Return one consumed extraction slot to the hourly budget.
+
+    Callers consume a slot with ``check_extraction_budget()`` *before* the
+    spawn gate; when the gate denies the spawn no extraction actually runs,
+    so the slot must be returned or a denied spawn permanently burns budget
+    (issue #644 / M-71). No-op when budget tracking is disabled. Only
+    decrements within the same hour the slot was consumed.
+    """
+    if _MAX_EXTRACTIONS_PER_HOUR <= 0:
+        return
+    fd = -1
+    try:
+        if not _BUDGET_FILE.exists():
+            return
+        fd = os.open(str(_BUDGET_FILE), os.O_RDWR)
+        if _HAS_FCNTL:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            raw = os.read(fd, 4096).decode("utf-8", errors="replace").strip()
+            data = json.loads(raw) if raw else {}
+        except (json.JSONDecodeError, ValueError):
+            return
+        current_hour = int(time.time() // 3600)
+        # Only refund if we're still in the hour the slot was consumed —
+        # a rollover already reset the counter, nothing to give back.
+        if data.get("hour") != current_hour:
+            return
+        if data.get("count", 0) <= 0:
+            return
+        data["count"] -= 1
+        payload = json.dumps(data).encode("utf-8")
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, payload)
+    except OSError:
+        pass
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 def record_stale_processing_pid(processing_path: Path, pid: int) -> None:
     """Write the spawned PID into a .processing file for liveness checks."""
     try:
         data = json.loads(processing_path.read_text(encoding="utf-8"))
         data["claimed_pid"] = pid
-        processing_path.write_text(json.dumps(data), encoding="utf-8")
+        _atomic_write_text(processing_path, json.dumps(data))
     except (OSError, json.JSONDecodeError):
         pass
 
@@ -231,6 +296,27 @@ def clear_backlog_processing(session_id: str, backlog_dir: Path | None = None) -
         return False
     except OSError:
         return False
+
+
+def _quarantine_marker(path: Path) -> None:
+    """Move a corrupt backlog marker aside to ``.corrupt`` (issue #644 / M-14).
+
+    A marker whose JSON fails to parse must never be recycled back to
+    ``.json`` — the drainers would re-claim it every session, and a few such
+    poison pills permanently consume every ``_DRAIN_CAP`` slot so healthy
+    sessions are never extracted. Renaming to ``.corrupt`` (which the
+    ``*.json`` glob ignores) takes it out of rotation while preserving it for
+    forensics. Best-effort: on rename failure, unlink so it cannot poison.
+    """
+    target = path.with_suffix(".corrupt")
+    try:
+        os.replace(path, target)
+        log.warning("Quarantined corrupt backlog marker: %s -> %s", path.name, target.name)
+    except OSError:
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def cleanup_stale_processing(backlog_dir: Path) -> None:
@@ -282,11 +368,11 @@ def mark_session_extracted(session_id: str, transcript_path: str, spawned_pid: i
         EXTRACTED_DIR.mkdir(parents=True, exist_ok=True)
         current_size = Path(transcript_path).stat().st_size
         marker = EXTRACTED_DIR / safe_id
-        marker.write_text(json.dumps({
+        _atomic_write_text(marker, json.dumps({
             "size": current_size,
             "timestamp": time.time(),
             "pid": spawned_pid or os.getpid(),
-        }), encoding="utf-8")
+        }))
     except OSError:
         pass
 

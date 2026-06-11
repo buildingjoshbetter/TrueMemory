@@ -195,7 +195,14 @@ def _drain_backlog() -> None:
     if not BACKLOG_DIR.exists():
         return
 
-    from truememory.ingest.hooks._shared import cleanup_stale_processing, check_extraction_budget, record_stale_processing_pid
+    from truememory.ingest.hooks._shared import (
+        cleanup_stale_processing,
+        check_extraction_budget,
+        refund_extraction_budget,
+        record_stale_processing_pid,
+        mark_session_extracted,
+        _quarantine_marker,
+    )
     cleanup_stale_processing(BACKLOG_DIR)
 
     try:
@@ -212,8 +219,24 @@ def _drain_backlog() -> None:
         except (FileNotFoundError, OSError):
             continue
 
+        # M-14: a corrupt JSON marker must NOT be recycled back to .json (it
+        # would poison a _DRAIN_CAP slot forever). Read + parse first; on a
+        # decode error quarantine it to .corrupt and move on.
         try:
-            data = json.loads(claimed_path.read_text(encoding="utf-8"))
+            raw = claimed_path.read_text(encoding="utf-8")
+        except OSError:
+            try:
+                claimed_path.rename(marker_path)
+            except OSError:
+                pass
+            continue
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            _quarantine_marker(claimed_path)
+            continue
+
+        try:
             transcript = data.get("transcript_path", "")
             if not transcript or not Path(transcript).exists():
                 claimed_path.unlink(missing_ok=True)
@@ -229,6 +252,9 @@ def _drain_backlog() -> None:
 
             with spawn_gate() as allowed:
                 if not allowed:
+                    # M-71: the budget slot consumed above is never used when the
+                    # gate denies — refund it so a denied spawn does not burn budget.
+                    refund_extraction_budget()
                     log.info("Drain: spawn cap reached, leaving remaining backlog for next session")
                     try:
                         claimed_path.rename(marker_path)
@@ -268,6 +294,12 @@ def _drain_backlog() -> None:
                     _log_file.close()
                 register_spawned_pid(proc.pid)
                 record_stale_processing_pid(claimed_path, proc.pid)
+                # M-34: also record an optimistic EXTRACTED_DIR marker tagged
+                # with the worker PID. Without it, should_extract_session()
+                # sees no marker for the worker's whole runtime and the Stop
+                # hook spawns a parallel ingest of the same transcript.
+                if session_id:
+                    mark_session_extracted(session_id, transcript, spawned_pid=proc.pid)
             # NOTE (issue #422): do NOT unlink the .processing claim here.
             # Removing it on spawn (before the worker finishes) means a worker
             # that exits non-zero — crash, OOM, embed-model error — leaves no
@@ -401,17 +433,26 @@ def _scan_stale_sessions() -> None:
         # (first scan or corrupted marker).
         cutoff = watermark if watermark > 0 else (now - 86400)
 
-        # Write the new watermark (current time) — even if no files are
-        # queued, the mtime update gates the next scan interval.
-        try:
-            os.lseek(scan_fd, 0, os.SEEK_SET)
-            os.ftruncate(scan_fd, 0)
-            os.write(scan_fd, str(now).encode("utf-8"))
-        except OSError:
-            return
+        # M-37: the new watermark is written AFTER the scan, not before. If we
+        # advanced to ``now`` up front and then stopped at ``_SCAN_CAP``, every
+        # candidate beyond the cap (mtime < now) would fall outside the next
+        # scan's window and never be re-checked. We instead advance only as far
+        # as the oldest candidate we did NOT queue, so deferred work stays in
+        # range. ``None`` means "no deferred candidate" → advance fully to now.
+        oldest_deferred_mtime: float | None = None
+
+        def _commit_watermark(value: float) -> None:
+            try:
+                os.lseek(scan_fd, 0, os.SEEK_SET)
+                os.ftruncate(scan_fd, 0)
+                os.write(scan_fd, str(value).encode("utf-8"))
+            except OSError:
+                pass
 
         claude_dir = Path.home() / ".claude" / "projects"
         if not claude_dir.exists():
+            # Nothing to scan, but still gate the next interval.
+            _commit_watermark(now)
             return
 
         from truememory.ingest.hooks._shared import EXTRACTED_DIR, _safe_session_id, mark_session_extracted
@@ -424,6 +465,7 @@ def _scan_stale_sessions() -> None:
         try:
             project_entries = os.scandir(str(claude_dir))
         except OSError:
+            _commit_watermark(now)
             return
 
         for proj_entry in project_entries:
@@ -458,6 +500,14 @@ def _scan_stale_sessions() -> None:
                 if marker.exists():
                     continue
 
+                # M-15: skip if a backlog claim already exists for this session.
+                # A queued .json or an in-flight .processing means a worker has
+                # (or will) ingest this transcript; re-queueing would overwrite a
+                # live worker's claim and cause two workers on one transcript.
+                if (BACKLOG_DIR / f"{safe_id}.json").exists() or \
+                        (BACKLOG_DIR / f"{safe_id}.processing").exists():
+                    continue
+
                 transcript = Path(entry.path)
                 if _is_extraction_transcript(transcript):
                     try:
@@ -467,13 +517,20 @@ def _scan_stale_sessions() -> None:
                     skipped_noise += 1
                     continue
 
+                if queued >= _SCAN_CAP:
+                    # M-37: cap reached — this candidate (and any others in this
+                    # window) are deferred to a later scan. Mark that we must not
+                    # advance the watermark past the scan cutoff, or deferred
+                    # candidates older than ``now`` would fall outside the next
+                    # window and never be re-checked. (We break before queueing.)
+                    oldest_deferred_mtime = cutoff
+                    break
+
                 _queue_to_backlog(
                     str(transcript), session_id, "", "",
                     reason="stale_session_recovery",
                 )
                 queued += 1
-                if queued >= _SCAN_CAP:
-                    break
             if queued >= _SCAN_CAP:
                 break
 
@@ -481,6 +538,17 @@ def _scan_stale_sessions() -> None:
             log.info("Stale session scanner: queued %d unextracted sessions", queued)
         if skipped_noise > 0:
             log.info("Stale session scanner: skipped %d extraction noise transcripts", skipped_noise)
+
+        # M-37: when the cap was hit, hold the watermark at the scan cutoff so
+        # the deferred candidates stay inside the next scan's [watermark, now]
+        # window (re-queueing is idempotent — M-15 skips sessions that already
+        # have a backlog claim). Otherwise the scan fully drained the window and
+        # the watermark advances to ``now``. The _SCAN_INTERVAL gate still
+        # throttles how often the scan actually runs.
+        if oldest_deferred_mtime is not None:
+            _commit_watermark(oldest_deferred_mtime)
+        else:
+            _commit_watermark(now)
 
         # Piggyback on the scan window to prune stale extracted/ markers
         # (issue #579). Runs at most once per _SCAN_INTERVAL alongside the
@@ -500,6 +568,13 @@ def _run_maintenance_background() -> None:
     (daemon threads die when the hook process exits — issue #557).
     stdout/stderr are redirected to a log file to avoid blocking.
     """
+    # M-38: honor the guard env var. A maintenance child is spawned with
+    # TRUEMEMORY_MAINTENANCE_CHILD=1; if such a child ever re-enters this hook
+    # it must NOT spawn yet another maintenance subprocess (recursion / fork
+    # storm). The flag was previously set but never read.
+    if os.environ.get("TRUEMEMORY_MAINTENANCE_CHILD") == "1":
+        return
+
     import subprocess
 
     _log_dir = Path.home() / ".truememory" / "logs"
@@ -526,9 +601,12 @@ def _run_maintenance_background() -> None:
         finally:
             log_file.close()
     except Exception as exc:
-        log.debug("Failed to spawn background maintenance: %s", exc)
-        _drain_backlog()
-        _scan_stale_sessions()
+        # M-38: do NOT inline drain+scan on spawn failure. Spawn failures occur
+        # precisely when the system is unhealthy (fd exhaustion, OOM, disk
+        # full); running maintenance synchronously here would block SessionStart
+        # and delay recall injection at the worst possible time. The next
+        # session retries maintenance via its own spawn.
+        log.debug("Failed to spawn background maintenance; skipping (next session retries): %s", exc)
 
 
 def _spawn_stale_scan() -> None:

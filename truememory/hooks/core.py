@@ -763,14 +763,15 @@ def _queue_to_backlog(
     try:
         BACKLOG_DIR.mkdir(parents=True, exist_ok=True)
         BACKLOG_DIR.chmod(0o700)
+        from truememory.ingest.hooks._shared import _atomic_write_text
         marker = BACKLOG_DIR / f"{_sanitize_session_id(session_id)}.json"
-        marker.write_text(json.dumps({
+        _atomic_write_text(marker, json.dumps({
             "transcript_path": transcript_path,
             "session_id": session_id,
             "user_id": user_id,
             "db_path": db_path,
             "queued_at": datetime.now(timezone.utc).isoformat(),
             "reason": reason,
-        }), encoding="utf-8")
+        }))
     except Exception as e:
         log.error("core: failed to queue backlog marker: %s", e)
