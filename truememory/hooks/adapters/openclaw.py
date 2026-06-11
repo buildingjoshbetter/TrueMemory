@@ -32,7 +32,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from truememory.hooks.adapters.base import CLIAdapter
+from truememory.hooks.adapters.base import CLIAdapter, atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -163,10 +163,7 @@ class OpenClawAdapter(CLIAdapter):
             if not old_top:
                 del existing["mcpServers"]
 
-        _CONFIG_PATH.write_text(
-            json.dumps(existing, indent=2),
-            encoding="utf-8",
-        )
+        atomic_write_text(_CONFIG_PATH, json.dumps(existing, indent=2))
 
     def install_hooks(
         self,
@@ -187,7 +184,7 @@ class OpenClawAdapter(CLIAdapter):
                         'process.env.TRUEMEMORY_PYTHON || "python3"',
                         f'process.env.TRUEMEMORY_PYTHON || "{python_path}"',
                     )
-                dst.write_text(content, encoding="utf-8")
+                atomic_write_text(dst, content)
 
     def uninstall(self) -> None:
         self._remove_mcp_entry()
@@ -261,9 +258,7 @@ class OpenClawAdapter(CLIAdapter):
                 changed = True
 
             if changed:
-                _CONFIG_PATH.write_text(
-                    json.dumps(data, indent=2), encoding="utf-8",
-                )
+                atomic_write_text(_CONFIG_PATH, json.dumps(data, indent=2))
         except OSError:
             pass
 

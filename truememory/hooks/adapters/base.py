@@ -6,8 +6,38 @@ MCP server setup.
 """
 from __future__ import annotations
 
+import json
+import os
 from abc import ABC, abstractmethod
 from pathlib import Path
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write *text* to *path* atomically (tmp-in-same-dir + os.replace).
+
+    X2-1 (#691): adapters write the user's live editor/CLI config. A bare
+    ``write_text`` can truncate that config if the process dies mid-write.
+    Writing to a unique per-process tmp in the same directory and atomically
+    renaming means a reader (or a crash) sees either the old file or the fully
+    written new one — never a torn one.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def atomic_write_json(path: Path, data, indent: int = 2) -> None:
+    """Atomically write *data* as JSON (see :func:`atomic_write_text`)."""
+    atomic_write_text(path, json.dumps(data, indent=indent))
 
 
 class CLIAdapter(ABC):

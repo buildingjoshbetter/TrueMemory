@@ -14,7 +14,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from truememory.hooks.adapters.base import CLIAdapter
+from truememory.hooks.adapters.base import CLIAdapter, atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -95,10 +95,7 @@ class KimiAdapter(CLIAdapter):
             "args": ["-m", "truememory.mcp_server"],
         }
 
-        _MCP_CONFIG.write_text(
-            json.dumps(existing, indent=2),
-            encoding="utf-8",
-        )
+        atomic_write_text(_MCP_CONFIG, json.dumps(existing, indent=2))
 
     def install_hooks(
         self,
@@ -136,7 +133,7 @@ class KimiAdapter(CLIAdapter):
 
         if lines_to_append:
             new_text = existing_text.rstrip() + "\n" + "\n".join(lines_to_append) + "\n"
-            _HOOK_CONFIG.write_text(new_text, encoding="utf-8")
+            atomic_write_text(_HOOK_CONFIG, new_text)
 
     def uninstall(self) -> None:
         self._remove_mcp_entry()
@@ -246,9 +243,7 @@ class KimiAdapter(CLIAdapter):
             servers = data.get("mcpServers", {})
             if "truememory" in servers:
                 del servers["truememory"]
-                _MCP_CONFIG.write_text(
-                    json.dumps(data, indent=2), encoding="utf-8",
-                )
+                atomic_write_text(_MCP_CONFIG, json.dumps(data, indent=2))
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -283,4 +278,4 @@ class KimiAdapter(CLIAdapter):
             cleaned.append(line)
             i += 1
 
-        _HOOK_CONFIG.write_text("".join(cleaned), encoding="utf-8")
+        atomic_write_text(_HOOK_CONFIG, "".join(cleaned))

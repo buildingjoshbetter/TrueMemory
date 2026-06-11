@@ -550,9 +550,12 @@ def set_recall_cache(
             "timestamp": time.time(),
             "context": context,
         }
-        tmp = RECALL_CACHE_PATH.with_suffix(".tmp")
-        tmp.write_text(json.dumps(existing), encoding="utf-8")
-        os.replace(tmp, RECALL_CACHE_PATH)
+        # C1-1 (#691): use the unique per-process tmp (via _atomic_write_text)
+        # instead of a FIXED RECALL_CACHE_PATH.with_suffix(".tmp"). Concurrent
+        # writers (session_start + core.py + a forget) sharing one fixed tmp
+        # could interleave and leave the cache file as two concatenated JSON
+        # docs; the next read then reset existing={}, silently dropping entries.
+        _atomic_write_text(RECALL_CACHE_PATH, json.dumps(existing))
     except OSError:
         pass
 
@@ -580,9 +583,8 @@ def invalidate_recall_cache(db_path: str = "", user_id: str = "") -> None:
             for k in matched:
                 del data[k]
             if data:
-                tmp = RECALL_CACHE_PATH.with_suffix(".tmp")
-                tmp.write_text(json.dumps(data), encoding="utf-8")
-                os.replace(tmp, RECALL_CACHE_PATH)
+                # C1-1 (#691): unique per-process tmp, not a fixed shared one.
+                _atomic_write_text(RECALL_CACHE_PATH, json.dumps(data))
             else:
                 RECALL_CACHE_PATH.unlink(missing_ok=True)
     except (OSError, json.JSONDecodeError, TypeError):

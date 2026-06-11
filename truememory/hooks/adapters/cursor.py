@@ -13,7 +13,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from truememory.hooks.adapters.base import CLIAdapter
+from truememory.hooks.adapters.base import CLIAdapter, atomic_write_text
 
 _CURSOR_DIR = Path.home() / ".cursor"
 _MCP_CONFIG = _CURSOR_DIR / "mcp.json"
@@ -133,10 +133,7 @@ class CursorAdapter(CLIAdapter):
             "args": ["-m", "truememory.mcp_server"],
         }
 
-        _MCP_CONFIG.write_text(
-            json.dumps(existing, indent=2),
-            encoding="utf-8",
-        )
+        atomic_write_text(_MCP_CONFIG, json.dumps(existing, indent=2))
 
     def install_hooks(
         self,
@@ -212,10 +209,7 @@ class CursorAdapter(CLIAdapter):
                 "timeout": info["timeout"],
             })
 
-        _HOOK_CONFIG.write_text(
-            json.dumps(existing, indent=2),
-            encoding="utf-8",
-        )
+        atomic_write_text(_HOOK_CONFIG, json.dumps(existing, indent=2))
 
     def uninstall(self) -> None:
         self._remove_mcp_entry()
@@ -291,9 +285,7 @@ class CursorAdapter(CLIAdapter):
             servers = data.get("mcpServers", {})
             if isinstance(servers, dict) and "truememory" in servers:
                 del servers["truememory"]
-                _MCP_CONFIG.write_text(
-                    json.dumps(data, indent=2), encoding="utf-8",
-                )
+                atomic_write_text(_MCP_CONFIG, json.dumps(data, indent=2))
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -325,6 +317,4 @@ class CursorAdapter(CLIAdapter):
             else:
                 del hooks[event]
 
-        _HOOK_CONFIG.write_text(
-            json.dumps(data, indent=2), encoding="utf-8",
-        )
+        atomic_write_text(_HOOK_CONFIG, json.dumps(data, indent=2))

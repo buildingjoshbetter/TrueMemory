@@ -29,7 +29,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from truememory.hooks.adapters.base import CLIAdapter
+from truememory.hooks.adapters.base import CLIAdapter, atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -134,7 +134,7 @@ class HermesAdapter(CLIAdapter):
             "args": ["-m", "truememory.mcp_server"],
         }
 
-        _CONFIG.write_text(_yaml_safe_dump(existing), encoding="utf-8")
+        atomic_write_text(_CONFIG, _yaml_safe_dump(existing))
 
     def install_hooks(
         self,
@@ -190,7 +190,7 @@ class HermesAdapter(CLIAdapter):
                 entry["timeout"] = info["timeout"]
             event_list.append(entry)
 
-        _CONFIG.write_text(_yaml_safe_dump(existing), encoding="utf-8")
+        atomic_write_text(_CONFIG, _yaml_safe_dump(existing))
 
     def uninstall(self) -> None:
         self._remove_mcp_entry()
@@ -267,7 +267,7 @@ class HermesAdapter(CLIAdapter):
             servers = data.get("mcp_servers", {})
             if isinstance(servers, dict) and "truememory" in servers:
                 del servers["truememory"]
-                _CONFIG.write_text(_yaml_safe_dump(data), encoding="utf-8")
+                atomic_write_text(_CONFIG, _yaml_safe_dump(data))
         except OSError:
             pass
 
@@ -299,6 +299,6 @@ class HermesAdapter(CLIAdapter):
                     else:
                         del hooks[event]
             if changed:
-                _CONFIG.write_text(_yaml_safe_dump(data), encoding="utf-8")
+                atomic_write_text(_CONFIG, _yaml_safe_dump(data))
         except OSError:
             pass

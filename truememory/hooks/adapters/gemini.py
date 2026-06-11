@@ -18,7 +18,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from truememory.hooks.adapters.base import CLIAdapter
+from truememory.hooks.adapters.base import CLIAdapter, atomic_write_text
 
 _GEMINI_DIR = Path.home() / ".gemini"
 _CONFIG_PATH = _GEMINI_DIR / "settings.json"
@@ -232,10 +232,7 @@ class GeminiAdapter(CLIAdapter):
 
     def _write_config(self, settings: dict) -> None:
         _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _CONFIG_PATH.write_text(
-            json.dumps(settings, indent=2),
-            encoding="utf-8",
-        )
+        atomic_write_text(_CONFIG_PATH, json.dumps(settings, indent=2))
 
     def _has_mcp_entry(self) -> bool:
         if not _CONFIG_PATH.exists():

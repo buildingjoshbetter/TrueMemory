@@ -16,7 +16,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from truememory.hooks.adapters.base import CLIAdapter
+from truememory.hooks.adapters.base import CLIAdapter, atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -136,7 +136,7 @@ class CodexAdapter(CLIAdapter):
         )
 
         new_text = existing_text.rstrip() + "\n" + section
-        _CONFIG_PATH.write_text(new_text, encoding="utf-8")
+        atomic_write_text(_CONFIG_PATH, new_text)
 
     def install_hooks(
         self,
@@ -179,10 +179,10 @@ class CodexAdapter(CLIAdapter):
 
         if lines_to_append:
             new_text = existing_text.rstrip() + "\n" + "\n".join(lines_to_append) + "\n"
-            _CONFIG_PATH.write_text(new_text, encoding="utf-8")
+            atomic_write_text(_CONFIG_PATH, new_text)
         elif existing_text != (_CONFIG_PATH.read_text(encoding="utf-8") if _CONFIG_PATH.exists() else ""):
             # Legacy blocks were removed; write updated text even if nothing new appended
-            _CONFIG_PATH.write_text(existing_text, encoding="utf-8")
+            atomic_write_text(_CONFIG_PATH, existing_text)
 
     def uninstall(self) -> None:
         if not _CONFIG_PATH.exists():
@@ -195,7 +195,7 @@ class CodexAdapter(CLIAdapter):
         text = self._remove_mcp_section(text)
         text = self._remove_hook_blocks(text)
         text = self._remove_legacy_hook_blocks(text)
-        _CONFIG_PATH.write_text(text, encoding="utf-8")
+        atomic_write_text(_CONFIG_PATH, text)
 
     def verify(self) -> bool:
         if not _CONFIG_PATH.exists():

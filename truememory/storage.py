@@ -419,7 +419,6 @@ def _backup_database(db_path: Path) -> Path | None:
     Rotates old backups so the degraded-legacy re-backup path cannot fill the
     disk (M-24). Returns the backup path on success, None on failure.
     """
-    import shutil
     import uuid
 
     suffix = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
@@ -428,18 +427,37 @@ def _backup_database(db_path: Path) -> Path | None:
     if backup.exists():
         return None
 
+    # D1-6 (#691): the old approach copied the main DB and the -wal/-shm files
+    # separately with shutil.copy2 — NON-atomic. A concurrent writer (the
+    # documented multi-process model) could change the WAL between the copies,
+    # tearing the backup pair so a restore fails ("no such table"). Use SQLite's
+    # Online Backup API instead: it produces a SINGLE, internally-consistent
+    # snapshot file (WAL folded in) regardless of concurrent writers, so a
+    # restore is a single `cp backup db` with no sibling files.
+    src = dst = None
     try:
-        shutil.copy2(str(db_path), str(backup))
-        for ext in ("-wal", "-shm"):
-            wal_path = Path(f"{db_path}{ext}")
-            if wal_path.exists():
-                shutil.copy2(str(wal_path), str(backup) + ext)
-        log.info("Legacy DB backup created: %s", backup)
+        src = sqlite3.connect(str(db_path))
+        dst = sqlite3.connect(str(backup))
+        with dst:
+            src.backup(dst)
+        log.info("Legacy DB backup created (consistent snapshot): %s", backup)
         _prune_old_backups(db_path)
         return backup
     except Exception as e:
         log.warning("Could not back up database before migration: %s", e)
+        try:
+            if backup.exists():
+                backup.unlink()
+        except OSError:
+            pass
         return None
+    finally:
+        for _c in (src, dst):
+            if _c is not None:
+                try:
+                    _c.close()
+                except sqlite3.Error:
+                    pass
 
 
 def _migrate_messages_schema(conn: sqlite3.Connection, db_path: str | Path) -> None:
