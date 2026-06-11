@@ -367,7 +367,12 @@ class EncodingGate:
             except Exception:
                 pass
         if results is None:
-            results = self._search(fact, limit=10)
+            # search_vectors() fell back to the full pipeline (no vectors).
+            # Skip the cross-encoder reranker — the gate only reads the
+            # nearest memory's CONTENT (compression novelty + PE re-embed),
+            # never the retrieval score, so paying the reranker per fact is
+            # wasted work (issue #632).
+            results = self._search(fact, limit=10, skip_reranker=True)
 
         # Exclude directives — they are standing instructions, not facts,
         # and should not cause incoming memories to be rejected as redundant.
@@ -550,13 +555,24 @@ class EncodingGate:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _search(self, query: str, limit: int = 5) -> list[dict]:
-        """Search existing memories, scoped to user if set."""
+    def _search(self, query: str, limit: int = 5, skip_reranker: bool = False) -> list[dict]:
+        """Search existing memories, scoped to user if set.
+
+        ``skip_reranker`` (issue #632) asks the underlying Memory.search to
+        skip the cross-encoder reranker. Passed through best-effort: if the
+        backing object doesn't accept the kwarg (e.g. a test double), we
+        retry without it rather than failing the gate.
+        """
+        kwargs: dict = {"limit": limit}
+        if self.user_id:
+            kwargs["user_id"] = self.user_id
         try:
-            if self.user_id:
-                return self.memory.search(query, user_id=self.user_id, limit=limit)
-            else:
-                return self.memory.search(query, limit=limit)
+            if skip_reranker:
+                try:
+                    return self.memory.search(query, _skip_reranker=True, **kwargs)
+                except TypeError:
+                    pass  # backing search() lacks the kwarg — fall through
+            return self.memory.search(query, **kwargs)
         except Exception as e:
             log.warning("Memory search failed during encoding gate: %s", e)
             return []

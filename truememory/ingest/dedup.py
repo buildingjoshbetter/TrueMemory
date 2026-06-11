@@ -163,13 +163,21 @@ def check_duplicate(
     top_score = top.get("score", 0)
     top_content = top.get("content", "")
     top_id = top.get("id")
+    # Score-space contract (issue #632): the absolute 0.92 cosine cutoff is
+    # only meaningful when the score is a TRUE cosine similarity. When the
+    # embedder is dead or in FTS-only mode, search_vectors() falls back to
+    # the full pipeline whose scores are relatively normalized (FTS top hit
+    # pinned to 1.0; reranker fused scores min-max pinned). Comparing those
+    # to 0.92 drops any fact sharing one keyword with a stored memory as a
+    # bogus "duplicate". Only trust the number when it is cosine-space.
+    top_is_cosine = top.get("score_space", "cosine") == "cosine"
 
     # Very high similarity — likely near-exact duplicate.
     # BUT: if the new fact contains update markers (issue #576), it may be
     # a genuine fact change that just happens to embed close to the old
     # version.  Route those to LLM arbitration (if available) or the
     # heuristic path rather than silently dropping them.
-    if top_score > 0.92:
+    if top_is_cosine and top_score > 0.92:
         if _has_update_markers(fact):
             log.debug(
                 "High-similarity candidate (%.2f) has update markers — "
@@ -186,6 +194,15 @@ def check_duplicate(
             existing_content=top_content,
             reason=f"near-exact match ({top_score:.2f})",
         )
+
+    # Relative/fused score (FTS-only / degraded / reranked): the number is
+    # NOT a cosine similarity, so we cannot trust it for a SKIP/UPDATE
+    # decision. Defer to the LLM if available, otherwise fall back to the
+    # scale-free word-overlap heuristic instead of the (meaningless) score.
+    if not top_is_cosine:
+        if config:
+            return _llm_dedup(fact, top_content, top_id, config)
+        return _heuristic_dedup(fact, top_content, top_id, similarity=0.0)
 
     # When LLM dedup is available, send the top candidate to the LLM
     # regardless of absolute similarity score — the LLM is the canonical

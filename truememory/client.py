@@ -122,6 +122,7 @@ class Memory:
         user_id: str | None = None,
         limit: int = 10,
         include_directives: bool = False,
+        _skip_reranker: bool = False,
     ) -> list[dict]:
         """Search memories using the full 6-layer pipeline.
 
@@ -130,6 +131,10 @@ class Memory:
             user_id: Filter results to this user (optional).
             limit:   Max results.
             include_directives: If True, include directive rows in results.
+            _skip_reranker: Internal — skip cross-encoder reranking. Used by
+                callers (encoding gate novelty, dedup fallback) that only
+                need candidate content / raw scores, not a reranked ordering,
+                so they don't pay the cross-encoder per fact (issue #632).
 
         Returns:
             List of result dicts sorted by relevance.
@@ -137,6 +142,7 @@ class Memory:
         results = self._engine.search(
             query, limit=limit * 3 if user_id else limit,
             include_directives=include_directives,
+            _skip_reranker=_skip_reranker,
         )
 
         if user_id:
@@ -144,6 +150,13 @@ class Memory:
 
         for r in results:
             r["user_id"] = r.get("sender", "")
+            # Score-space contract (issue #632): the full search() pipeline
+            # produces RELATIVELY normalized scores (FTS top hit pinned to
+            # 1.0; reranker fused scores min-max pinned). These are NOT
+            # absolute cosine similarities and must never be compared to
+            # absolute cosine thresholds (dedup 0.92, novelty 0.85). Tag
+            # them so consumers can tell the difference.
+            r.setdefault("score_space", "relative")
 
         return results[:limit]
 
@@ -163,11 +176,22 @@ class Memory:
         cos_sim = max(0, 1 - d). This gives the gate a score that can
         be directly subtracted from 1.0 to get novelty.
 
+        Each result is tagged with ``score_space`` (issue #632):
+        ``"cosine"`` when the pure-vector path produced the score (an
+        absolute cosine similarity safe to compare against absolute
+        thresholds), or ``"relative"`` when vectors were unavailable and
+        we fell back to the full ``search()`` pipeline (FTS-only /
+        reranked scores that are relatively normalized and must NOT be
+        compared to absolute cosine cutoffs).
+
         Falls back to regular search() if vector search is unavailable.
         """
         result = self._engine.search_vectors_raw(query, limit=limit)
         if result is None:
+            # No vectors available — relative/fused scores only.
             return self.search(query, limit=limit)
+        for r in result:
+            r["score_space"] = "cosine"
         return result
 
     def search_deep(
