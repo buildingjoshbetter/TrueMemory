@@ -193,7 +193,8 @@ def _check_for_update() -> str:
             try:
                 tmp = update_path.with_suffix(".tmp")
                 tmp.write_text(json.dumps(data), encoding="utf-8")
-                tmp.rename(update_path)
+                # M-49: os.replace tolerates an existing file on Windows.
+                tmp.replace(update_path)
             except Exception:
                 pass
             return (

@@ -143,7 +143,9 @@ def init(config: dict) -> dict | None:
                 _p = Path.home() / ".truememory" / ".update_available"
                 _tmp = _p.with_suffix(".tmp")
                 _tmp.write_text(json.dumps(info), encoding="utf-8")
-                _tmp.rename(_p)
+                # M-49: os.replace tolerates an existing destination on
+                # Windows (Path.rename raises FileExistsError there).
+                _tmp.replace(_p)
             except Exception:
                 pass
 

@@ -188,7 +188,8 @@ def _load_config() -> dict:
         else:
             _reason = str(e)
         try:
-            _CONFIG_PATH.rename(backup)
+            # M-49: os.replace tolerates an existing backup on Windows.
+            _CONFIG_PATH.replace(backup)
             print(
                 f"truememory: config.json is corrupt ({_reason}). "
                 f"Saved corrupt file to {backup} — your API keys may be "

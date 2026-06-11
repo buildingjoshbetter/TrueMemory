@@ -671,7 +671,8 @@ def _try_capture_email(prompt: str) -> None:
         config["email"] = email
         tmp = config_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(config, indent=2), encoding="utf-8")
-        tmp.rename(config_path)
+        # M-49: os.replace tolerates an existing config on Windows.
+        tmp.replace(config_path)
     except Exception:
         pass
 
@@ -801,7 +802,9 @@ def buffer_message(session_id: str, prompt: str):
     try:
         if buffer_file.exists() and buffer_file.stat().st_size > MAX_BUFFER_SIZE:
             rotated = buffer_file.with_suffix(f".{int(time.time())}.jsonl")
-            buffer_file.rename(rotated)
+            # M-49: os.replace tolerates a same-second rotation collision
+            # on Windows (Path.rename raises FileExistsError there).
+            buffer_file.replace(rotated)
     except OSError:
         pass
 

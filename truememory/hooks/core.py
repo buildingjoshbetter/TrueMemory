@@ -209,7 +209,7 @@ def _save_cap_state(
         if last_ramp_time is not None:
             data["last_ramp_time"] = last_ramp_time
         tmp.write_text(_json.dumps(data), encoding="utf-8")
-        tmp.rename(_SPAWN_CAP_STATE_PATH)
+        tmp.replace(_SPAWN_CAP_STATE_PATH)
     except Exception:
         pass
 
@@ -590,7 +590,7 @@ def buffer_message(session_id: str, prompt: str) -> None:
     try:
         if buffer_file.exists() and buffer_file.stat().st_size > MAX_BUFFER_SIZE:
             rotated = buffer_file.with_suffix(f".{int(time.time())}.jsonl")
-            buffer_file.rename(rotated)
+            buffer_file.replace(rotated)
     except OSError:
         pass
 
