@@ -29,39 +29,20 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
-def _transcript_roots() -> list[Path]:
-    """Directories a transcript_path is allowed to live under (M-90).
+# M-90 transcript allowlist now lives in truememory.ingest.hooks._shared
+# (hoisted so stop.py and the SessionStart backlog drain share the same guard).
+# These thin shims keep the original names working for callers/tests.
 
-    Defaults to Claude Code's ``~/.claude/projects``. An explicit
-    ``TRUEMEMORY_TRANSCRIPT_DIR`` override (e.g. for tests or non-default
-    installs) is honored when set.
-    """
-    roots = [Path.home() / ".claude" / "projects"]
-    override = os.environ.get("TRUEMEMORY_TRANSCRIPT_DIR", "")
-    if override:
-        roots.insert(0, Path(override))
-    return roots
+def _transcript_roots() -> list[Path]:
+    """Shim — see ``_shared._transcript_roots``."""
+    from truememory.ingest.hooks._shared import _transcript_roots as _shared_roots
+    return _shared_roots()
 
 
 def _is_allowed_transcript(transcript_path: str) -> bool:
-    """Return True only if *transcript_path* is inside an expected root (M-90).
-
-    The hook's stdin / backlog is attacker-influenceable in a local-control
-    scenario; ``parse_transcript`` would otherwise read any user-readable file
-    into the memory store via its plaintext fallback. Resolve symlinks and
-    require containment under a known transcripts root.
-    """
-    try:
-        resolved = Path(transcript_path).resolve()
-    except (OSError, ValueError):
-        return False
-    for root in _transcript_roots():
-        try:
-            if resolved.is_relative_to(root.resolve()):
-                return True
-        except (OSError, ValueError):
-            continue
-    return False
+    """Shim — delegates to the shared M-90 guard (``_shared.is_allowed_transcript``)."""
+    from truememory.ingest.hooks._shared import is_allowed_transcript
+    return is_allowed_transcript(transcript_path)
 
 
 def _parse_args() -> argparse.Namespace:
