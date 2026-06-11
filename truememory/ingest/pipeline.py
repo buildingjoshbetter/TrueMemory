@@ -571,6 +571,17 @@ class IngestionPipeline:
             result.facts_skipped_gate, result.facts_skipped_dedup,
             result.elapsed_seconds,
         )
+        # Issue #645 (M-64): the engine.add fast path bypasses
+        # client.Memory.add (which invalidates), so a full transcript could
+        # store fresh facts without ever dropping the recall cache — the next
+        # session would inject stale recall for the rest of the TTL. Invalidate
+        # once after the batch commits if anything was written.
+        if result.facts_stored or result.facts_updated:
+            try:
+                from truememory.ingest.hooks._shared import invalidate_recall_cache
+                invalidate_recall_cache()
+            except Exception:
+                pass
         return result
 
     def ingest_text(self, text: str, session_id: str = "") -> IngestionResult:

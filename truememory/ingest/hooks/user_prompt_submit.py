@@ -548,7 +548,11 @@ def _try_proactive_recall(
             pass
         from truememory.client import Memory
         with Memory(path=db_path or None) as m:
-            results = m.search(prompt, user_id=user_id or None, limit=limit)
+            # Issue #652 (M-47): proactive recall only injects ranked content,
+            # not cross-encoder scores, so skip the reranker on the hot path.
+            results = m.search(
+                prompt, user_id=user_id or None, limit=limit, _skip_reranker=True,
+            )
         # We searched this prompt — whether or not it found anything, the
         # auto-recall fallback must not search it again (M-42).
         if not results:
@@ -603,7 +607,11 @@ def _try_auto_recall(prompt: str, user_id: str, db_path: str, session_id: str = 
             pass
         from truememory.client import Memory
         with Memory(path=db_path or None) as m:
-            results = m.search(prompt, user_id=user_id or None, limit=5)
+            # Issue #652 (M-47): auto-recall injection needs ranked content,
+            # not cross-encoder scores — skip the reranker.
+            results = m.search(
+                prompt, user_id=user_id or None, limit=5, _skip_reranker=True,
+            )
         if not results:
             return None
         lines = []

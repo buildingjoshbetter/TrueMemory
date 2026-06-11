@@ -142,8 +142,10 @@ class TestMultiDB:
         assert _shared.get_recall_cache("", "bob") == "ctx-bob"
 
     def test_default_key(self, isolated_cache):
-        assert _shared._recall_cache_key("", "") == "default:"
-        assert _shared._recall_cache_key("/a.db", "alice") == "/a.db:alice"
+        # Key now carries intensity:budget:producer too (issue #645). The
+        # db:user prefix is preserved as the leading segment.
+        assert _shared._recall_cache_key("", "").startswith("default:")
+        assert _shared._recall_cache_key("/a.db", "alice").startswith("/a.db:alice:")
 
 
 class TestTTLDisabled:

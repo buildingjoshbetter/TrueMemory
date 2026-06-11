@@ -415,12 +415,18 @@ def mark_recall_injected(session_id: str) -> None:
         pass
 
 
-def get_recall_cache(db_path: str, user_id: str = "") -> str | None:
+def get_recall_cache(
+    db_path: str, user_id: str = "", intensity: str = "", budget: int = 0,
+    producer: str = "",
+) -> str | None:
     """Return cached recall context if it exists and is within the TTL.
 
     Returns the cached context string, or None if the cache is missing,
-    stale, or disabled. Cache key is (db_path, user_id) so multi-DB and
-    multi-user setups get separate caches.
+    stale, or disabled. The cache key includes (db_path, user_id,
+    intensity, budget) (issue #645, M-35) so a standard-intensity /
+    small-budget session never serves its trimmed payload to a later
+    max-intensity session (and vice versa); multi-DB and multi-user
+    setups also stay isolated.
     """
     if RECALL_CACHE_TTL <= 0:
         return None
@@ -428,7 +434,7 @@ def get_recall_cache(db_path: str, user_id: str = "") -> str | None:
         if not RECALL_CACHE_PATH.exists():
             return None
         data = json.loads(RECALL_CACHE_PATH.read_text(encoding="utf-8"))
-        key = _recall_cache_key(db_path, user_id)
+        key = _recall_cache_key(db_path, user_id, intensity, budget, producer)
         entry = data.get(key)
         if entry is None:
             return None
@@ -440,11 +446,15 @@ def get_recall_cache(db_path: str, user_id: str = "") -> str | None:
         return None
 
 
-def set_recall_cache(context: str, db_path: str, user_id: str = "") -> None:
+def set_recall_cache(
+    context: str, db_path: str, user_id: str = "", intensity: str = "", budget: int = 0,
+    producer: str = "",
+) -> None:
     """Write recall results to the cache file with a timestamp.
 
-    Preserves entries for other (db_path, user_id) combinations so
-    multi-DB setups coexist in a single cache file.
+    Preserves entries for other (db_path, user_id, intensity, budget)
+    combinations so multi-DB / multi-intensity setups coexist in a single
+    cache file (issue #645, M-35).
     """
     if RECALL_CACHE_TTL <= 0:
         return
@@ -459,7 +469,7 @@ def set_recall_cache(context: str, db_path: str, user_id: str = "") -> None:
                     existing = {}
         except (OSError, json.JSONDecodeError):
             existing = {}
-        key = _recall_cache_key(db_path, user_id)
+        key = _recall_cache_key(db_path, user_id, intensity, budget, producer)
         existing[key] = {
             "timestamp": time.time(),
             "context": context,
@@ -484,9 +494,15 @@ def invalidate_recall_cache(db_path: str = "", user_id: str = "") -> None:
             RECALL_CACHE_PATH.unlink(missing_ok=True)
             return
         data = json.loads(RECALL_CACHE_PATH.read_text(encoding="utf-8"))
-        key = _recall_cache_key(db_path, user_id)
-        if key in data:
-            del data[key]
+        # Keys are "<db>:<user>:<intensity>:<budget>" (issue #645). A
+        # per-db invalidate must drop every intensity/budget variant for
+        # this (db_path, user_id) pair, not just one — otherwise a deleted
+        # memory keeps leaking from the max-intensity cache slot.
+        prefix = _recall_cache_key_prefix(db_path, user_id)
+        matched = [k for k in data if k.startswith(prefix)]
+        if matched:
+            for k in matched:
+                del data[k]
             if data:
                 tmp = RECALL_CACHE_PATH.with_suffix(".tmp")
                 tmp.write_text(json.dumps(data), encoding="utf-8")
@@ -501,14 +517,46 @@ def invalidate_recall_cache(db_path: str = "", user_id: str = "") -> None:
             pass
 
 
-def _recall_cache_key(db_path: str, user_id: str = "") -> str:
-    """Deterministic cache key from db_path and user_id.
+def _normalize_db_path(db_path: str) -> str:
+    """Collapse relative-vs-absolute spellings of *db_path* to one key.
 
-    Normalizes db_path via PurePosixPath so the same logical path produces
-    the same key on both Unix (``/a.db``) and Windows (``\\a.db``).
+    Issue #645 (M-35): ``./memories.db`` and ``/abs/memories.db`` used to
+    split the cache into two slots, so the same DB got searched twice and
+    each slot served stale results to the other. resolve() (strict=False)
+    canonicalizes both to the same absolute path; as_posix() keeps the key
+    stable across Unix and Windows.
     """
-    normalized = str(Path(db_path).as_posix()) if db_path else "default"
-    return f"{normalized}:{user_id or ''}"
+    if not db_path:
+        return "default"
+    try:
+        return Path(db_path).resolve(strict=False).as_posix()
+    except (OSError, ValueError, RuntimeError):
+        return Path(db_path).as_posix()
+
+
+def _recall_cache_key_prefix(db_path: str, user_id: str = "") -> str:
+    """Key prefix shared by every intensity/budget variant of one DB+user."""
+    return f"{_normalize_db_path(db_path)}:{user_id or ''}:"
+
+
+def _recall_cache_key(
+    db_path: str, user_id: str = "", intensity: str = "", budget: int = 0,
+    producer: str = "",
+) -> str:
+    """Deterministic cache key from db_path, user_id, intensity and budget.
+
+    Issue #645 (M-35): including intensity + effective budget stops a
+    standard/small-budget session from poisoning a later max-intensity
+    session (and vice versa) — those sessions trim the payload
+    differently and must not share a cache slot. The ``producer`` tag
+    keeps the session-start (budget-capped) payload from being served to
+    the adapter recall path (uncapped) and vice versa.
+    """
+    return (
+        f"{_recall_cache_key_prefix(db_path, user_id)}"
+        f"{intensity or 'standard'}:{int(budget) if budget else 0}"
+        f":{producer or 'session_start'}"
+    )
 
 
 def consume_recall_injected(session_id: str, within_seconds: float = _RECALL_DEBOUNCE_SECONDS) -> bool:

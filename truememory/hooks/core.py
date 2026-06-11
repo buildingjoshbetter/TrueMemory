@@ -456,10 +456,23 @@ def recall_memories(
     the TTL (default 5 min, env TRUEMEMORY_RECALL_CACHE_TTL) return the
     cached context instead of re-querying the full search pipeline.
     """
-    # --- Issue #559: check cache first ---
+    # Issue #396: scale recall limit based on search intensity
+    if memory_limit:
+        limit = memory_limit
+        intensity = _get_search_intensity()
+    else:
+        intensity = _get_search_intensity()
+        limit = _INTENSITY_MEMORY_LIMITS.get(intensity, _BASE_MEMORY_LIMIT)
+
+    # --- Issue #559 / #645: check cache first ---
+    # The cache key includes intensity + a "core" producer tag (issue #645,
+    # M-35) so this adapter's UNcapped payload never collides with the
+    # session-start hook's budget-capped payload in the shared cache file.
     try:
         from truememory.ingest.hooks._shared import get_recall_cache, set_recall_cache
-        cached = get_recall_cache(db_path or "", user_id)
+        cached = get_recall_cache(
+            db_path or "", user_id, intensity=intensity, producer="core",
+        )
         if cached is not None:
             return cached
     except Exception:
@@ -470,12 +483,6 @@ def recall_memories(
     except ImportError:
         return ""
 
-    # Issue #396: scale recall limit based on search intensity
-    if memory_limit:
-        limit = memory_limit
-    else:
-        intensity = _get_search_intensity()
-        limit = _INTENSITY_MEMORY_LIMITS.get(intensity, _BASE_MEMORY_LIMIT)
     db = db_path or None
     memory = Memory(path=db) if db else Memory()
 
@@ -496,10 +503,18 @@ def recall_memories(
     for query in queries:
         added_this_query = 0
         try:
+            # Issue #652 (M-47): recall injection only needs ranked content,
+            # not cross-encoder scores, so skip the reranker to avoid paying
+            # the cross-encoder on every adapter session-recall query.
             if user_id:
-                results = memory.search(query, user_id=user_id, limit=per_query_limit * 3)
+                results = memory.search(
+                    query, user_id=user_id, limit=per_query_limit * 3,
+                    _skip_reranker=True,
+                )
             else:
-                results = memory.search(query, limit=per_query_limit * 3)
+                results = memory.search(
+                    query, limit=per_query_limit * 3, _skip_reranker=True,
+                )
 
             for r in results:
                 if added_this_query >= per_query_limit:
@@ -545,9 +560,11 @@ def recall_memories(
     lines.append("</truememory-context>")
     context = "\n".join(lines)
 
-    # Cache results for subsequent calls (issue #559)
+    # Cache results for subsequent calls (issue #559 / #645)
     try:
-        set_recall_cache(context, db_path or "", user_id)
+        set_recall_cache(
+            context, db_path or "", user_id, intensity=intensity, producer="core",
+        )
     except Exception:
         pass
 

@@ -716,7 +716,8 @@ def main():
             recall_injected = False
         else:
             context = recall_memories(
-                input_data, user_id=args.user, db_path=args.db, budget=recall_budget,
+                input_data, user_id=args.user, db_path=args.db,
+                budget=recall_budget, intensity=intensity,
             )
             recall_injected = bool(context)
 
@@ -872,7 +873,13 @@ def _apply_budget(
     return [line for i, (line, _score) in enumerate(memory_lines) if i not in drop]
 
 
-def recall_memories(input_data: dict, user_id: str = "", db_path: str = "", budget: int = 0) -> str:
+def recall_memories(
+    input_data: dict,
+    user_id: str = "",
+    db_path: str = "",
+    budget: int = 0,
+    intensity: str = "",
+) -> str:
     """Search TrueMemory and format relevant memories for injection.
 
     Uses a file-based cache (issue #559): after running the 5 search
@@ -933,9 +940,10 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "", budg
     # --- Issue #559: cache-TTL for the 5 recall queries ---
     from truememory.ingest.hooks._shared import get_recall_cache, set_recall_cache
 
-    cached = get_recall_cache(db_path or "", user_id)
+    cached = get_recall_cache(db_path or "", user_id, intensity=intensity, budget=budget)
     if cached is not None:
-        parts.append(cached)
+        if cached:
+            parts.append(cached)
         return "\n\n".join(parts) if parts else ""
 
     queries = [
@@ -951,11 +959,18 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "", budg
     all_results = []
     seen_ids = set(directive_ids)
     seen_content = set()
+    # Issue #645 (M-36): distinguish "searched, genuinely empty" from
+    # "every query raised" (model server down). At least one query must
+    # complete without raising before we are willing to cache an empty
+    # result — otherwise a transient outage negative-caches "" for the
+    # full TTL and blacks out recall for 5 minutes after recovery.
+    any_query_succeeded = False
 
     for query in queries:
         added_this_query = 0
         try:
             results = memory._engine.search(query, limit=per_query_limit * 3, _skip_reranker=True)
+            any_query_succeeded = True
             if user_id:
                 results = [r for r in results if r.get("sender", "") == user_id]
 
@@ -1013,8 +1028,20 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "", budg
             recall_context = "\n".join(lines)
             parts.append(recall_context)
 
-    # Cache the recall portion (not directives) for subsequent calls
-    set_recall_cache(recall_context if all_results else "", db_path or "", user_id)
+    # Cache the recall portion (not directives) for subsequent calls.
+    #
+    # Issue #645 (M-36): only cache when it is safe to do so.
+    #  - If every query raised (model server down), do NOT cache —
+    #    re-search on the next call once the server recovers.
+    #  - A genuinely empty result (queries ran, found nothing) may cache "".
+    #  - If results existed pre-budget but the budget dropped them all
+    #    (recall_context == "" while all_results), do NOT cache "" —
+    #    caching it would hide real memories for the full TTL.
+    if any_query_succeeded and not (all_results and not recall_context):
+        set_recall_cache(
+            recall_context if all_results else "",
+            db_path or "", user_id, intensity=intensity, budget=budget,
+        )
 
     return "\n\n".join(parts) if parts else ""
 

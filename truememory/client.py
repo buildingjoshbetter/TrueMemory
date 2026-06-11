@@ -26,6 +26,20 @@ from truememory.engine import TrueMemoryEngine
 _DEFAULT_DB = Path.home() / ".truememory" / "memories.db"
 
 
+def _invalidate_recall_cache() -> None:
+    """Best-effort drop of the shared recall cache after a mutation.
+
+    Issue #645 (M-64): add/update/delete/delete_all must all invalidate so a
+    just-stored, edited, or forgotten memory is reflected in the very next
+    hook injection instead of after a full TTL.
+    """
+    try:
+        from truememory.ingest.hooks._shared import invalidate_recall_cache
+        invalidate_recall_cache()
+    except Exception:
+        pass
+
+
 class Memory:
     """
     High-level memory interface for AI agents.
@@ -111,11 +125,7 @@ class Memory:
         result["metadata"] = metadata or {}
         # Issue #559: invalidate recall cache so the next hook invocation
         # picks up newly stored memories instead of serving stale results.
-        try:
-            from truememory.ingest.hooks._shared import invalidate_recall_cache
-            invalidate_recall_cache()
-        except Exception:
-            pass
+        _invalidate_recall_cache()
         return result
 
     def search(
@@ -256,11 +266,21 @@ class Memory:
         result = self._engine.update(memory_id, content=content)
         if result:
             result["user_id"] = result.get("sender", "")
+        # Issue #645 (M-64): mutating a memory must drop the recall cache so
+        # the next hook injects the new content instead of the stale copy.
+        if result:
+            _invalidate_recall_cache()
         return result
 
     def delete(self, memory_id: int) -> bool:
         """Delete a memory by ID."""
-        return self._engine.delete(memory_id)
+        deleted = self._engine.delete(memory_id)
+        # Issue #645 (M-64): "forget that" must take effect immediately —
+        # invalidate the recall cache so the deleted memory (PII, a fact the
+        # user retracted) is not re-injected for the rest of the TTL.
+        if deleted:
+            _invalidate_recall_cache()
+        return deleted
 
     def delete_all(self, user_id: str | None = None) -> bool:
         """Delete all memories, optionally filtered by user.
@@ -272,7 +292,11 @@ class Memory:
         Returns:
             True if any rows were deleted.
         """
-        return self._engine.delete_all(user_id=user_id)
+        deleted = self._engine.delete_all(user_id=user_id)
+        # Issue #645 (M-64): bulk delete must invalidate recall cache too.
+        if deleted:
+            _invalidate_recall_cache()
+        return deleted
 
     def stats(self) -> dict:
         """Return memory system statistics."""

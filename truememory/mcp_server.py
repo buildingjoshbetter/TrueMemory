@@ -1393,6 +1393,16 @@ def truememory_configure(
     config["tier"] = tier
     _save_config(config)
 
+    # Issue #645 (M-35): search_intensity is part of the recall cache key
+    # (it changes both the memory limit and the payload budget). A config
+    # change that the cache never learned about would keep serving the old
+    # intensity's payload for the full TTL, so drop the whole cache now.
+    try:
+        from truememory.ingest.hooks._shared import invalidate_recall_cache
+        invalidate_recall_cache()
+    except Exception:
+        pass
+
     # Invalidate cached LLM function so it picks up the new key
     if api_key:
         global _cached_llm_fn, _cached_llm_fn_built
