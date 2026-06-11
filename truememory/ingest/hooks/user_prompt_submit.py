@@ -297,23 +297,31 @@ def _try_per_exchange_store(prompt: str, session_id: str, user_id: str, db_path:
         from truememory.client import Memory
         with Memory(path=db_path or None) as m:
             # Novelty check: quick search to avoid dupes.
-            # Score-space contract (issue #632): m.search() returns
+            # Score-space contract (issue #632): a score is only a true
+            # absolute cosine similarity when its result is tagged
+            # score_space="cosine". The full search() pipeline can return
             # RELATIVELY normalized scores (FTS top hit pinned to 1.0;
-            # reranker fused scores min-max pinned), NOT absolute cosine
-            # similarity. Comparing them to the absolute 0.85 cutoff drops
-            # any prompt sharing one keyword with a stored memory as a
-            # bogus "duplicate" — exactly when the embedder is dead. Only
-            # trust the number when it is cosine-space; otherwise fall back
-            # to the scale-free word-overlap heuristic.
+            # reranker fused scores min-max pinned) — comparing those to the
+            # absolute 0.85 cutoff drops any prompt sharing one keyword with
+            # a stored memory as a bogus "duplicate", exactly when the
+            # embedder is dead.
+            #
+            # Apply the 0.85 cosine cutoff ONLY to cosine-space scores.
+            # Missing tag defaults to cosine for back-compat (matches
+            # dedup.py): raw vector hits and callers that predate the tag
+            # are genuine cosine. When the tag is explicitly "relative" the
+            # number is untrustworthy, so fall back to the scale-free
+            # word-overlap heuristic instead. (#631 makes the vector path
+            # emit true cosine, so this stays correct as it lands.)
             existing = m.search(prompt, user_id=user_id or None, limit=3)
             if existing:
                 for r in existing:
                     score = r.get("score", 0.0)
-                    if r.get("score_space", "relative") == "cosine":
+                    if r.get("score_space", "cosine") != "relative":
                         if score > 0.85:
-                            return  # Too similar to existing memory
+                            return  # Too similar to existing memory (cosine)
                     elif _word_overlap(prompt, r.get("content", "")) > 0.85:
-                        return  # Scale-free near-duplicate
+                        return  # Scale-free near-duplicate (relative score)
 
             # Run through encoding gate
             from truememory.ingest.encoding_gate import EncodingGate

@@ -175,7 +175,7 @@ def test_novelty_relative_one_keyword_overlap_not_dropped():
         "score_space": "relative",
     }
     # Replicates the guarded novelty decision in _try_per_exchange_store.
-    is_cosine = hit.get("score_space", "relative") == "cosine"
+    is_cosine = hit.get("score_space", "cosine") != "relative"
     dropped = (
         (is_cosine and hit["score"] > 0.85)
         or (not is_cosine and _word_overlap(prompt, hit["content"]) > 0.85)
@@ -193,12 +193,28 @@ def test_novelty_relative_true_duplicate_dropped():
         "score": 1.0,
         "score_space": "relative",
     }
-    is_cosine = hit.get("score_space", "relative") == "cosine"
+    is_cosine = hit.get("score_space", "cosine") != "relative"
     dropped = (
         (is_cosine and hit["score"] > 0.85)
         or (not is_cosine and _word_overlap(prompt, hit["content"]) > 0.85)
     )
     assert dropped is True
+
+
+def test_novelty_untagged_cosine_score_dropped():
+    """Back-compat (mirrors #634): an untagged high score is treated as
+    cosine and a near-duplicate above 0.85 IS dropped, even when its content
+    shares no words with the prompt (so word-overlap could not catch it)."""
+    from truememory.ingest.hooks.user_prompt_submit import _word_overlap
+
+    prompt = "I prefer dark mode for all my editors"
+    hit = {"content": "x", "score": 0.95}  # no score_space tag
+    is_cosine = hit.get("score_space", "cosine") != "relative"
+    dropped = (
+        (is_cosine and hit["score"] > 0.85)
+        or (not is_cosine and _word_overlap(prompt, hit["content"]) > 0.85)
+    )
+    assert dropped is True, "untagged 0.95 score must be treated as cosine and dropped"
 
 
 # ── client.py score_space tagging ─────────────────────────────────────────
