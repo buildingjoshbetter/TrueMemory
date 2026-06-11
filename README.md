@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/buildingjoshbetter/TrueMemory"><img src="https://img.shields.io/github/stars/buildingjoshbetter/TrueMemory?style=social" alt="Stars"></a>
-  <a href="https://pepy.tech/projects/truememory"><img src="https://static.pepy.tech/personalized-badge/truememory?period=total&units=NONE&left_color=white&right_color=%2339FF14&left_text=installs" alt="PyPI Installs"></a>
+  <a href="https://pepy.tech/projects/truememory"><img src="https://img.shields.io/pepy/dt/truememory?style=flat&label=installs&color=39FF14&labelColor=white" alt="PyPI Installs"></a>
   &nbsp;–&nbsp;
   <a href="./i18n/README.zh-CN.md"><img alt="简体中文" src="https://img.shields.io/badge/简体中文-d9d9d9"></a>
   <a href="./i18n/README.ru.md"><img alt="Русский" src="https://img.shields.io/badge/Русский-d9d9d9"></a>
