@@ -1288,12 +1288,17 @@ class TrueMemoryEngine:
         # rebuild; route the user through truememory_configure() instead.
         self._has_vectors = False
         if _HAS_VECTOR:
-            from truememory.vector_search import _active_vec_table
+            from truememory.vector_search import (
+                _active_vec_table,
+                vectors_are_built,
+            )
             vec_tbl = _active_vec_table(self.conn)
-            try:
-                self.conn.execute(f"SELECT 1 FROM {vec_tbl} LIMIT 1").fetchone()
+            # vectors_are_built() returns False for a table left ``in_progress``
+            # by an interrupted build (issue #647) — so a partial/empty table is
+            # rebuilt rather than trusted, not just one that's missing.
+            if vectors_are_built(self.conn, vec_tbl):
                 self._has_vectors = True
-            except Exception:
+            else:
                 logger.warning(
                     "Vector table %r missing or unreadable; attempting rebuild "
                     "with current model=%s",
