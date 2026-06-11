@@ -17,12 +17,9 @@ Covers the three M-findings plus the deferred M-47 (#652):
 """
 from __future__ import annotations
 
-import os
 
 import pytest
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from truememory.ingest.hooks import _shared
 

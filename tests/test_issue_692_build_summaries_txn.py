@@ -9,10 +9,7 @@ caller's txn without committing it and never touches isolation_level.
 
 No model loads.
 """
-import os
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 import inspect
 

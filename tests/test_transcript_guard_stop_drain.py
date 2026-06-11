@@ -9,10 +9,7 @@ tests fail pre-fix, pass post-fix.
 
 FTS-only / no model loads.
 """
-import os
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from truememory.ingest.hooks._shared import is_allowed_transcript, _transcript_roots
 

@@ -24,11 +24,9 @@ All tests mock the model/embedding layer (no real model loads).
 from __future__ import annotations
 
 import json
-import os
 
 import pytest
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 
 # ---------------------------------------------------------------------------

@@ -8,10 +8,7 @@ read content/score, never ranked order.
 
 No model loads — uses a stub Memory that records the _skip_reranker kwarg.
 """
-import os
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 
 class _RecordingMemory:

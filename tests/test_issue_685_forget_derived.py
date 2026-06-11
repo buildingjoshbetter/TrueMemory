@@ -11,10 +11,7 @@ any summary that lists the message id).
 FTS-only / no model loads — exercises delete_message directly against
 hand-seeded derived rows.
 """
-import os
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 import json
 

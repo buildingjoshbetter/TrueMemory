@@ -9,10 +9,7 @@ Post-fix: it returns [] early without touching FTS.
 
 FTS-only / no model loads.
 """
-import os
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 import truememory.consolidation as consolidation
 from truememory.consolidation import search_consolidated

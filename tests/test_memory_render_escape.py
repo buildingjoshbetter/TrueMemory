@@ -8,10 +8,7 @@ block. These tests fail pre-fix, pass post-fix.
 
 FTS-only / no model loads.
 """
-import os
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from truememory._sanitize import sanitize_injection_content
 

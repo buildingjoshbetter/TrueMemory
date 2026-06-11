@@ -9,10 +9,7 @@ divergence keeps both facts (ADD) and only true paraphrases fast-SKIP.
 
 No model loads — drives check_duplicate with a stubbed search function.
 """
-import os
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from truememory.ingest.dedup import (
     check_duplicate,

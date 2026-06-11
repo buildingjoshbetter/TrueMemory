@@ -96,6 +96,7 @@ packages = ["truememory"]
 # _working/ (149MB of paper drafts, audit logs, bench archives).
 exclude = [
     "/_working",
+    "/tests",  # A2-4 (#697): tests are not needed in the source distribution
     "/.claude",
     "/dist",
     "/build",

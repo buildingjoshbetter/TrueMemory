@@ -9,10 +9,7 @@ Post-fix: _ensure_connection probes the cached handle and reconnects on failure.
 
 FTS-only / no model loads.
 """
-import os
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 import sqlite3
 

@@ -201,7 +201,7 @@ results = m.search_deep("career history?", user_id="alex")  # multi-round, highe
 |---|---|
 | [Getting Started](docs/guides/getting-started.md) | Install to first memory |
 | [Python API Reference](docs/python-api.md) | Full `Memory` class reference |
-| [MCP Tool Reference](docs/mcp-tools.md) | All 8 MCP tools |
+| [MCP Tool Reference](docs/mcp-tools.md) | All 11 MCP tools |
 | [CLI Reference](docs/cli.md) | `truememory-mcp` and `truememory-ingest` |
 | [Environment Variables](docs/env-vars.md) | All `TRUEMEMORY_*` config options |
 | [Architecture Deep Dive](docs/architecture.md) | 6-layer retrieval pipeline, encoding gate |

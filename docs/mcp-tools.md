@@ -1,6 +1,6 @@
 # MCP Tool Reference
 
-TrueMemory exposes 9 tools via the Model Context Protocol. These are called by Claude Code, Claude Desktop, and other MCP-compatible clients.
+TrueMemory exposes 11 tools via the Model Context Protocol. These are called by Claude Code, Claude Desktop, and other MCP-compatible clients.
 
 ---
 

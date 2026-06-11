@@ -28,7 +28,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 import truememory.ingest.markers as markers
 import truememory.ingest.dedup as dedup

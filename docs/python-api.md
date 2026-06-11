@@ -31,15 +31,16 @@ with Memory() as m:
 
 ---
 
-## m.add(content, user_id=None, metadata=None) → dict
+## m.add(content, user_id=None, metadata=None, directive=False) → dict
 
-Store a memory. Returns a dict with the new memory's `id`, `content`, `user_id`, and `created_at`. Empty or whitespace-only content is silently skipped (returns `{"id": None}`).
+Store a memory. Returns a dict with the new memory's `id`, `content`, `user_id`, and `created_at`. Empty or whitespace-only content is skipped (a warning is issued and a skip-marker `{"id": None}` is returned).
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `content` | `str` | required | The fact or preference to store. Write as a clear, atomic statement. |
 | `user_id` | `str \| None` | `None` | Scope this memory to a specific user. |
-| `metadata` | `dict \| None` | `None` | Reserved for future use. |
+| `metadata` | `dict \| None` | `None` | JSON-serializable metadata persisted with the memory and round-tripped on retrieval (live since v0.7.x). |
+| `directive` | `bool` | `False` | Store as a standing directive (an always-injected instruction) rather than a recallable fact. |
 
 ```python
 result = m.add("Prefers TypeScript over JavaScript", user_id="alice")

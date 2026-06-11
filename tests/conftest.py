@@ -27,6 +27,17 @@ import sqlite3
 
 import pytest
 
+# V-cigate-1 (#697): offline mode is set ONCE here, in the single conftest that
+# pytest imports before any test module, instead of each test module doing its
+# own module-level os.environ.setdefault("HF_HUB_OFFLINE", "1"). Those scattered
+# import-time mutations were the §3.5 class behind the original network-tests
+# leak (#654): pytest imports every module during collection, so an offline
+# setdefault leaked into the online job. setdefault (not [...]=) so the
+# network-tests job's explicit HF_HUB_OFFLINE="0" still wins. A guard test
+# (test_ci_isolation) fails if a test module reintroduces the antipattern.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
 
 def _can_load_sqlite_vec() -> bool:
     """True if sqlite-vec can be loaded into a connection."""
