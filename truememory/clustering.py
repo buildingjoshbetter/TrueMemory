@@ -200,6 +200,7 @@ def search_clustered(
     query: str,
     limit: int = 10,
     top_clusters: int = 3,
+    include_directives: bool = False,
 ) -> list[dict]:
     """
     Two-stage clustered search: find top clusters, then search within them.
@@ -273,11 +274,15 @@ def search_clustered(
     id_placeholders = ",".join("?" * len(cluster_msg_ids))
     msg_ids_list = list(cluster_msg_ids)
 
+    directive_filter = (
+        "" if include_directives
+        else " AND (m.directive = 0 OR m.directive IS NULL)"
+    )
     messages = conn.execute(
         f"""SELECT m.id, m.content, m.sender, m.recipient, m.timestamp,
-                   m.category, m.modality
+                   m.category, m.modality, m.directive
             FROM messages m
-            WHERE m.id IN ({id_placeholders})""",
+            WHERE m.id IN ({id_placeholders}){directive_filter}""",
         msg_ids_list,
     ).fetchall()
 
@@ -333,6 +338,7 @@ def search_clustered(
             "timestamp": msg[4],
             "category": msg[5],
             "modality": msg[6],
+            "directive": bool(msg[7]),
             "score": sim,
             "source": "clustered",
         })

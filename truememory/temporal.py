@@ -515,6 +515,7 @@ def search_temporal(
     fts_results: list[dict] | None = None,
     hybrid_results: list[dict] | None = None,
     limit: int = 10,
+    include_directives: bool = False,
 ) -> list[dict]:
     """
     Apply temporal filtering and re-ranking to search results.
@@ -580,7 +581,8 @@ def search_temporal(
     # --- If not enough results, do a fresh SQL query with time constraints ---
     if len(results) < limit and (after or before):
         existing_ids = {r.get("id") for r in results}
-        extra = get_timeline(conn, after=after, before=before)
+        extra = get_timeline(conn, after=after, before=before,
+                             include_directives=include_directives)
         for msg in extra:
             if msg["id"] not in existing_ids:
                 results.append(msg)
@@ -598,6 +600,7 @@ def get_timeline(
     entity: str | None = None,
     after: str | None = None,
     before: str | None = None,
+    include_directives: bool = False,
 ) -> list[dict]:
     """
     Get a chronological timeline of messages.
@@ -639,6 +642,12 @@ def get_timeline(
         entity_lower = entity.lower()
         clauses.append("(LOWER(sender) = ? OR LOWER(recipient) = ?)")
         params.extend([entity_lower, entity_lower])
+
+    # Defense-in-depth (#637 M-91): exclude directives unless explicitly
+    # requested.  The engine masks these via its final filter, but direct
+    # callers of the fallback would otherwise receive directive content.
+    if not include_directives:
+        clauses.append("(directive = 0 OR directive IS NULL)")
 
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     sql = f"SELECT {_SELECT_COLS} FROM messages{where} ORDER BY timestamp"

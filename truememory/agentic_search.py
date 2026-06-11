@@ -234,13 +234,21 @@ def clean_results(
     results: list[dict],
     limit: int,
     max_per_session: int = 0,
+    include_directives: bool = False,
 ) -> list[dict]:
-    """Deduplicate, clean, and optionally enforce session-diversity on results."""
+    """Deduplicate, clean, and optionally enforce session-diversity on results.
+
+    Defense-in-depth: directive rows (directive=1) are dropped unless
+    include_directives is True, so directive content can never leak through
+    the agentic cleaning leg even if an upstream supplement forgot to filter.
+    """
     cleaned: list[dict] = []
     seen_ids: set = set()
     seen_content: set = set()
 
     for r in results:
+        if not include_directives and r.get("directive"):
+            continue
         content = r.get("content", "")
         rid = r.get("id")
 
