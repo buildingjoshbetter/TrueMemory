@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 
 from truememory import _platform
+from truememory._platform import _env_int
 
 try:
     import fcntl
@@ -38,7 +39,7 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 
-_BASE_MEMORY_LIMIT = int(os.environ.get("TRUEMEMORY_RECALL_LIMIT", "25"))
+_BASE_MEMORY_LIMIT = _env_int("TRUEMEMORY_RECALL_LIMIT", 25, lo=1)
 
 # Issue #396: search intensity scales the recall limit at session start.
 # Standard = 25, Enhanced/Max = 35.
@@ -84,12 +85,12 @@ def _get_search_intensity() -> str:
 MEMORY_LIMIT = _BASE_MEMORY_LIMIT  # module-level default; overridden in main()
 # Max directives force-injected at session start. Uncapped injection let a
 # large directive set consume unbounded context (issue #589, D-4).
-DIRECTIVE_LIMIT = int(os.environ.get("TRUEMEMORY_DIRECTIVE_LIMIT", "50"))
+DIRECTIVE_LIMIT = _env_int("TRUEMEMORY_DIRECTIVE_LIMIT", 50, lo=0)
 # Per-memory character cap and total payload budget (issue #578).
 # Memories exceeding the per-entry cap are sliced on a word boundary and
 # suffixed with a pointer so the agent can fetch the full text on demand.
-RECALL_MEMORY_CHARS = int(os.environ.get("TRUEMEMORY_RECALL_MEMORY_CHARS", "500"))
-RECALL_BUDGET_CHARS = int(os.environ.get("TRUEMEMORY_RECALL_BUDGET_CHARS", "8192"))
+RECALL_MEMORY_CHARS = _env_int("TRUEMEMORY_RECALL_MEMORY_CHARS", 500, lo=0)
+RECALL_BUDGET_CHARS = _env_int("TRUEMEMORY_RECALL_BUDGET_CHARS", 8192, lo=0)
 
 # Issue #636 (M-72): "max" intensity raises MEMORY_LIMIT to 35 but the recall
 # payload was still capped at RECALL_BUDGET_CHARS (8KB), so _apply_budget
@@ -120,7 +121,7 @@ _DRAIN_CAP = 3
 _SCAN_MARKER = Path.home() / ".truememory" / ".last_stale_scan"
 _SCAN_INTERVAL = 900  # 15 minutes
 _SCAN_CAP = 3  # max sessions to queue per scan
-_EXTRACTED_MARKER_MAX_AGE = int(os.environ.get("TRUEMEMORY_EXTRACTED_MARKER_MAX_AGE_DAYS", "30")) * 86400
+_EXTRACTED_MARKER_MAX_AGE = _env_int("TRUEMEMORY_EXTRACTED_MARKER_MAX_AGE_DAYS", 30, lo=0) * 86400
 
 _EXTRACTION_SENTINEL = "[[TRUEMEMORY_INTERNAL_EXTRACTION]]"
 _EXTRACTION_LEGACY_PREFIXES = (

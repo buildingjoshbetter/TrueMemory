@@ -16,6 +16,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from truememory._platform import _env_int
+
 try:
     import psutil
 except ImportError:
@@ -23,7 +25,7 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 
-_BASE_MEMORY_LIMIT = int(os.environ.get("TRUEMEMORY_RECALL_LIMIT", "25"))
+_BASE_MEMORY_LIMIT = _env_int("TRUEMEMORY_RECALL_LIMIT", 25, lo=1)
 
 # Issue #396: search intensity scales the recall limit.
 # Standard = 25, Enhanced/Max = 35.
@@ -53,8 +55,8 @@ BUFFER_DIR = Path(os.environ.get(
     "TRUEMEMORY_BUFFER_DIR",
     str(Path.home() / ".truememory" / "buffers"),
 ))
-RETENTION_DAYS = int(os.environ.get("TRUEMEMORY_BUFFER_RETENTION_DAYS", "7"))
-MAX_BUFFER_SIZE = int(os.environ.get("TRUEMEMORY_BUFFER_MAX_BYTES", str(10 * 1024 * 1024)))
+RETENTION_DAYS = _env_int("TRUEMEMORY_BUFFER_RETENTION_DAYS", 7, lo=0)
+MAX_BUFFER_SIZE = _env_int("TRUEMEMORY_BUFFER_MAX_BYTES", 10 * 1024 * 1024, lo=1)
 
 TRACE_DIR = Path.home() / ".truememory" / "traces"
 LOG_DIR = Path.home() / ".truememory" / "logs"

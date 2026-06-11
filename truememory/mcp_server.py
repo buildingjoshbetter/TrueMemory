@@ -317,6 +317,7 @@ if isinstance(_startup_tier, str) and _startup_tier.strip():
     os.environ["TRUEMEMORY_EMBED_MODEL"] = _startup_tier
 
 from truememory import __version__  # noqa: E402
+from truememory._platform import _env_int  # noqa: E402
 from truememory.client import Memory  # noqa: E402
 from truememory.telemetry import tracked as _tracked  # noqa: E402
 
@@ -1650,8 +1651,8 @@ def truememory_consolidate() -> str:
 # Background model preloading
 # ---------------------------------------------------------------------------
 
-_MODEL_IDLE_TIMEOUT_SEC = int(os.environ.get("TRUEMEMORY_MODEL_IDLE_SEC", "300"))
-_MAX_RSS_MB = int(os.environ.get("TRUEMEMORY_MAX_RSS_MB", "0"))
+_MODEL_IDLE_TIMEOUT_SEC = _env_int("TRUEMEMORY_MODEL_IDLE_SEC", 300, lo=0)
+_MAX_RSS_MB = _env_int("TRUEMEMORY_MAX_RSS_MB", 0, lo=0)
 _last_search_time: float = 0.0
 _idle_timer: threading.Timer | None = None
 _idle_timer_lock = threading.Lock()
@@ -1776,7 +1777,7 @@ def _preload_models():
 # Background backlog drainer
 # ---------------------------------------------------------------------------
 
-_BACKLOG_DRAIN_INTERVAL_NORMAL = int(os.environ.get("TRUEMEMORY_DRAIN_INTERVAL_SEC", "30"))
+_BACKLOG_DRAIN_INTERVAL_NORMAL = _env_int("TRUEMEMORY_DRAIN_INTERVAL_SEC", 30, lo=1)
 _BACKLOG_DRAIN_INTERVAL_IDLE = 120
 _BACKLOG_LARGE_THRESHOLD = 20
 _BACKLOG_DIR = Path.home() / ".truememory" / "backlog"

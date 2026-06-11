@@ -20,6 +20,43 @@ _LOOPBACK_HOST: str = "127.0.0.1"
 
 
 # ---------------------------------------------------------------------------
+# Safe environment-variable parsing (issue #639)
+# ---------------------------------------------------------------------------
+
+def _env_int(
+    name: str,
+    default: int,
+    lo: int | None = None,
+    hi: int | None = None,
+) -> int:
+    """Read integer env var *name*, never crashing at import.
+
+    An unset, empty, or non-numeric value (e.g. ``""``, ``"abc"``, ``"1.5"``)
+    returns *default* instead of raising ``ValueError`` — a module-level bare
+    ``int(os.environ.get(...))`` would otherwise crash the whole hook/server
+    at import, before any ``main()`` try/except can catch it (M-27).
+
+    When *lo* / *hi* are given the parsed value is clamped into ``[lo, hi]``,
+    guarding against negative/zero knobs that parse but misbehave — e.g. a
+    negative SQLite ``LIMIT`` meaning "unlimited", or a zero "consolidate
+    every N" meaning "consolidate on every add" (M-59).
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except (ValueError, TypeError):
+            value = default
+    if lo is not None and value < lo:
+        value = lo
+    if hi is not None and value > hi:
+        value = hi
+    return value
+
+
+# ---------------------------------------------------------------------------
 # Cross-platform PID liveness
 # ---------------------------------------------------------------------------
 
