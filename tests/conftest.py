@@ -50,6 +50,51 @@ requires_sqlite_ext = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_truememory_home(tmp_path_factory):
+    """Point the model-server socket/state and ``$HOME`` at a session tmp dir.
+
+    Issue #654 (M-54): ``model_client.SOCK_PATH`` / ``model_server.SOCK_PATH``
+    are computed at import time from ``Path.home() / ".truememory"`` — i.e. the
+    contributor's REAL user-global socket. Without isolation, a test that
+    probes ``_server_ready()`` / autostart can connect to (or stomp on)
+    whatever live daemon the developer is running, producing order- and
+    machine-dependent flakes.
+
+    This session-scoped autouse fixture redirects the module-level path
+    attributes on both modules at a hermetic tmp ``.truememory`` dir and sets
+    ``$HOME`` so any *new* code that recomputes ``Path.home()`` also lands in
+    the sandbox. Per-test ``patch.object(..., "SOCK_PATH", ...)`` calls still
+    override these baselines within their own scope, so existing socket tests
+    are unaffected.
+    """
+    home = tmp_path_factory.mktemp("tm_home")
+    tm_dir = home / ".truememory"
+    tm_dir.mkdir(parents=True, exist_ok=True)
+
+    # Set HOME first so it is captured by the per-test ``_isolate_environ``
+    # snapshot and therefore persists across the whole session.
+    os.environ["HOME"] = str(home)
+
+    for mod_name in ("truememory.model_client", "truememory.model_server"):
+        try:
+            mod = __import__(mod_name, fromlist=["_TRUEMEMORY_DIR"])
+        except Exception:
+            continue
+        if hasattr(mod, "_TRUEMEMORY_DIR"):
+            mod._TRUEMEMORY_DIR = tm_dir
+        for attr, name in (
+            ("SOCK_PATH", "model.sock"),
+            ("PID_PATH", "model_server.pid"),
+            ("PORT_PATH", "model_server.port"),
+            ("TOKEN_PATH", "model_server.token"),
+            ("LOCK_PATH", "model_server.lock"),
+        ):
+            if hasattr(mod, attr):
+                setattr(mod, attr, tm_dir / name)
+    yield
+
+
 @pytest.fixture(autouse=True)
 def _isolate_environ():
     """Snapshot/restore ``os.environ`` around every test.

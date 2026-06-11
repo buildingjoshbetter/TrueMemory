@@ -16,6 +16,10 @@ concurrency:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    # Issue #654 (M-82): matrix entries flagged `experimental` (e.g. 3.14)
+    # don't gate the merge; all stable entries default to false and remain
+    # required.
+    continue-on-error: ${{ matrix.experimental || false }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -29,6 +33,15 @@ jobs:
             python-version: "3.11"
           - os: ubuntu-latest
             python-version: "3.13"
+          # Issue #654 (M-82): Python 3.14 is the homebrew default but was
+          # untested. Added non-gating (continue-on-error) for now: 3.14 may
+          # surface the known test_upgrade_path UnicodeDecodeError + gate_eval
+          # issues that are environment/version-specific, and we do NOT skip
+          # real tests just to make 3.14 green. Promote to required once 3.14
+          # is clean.
+          - os: ubuntu-latest
+            python-version: "3.14"
+            experimental: true
     steps:
       - uses: actions/checkout@v6
       - name: Set up Python ${{ matrix.python-version }}
@@ -51,13 +64,19 @@ jobs:
       - name: Lint
         run: ruff check truememory/ tests/
 
-  # Issue #426: model-download tests run here, isolated from the gate. This job
-  # exercises real HuggingFace downloads so coverage is NOT weakened, but a
-  # network flake here does not block PRs or releases (continue-on-error).
+  # Issue #426 / #654 (M-52): model-download tests run here, isolated from the
+  # gate. This job exercises real HuggingFace downloads + the real embedding
+  # path (test_issue_654_real_vector_smoke), so the L2-vs-cosine class of bug
+  # can no longer merge green.
+  #
+  # Previously this job was `continue-on-error: true`, which silently swallowed
+  # real-vector regressions (this is how the M-03 cosine bug shipped). It is now
+  # gating, but with a 3x retry loop so a transient HfHubHTTPError (network
+  # flake, not a code regression) does not block PRs or releases. Only a
+  # genuine, reproducible failure across all attempts fails CI.
   network-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
       - name: Set up Python 3.12
@@ -68,8 +87,20 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: Install dependencies
         run: pip install -e ".[all,dev]"
-      - name: Run network-marked tests
-        run: pytest tests/ -v -m "network"
+      - name: Run network-marked tests (retried for transient HF flakes)
+        run: |
+          for attempt in 1 2 3; do
+            echo "::group::network-tests attempt $attempt"
+            if pytest tests/ -v -m "network"; then
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "network-tests attempt $attempt failed; retrying after backoff..."
+            sleep $((attempt * 15))
+          done
+          echo "network-tests failed after 3 attempts — treating as a real regression."
+          exit 1
 
   # Hunter F26: catch packaging regressions (missing py.typed, metadata
   # errors, broken README rendering, sdist contents) in CI instead of
@@ -92,3 +123,10 @@ jobs:
         run: python -m build
       - name: Verify package metadata
         run: twine check --strict dist/*
+      # Issue #654 (M-83): actually install the built wheel and exercise the
+      # console entry point, so a broken/missing entry-point or import-time
+      # failure is caught here (not just at release).
+      - name: Install wheel and smoke-test console script
+        run: |
+          pip install dist/*.whl
+          truememory-mcp --help
