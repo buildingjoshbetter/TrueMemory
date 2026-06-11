@@ -204,6 +204,13 @@ def _check_conversation_depth(session_id: str, prompt: str, window: int = 5) -> 
     Reads the last `window` buffer entries and checks if the current prompt
     shares significant keywords with them, suggesting a sustained topic
     worth capturing.
+
+    The current prompt has already been appended to the buffer by ``main()``
+    before this runs, so the final buffer entry IS the current prompt. We
+    exclude it (``lines[:-1]``) — otherwise the prompt always overlaps with
+    itself and "enhanced" becomes indistinguishable from "max" (issue #634,
+    M-17). This means a shallow/first-prompt exchange (no prior on-topic
+    history) correctly does NOT fire under "enhanced".
     """
     safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "unknown"
     buffer_file = _PROMPT_COUNTER_DIR.parent / "buffers" / f"{safe_id}.jsonl"
@@ -218,7 +225,9 @@ def _check_conversation_depth(session_id: str, prompt: str, window: int = 5) -> 
     try:
         recent_words: set[str] = set()
         lines = buffer_file.read_text(encoding="utf-8").strip().splitlines()
-        for line in lines[-window:]:
+        # Exclude the final entry: it is the current prompt (issue #634, M-17).
+        prior_lines = lines[:-1]
+        for line in prior_lines[-window:]:
             try:
                 entry = json.loads(line)
                 content = entry.get("content", "")
@@ -247,33 +256,48 @@ def _try_per_exchange_store(prompt: str, session_id: str, user_id: str, db_path:
     if not _detect_storable_content(prompt):
         return
 
-    # Enhanced: require conversation depth; Max: skip depth check
+    # Enhanced: require conversation depth; Max: skip depth check.
+    # The depth check excludes the current prompt (already buffered by main())
+    # so "enhanced" does not trivially match itself (issue #634, M-17).
     if store_intensity == "enhanced" and not _check_conversation_depth(session_id, prompt):
         return
 
-    # Novelty check: quick search to avoid dupes
+    # Issue #634 (M-18): arm the same model-server deadline the recall paths
+    # use so a slow/contended model server can't hang prompt submission on the
+    # two searches + add below. Without this the store path runs synchronously
+    # with no deadline before any recall path gets to set one.
+    try:
+        from truememory.ingest.hooks._shared import get_recall_deadline
+        from truememory.model_client import set_request_timeout
+        set_request_timeout(get_recall_deadline())
+    except Exception:
+        pass
+
+    # Issue #634 (M-04): the encoding gate returns EncodingDecision with a
+    # `should_encode` attribute (not `passed`). The previous code read
+    # `decision.passed`, which raised AttributeError swallowed by the blanket
+    # except below, so the store path stored ZERO rows. The Memory instance
+    # was also never closed (leak). Both are fixed here.
     try:
         from truememory.client import Memory
-        m = Memory(path=db_path or None)
-        existing = m.search(prompt, user_id=user_id or None, limit=3)
-        if existing:
-            for r in existing:
-                score = r.get("score", 0.0)
-                if score > 0.85:
-                    return  # Too similar to existing memory
-    except Exception:
-        return  # If search fails, skip storing
+        with Memory(path=db_path or None) as m:
+            # Novelty check: quick search to avoid dupes
+            existing = m.search(prompt, user_id=user_id or None, limit=3)
+            if existing:
+                for r in existing:
+                    score = r.get("score", 0.0)
+                    if score > 0.85:
+                        return  # Too similar to existing memory
 
-    # Run through encoding gate
-    try:
-        from truememory.ingest.encoding_gate import EncodingGate
-        gate = EncodingGate(memory=m, user_id=user_id or "")
-        decision = gate.evaluate(prompt)
-        if not decision.passed:
-            return
+            # Run through encoding gate
+            from truememory.ingest.encoding_gate import EncodingGate
+            gate = EncodingGate(memory=m, user_id=user_id or "")
+            decision = gate.evaluate(prompt)
+            if not decision.should_encode:
+                return
 
-        # Store the content
-        m.add(content=prompt, user_id=user_id or None)
+            # Store the content
+            m.add(content=prompt, user_id=user_id or None)
     except Exception:
         pass  # Never crash the hook
 
