@@ -313,8 +313,13 @@ def _ensure_metadata_table(conn: sqlite3.Connection) -> None:
     )
 
 
-def _write_embedder_metadata(conn: sqlite3.Connection) -> None:
-    """Record `(embed_model, embed_dim)` so later opens can detect drift."""
+def _write_embedder_metadata_no_commit(conn: sqlite3.Connection) -> None:
+    """Stage `(embed_model, embed_dim)` rows WITHOUT committing.
+
+    Lets callers (build_vectors / build_separation_vectors) commit the embedder
+    metadata in the same transaction as clearing the in-progress marker, so the
+    table is never "trusted" under stale metadata (issue #647).
+    """
     _ensure_metadata_table(conn)
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     conn.execute(
@@ -325,7 +330,88 @@ def _write_embedder_metadata(conn: sqlite3.Connection) -> None:
         "INSERT OR REPLACE INTO metadata(key, value, updated_at) VALUES (?, ?, ?)",
         ("embed_dim", str(_embedding_dim), now),
     )
+
+
+def _write_embedder_metadata(conn: sqlite3.Connection) -> None:
+    """Record `(embed_model, embed_dim)` so later opens can detect drift."""
+    _write_embedder_metadata_no_commit(conn)
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Build-state marker (issue #647)
+# ---------------------------------------------------------------------------
+#
+# A vec0 table that exists with rows looks "built" to engine.open() — but a run
+# killed mid-embed (or one that hit a None content / NaN embedding) leaves a
+# partial or empty table that must NOT be trusted. We persist an in-progress
+# marker in the SAME transaction as the destructive DELETE and clear it only
+# with the final commit (alongside the embedder metadata). Any table whose
+# marker is still ``in_progress`` is treated as NOT built and rebuilt.
+#
+# This is deliberately separate from #631's ``*_cos_stage`` staging tables:
+# that machinery makes the *L2→cosine re-norm* (no re-embed) crash-safe; this
+# marker makes the *re-embed* (build_vectors / build_separation_vectors) crash-
+# safe. They compose — a build leaves the marker; a cosine migration leaves a
+# stage table; neither touches the other's state.
+
+_BUILD_STATE_KEY_PREFIX = "vec_build_state:"
+
+
+def _build_state_key(table_name: str) -> str:
+    return f"{_BUILD_STATE_KEY_PREFIX}{table_name}"
+
+
+def _mark_build_in_progress(conn: sqlite3.Connection, table_name: str) -> None:
+    """Record that *table_name* is mid-build. Caller controls the commit so the
+    marker lands in the same transaction as the DELETE that wipes the table."""
+    _ensure_metadata_table(conn)
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    conn.execute(
+        "INSERT OR REPLACE INTO metadata(key, value, updated_at) VALUES (?, ?, ?)",
+        (_build_state_key(table_name), "in_progress", now),
+    )
+
+
+def _clear_build_in_progress(conn: sqlite3.Connection, table_name: str) -> None:
+    """Clear the in-progress marker for *table_name*. Caller controls commit."""
+    _ensure_metadata_table(conn)
+    conn.execute(
+        "DELETE FROM metadata WHERE key = ?", (_build_state_key(table_name),)
+    )
+
+
+def _build_in_progress(conn: sqlite3.Connection, table_name: str) -> bool:
+    """True if *table_name* has an uncleared in-progress build marker."""
+    try:
+        _ensure_metadata_table(conn)
+        row = conn.execute(
+            "SELECT value FROM metadata WHERE key = ?",
+            (_build_state_key(table_name),),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return bool(row) and row[0] == "in_progress"
+
+
+def vectors_are_built(
+    conn: sqlite3.Connection, table_name: str | None = None
+) -> bool:
+    """True if the active (or named) vec table is present, readable, and not
+    mid-build.
+
+    A table left ``in_progress`` by an interrupted build is treated as NOT
+    built so engine.open() rebuilds it rather than trusting partial/empty data
+    (issue #647, M-21). Also returns False if the table is missing/unreadable.
+    """
+    tbl = table_name or _active_vec_table(conn)
+    if _build_in_progress(conn, tbl):
+        return False
+    try:
+        conn.execute(f"SELECT 1 FROM {tbl} LIMIT 1").fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return True
 
 
 def _read_embedder_metadata(
@@ -667,8 +753,35 @@ def build_vectors(
         return 0
 
     tbl = table_name or _active_vec_table(conn)
-    conn.execute(f"DELETE FROM {tbl}")
-    conn.commit()
+
+    # Resume vs. fresh build (issue #647, M-21).
+    #
+    # If a prior run was interrupted it left an ``in_progress`` marker. The
+    # rows already written are valid (each is L2-normalized at write time), so
+    # we resume from ``max(rowid)`` instead of re-wiping — no data confusion,
+    # no redundant re-embedding. On a fresh build we wipe and set the marker in
+    # the SAME transaction, so a crash before completion never leaves an
+    # untracked partial/empty table that engine.open() would trust.
+    resume_after = 0
+    if _build_in_progress(conn, tbl):
+        try:
+            resume_after = conn.execute(
+                f"SELECT MAX(rowid) FROM {tbl}"
+            ).fetchone()[0] or 0
+        except sqlite3.OperationalError:
+            resume_after = 0
+    if resume_after > 0:
+        messages = [m for m in messages if m["id"] > resume_after]
+        if not messages:
+            # Everything was already embedded before the interruption; just
+            # finalize (clear marker + write metadata) so the table is trusted.
+            _clear_build_in_progress(conn, tbl)
+            _write_embedder_metadata(conn)
+            return 0
+    else:
+        conn.execute(f"DELETE FROM {tbl}")
+        _mark_build_in_progress(conn, tbl)
+        conn.commit()  # DELETE + marker land atomically
 
     model = get_model()
     batch_size = _get_batch_size()
@@ -718,11 +831,13 @@ def build_vectors(
                 conn.commit()
                 batches_since_commit = 0
 
-    # Final commit for any remaining rows since last batch commit.
-    if batches_since_commit > 0:
-        conn.commit()
-
-    _write_embedder_metadata(conn)
+    # Final commit: clear the in-progress marker and stamp embedder metadata in
+    # the SAME transaction so the table is only ever "trusted" once it is fully
+    # built under the current embedder (issue #647: no NEW vectors under OLD
+    # metadata, no empty/partial table accepted as built).
+    _clear_build_in_progress(conn, tbl)
+    _write_embedder_metadata_no_commit(conn)
+    conn.commit()
     return total
 
 
@@ -892,6 +1007,7 @@ def build_separation_vectors(
     messages: list[dict] | None = None,
     *,
     table_name: str | None = None,
+    txn_batch: int | None = None,
 ) -> int:
     """
     Build separation embeddings: ``"{sender} to {recipient} on {date}: {content}"``.
@@ -929,11 +1045,34 @@ def build_separation_vectors(
         return 0
 
     tbl = table_name or _active_sep_table(conn)
-    conn.execute(f"DELETE FROM {tbl}")
+
+    # Resume vs. fresh build — same durability contract as build_vectors
+    # (issue #647, M-21 + M-45). Marker + DELETE land atomically; batched
+    # commits below release the write lock during the run (#619 treatment).
+    resume_after = 0
+    if _build_in_progress(conn, tbl):
+        try:
+            resume_after = conn.execute(
+                f"SELECT MAX(rowid) FROM {tbl}"
+            ).fetchone()[0] or 0
+        except sqlite3.OperationalError:
+            resume_after = 0
+    if resume_after > 0:
+        messages = [m for m in messages if m["id"] > resume_after]
+        if not messages:
+            _clear_build_in_progress(conn, tbl)
+            _write_embedder_metadata(conn)
+            return 0
+    else:
+        conn.execute(f"DELETE FROM {tbl}")
+        _mark_build_in_progress(conn, tbl)
+        conn.commit()  # DELETE + marker land atomically
 
     model = get_model()
     batch_size = _get_batch_size()
+    commit_every = txn_batch if txn_batch is not None else _BUILD_VECTORS_TXN_BATCH
     total = 0
+    batches_since_commit = 0
 
     try:
         import torch
@@ -975,11 +1114,19 @@ def build_separation_vectors(
                 )
 
             total += len(rows_to_insert)
+            batches_since_commit += 1
             del embeddings
             _flush_mps_cache()
 
+            if batches_since_commit >= commit_every:
+                conn.commit()
+                batches_since_commit = 0
+
+    # Final commit: clear the in-progress marker + stamp embedder metadata
+    # atomically (issue #647).
+    _clear_build_in_progress(conn, tbl)
+    _write_embedder_metadata_no_commit(conn)
     conn.commit()
-    _write_embedder_metadata(conn)
     return total
 
 
