@@ -310,20 +310,67 @@ def _parse_plain_text(text: str) -> list[Message]:
     return messages
 
 
+# TrueMemory injects context into the live conversation via XML-wrapped
+# blocks (the session_start / user_prompt_submit hooks emit
+# <truememory-recall>, <truememory-context>, <truememory-directives>,
+# <truememory-update>, <truememory-email-request>, <truememory-first-run>,
+# ...). When that injected text lands back in the transcript and is fed to
+# the extractor, the truncated near-duplicate memories get re-extracted as
+# *new* memories — an echo-amplification loop that grows generational copies
+# of the same fact (issue #652, M-19). We strip every <truememory-...>...
+# </truememory-...> wrapper (and any stray unclosed opener) before extraction
+# so our own injected context can never be mined back into the store.
+_TRUEMEMORY_BLOCK_RE = re.compile(
+    r"<truememory-[a-z0-9-]+\b[^>]*>.*?</truememory-[a-z0-9-]+>",
+    re.IGNORECASE | re.DOTALL,
+)
+_TRUEMEMORY_STRAY_TAG_RE = re.compile(
+    r"</?truememory-[a-z0-9-]+\b[^>]*>",
+    re.IGNORECASE,
+)
+
+
+def strip_truememory_blocks(text: str) -> str:
+    """Remove TrueMemory's own injected ``<truememory-*>`` context blocks.
+
+    These blocks are injected into the conversation by the recall hooks
+    (``session_start`` / ``user_prompt_submit``). Left in the transcript they
+    would be re-extracted as fresh memories, creating an echo loop of
+    truncated near-duplicates (issue #652). We drop whole wrapped blocks
+    first, then sweep any stray unbalanced opener/closer tags that survived
+    (e.g. a block split across a chunk boundary).
+    """
+    if "<truememory-" not in text.lower():
+        return text
+    cleaned = _TRUEMEMORY_BLOCK_RE.sub("", text)
+    cleaned = _TRUEMEMORY_STRAY_TAG_RE.sub("", cleaned)
+    return cleaned
+
+
 def format_for_extraction(messages: list[Message]) -> str:
     """
     Format parsed messages into a clean transcript for LLM extraction.
     Filters out tool calls and system messages — focuses on human conversation.
+
+    TrueMemory's own injected ``<truememory-*>`` recall/context blocks are
+    stripped from each message before formatting so they can't be re-mined
+    back into the store (issue #652, M-19).
     """
     lines = []
     for msg in messages:
         if msg.role in ("tool_use", "tool_result", "system"):
             continue
         role_label = "User" if msg.role == "human" else "Assistant"
+        # Drop any TrueMemory-injected context blocks before we consider
+        # length / truncation, so echoed recall never reaches the extractor.
+        content = strip_truememory_blocks(msg.content)
         # Truncate very long assistant responses (code output, etc.)
-        content = msg.content
         if msg.role == "assistant" and len(content) > 500:
             content = content[:500] + "... [truncated]"
+        # Stripping a block may leave a message empty — skip it entirely so we
+        # don't emit a bare "User:" / "Assistant:" label with no content.
+        if not content.strip():
+            continue
         lines.append(f"{role_label}: {content}")
 
     return "\n\n".join(lines)

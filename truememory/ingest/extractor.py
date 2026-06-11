@@ -505,12 +505,33 @@ def _extract_user_lines(transcript: str) -> str:
     lines.  We keep only lines that belong to a ``User:`` block so the
     heuristic extractor never fires on the assistant's own text (which
     would produce spurious facts like "I'm an AI assistant").
+
+    A single message can itself contain blank lines (a multi-paragraph
+    message), so splitting on ``"\n\n"`` produces *continuation* blocks that
+    carry no ``Role:`` prefix. Those belong to whichever role last opened a
+    block — we must track the current role and keep continuation paragraphs
+    of a user message rather than silently dropping everything after the
+    first paragraph (issue #652, M-65). Without this, the entire no-LLM
+    (Edge-tier) extraction path loses all but paragraph 1 of every
+    multi-paragraph user turn.
     """
     blocks = transcript.split("\n\n")
     user_blocks: list[str] = []
+    # None until we've seen a role-labelled block; tracks which role the
+    # current (and any following unlabelled continuation) blocks belong to.
+    current_is_user = False
     for block in blocks:
         stripped = block.strip()
-        if stripped.startswith("User:") or stripped.startswith("user:"):
+        if not stripped:
+            continue
+        lowered = stripped.lower()
+        if lowered.startswith("user:"):
+            current_is_user = True
+            user_blocks.append(stripped)
+        elif lowered.startswith("assistant:"):
+            current_is_user = False
+        elif current_is_user:
+            # Continuation paragraph of the in-progress user message.
             user_blocks.append(stripped)
     return "\n\n".join(user_blocks)
 
