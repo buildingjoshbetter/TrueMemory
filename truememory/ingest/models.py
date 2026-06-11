@@ -37,8 +37,11 @@ log = logging.getLogger(__name__)
 # budget_tokens, or explicit ``thinking: {type: disabled}``.  Covers both
 # Anthropic-direct IDs (``claude-fable-5-…``, ``claude-opus-4-8-…``) and
 # OpenRouter-prefixed variants (``anthropic/claude-fable-5-…``).
+# M-97: also match context-window-suffixed IDs like ``claude-fable-5[1m]``
+# (the ``[`` follows the family token directly), alongside ``-``-suffixed and
+# bare IDs.
 _STRICT_PARAM_MODEL_RE = re.compile(
-    r"(?:^|/)claude-(?:fable-5|opus-4-8)(?:-|$)", re.IGNORECASE,
+    r"(?:^|/)claude-(?:fable-5|opus-4-8)(?:-|\[|$)", re.IGNORECASE,
 )
 
 # Keys that must be stripped from the request body for strict-param models.

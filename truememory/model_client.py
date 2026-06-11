@@ -220,7 +220,13 @@ def _start_server(wait_timeout: float | None = None) -> bool:
     """
     if os.environ.get("TRUEMEMORY_NO_MODEL_SERVER", "") == "1":
         return False
+    # M-89: ~/.truememory holds real memories/PII — keep it owner-only (0700),
+    # never the default-umask 0755.
     _TRUEMEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        _TRUEMEMORY_DIR.chmod(0o700)
+    except OSError:
+        pass
 
     alive = _server_is_alive()
     if not alive:

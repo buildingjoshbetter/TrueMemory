@@ -1038,7 +1038,7 @@ def truememory_store(
     # content is what gets stored, so whitespace-padded real text is preserved.
     if content is None or not content.strip():
         return json.dumps({"error": "Content is empty or whitespace-only; nothing stored."})
-    MAX_CONTENT_LENGTH = 50_000
+    from truememory.engine import MAX_CONTENT_LENGTH
     if len(content) > MAX_CONTENT_LENGTH:
         return json.dumps({"error": f"Content too large ({len(content)} chars). Maximum is {MAX_CONTENT_LENGTH}."})
     MAX_METADATA_LENGTH = 10_000

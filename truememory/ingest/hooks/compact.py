@@ -29,6 +29,41 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
+def _transcript_roots() -> list[Path]:
+    """Directories a transcript_path is allowed to live under (M-90).
+
+    Defaults to Claude Code's ``~/.claude/projects``. An explicit
+    ``TRUEMEMORY_TRANSCRIPT_DIR`` override (e.g. for tests or non-default
+    installs) is honored when set.
+    """
+    roots = [Path.home() / ".claude" / "projects"]
+    override = os.environ.get("TRUEMEMORY_TRANSCRIPT_DIR", "")
+    if override:
+        roots.insert(0, Path(override))
+    return roots
+
+
+def _is_allowed_transcript(transcript_path: str) -> bool:
+    """Return True only if *transcript_path* is inside an expected root (M-90).
+
+    The hook's stdin / backlog is attacker-influenceable in a local-control
+    scenario; ``parse_transcript`` would otherwise read any user-readable file
+    into the memory store via its plaintext fallback. Resolve symlinks and
+    require containment under a known transcripts root.
+    """
+    try:
+        resolved = Path(transcript_path).resolve()
+    except (OSError, ValueError):
+        return False
+    for root in _transcript_roots():
+        try:
+            if resolved.is_relative_to(root.resolve()):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
 def _parse_args() -> argparse.Namespace:
     """Parse command-line overrides for user_id and db_path.
 
@@ -53,8 +88,11 @@ def main():
     except (json.JSONDecodeError, EOFError):
         input_data = {}
 
-    transcript_path = input_data.get("transcript_path", "")
-    session_id = input_data.get("session_id", "unknown")
+    # M-95: stdin fields may be non-strings (e.g. an int session_id) from a
+    # misbehaving / hostile caller. Coerce to str before any str/Path op so the
+    # hook never crashes with TypeError.
+    transcript_path = str(input_data.get("transcript_path", "") or "")
+    session_id = str(input_data.get("session_id", "unknown") or "unknown")
 
     # Sanitize session_id to prevent injection (consistent with user_prompt_submit.py)
     safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64]
@@ -63,6 +101,12 @@ def main():
     session_id = safe_id
 
     if not transcript_path or not Path(transcript_path).exists():
+        return
+
+    # M-90: reject transcript paths outside the expected transcripts root so an
+    # attacker-chosen arbitrary file is never read into the memory store.
+    if not _is_allowed_transcript(transcript_path):
+        log.warning("Rejecting transcript_path outside transcripts root: %r", transcript_path)
         return
 
     try:
