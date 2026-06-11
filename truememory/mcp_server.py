@@ -1906,12 +1906,13 @@ def _drain_batch_from_backlog(markers: list[Path]) -> None:
                     "a", encoding="utf-8",
                 )
                 try:
+                    from truememory import _platform
                     proc = _subprocess.Popen(
                         cmd,
                         stdout=_log_file,
                         stderr=_subprocess.STDOUT,
                         stdin=_subprocess.DEVNULL,
-                        start_new_session=hasattr(os, 'setsid'),
+                        **_platform.spawn_kwargs(),
                     )
                 finally:
                     _log_file.close()

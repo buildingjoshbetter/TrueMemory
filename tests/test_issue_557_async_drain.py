@@ -35,7 +35,12 @@ def test_maintenance_spawns_background_subprocess(tmp_path, monkeypatch):
     assert "_drain_backlog" in script
     assert "_scan_stale_sessions" in script
     # Must detach from parent session group so it survives hook exit.
-    assert spawned["kwargs"].get("start_new_session") is hasattr(os, "setsid")
+    # Detach mechanism is platform-specific (_platform.spawn_kwargs):
+    # creationflags on Windows, start_new_session on POSIX.
+    if sys.platform == "win32":
+        assert spawned["kwargs"].get("creationflags", 0) != 0
+    else:
+        assert spawned["kwargs"].get("start_new_session") is hasattr(os, "setsid")
     # stdout/stderr must be redirected (not inherited) to avoid blocking.
     assert spawned["kwargs"].get("stdin") == subprocess.DEVNULL
     assert spawned["kwargs"]["stdout"] is not None

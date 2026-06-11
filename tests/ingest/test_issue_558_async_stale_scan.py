@@ -43,7 +43,12 @@ class TestSpawnStaleScan:
         assert captured["cmd"] == [
             sys.executable, "-m", "truememory.ingest.hooks.session_start", "--scan-stale",
         ]
-        assert captured["kwargs"]["start_new_session"] is hasattr(os, "setsid")
+        # Detach mechanism is platform-specific (_platform.spawn_kwargs):
+        # creationflags on Windows, start_new_session on POSIX.
+        if sys.platform == "win32":
+            assert captured["kwargs"].get("creationflags", 0) != 0
+        else:
+            assert captured["kwargs"]["start_new_session"] is hasattr(os, "setsid")
         assert captured["kwargs"]["stdin"] == subprocess.DEVNULL
 
     def test_spawn_failure_does_not_raise(self, monkeypatch):

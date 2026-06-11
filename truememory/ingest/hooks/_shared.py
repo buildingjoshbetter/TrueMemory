@@ -5,7 +5,10 @@ import errno
 import json
 import logging
 import os
+import sys
 import time
+
+from truememory import _platform
 
 try:
     import fcntl
@@ -153,6 +156,13 @@ def _pid_is_alive(pid: int) -> bool:
     """
     if pid <= 0:
         return False
+    if sys.platform == "win32":
+        # ``os.kill(pid, 0)`` on Windows sends a console Ctrl event to the
+        # process group (workers run with CREATE_NEW_PROCESS_GROUP) and would
+        # interrupt a live worker; a missing PID raises a generic OSError that
+        # the fallback below treats as alive, wedging stale-claim cleanup.
+        # Route through the canonical psutil-backed helper instead.
+        return _platform.pid_is_alive(pid)
     try:
         os.kill(pid, 0)
         return True

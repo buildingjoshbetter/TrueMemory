@@ -137,8 +137,10 @@ def _dedup_store_lock():
 
     Holding this process-wide lock around the check_duplicate + store_fact
     pair makes the sequence atomic across concurrent hooks. On Windows
-    (no fcntl) we skip locking and rely on ``busy_timeout`` + the embedding
-    similarity check as best-effort protection.
+    (no fcntl) we take an exclusive ``msvcrt.locking`` lock over the same
+    path so the critical section is still serialized; the POSIX inode
+    revalidation is not needed there because Windows keeps the file open
+    while locked and does not allow it to be unlinked underneath us.
 
     Locking discipline (#649, M-31). ``flock`` is the authority on
     mutual exclusion, NOT the PID/mtime bookkeeping:
@@ -156,14 +158,45 @@ def _dedup_store_lock():
     - The PID is written purely for diagnostics (and to let an operator see
       who holds it). mtime is refreshed on acquire as a heartbeat.
     """
-    if not _HAS_FCNTL:
-        yield
-        return
-
     try:
         _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         yield
+        return
+
+    if not _HAS_FCNTL:
+        # Windows: exclusive blocking msvcrt lock serializes the
+        # dedup-then-store critical section (no fcntl available).
+        try:
+            import msvcrt
+        except ImportError:
+            # No lock primitive at all: degrade open (busy_timeout protects).
+            yield
+            return
+        try:
+            lock_f = open(str(_LOCK_PATH), "a+")
+        except OSError:
+            yield
+            return
+        try:
+            try:
+                msvcrt.locking(lock_f.fileno(), msvcrt.LK_LOCK, 1)
+            except OSError:
+                # Could not acquire — degrade open rather than block ingestion.
+                yield
+                return
+            try:
+                yield
+            finally:
+                try:
+                    msvcrt.locking(lock_f.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+        finally:
+            try:
+                lock_f.close()
+            except OSError:
+                pass
         return
 
     lock_fd = _acquire_flock(_LOCK_PATH)

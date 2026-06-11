@@ -387,15 +387,43 @@ def spawn_gate():
     Callers MUST call register_spawned_pid(proc.pid) inside the gate
     after a successful Popen, before the context manager exits.
 
-    On Windows (no fcntl), falls back to best-effort pgrep without a lock.
+    On Windows (no fcntl) the lock is taken with ``msvcrt.locking`` over the
+    same PID tracking file, so the cap is still enforced atomically instead of
+    falling back to a lockless pgrep count that returns 0 and leaks spawns.
     """
     cap = _get_spawn_cap()
 
+    SPAWN_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+
     if not _HAS_FCNTL:
-        yield _count_active_ingest_processes() < cap
+        # Windows: exclusive blocking msvcrt lock mirrors the flock branch.
+        try:
+            import msvcrt
+        except ImportError:
+            # No lock primitive at all (neither fcntl nor msvcrt): best-effort
+            # lockless count. This is the genuine no-primitive fallback.
+            yield _count_active_ingest_processes() < cap
+            return
+        lock_f = open(str(SPAWN_LOCK_PATH), "a+")
+        try:
+            try:
+                msvcrt.locking(lock_f.fileno(), msvcrt.LK_LOCK, 1)
+            except OSError:
+                # Could not acquire the lock; fall back to best-effort count
+                # rather than blocking the hook indefinitely.
+                yield _count_active_ingest_processes() < cap
+                return
+            live = _read_live_pids()
+            _write_pids(live)
+            yield len(live) < cap
+        finally:
+            try:
+                msvcrt.locking(lock_f.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+            lock_f.close()
         return
 
-    SPAWN_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     fd = None
     try:
         fd = os.open(str(SPAWN_LOCK_PATH), os.O_CREAT | os.O_WRONLY, 0o600)
