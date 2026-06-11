@@ -164,15 +164,41 @@ _PROMPT_COUNTER_DIR = Path(os.environ.get(
 ))
 
 
+# Issue #636 (M-16): the only valid intensity values. Any other value —
+# "MAX", "Enhanced", garbage, JSON null — must NOT silently enable the most
+# expensive every-prompt mode. Readers normalize (lowercase + allowlist) and
+# fall back to "standard" so an unrecognized config value fails CLOSED.
+_VALID_INTENSITIES = frozenset({"standard", "enhanced", "max"})
+
+
+def _normalize_intensity(value: object) -> str:
+    """Normalize a raw config intensity value to a known level (issue #636).
+
+    Lowercases strings and validates against the allowlist; any non-string or
+    unrecognized value (None/null, "MAX", "garbage", numbers) falls back to
+    "standard". This makes invalid config fail closed to the cheapest mode
+    instead of the exclusion-based dispatch failing open to "max".
+    """
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _VALID_INTENSITIES:
+            return normalized
+    return "standard"
+
+
 def _get_intensity_config() -> tuple[str, str]:
-    """Read search_intensity and store_intensity from persistent config."""
+    """Read search_intensity and store_intensity from persistent config.
+
+    Values are normalized through the allowlist (issue #636) so invalid or
+    mismatched-case config cannot enable an unintended intensity mode.
+    """
     try:
         config_path = Path.home() / ".truememory" / "config.json"
         if config_path.exists():
             config = json.loads(config_path.read_text(encoding="utf-8"))
             return (
-                config.get("search_intensity", "standard"),
-                config.get("store_intensity", "standard"),
+                _normalize_intensity(config.get("search_intensity", "standard")),
+                _normalize_intensity(config.get("store_intensity", "standard")),
             )
     except Exception:
         pass
@@ -336,35 +362,53 @@ def _try_per_exchange_store(prompt: str, session_id: str, user_id: str, db_path:
         pass  # Never crash the hook
 
 
-def _try_proactive_recall(prompt: str, user_id: str, db_path: str, session_id: str, search_intensity: str, prompt_count: int) -> str | None:
+def _try_proactive_recall(
+    prompt: str,
+    user_id: str,
+    db_path: str,
+    session_id: str,
+    search_intensity: str,
+    prompt_count: int,
+    debounced: bool = False,
+) -> tuple[str | None, bool]:
     """Proactive recall based on search intensity.
 
     Enhanced: recall every ~5th prompt (8 results).
     Max: every prompt gets a memory search (10 results).
     Standard: handled by existing _try_auto_recall (recall-intent only).
+
+    Returns ``(recall_context, searched)``. ``searched`` is True when this
+    function ran (or short-circuited) the search for this prompt — the caller
+    uses it to decide whether the auto-recall fallback would be a redundant
+    second search of the same prompt (issue #636, M-41/M-42).
+
+    ``debounced`` is the result of the one-shot SessionStart recall marker,
+    consumed once by ``main()`` (issue #636, M-41): when True, SessionStart
+    already injected recall for this prompt, so proactive recall is suppressed
+    AND the caller must skip the auto-recall fallback (it would re-run the
+    exact first-prompt search #561 suppressed).
     """
     if search_intensity == "standard":
-        return None
+        return None, False
 
-    # Dedup: skip if session_start already injected recall for this session
-    try:
-        from truememory.ingest.hooks._shared import consume_recall_injected
-        if session_id and consume_recall_injected(session_id):
-            return None
-    except Exception:
-        pass
+    # Dedup: SessionStart already injected recall for this session's first
+    # prompt. Suppress here and tell the caller it was handled so the
+    # auto-recall fallback does not fire the same search again (M-41).
+    if debounced:
+        return None, True
 
     if search_intensity == "enhanced":
-        # Every 5th prompt
+        # Every 5th prompt; off-cadence prompts fall through to auto-recall
+        # (recall-intent detection), so report searched=False.
         if prompt_count % 5 != 0:
-            return None
+            return None, False
         limit = 8
     else:  # max
         limit = 10
 
-    # Skip code-heavy prompts
+    # Skip code-heavy prompts; auto-recall also skips these, so nothing to do.
     if _CODE_RE.search(prompt):
-        return None
+        return None, True
 
     try:
         try:
@@ -374,10 +418,12 @@ def _try_proactive_recall(prompt: str, user_id: str, db_path: str, session_id: s
         except Exception:
             pass
         from truememory.client import Memory
-        m = Memory(path=db_path or None)
-        results = m.search(prompt, user_id=user_id or None, limit=limit)
+        with Memory(path=db_path or None) as m:
+            results = m.search(prompt, user_id=user_id or None, limit=limit)
+        # We searched this prompt — whether or not it found anything, the
+        # auto-recall fallback must not search it again (M-42).
         if not results:
-            return None
+            return None, True
         lines = []
         for r in results[:limit]:
             content = r.get("content", "")[:200]
@@ -387,9 +433,9 @@ def _try_proactive_recall(prompt: str, user_id: str, db_path: str, session_id: s
             "Proactive memory recall:\n"
             + "\n".join(lines)
             + "\n</truememory-recall>"
-        )
+        ), True
     except Exception:
-        return None
+        return None, True
 
 
 def _detect_recall(prompt: str) -> bool:
@@ -400,15 +446,19 @@ def _detect_recall(prompt: str) -> bool:
     return bool(_RECALL_RE.search(prompt))
 
 
-def _try_auto_recall(prompt: str, user_id: str, db_path: str, session_id: str = "") -> str | None:
+def _try_auto_recall(prompt: str, user_id: str, db_path: str, session_id: str = "", debounced: bool = False) -> str | None:
     """Search TrueMemory if prompt looks like a recall question.
 
     Skips the search entirely on the first prompt right after SessionStart,
     which already injected recall (issue #561). The gate runs before detection
     and the Memory load so the redundant first-message recall costs nothing.
+
+    ``debounced`` is the one-shot SessionStart recall marker, consumed once by
+    ``main()`` (issue #636, M-41): consuming it here too would double-consume
+    and let a duplicate search slip through, so the marker is read upstream and
+    passed in.
     """
-    from truememory.ingest.hooks._shared import consume_recall_injected
-    if session_id and consume_recall_injected(session_id):
+    if debounced:
         return None
     if not _detect_recall(prompt):
         return None
@@ -423,8 +473,8 @@ def _try_auto_recall(prompt: str, user_id: str, db_path: str, session_id: str = 
         except Exception:
             pass
         from truememory.client import Memory
-        m = Memory(path=db_path or None)
-        results = m.search(prompt, user_id=user_id or None, limit=5)
+        with Memory(path=db_path or None) as m:
+            results = m.search(prompt, user_id=user_id or None, limit=5)
         if not results:
             return None
         lines = []
@@ -555,16 +605,39 @@ def main():
     except Exception:
         pass  # Never crash the hook
 
-    # Issue #396: proactive recall for enhanced/max search intensity
+    # Issue #561 / #636 (M-41): consume the one-shot SessionStart recall marker
+    # exactly ONCE per prompt. Both the proactive and auto-recall paths used to
+    # call consume_recall_injected() independently — the proactive path consumed
+    # it, returned None, and the auto-recall path then saw no marker and ran the
+    # exact first-prompt search #561 was meant to suppress. We read it here and
+    # pass the result into both paths.
+    debounced = False
+    try:
+        from truememory.ingest.hooks._shared import consume_recall_injected
+        if session_id:
+            debounced = consume_recall_injected(session_id)
+    except Exception:
+        pass
+
+    # Issue #396: proactive recall for enhanced/max search intensity.
+    # ``searched`` is True when the proactive path already searched (or was
+    # debounced for) this prompt, so the auto-recall fallback below would be a
+    # redundant second Memory init + search of the same prompt (issue #636,
+    # M-41/M-42). Only fall back when proactive did not handle this prompt.
     recall_context = None
+    searched = False
     if search_intensity != "standard":
-        recall_context = _try_proactive_recall(
+        recall_context, searched = _try_proactive_recall(
             prompt, args.user, args.db, session_id, search_intensity, prompt_count,
+            debounced=debounced,
         )
 
-    # Fall back to standard recall-intent detection
-    if not recall_context:
-        recall_context = _try_auto_recall(prompt, args.user, args.db, session_id)
+    # Fall back to standard recall-intent detection (only if proactive didn't
+    # already search this prompt).
+    if not recall_context and not searched:
+        recall_context = _try_auto_recall(
+            prompt, args.user, args.db, session_id, debounced=debounced,
+        )
 
     if recall_context:
         print(json.dumps({"additionalContext": recall_context}))

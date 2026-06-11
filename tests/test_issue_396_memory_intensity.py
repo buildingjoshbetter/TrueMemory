@@ -271,19 +271,23 @@ class TestPromptCounting:
 
 class TestProactiveRecallScheduling:
     def test_standard_returns_none(self):
+        # Issue #636: now returns (context, searched). Standard never searches.
         from truememory.ingest.hooks.user_prompt_submit import _try_proactive_recall
-        result = _try_proactive_recall(
+        ctx, searched = _try_proactive_recall(
             "what is X", "", "", "session", "standard", 5,
         )
-        assert result is None
+        assert ctx is None
+        assert searched is False
 
     def test_enhanced_skips_non_5th(self):
+        # Off-cadence: no context AND searched=False so auto-recall can still run.
         from truememory.ingest.hooks.user_prompt_submit import _try_proactive_recall
         # prompt_count=3 is not a multiple of 5
-        result = _try_proactive_recall(
+        ctx, searched = _try_proactive_recall(
             "what is X", "", "", "session", "enhanced", 3,
         )
-        assert result is None
+        assert ctx is None
+        assert searched is False
 
     def test_enhanced_triggers_on_5th(self):
         """Enhanced search should attempt recall on 5th prompt.
@@ -295,12 +299,13 @@ class TestProactiveRecallScheduling:
         # This test verifies the scheduling logic doesn't block the 5th prompt
         from truememory.ingest.hooks.user_prompt_submit import _try_proactive_recall
         # With an invalid db_path, it will fail at Memory() but that's after
-        # passing the scheduling check
-        result = _try_proactive_recall(
+        # passing the scheduling check. Issue #636: still reports searched=True
+        # because the cadence gate passed and the search was attempted.
+        ctx, searched = _try_proactive_recall(
             "what is X", "", "/nonexistent/db", "session", "enhanced", 5,
         )
-        # Result is None because Memory fails, but the scheduling check passed
-        assert result is None
+        assert ctx is None
+        assert searched is True
 
 
 # ---------------------------------------------------------------------------

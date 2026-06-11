@@ -71,16 +71,22 @@ class TestRecallMarker:
 
 class TestAutoRecallGate:
     def test_fresh_marker_short_circuits_recall(self, marker_dir, monkeypatch):
-        """A fresh marker makes _try_auto_recall return None before doing any
-        recall work (no detection, no Memory load)."""
+        """A consumed debounce marker makes _try_auto_recall return None before
+        doing any recall work (no detection, no Memory load).
+
+        Issue #636 (M-41): the marker is now consumed once in main() and the
+        result passed in as ``debounced`` (so the proactive and auto-recall
+        paths can't double-consume it). The short-circuit semantics are
+        unchanged — only who reads the marker moved upstream.
+        """
         def _boom(*_a, **_k):
             raise AssertionError("recall work must not run when marker is fresh")
 
         monkeypatch.setattr(ups, "_detect_recall", _boom)
-        _shared.mark_recall_injected("session-first")
 
         result = ups._try_auto_recall(
-            "what's my favorite editor", "", "", session_id="session-first"
+            "what's my favorite editor", "", "", session_id="session-first",
+            debounced=True,
         )
         assert result is None
 

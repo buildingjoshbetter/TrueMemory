@@ -46,13 +46,33 @@ _INTENSITY_MEMORY_LIMITS = {
 }
 
 
+# Issue #636 (M-16): valid intensity levels. Normalize raw config values
+# (lowercase + allowlist) so "MAX"/"Enhanced"/garbage/null resolve to a known
+# level instead of silently mapping to base via .get()'s default — keeping
+# this reader consistent with user_prompt_submit's fail-closed dispatch.
+_VALID_INTENSITIES = frozenset({"standard", "enhanced", "max"})
+
+
+def _normalize_intensity(value: object) -> str:
+    """Normalize a raw config intensity value to a known level (issue #636)."""
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _VALID_INTENSITIES:
+            return normalized
+    return "standard"
+
+
 def _get_search_intensity() -> str:
-    """Read search_intensity from persistent config (default: standard)."""
+    """Read search_intensity from persistent config (default: standard).
+
+    Normalized through the allowlist (issue #636) so an invalid or
+    mismatched-case value resolves predictably rather than slipping through.
+    """
     try:
         config_path = Path.home() / ".truememory" / "config.json"
         if config_path.exists():
             config = json.loads(config_path.read_text(encoding="utf-8"))
-            return config.get("search_intensity", "standard")
+            return _normalize_intensity(config.get("search_intensity", "standard"))
     except Exception:
         pass
     return "standard"
@@ -67,6 +87,30 @@ DIRECTIVE_LIMIT = int(os.environ.get("TRUEMEMORY_DIRECTIVE_LIMIT", "50"))
 # suffixed with a pointer so the agent can fetch the full text on demand.
 RECALL_MEMORY_CHARS = int(os.environ.get("TRUEMEMORY_RECALL_MEMORY_CHARS", "500"))
 RECALL_BUDGET_CHARS = int(os.environ.get("TRUEMEMORY_RECALL_BUDGET_CHARS", "8192"))
+
+# Issue #636 (M-72): "max" intensity raises MEMORY_LIMIT to 35 but the recall
+# payload was still capped at RECALL_BUDGET_CHARS (8KB), so _apply_budget
+# dropped the extra memories and the knob was a silent no-op. Scale the budget
+# with intensity so "max" actually injects a larger payload. An explicit
+# TRUEMEMORY_RECALL_BUDGET_CHARS override is authoritative (multiplier x1).
+_INTENSITY_BUDGET_MULTIPLIER = {
+    "standard": 1.0,
+    "enhanced": 1.0,
+    "max": 2.0,
+}
+_BUDGET_ENV_OVERRIDDEN = "TRUEMEMORY_RECALL_BUDGET_CHARS" in os.environ
+
+
+def _intensity_budget(intensity: str) -> int:
+    """Effective recall payload budget for *intensity* (issue #636, M-72).
+
+    An explicit env override pins the budget (multiplier x1) so operators keep
+    full control; otherwise "max" gets a larger budget so its higher memory
+    limit is not silently nullified by the 8KB cap.
+    """
+    if _BUDGET_ENV_OVERRIDDEN:
+        return RECALL_BUDGET_CHARS
+    return int(RECALL_BUDGET_CHARS * _INTENSITY_BUDGET_MULTIPLIER.get(intensity, 1.0))
 ONBOARDED_MARKER = Path.home() / ".truememory" / ".onboarded"
 BACKLOG_DIR = Path.home() / ".truememory" / "backlog"
 _DRAIN_CAP = 3
@@ -660,13 +704,18 @@ def main():
     global MEMORY_LIMIT
     intensity = _get_search_intensity()
     MEMORY_LIMIT = _INTENSITY_MEMORY_LIMITS.get(intensity, _BASE_MEMORY_LIMIT)
+    # Issue #636 (M-72): scale the recall payload budget with intensity so the
+    # higher "max" memory limit isn't silently capped at 8KB.
+    recall_budget = _intensity_budget(intensity)
 
     try:
         if _is_first_run():
             context = _first_run_context()
             recall_injected = False
         else:
-            context = recall_memories(input_data, user_id=args.user, db_path=args.db)
+            context = recall_memories(
+                input_data, user_id=args.user, db_path=args.db, budget=recall_budget,
+            )
             recall_injected = bool(context)
 
         # Check for available updates
@@ -821,7 +870,7 @@ def _apply_budget(
     return [line for i, (line, _score) in enumerate(memory_lines) if i not in drop]
 
 
-def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> str:
+def recall_memories(input_data: dict, user_id: str = "", db_path: str = "", budget: int = 0) -> str:
     """Search TrueMemory and format relevant memories for injection.
 
     Uses a file-based cache (issue #559): after running the 5 search
@@ -947,7 +996,7 @@ def recall_memories(input_data: dict, user_id: str = "", db_path: str = "") -> s
             score = r.get("score", 0.0)
             memory_lines.append((f"- {truncated}", score))
 
-        kept = _apply_budget(memory_lines, directive_block)
+        kept = _apply_budget(memory_lines, directive_block, budget=budget)
 
         if kept:
             lines = [
