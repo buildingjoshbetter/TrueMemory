@@ -1338,13 +1338,21 @@ def _rebuild_table_as_cosine(conn: sqlite3.Connection, table_name: str) -> int:
         return 0
 
     stage = f"{table_name}_cos_stage"
+    stage_done = f"{stage}_done"
     fmt = f"{dim}f"
 
     # Phase 1: copy normalized vectors into a durable plain staging table.
+    # D1-2 crash-safety: a separate "done" marker row is written in the SAME
+    # commit as the staged rows. An interrupted stage (crash mid-copy) leaves an
+    # empty/partial stage with NO done marker, so resume can tell it apart from a
+    # complete stage and re-stage from the still-intact original instead of
+    # swapping an empty stage over it and losing every vector.
     conn.execute(f"DROP TABLE IF EXISTS {stage}")
+    conn.execute(f"DROP TABLE IF EXISTS {stage_done}")
     conn.execute(
         f"CREATE TABLE {stage} (rowid INTEGER PRIMARY KEY, embedding BLOB)"
     )
+    conn.execute(f"CREATE TABLE {stage_done} (done INTEGER PRIMARY KEY)")
     rows = conn.execute(
         f"SELECT rowid, embedding FROM {table_name}"
     ).fetchall()
@@ -1363,7 +1371,10 @@ def _rebuild_table_as_cosine(conn: sqlite3.Connection, table_name: str) -> int:
             (rowid, serialize_f32(normed)),
         )
         staged += 1
-    conn.commit()  # staging durable before we touch the original
+    # Mark staging complete in the SAME transaction as the staged rows, so the
+    # marker is durable iff every row is.
+    conn.execute(f"INSERT INTO {stage_done}(done) VALUES (1)")
+    conn.commit()  # staged rows + completeness marker durable before we touch the original
 
     # Phase 2: replace the vec0 table with a cosine one and refill it.
     carried = _finish_cosine_swap(conn, table_name, dim)
@@ -1403,6 +1414,7 @@ def _finish_cosine_swap(
         )
         carried = len(staged_rows)
     conn.execute(f"DROP TABLE IF EXISTS {stage}")
+    conn.execute(f"DROP TABLE IF EXISTS {stage}_done")
     return carried
 
 
@@ -1437,17 +1449,35 @@ def migrate_to_cosine_metric(conn: sqlite3.Connection) -> bool:
             (stage,),
         ).fetchone()
         if has_stage:
-            # A prior run was interrupted between staging and swap. The staging
-            # table holds the already-normalized vectors — finish the swap.
-            dim = (
-                _detect_existing_vec_dim(conn, table)
-                or _detect_existing_vec_dim(conn, stage)
-                or _embedding_dim
+            # A prior run was interrupted between staging and swap. Only finish
+            # the swap if the staging completed durably (the "done" marker is
+            # present); otherwise the stage is empty/partial and the ORIGINAL
+            # table is still intact, so drop the partial stage and re-stage from
+            # scratch below rather than swapping an empty stage over the original
+            # and losing every vector (D1-2).
+            stage_done = f"{stage}_done"
+            stage_complete = bool(
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name = ? AND type='table'",
+                    (stage_done,),
+                ).fetchone()
+                and conn.execute(f"SELECT 1 FROM {stage_done} LIMIT 1").fetchone()
             )
-            _finish_cosine_swap(conn, table, dim)
+            if stage_complete:
+                dim = (
+                    _detect_existing_vec_dim(conn, table)
+                    or _detect_existing_vec_dim(conn, stage)
+                    or _embedding_dim
+                )
+                _finish_cosine_swap(conn, table, dim)
+                conn.commit()
+                migrated = True
+                continue
+            # Incomplete stage from an interrupted copy — discard it and fall
+            # through to a fresh rebuild from the intact original table.
+            conn.execute(f"DROP TABLE IF EXISTS {stage}")
+            conn.execute(f"DROP TABLE IF EXISTS {stage_done}")
             conn.commit()
-            migrated = True
-            continue
 
         exists = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE name = ? AND type='table'",

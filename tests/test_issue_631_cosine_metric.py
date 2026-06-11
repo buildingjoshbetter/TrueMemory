@@ -175,6 +175,11 @@ class TestIssue631CosineMetric:
         conn.execute("CREATE TABLE vec_messages_cos_stage (rowid INTEGER PRIMARY KEY, embedding BLOB)")
         conn.execute("INSERT INTO vec_messages_cos_stage VALUES (1, ?)", (_ser([1.0, 0.0]),))
         conn.execute("INSERT INTO vec_messages_cos_stage VALUES (9, ?)", (_ser([0.0, 1.0]),))
+        # D1-2 (#686): a resumable stage must carry the "done" marker written in
+        # the same commit as its rows. Construct the stage the way Phase 1 now
+        # leaves it on a completed copy, so it is promoted rather than re-staged.
+        conn.execute("CREATE TABLE vec_messages_cos_stage_done (done INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO vec_messages_cos_stage_done(done) VALUES (1)")
         conn.commit()
 
         assert migrate_to_cosine_metric(conn) is True
