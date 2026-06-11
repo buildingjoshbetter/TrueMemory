@@ -45,8 +45,13 @@ dependencies = [
 reranker = []
 gpu = []
 agentic = []
+# A2-1 (#696): HDBSCAN scene clustering is an optional feature — clustering.py
+# imports `hdbscan` lazily and degrades gracefully when absent. Declare it as an
+# extra so `pip install truememory[clustering]` resolves it, instead of users
+# guessing the off-resolver package name from a docstring.
+clustering = ["hdbscan>=0.8,<0.9"]
 dev = ["pytest>=7.0,<10.0", "pytest-timeout>=2.2,<3.0", "ruff>=0.4,<1.0", "build>=1.2,<2.0", "twine>=5.0,<7.0"]
-all = ["truememory[agentic]"]
+all = ["truememory[agentic,clustering]"]
 
 [project.scripts]
 truememory-mcp = "truememory.mcp_server:main"

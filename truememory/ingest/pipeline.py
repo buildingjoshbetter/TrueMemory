@@ -28,6 +28,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -40,6 +41,19 @@ from truememory.ingest.dedup import check_duplicate, DedupAction
 from truememory.ingest.models import LLMConfig, auto_detect
 
 log = logging.getLogger(__name__)
+
+
+# S1-3 (#696): memory/transcript text (fact.content, dedup.fact) is logged for
+# diagnostics. Logging it raw lets embedded newlines / CR / ANSI escapes forge
+# extra log lines or inject terminal control sequences. _safe_log strips all
+# control characters (incl. newline/CR/tab → space) so a logged value stays on
+# one line and can't spoof log structure.
+_LOG_UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _safe_log(value: object) -> str:
+    """Neutralize control chars in untrusted text before it reaches a log line."""
+    return _LOG_UNSAFE_RE.sub(" ", str(value))
 
 
 # Optional: fcntl for cross-process locking of the dedup-store critical
@@ -481,7 +495,7 @@ class IngestionPipeline:
                 result.facts_skipped_gate += 1
                 trace_entry["action"] = "skipped_gate"
                 result.trace.append(trace_entry)
-                log.debug("Gate blocked: %s — %s", fact.content[:50], decision.reason)
+                log.debug("Gate blocked: %s — %s", _safe_log(fact.content[:50]), decision.reason)
                 continue
 
             result.facts_encoded += 1
@@ -523,7 +537,7 @@ class IngestionPipeline:
                             "Storage failed for fact (db=%s): %s — fact=%r",
                             getattr(self.memory, "db_path", "<unknown>"),
                             e,
-                            dedup.fact[:120],
+                            _safe_log(dedup.fact[:120]),
                         )
                         trace_entry["action"] = "storage_failed"
                         trace_entry["storage_error"] = {
@@ -533,7 +547,7 @@ class IngestionPipeline:
                     else:
                         result.facts_stored += 1
                         trace_entry["action"] = "stored"
-                        log.info("Stored: %s", dedup.fact[:80])
+                        log.info("Stored: %s", _safe_log(dedup.fact[:80]))
 
                 elif dedup.action == DedupAction.UPDATE:
                     try:
@@ -544,7 +558,7 @@ class IngestionPipeline:
                             dedup.existing_id,
                             getattr(self.memory, "db_path", "<unknown>"),
                             e,
-                            dedup.fact[:120],
+                            _safe_log(dedup.fact[:120]),
                         )
                         trace_entry["action"] = "storage_failed"
                         trace_entry["storage_error"] = {
@@ -554,12 +568,12 @@ class IngestionPipeline:
                     else:
                         result.facts_updated += 1
                         trace_entry["action"] = "updated"
-                        log.info("Updated [%s]: %s", dedup.existing_id, dedup.fact[:80])
+                        log.info("Updated [%s]: %s", dedup.existing_id, _safe_log(dedup.fact[:80]))
 
                 elif dedup.action == DedupAction.SKIP:
                     result.facts_skipped_dedup += 1
                     trace_entry["action"] = "skipped_dedup"
-                    log.debug("Dedup skipped: %s — %s", fact.content[:50], dedup.reason)
+                    log.debug("Dedup skipped: %s — %s", _safe_log(fact.content[:50]), dedup.reason)
 
             result.trace.append(trace_entry)
 
@@ -642,7 +656,7 @@ class IngestionPipeline:
                     try:
                         self._store_fact(dedup.fact, fact, session_id)
                     except sqlite3.OperationalError as e:
-                        log.error("Storage failed in ingest_text: %s — fact=%r", e, dedup.fact[:120])
+                        log.error("Storage failed in ingest_text: %s — fact=%r", e, _safe_log(dedup.fact[:120]))
                         continue
                     result.facts_stored += 1
                 elif dedup.action == DedupAction.UPDATE:
@@ -651,7 +665,7 @@ class IngestionPipeline:
                     except sqlite3.OperationalError as e:
                         log.error(
                             "Update failed in ingest_text for memory id=%s: %s — fact=%r",
-                            dedup.existing_id, e, dedup.fact[:120],
+                            dedup.existing_id, e, _safe_log(dedup.fact[:120]),
                         )
                         continue
                     result.facts_updated += 1
@@ -730,7 +744,7 @@ class IngestionPipeline:
                 if callable(updater):
                     result = updater(existing_id, new_content)
                     if result is not None:
-                        log.debug("Updated memory %d with: %s", existing_id, new_content[:60])
+                        log.debug("Updated memory %d with: %s", existing_id, _safe_log(new_content[:60]))
                         return
                 else:
                     log.warning("Memory.update() not available; storing as new")
