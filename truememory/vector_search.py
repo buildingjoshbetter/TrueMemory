@@ -459,6 +459,63 @@ def serialize_f32(vector) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# Cosine-metric helpers (issue #631)
+# ---------------------------------------------------------------------------
+
+# sqlite-vec stores vectors with an L2 distance function by default. We declare
+# ``distance_metric=cosine`` on every vec0 table so that ``v.distance`` is a
+# true cosine distance and ``cos_sim = 1 - distance`` is numerically honest.
+#
+# NOTE (sqlite-vec 0.1.9 syntax): ``distance_metric`` is a *column-level*
+# option (space-separated inside the column declaration), NOT a comma-separated
+# table option. ``vec0(embedding float[256] distance_metric=cosine)`` is valid;
+# ``vec0(embedding float[256], distance_metric=cosine)`` raises
+# "Unknown table option".
+_VEC_DISTANCE_METRIC = "cosine"
+
+
+def _vec0_column_decl(dim: int) -> str:
+    """Return the vec0 embedding-column declaration with the cosine metric."""
+    return f"embedding float[{dim}] distance_metric={_VEC_DISTANCE_METRIC}"
+
+
+def _table_uses_cosine(conn: sqlite3.Connection, table_name: str) -> bool:
+    """True if *table_name* exists and its DDL declares the cosine metric.
+
+    Used to detect old-format (L2-default) vec tables that need rebuilding.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name = ? AND type='table'",
+        (table_name,),
+    ).fetchone()
+    if not row or not row[0]:
+        return False
+    return "distance_metric=cosine" in row[0].replace(" ", "").replace("'", "")
+
+
+def _normalize_for_cosine(emb):
+    """L2-normalize *emb* so cosine distance is meaningful, or return None.
+
+    Cosine distance is only well-defined once vectors are unit-normalized.
+    Edge-tier (potion) vectors already arrive unit-norm, but Base/Pro (Qwen3
+    @ truncate_dim=256, Matryoshka) vectors do NOT — truncating a normalized
+    1024d vector to 256d leaves ``||v|| ~= 0.55``. Normalizing at write time
+    keeps cosine ordering correct across every tier.
+
+    A zero (or non-finite) vector has undefined cosine and would poison the
+    cosine table with NaN distances (sqlite-vec returns ``distance=NULL`` for
+    such rows). Those are skipped by returning ``None`` (C2-8 guard).
+    """
+    arr = np.asarray(emb, dtype=np.float32)
+    if not np.all(np.isfinite(arr)):
+        return None
+    norm = float(np.linalg.norm(arr))
+    if norm < 1e-12:
+        return None
+    return arr / norm
+
+
+# ---------------------------------------------------------------------------
 # Table initialization
 # ---------------------------------------------------------------------------
 
@@ -505,13 +562,17 @@ def init_vec_table(
     dim = _embedding_dim
     conn.execute(
         f"CREATE VIRTUAL TABLE IF NOT EXISTS {vec_name} "
-        f"USING vec0(embedding float[{dim}])"
+        f"USING vec0({_vec0_column_decl(dim)})"
     )
     conn.execute(
         f"CREATE VIRTUAL TABLE IF NOT EXISTS {sep_name} "
-        f"USING vec0(embedding float[{dim}])"
+        f"USING vec0({_vec0_column_decl(dim)})"
     )
     conn.commit()
+
+    # Upgrade any pre-#631 L2-default tables to cosine in place. Idempotent:
+    # a no-op once the active tables already declare distance_metric=cosine.
+    migrate_to_cosine_metric(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -630,12 +691,25 @@ def build_vectors(
 
             embeddings = _encode_with_mps_fallback(model, texts, show_progress_bar=False)
 
-            conn.executemany(
-                f"INSERT INTO {tbl}(rowid, embedding) VALUES (?, ?)",
-                [(mid, serialize_f32(emb)) for mid, emb in zip(ids, embeddings)],
-            )
+            rows_to_insert = []
+            for mid, emb in zip(ids, embeddings):
+                normed = _normalize_for_cosine(emb)
+                if normed is None:
+                    # Zero/NaN vector: undefined cosine — skip so it can't
+                    # poison the cosine table with NULL distances (C2-8).
+                    logger.warning(
+                        "Skipping message %s: zero-norm/non-finite embedding "
+                        "(undefined cosine)", mid,
+                    )
+                    continue
+                rows_to_insert.append((mid, serialize_f32(normed)))
+            if rows_to_insert:
+                conn.executemany(
+                    f"INSERT INTO {tbl}(rowid, embedding) VALUES (?, ?)",
+                    rows_to_insert,
+                )
 
-            total += len(batch)
+            total += len(rows_to_insert)
             batches_since_commit += 1
             del embeddings
             _flush_mps_cache()
@@ -884,12 +958,23 @@ def build_separation_vectors(
 
             embeddings = _encode_with_mps_fallback(model, texts, show_progress_bar=False)
 
-            conn.executemany(
-                f"INSERT INTO {tbl}(rowid, embedding) VALUES (?, ?)",
-                [(mid, serialize_f32(emb)) for mid, emb in zip(ids, embeddings)],
-            )
+            rows_to_insert = []
+            for mid, emb in zip(ids, embeddings):
+                normed = _normalize_for_cosine(emb)
+                if normed is None:
+                    logger.warning(
+                        "Skipping separation vector for message %s: "
+                        "zero-norm/non-finite embedding (undefined cosine)", mid,
+                    )
+                    continue
+                rows_to_insert.append((mid, serialize_f32(normed)))
+            if rows_to_insert:
+                conn.executemany(
+                    f"INSERT INTO {tbl}(rowid, embedding) VALUES (?, ?)",
+                    rows_to_insert,
+                )
 
-            total += len(batch)
+            total += len(rows_to_insert)
             del embeddings
             _flush_mps_cache()
 
@@ -921,10 +1006,19 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
     """
     model = get_model()
     embedding = _encode_with_mps_fallback(model, [content])[0]  # shape (dim,)
+    normed = _normalize_for_cosine(embedding)
+    if normed is None:
+        # Zero/NaN vector has undefined cosine — skip rather than poison the
+        # cosine table with NULL distances (C2-8).
+        logger.warning(
+            "Skipping message %d: zero-norm/non-finite embedding "
+            "(undefined cosine)", message_id,
+        )
+        return
     vec_tbl = _active_vec_table(conn)
     conn.execute(
         f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
-        (message_id, serialize_f32(embedding)),
+        (message_id, serialize_f32(normed)),
     )
 
     try:
@@ -935,10 +1029,18 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
         if row:
             sep_text = _build_sep_text(row[0], row[1], row[2], content)
             sep_embedding = _encode_with_mps_fallback(model, [sep_text])[0]
+            sep_normed = _normalize_for_cosine(sep_embedding)
+            if sep_normed is None:
+                logger.warning(
+                    "Skipping separation vector for message %d: "
+                    "zero-norm/non-finite embedding (undefined cosine)",
+                    message_id,
+                )
+                return
             sep_tbl = _active_sep_table(conn)
             conn.execute(
                 f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
-                (message_id, serialize_f32(sep_embedding)),
+                (message_id, serialize_f32(sep_normed)),
             )
     except Exception:
         logger.warning("Failed to create separation vector for message %d", message_id, exc_info=True)
@@ -1031,6 +1133,170 @@ def search_vector_separation(
 
 
 # ---------------------------------------------------------------------------
+# Cosine-metric migration (issue #631)
+# ---------------------------------------------------------------------------
+
+# Every vec0 table that might hold user vectors. Tier-specific names cover the
+# tier-switch cache; the generic names cover legacy / pre-tier-switch DBs.
+_KNOWN_VEC_TABLES = (
+    "vec_messages",
+    "vec_messages_sep",
+    "vec_messages_edge",
+    "vec_messages_sep_edge",
+    "vec_messages_basepro",
+    "vec_messages_sep_basepro",
+)
+
+
+def _rebuild_table_as_cosine(conn: sqlite3.Connection, table_name: str) -> int:
+    """Rebuild one L2-default vec0 table in place as a cosine table.
+
+    Re-inserts the EXISTING stored vectors (L2-normalized so cosine is
+    meaningful) — no re-embedding. Zero-norm / non-finite vectors are dropped
+    so they can't poison the cosine table with NULL distances (C2-8).
+
+    vec0 virtual tables cannot be renamed (``ALTER TABLE RENAME`` leaves their
+    shadow ``*_rowids`` / ``*_chunks`` tables behind), so the rebuild recreates
+    the table under its original name. Crash-safety comes from a *plain* SQLite
+    staging table ``{table}_cos_stage`` that holds the normalized vectors before
+    the vec0 table is dropped: if the process dies mid-rebuild, the next run
+    detects the staging table and finishes the swap rather than losing data.
+
+    Returns the number of vectors carried over.
+    """
+    dim = _detect_existing_vec_dim(conn, table_name)
+    if dim is None:
+        return 0
+
+    stage = f"{table_name}_cos_stage"
+    fmt = f"{dim}f"
+
+    # Phase 1: copy normalized vectors into a durable plain staging table.
+    conn.execute(f"DROP TABLE IF EXISTS {stage}")
+    conn.execute(
+        f"CREATE TABLE {stage} (rowid INTEGER PRIMARY KEY, embedding BLOB)"
+    )
+    rows = conn.execute(
+        f"SELECT rowid, embedding FROM {table_name}"
+    ).fetchall()
+    skipped = 0
+    staged = 0
+    for rowid, blob in rows:
+        if blob is None or len(blob) != dim * 4:
+            skipped += 1
+            continue
+        normed = _normalize_for_cosine(struct.unpack(fmt, blob))
+        if normed is None:
+            skipped += 1
+            continue
+        conn.execute(
+            f"INSERT INTO {stage}(rowid, embedding) VALUES (?, ?)",
+            (rowid, serialize_f32(normed)),
+        )
+        staged += 1
+    conn.commit()  # staging durable before we touch the original
+
+    # Phase 2: replace the vec0 table with a cosine one and refill it.
+    carried = _finish_cosine_swap(conn, table_name, dim)
+
+    if skipped:
+        logger.warning(
+            "Cosine migration for %s dropped %d zero-norm/invalid vector(s)",
+            table_name, skipped,
+        )
+    logger.info(
+        "Rebuilt %s as cosine (%d vectors carried over)", table_name, carried
+    )
+    return carried
+
+
+def _finish_cosine_swap(
+    conn: sqlite3.Connection, table_name: str, dim: int
+) -> int:
+    """Drop the old vec0 table, recreate it as cosine, refill from staging.
+
+    Assumes ``{table_name}_cos_stage`` exists and is populated. Idempotent /
+    resumable: safe to call after a crash that left the staging table behind.
+    """
+    stage = f"{table_name}_cos_stage"
+    conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+    conn.execute(
+        f"CREATE VIRTUAL TABLE {table_name} USING vec0({_vec0_column_decl(dim)})"
+    )
+    carried = 0
+    staged_rows = conn.execute(
+        f"SELECT rowid, embedding FROM {stage}"
+    ).fetchall()
+    if staged_rows:
+        conn.executemany(
+            f"INSERT INTO {table_name}(rowid, embedding) VALUES (?, ?)",
+            staged_rows,
+        )
+        carried = len(staged_rows)
+    conn.execute(f"DROP TABLE IF EXISTS {stage}")
+    return carried
+
+
+def migrate_to_cosine_metric(conn: sqlite3.Connection) -> bool:
+    """Upgrade any old-format (L2-default) vec0 tables to cosine in place.
+
+    Detects tables whose DDL lacks ``distance_metric=cosine`` and rebuilds each
+    one, re-inserting the existing stored vectors (L2-normalized). This is the
+    #631 fix for existing user DBs: the vectors are unchanged, only the table's
+    distance function and per-row norm change so that ``cos_sim = 1 - distance``
+    becomes numerically honest.
+
+    Idempotent: a no-op once every present table already declares cosine.
+    Returns True if at least one table was rebuilt.
+    """
+    # Ensure the extension is loaded (callers from engine.open already load it,
+    # but init_vec_table is the common entry and loads it just above).
+    try:
+        import sqlite_vec
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+    except Exception:
+        # If the extension cannot load, there are no vec0 tables to migrate.
+        return False
+
+    migrated = False
+    for table in _KNOWN_VEC_TABLES:
+        stage = f"{table}_cos_stage"
+        has_stage = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = ? AND type='table'",
+            (stage,),
+        ).fetchone()
+        if has_stage:
+            # A prior run was interrupted between staging and swap. The staging
+            # table holds the already-normalized vectors — finish the swap.
+            dim = (
+                _detect_existing_vec_dim(conn, table)
+                or _detect_existing_vec_dim(conn, stage)
+                or _embedding_dim
+            )
+            _finish_cosine_swap(conn, table, dim)
+            conn.commit()
+            migrated = True
+            continue
+
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = ? AND type='table'",
+            (table,),
+        ).fetchone()
+        if not exists:
+            continue
+        if _table_uses_cosine(conn, table):
+            continue
+        _rebuild_table_as_cosine(conn, table)
+        migrated = True
+
+    if migrated:
+        conn.commit()
+    return migrated
+
+
+# ---------------------------------------------------------------------------
 # Legacy migration (generic → tier-specific table names)
 # ---------------------------------------------------------------------------
 
@@ -1086,11 +1352,11 @@ def migrate_legacy_vec_tables(conn: sqlite3.Connection) -> bool:
 
     conn.execute(
         f"CREATE VIRTUAL TABLE IF NOT EXISTS {new_vec} "
-        f"USING vec0(embedding float[{dim}])"
+        f"USING vec0({_vec0_column_decl(dim)})"
     )
     conn.execute(
         f"CREATE VIRTUAL TABLE IF NOT EXISTS {new_sep} "
-        f"USING vec0(embedding float[{dim}])"
+        f"USING vec0({_vec0_column_decl(dim)})"
     )
 
     conn.execute(f"INSERT INTO {new_vec} SELECT * FROM vec_messages")
