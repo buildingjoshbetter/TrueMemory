@@ -50,6 +50,18 @@ RETENTION_DAYS = int(os.environ.get("TRUEMEMORY_BUFFER_RETENTION_DAYS", "7"))
 MAX_BUFFER_SIZE = int(os.environ.get("TRUEMEMORY_BUFFER_MAX_BYTES", str(10 * 1024 * 1024)))
 
 
+def _safe_session_id_local(session_id: str) -> str:
+    """Sanitize a session_id for use in buffer/counter filenames.
+
+    Single source of truth so the prompt-counter, conversation-depth, and
+    buffer paths all derive the SAME on-disk name for a given session (issue
+    #635, M-73) — they previously inlined the same expression in three places,
+    risking drift. Mirrors ``buffer_message``'s scheme (alnum + ``-_``, 64-char
+    cap, ``unknown`` fallback).
+    """
+    return "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "unknown"
+
+
 def _word_overlap(a: str, b: str) -> float:
     """Scale-free Jaccard similarity on word sets (issue #632).
 
@@ -142,18 +154,47 @@ _CODE_RE = re.compile(
 # Issue #396: Memory Intensity — per-exchange evaluator + proactive recall
 # ---------------------------------------------------------------------------
 
-# Storable content heuristics for per-exchange evaluator
+# Storable content heuristics for per-exchange evaluator.
+#
+# Issue #635 (M-40): the previous pattern used bare standalone-word
+# alternations ("no"/"actually"/"instead"/"I'm") with no awareness of
+# negation, questions, quotes, or code, flagging 17/19 adversarial filler
+# cases. Tightened here to clause-level anchors that need a real subject +
+# preference/fact predicate:
+#   - bare "no" is dropped entirely (it is overwhelmingly filler/answer);
+#   - "actually"/"instead"/"wrong" only fire as a *correction* of a stated
+#     fact, anchored to a following first-person clause or a copula, not as
+#     standalone discourse markers;
+#   - "I'm" only fires when followed by an identity/state predicate
+#     ("I'm a ...", "I'm using ...", "I'm based in ..."), not bare "I'm".
+# Interrogatives and quoted spans are stripped before matching in
+# _detect_storable_content() so a question or a quote that merely *contains*
+# these tokens does not trigger the expensive store path.
 _STORABLE_RE = re.compile(
     r'\b(?:'
     r'(?:i|my|we)\s+(?:prefer|like|dislike|hate|love|use|always|never|want)\b'
     r'|(?:i|my)\s+(?:name|email|phone|address|birthday|age|job|role|team)\s+(?:is|are)\b'
-    r"|(?:i(?:'m|\s+am)\s+)"
+    r"|i(?:'m|\s+am)\s+(?:a|an|the|using|on|in|at|based|from|currently|now|working|building)\b"
     r'|(?:we|i)\s+(?:decided|agreed|committed|chose|picked)\b'
-    r'|(?:actually|no|wrong|correction|not\s+right|instead)\b'
+    r"|(?:actually|instead|correction)\b[^?]*?\b(?:i|my|we|it(?:'s|\s+is)|that(?:'s|\s+is))\b"
+    r"|(?:that(?:'s|\s+is)|it(?:'s|\s+is)|you(?:'re|\s+are))\s+(?:wrong|not\s+right|incorrect)\b"
     r'|(?:remember\s+(?:that|this|to))\b'
     r'|(?:from\s+now\s+on|always\s+do|never\s+do|every\s+session)\b'
     r'|(?:my\s+(?:favorite|preferred|usual|default))\b'
     r')',
+    re.IGNORECASE,
+)
+
+# Strips double/single-quoted spans so a quoted token inside an otherwise
+# non-storable prompt cannot trigger the store path (issue #635, M-40).
+_QUOTED_SPAN_RE = re.compile(r'"[^"]*"' r"|'[^']*'" r'|`[^`]*`')
+
+# Prompts that OPEN with a question word are interrogatives (asks), even when
+# they lack a trailing "?" ("do you prefer tabs", "what is my default")
+# (issue #635, M-40).
+_INTERROGATIVE_RE = re.compile(
+    r'^(?:do|does|did|can|could|would|will|are|is|was|were|have|has|'
+    r'what|who|when|where|why|how|which)\b',
     re.IGNORECASE,
 )
 
@@ -207,7 +248,7 @@ def _get_intensity_config() -> tuple[str, str]:
 
 def _get_prompt_count(session_id: str) -> int:
     """Read the prompt counter for a session."""
-    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "unknown"
+    safe_id = _safe_session_id_local(session_id)
     counter_file = _PROMPT_COUNTER_DIR / f"{safe_id}.count"
     try:
         if counter_file.exists():
@@ -218,25 +259,94 @@ def _get_prompt_count(session_id: str) -> int:
 
 
 def _increment_prompt_count(session_id: str) -> int:
-    """Increment and return the prompt counter for a session."""
-    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "unknown"
+    """Increment and return the prompt counter for a session.
+
+    Issue #635 (M-73): the read-modify-write is serialized with ``flock`` so
+    two overlapping hook invocations for the same session cannot both read N
+    and both write N+1 (losing a tick, which would skew the every-5th proactive
+    recall cadence). Falls back to the unlocked path on Windows / lock failure
+    rather than crashing the hook.
+    """
+    safe_id = _safe_session_id_local(session_id)
     counter_file = _PROMPT_COUNTER_DIR / f"{safe_id}.count"
-    count = _get_prompt_count(session_id) + 1
     try:
         _PROMPT_COUNTER_DIR.mkdir(parents=True, exist_ok=True)
-        counter_file.write_text(str(count), encoding="utf-8")
     except OSError:
         pass
-    return count
+
+    if not _HAS_FCNTL:
+        count = _get_prompt_count(session_id) + 1
+        try:
+            counter_file.write_text(str(count), encoding="utf-8")
+        except OSError:
+            pass
+        return count
+
+    fd = -1
+    try:
+        fd = os.open(str(counter_file), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            pass
+        try:
+            raw = os.read(fd, 64).decode("utf-8", errors="replace").strip()
+            current = int(raw) if raw else 0
+        except (ValueError, OSError):
+            current = 0
+        count = current + 1
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, str(count).encode("utf-8"))
+        except OSError:
+            pass
+        return count
+    except OSError:
+        # Could not open the counter under lock — fall back to best-effort.
+        count = _get_prompt_count(session_id) + 1
+        try:
+            counter_file.write_text(str(count), encoding="utf-8")
+        except OSError:
+            pass
+        return count
+    finally:
+        if fd >= 0:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def _detect_storable_content(prompt: str) -> bool:
-    """Fast heuristic: does the prompt contain content worth storing?"""
+    """Fast heuristic: does the prompt contain content worth storing?
+
+    Issue #635 (M-40): exclude interrogatives and quoted spans before the
+    storable-pattern match. A question ("do you prefer X?") is a recall/ask,
+    not a statement of the user's own preference, and a token that only
+    appears inside a quote ("the docs say 'I'm deprecated'") is not the user
+    asserting a fact. Both used to spuriously trip the expensive store path.
+    """
     if len(prompt) < 15 or len(prompt) > 2000:
         return False
     if _CODE_RE.search(prompt):
         return False
-    return bool(_STORABLE_RE.search(prompt))
+    # Strip quoted spans so a quoted token cannot trigger storage.
+    stripped = _QUOTED_SPAN_RE.sub(" ", prompt)
+    # An interrogative is an ask, not a self-statement: a trailing question
+    # mark, or a prompt that opens with a question word ("do you prefer...",
+    # "what is my..."). We do NOT exclude every _RECALL_RE phrasing here —
+    # "we decided ..." is both a recall cue and a genuine decision worth
+    # storing — so we gate on interrogative *form* only (issue #635, M-40).
+    if stripped.rstrip().endswith("?"):
+        return False
+    if _INTERROGATIVE_RE.match(stripped.lstrip()):
+        return False
+    return bool(_STORABLE_RE.search(stripped))
 
 
 def _check_conversation_depth(session_id: str, prompt: str, window: int = 5) -> bool:
@@ -253,13 +363,16 @@ def _check_conversation_depth(session_id: str, prompt: str, window: int = 5) -> 
     M-17). This means a shallow/first-prompt exchange (no prior on-topic
     history) correctly does NOT fire under "enhanced".
     """
-    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "unknown"
-    buffer_file = _PROMPT_COUNTER_DIR.parent / "buffers" / f"{safe_id}.jsonl"
-    if not buffer_file.exists():
-        buffer_file = Path(os.environ.get(
-            "TRUEMEMORY_BUFFER_DIR",
-            str(Path.home() / ".truememory" / "buffers"),
-        )) / f"{safe_id}.jsonl"
+    # Issue #635 (M-73): derive the buffer file from the buffer dir directly.
+    # The previous `_PROMPT_COUNTER_DIR.parent / "buffers"` was wrong whenever
+    # TRUEMEMORY_BUFFER_DIR pointed somewhere other than a ".../buffers" path
+    # (e.g. /custom/dir -> /custom/buffers), so depth never saw the buffer and
+    # "enhanced" silently degraded to never firing. The prompt counter and the
+    # message buffer share one directory (both default to TRUEMEMORY_BUFFER_DIR),
+    # so reading from _PROMPT_COUNTER_DIR points at the same place
+    # buffer_message() writes.
+    safe_id = _safe_session_id_local(session_id)
+    buffer_file = _PROMPT_COUNTER_DIR / f"{safe_id}.jsonl"
     if not buffer_file.exists():
         return False
 
@@ -356,8 +469,24 @@ def _try_per_exchange_store(prompt: str, session_id: str, user_id: str, db_path:
             if not decision.should_encode:
                 return
 
-            # Store the content
-            m.add(content=prompt, user_id=user_id or None)
+            # Issue #635 (M-39): route the actual store through the SAME
+            # dedup-store critical section the Stop pipeline uses, instead of
+            # a bare m.add(). The cheap novelty search above only sees full
+            # search() scores; check_duplicate() runs the authoritative
+            # vector + (optional) LLM dedup against existing memories. Holding
+            # _dedup_store_lock() across the check + add makes the per-exchange
+            # store atomic w.r.t. concurrent Stop-pipeline ingests, so a fact
+            # stored here and later re-extracted (rephrased) by the pipeline is
+            # SKIPped rather than double-stored, and vice versa.
+            from truememory.ingest.dedup import check_duplicate, DedupAction
+            from truememory.ingest.pipeline import _dedup_store_lock
+            with _dedup_store_lock():
+                dedup = check_duplicate(prompt, m, user_id=user_id or "")
+                if dedup.action == DedupAction.ADD:
+                    m.add(content=dedup.fact, user_id=user_id or None)
+                # UPDATE/SKIP: an equivalent memory already exists — the
+                # Stop pipeline owns merge/update semantics, so the
+                # per-exchange path simply declines to double-store.
     except Exception:
         pass  # Never crash the hook
 
@@ -651,10 +780,10 @@ def buffer_message(session_id: str, prompt: str):
     except OSError:
         pass
 
-    # Sanitize session_id to prevent path traversal (e.g., "../../etc/passwd")
-    safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64]
-    if not safe_id:
-        safe_id = "unknown"
+    # Sanitize session_id to prevent path traversal (e.g., "../../etc/passwd").
+    # Shared helper keeps this name in lockstep with the counter/depth paths
+    # (issue #635, M-73).
+    safe_id = _safe_session_id_local(session_id)
 
     buffer_file = BUFFER_DIR / f"{safe_id}.jsonl"
 
