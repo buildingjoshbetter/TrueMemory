@@ -377,7 +377,26 @@ class TrueMemoryEngine:
         ``open()`` manually for simple CRUD workflows.
         """
         if self.conn is not None:
-            return
+            # SRE-01: a cached handle can be poisoned by a transient disk I/O
+            # error (e.g. a stray -wal deletion) or closed out from under us.
+            # Previously the short-circuit returned the dead handle forever, so a
+            # long-lived MCP server failed every add/search/recall until manual
+            # restart. Probe the handle; if the probe fails, drop it and fall
+            # through to reconnect so the server self-heals once the FS recovers.
+            try:
+                self.conn.execute("PRAGMA schema_version")
+                return
+            except sqlite3.Error:
+                logger.warning(
+                    "DB connection probe failed for %s; reconnecting",
+                    self.db_path, exc_info=True,
+                )
+                try:
+                    self.conn.close()
+                except sqlite3.Error:
+                    pass
+                self.conn = None
+                self._has_vectors = False
 
         with self._init_lock:
             if self.conn is not None:
