@@ -88,6 +88,17 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[all,dev]"
       - name: Run network-marked tests (retried for transient HF flakes)
+        # This job MUST run online -- its whole purpose is real HuggingFace
+        # downloads + the real-embedding smoke test (#654/M-52). Force offline
+        # mode OFF: two test modules call os.environ.setdefault("HF_HUB_OFFLINE",
+        # "1") at import, and pytest imports every module during collection, so
+        # that default leaked offline-mode into this job and made the network
+        # tests fail 100% deterministically (LocalEntryNotFoundError), silently
+        # turning the real-vector gate into a no-op. Setting it "0" here makes
+        # the setdefault a no-op so downloads actually happen.
+        env:
+          HF_HUB_OFFLINE: "0"
+          TRANSFORMERS_OFFLINE: "0"
         run: |
           for attempt in 1 2 3; do
             echo "::group::network-tests attempt $attempt"
