@@ -164,6 +164,10 @@ def _find_dead_pid() -> int:
     return 999999
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX os.kill EPERM/ESRCH semantics; win32 uses psutil via _platform.pid_is_alive",
+)
 def test_pid_alive_treats_eperm_as_alive_esrch_as_dead(monkeypatch):
     """The liveness check must not treat a live-but-EPERM process as dead.
 

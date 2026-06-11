@@ -8,6 +8,7 @@ cleaned up.
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -22,6 +23,11 @@ _SKIP_NO_FCNTL = pytest.mark.skipif(
 )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX flock PID/mtime bookkeeping; Windows uses msvcrt byte-lock "
+    "(no PID/TTL stealing) — covered by test_issue_642_windows_platform.py",
+)
 class TestIssue461StaleLock:
     """Verify PID-based lock validation and TTL."""
 
