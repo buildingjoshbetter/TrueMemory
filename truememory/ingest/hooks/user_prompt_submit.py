@@ -402,6 +402,39 @@ def _check_conversation_depth(session_id: str, prompt: str, window: int = 5) -> 
         return False
 
 
+# SRE-02 (#693): minimum spacing between per-exchange stores for one session.
+# 0 disables the debounce. Configurable for tests / power users.
+_STORE_DEBOUNCE_SECONDS = _env_int("TRUEMEMORY_STORE_DEBOUNCE_SECONDS", 2, lo=0)
+_STORE_MARKER_DIR = Path.home() / ".truememory" / "store_markers"
+
+
+def _store_debounced(session_id: str) -> bool:
+    """Return True if a per-exchange store for *session_id* ran within the last
+    ``_STORE_DEBOUNCE_SECONDS`` (so this one should be skipped).
+
+    When it returns False (store allowed) it records the current time so the
+    next call within the window is debounced. Never blocks on marker I/O error.
+    """
+    if _STORE_DEBOUNCE_SECONDS <= 0:
+        return False
+    try:
+        safe = _safe_session_id_local(session_id)
+        marker = _STORE_MARKER_DIR / f"{safe}.ts"
+        now = time.time()
+        if marker.exists():
+            try:
+                if now - float(marker.read_text(encoding="utf-8").strip()) < _STORE_DEBOUNCE_SECONDS:
+                    return True
+            except (OSError, ValueError):
+                pass
+        from truememory.ingest.hooks._shared import _secure_mkdir
+        _secure_mkdir(_STORE_MARKER_DIR)
+        marker.write_text(str(now), encoding="utf-8")
+        return False
+    except OSError:
+        return False
+
+
 def _try_per_exchange_store(prompt: str, session_id: str, user_id: str, db_path: str, store_intensity: str) -> None:
     """Per-exchange evaluator: detect storable content and store via encoding gate.
 
@@ -418,6 +451,16 @@ def _try_per_exchange_store(prompt: str, session_id: str, user_id: str, db_path:
     # The depth check excludes the current prompt (already buffered by main())
     # so "enhanced" does not trivially match itself (issue #634, M-17).
     if store_intensity == "enhanced" and not _check_conversation_depth(session_id, prompt):
+        return
+
+    # SRE-02 (#693): bound the per-exchange store RATE. The work below
+    # (Memory open + embed + dedup + add) runs SYNCHRONOUSLY on prompt
+    # submission; without a limit a rapid flood of storable prompts at
+    # store_intensity=max piles up unbounded synchronous work and starves the
+    # model-server recall fast-lane. Debounce per session — the Stop-hook
+    # background extraction still captures everything from the transcript, so
+    # this only drops the redundant *eager* store, never data.
+    if _store_debounced(session_id):
         return
 
     # Issue #634 (M-18): arm the same model-server deadline the recall paths
