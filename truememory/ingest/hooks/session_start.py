@@ -24,12 +24,12 @@ import argparse
 import json
 import logging
 import os
-import re
 import sys
 from pathlib import Path
 
 from truememory import _platform
 from truememory._platform import _env_int
+from truememory._sanitize import sanitize_injection_content
 
 try:
     import fcntl
@@ -768,11 +768,6 @@ def _first_run_context() -> str:
 # at half the recall budget with a truncation marker.
 _DIRECTIVE_BUDGET_FRACTION = 0.5
 
-# Control/ANSI characters to strip from injected directive text (issue #638,
-# G2-2): an ESC sequence or NUL embedded in a directive corrupts the rendered
-# XML / terminal. Keep tab/newline (harmless, sometimes intentional).
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-
 
 def _sanitize_directive(content: str) -> str:
     """Neutralize a directive before interpolating it into injected XML.
@@ -785,20 +780,10 @@ def _sanitize_directive(content: str) -> str:
     token so directive content can never open or close an injection block, and
     strip control/ANSI characters (G2-2).
     """
-    if not content:
-        return content
-    # Strip control/ANSI chars first.
-    content = _CONTROL_CHARS_RE.sub("", content)
-    # Neutralize the XML wrapper tokens (case-insensitive) by escaping the
-    # leading angle bracket of any ``<truememory-`` / ``</truememory-``
-    # sequence. The resulting ``&lt;truememory-...`` is inert text — it can
-    # neither open nor close a real injection block.
-    content = re.sub(
-        r"(?i)<(/?truememory-)",
-        r"&lt;\1",
-        content,
-    )
-    return content
+    # Delegates to the shared sanitizer (truememory._sanitize), which also
+    # neutralizes ``<system…>`` framing tokens (issue: V-dir-1) in addition to
+    # the ``<truememory-*>`` wrapper tokens this used to handle alone.
+    return sanitize_injection_content(content)
 
 
 def _directive_scope_sql(user_id: str) -> tuple[str, list]:
@@ -867,6 +852,10 @@ def _truncate_memory(content: str, memory_id, max_chars: int = 0) -> str:
     Otherwise it is sliced to the last whitespace boundary before *max_chars*
     and a pointer suffix is appended so the agent can retrieve the full text.
     """
+    # Neutralize injected-block framing tokens BEFORE truncation so the budget
+    # reflects the actual injected text and a memory can't break out of the
+    # <truememory-context> block or forge a <system…> block (A1-1 / V-dir-1).
+    content = sanitize_injection_content(content)
     if max_chars <= 0:
         max_chars = RECALL_MEMORY_CHARS
     if len(content) <= max_chars:

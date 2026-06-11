@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from truememory._platform import _env_int
+from truememory._sanitize import sanitize_injection_content
 
 # Optional: fcntl isn't available on Windows, so we gracefully degrade
 try:
@@ -561,7 +562,7 @@ def _try_proactive_recall(
             return None, True
         lines = []
         for r in results[:limit]:
-            content = r.get("content", "")[:200]
+            content = sanitize_injection_content(r.get("content", "")[:200])
             lines.append(f"- {content}")
         return (
             "<truememory-recall>\n"
@@ -618,7 +619,7 @@ def _try_auto_recall(prompt: str, user_id: str, db_path: str, session_id: str = 
             return None
         lines = []
         for r in results[:5]:
-            content = r.get("content", "")[:200]
+            content = sanitize_injection_content(r.get("content", "")[:200])
             lines.append(f"- {content}")
         return (
             "<truememory-recall>\n"

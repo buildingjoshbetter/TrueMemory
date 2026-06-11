@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from truememory._platform import _env_int
+from truememory._sanitize import sanitize_injection_content
 
 try:
     import psutil
@@ -555,7 +556,7 @@ def recall_memories(
         "",
     ]
     for r in all_results[:limit]:
-        content = r.get("content", "").strip()
+        content = sanitize_injection_content(r.get("content", "").strip())
         if content:
             lines.append(f"- {content}")
 
