@@ -37,6 +37,41 @@ def test_get_by_id(mem):
     assert fetched["content"] == "Test memory"
 
 
+def test_metadata_round_trips_through_crud_and_search(mem):
+    metadata = {"session_id": "sess-123", "source": "unit-test", "nested": {"n": 1}}
+    added = mem.add("Alice prefers metadata-aware memories", user_id="alice", metadata=metadata)
+
+    assert added["metadata"] == metadata
+
+    fetched = mem.get(added["id"])
+    assert fetched is not None
+    assert fetched["metadata"] == metadata
+
+    all_mems = mem.get_all(user_id="alice")
+    assert all_mems[0]["metadata"] == metadata
+
+    results = mem.search("aware", user_id="alice")
+    assert results
+    assert results[0]["metadata"] == metadata
+
+
+def test_metadata_defaults_to_empty_dict(mem):
+    added = mem.add("No metadata here", user_id="alice")
+    assert added["metadata"] == {}
+    fetched = mem.get(added["id"])
+    assert fetched["metadata"] == {}
+
+
+def test_metadata_must_be_dict(mem):
+    with pytest.raises(TypeError, match="metadata must be a dict or None"):
+        mem.add("Bad metadata", metadata=["not", "a", "dict"])
+
+
+def test_metadata_must_be_json_serializable(mem):
+    with pytest.raises(TypeError, match="metadata must be JSON-serializable"):
+        mem.add("Bad metadata", metadata={"bad": object()})
+
+
 def test_delete(mem):
     added = mem.add("To be deleted", user_id="alice")
     mem.delete(added["id"])

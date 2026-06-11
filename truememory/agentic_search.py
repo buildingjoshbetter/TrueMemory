@@ -263,6 +263,7 @@ def clean_results(
             "category": r.get("category", ""),
             "modality": r.get("modality", ""),
             "directive": r.get("directive", False),
+            "metadata": r.get("metadata", {}),
             "score": score,
             "source": r.get("source", "agentic"),
         })

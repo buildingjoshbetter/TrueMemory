@@ -13,6 +13,7 @@ from truememory.storage import (
     get_message,
     get_message_count,
     bulk_replace_messages,
+    update_message,
     DEFAULT_BUSY_TIMEOUT_MS,
 )
 
@@ -71,6 +72,34 @@ class TestCreateDb:
         assert "idx_messages_sender" in indexes
         assert "idx_messages_timestamp" in indexes
 
+    def test_legacy_messages_table_adds_metadata_column(self, tmp_path):
+        path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(path)
+        conn.execute(
+            "CREATE TABLE messages ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "content TEXT NOT NULL, "
+            "sender TEXT DEFAULT '', "
+            "recipient TEXT DEFAULT '', "
+            "timestamp TEXT DEFAULT '', "
+            "category TEXT DEFAULT '', "
+            "modality TEXT DEFAULT '', "
+            "directive INTEGER DEFAULT 0"
+            ")"
+        )
+        conn.execute("INSERT INTO messages (content, sender) VALUES (?, ?)", ("legacy", "alice"))
+        conn.commit()
+        conn.close()
+
+        migrated = create_db(path)
+        try:
+            cols = {row[1] for row in migrated.execute("PRAGMA table_info(messages)").fetchall()}
+            assert "metadata" in cols
+            row = get_message(migrated, 1)
+            assert row["metadata"] == {}
+        finally:
+            migrated.close()
+
 
 class TestInsertMessage:
     def test_basic_insert_and_retrieve(self, db):
@@ -108,6 +137,30 @@ class TestInsertMessage:
         assert row["content"] == "Robert'); DROP TABLE messages;--"
         assert get_message_count(db) >= 1
 
+    def test_metadata_round_trip(self, db):
+        metadata = {"session_id": "sess-1", "source": "test"}
+        new_id = insert_message(db, {"content": "with metadata", "metadata": metadata})
+        db.commit()
+        row = get_message(db, new_id)
+        assert row["metadata"] == metadata
+
+    def test_metadata_must_be_dict(self, db):
+        with pytest.raises(TypeError, match="metadata must be a dict or None"):
+            insert_message(db, {"content": "bad metadata", "metadata": ["bad"]})
+
+    def test_metadata_must_be_json_serializable(self, db):
+        with pytest.raises(TypeError, match="metadata must be JSON-serializable"):
+            insert_message(db, {"content": "bad metadata", "metadata": {"bad": object()}})
+
+
+class TestUpdateMessage:
+    def test_update_metadata(self, db):
+        new_id = insert_message(db, {"content": "update metadata"})
+        db.commit()
+        assert update_message(db, new_id, metadata={"stage": "updated"}) is True
+        row = get_message(db, new_id)
+        assert row["metadata"] == {"stage": "updated"}
+
 
 class TestDeleteMessage:
     def test_delete_existing(self, db):
@@ -136,12 +189,17 @@ class TestBulkReplace:
         insert_message(db, {"content": "old message"})
         db.commit()
         messages = [
-            {"content": "new msg 1", "sender": "a"},
+            {"content": "new msg 1", "sender": "a", "metadata": {"batch": 1}},
             {"content": "new msg 2", "sender": "b"},
         ]
         count = bulk_replace_messages(db, messages)
         assert count == 2
         assert get_message_count(db) == 2
+        first_id = db.execute(
+            "SELECT id FROM messages WHERE content = ?", ("new msg 1",)
+        ).fetchone()[0]
+        first = get_message(db, first_id)
+        assert first["metadata"] == {"batch": 1}
 
     def test_fts_synced_after_replace(self, db):
         messages = [{"content": "bulk_unique_token_abc"}]

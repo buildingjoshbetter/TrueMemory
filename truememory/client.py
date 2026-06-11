@@ -70,7 +70,7 @@ class Memory:
         Args:
             content:  The text to remember.
             user_id:  Owner of this memory (optional).
-            metadata: Reserved for future use.
+            metadata: Optional JSON-serializable metadata stored with the memory.
 
         Returns:
             Dict with ``id``, ``content``, ``user_id``, ``created_at``.
@@ -103,10 +103,12 @@ class Memory:
             content=content,
             sender=user_id or "",
             timestamp=now,
+            metadata=metadata,
             directive=directive,
         )
         result["user_id"] = user_id or ""
         result["created_at"] = now
+        result["metadata"] = metadata or {}
         # Issue #559: invalidate recall cache so the next hook invocation
         # picks up newly stored memories instead of serving stale results.
         try:

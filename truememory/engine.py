@@ -581,7 +581,7 @@ class TrueMemoryEngine:
             recipient: Who it was said to.
             timestamp: ISO-8601 timestamp string.
             category:  Optional grouping label.
-            metadata:  Reserved for future use.
+            metadata:  Optional JSON-serializable metadata stored with the memory.
 
         Returns:
             Dict with ``id`` and the stored fields.
@@ -622,6 +622,7 @@ class TrueMemoryEngine:
                 "category": category,
                 "modality": "",
                 "directive": directive,
+                "metadata": metadata,
             }
             new_id = insert_message(self.conn, msg)
 
@@ -673,6 +674,7 @@ class TrueMemoryEngine:
             "timestamp": timestamp,
             "category": category,
             "directive": directive,
+            "metadata": metadata or {},
         }
 
     def _maybe_auto_consolidate(self) -> None:
@@ -1952,6 +1954,7 @@ class TrueMemoryEngine:
                 "category": r.get("category", ""),
                 "modality": r.get("modality", ""),
                 "directive": r.get("directive", False),
+                "metadata": r.get("metadata", {}),
                 "score": score,
                 "source": r.get("source", source_label),
             })
@@ -2331,6 +2334,7 @@ class TrueMemoryEngine:
                 "category": r.get("category", ""),
                 "modality": r.get("modality", ""),
                 "directive": r.get("directive", False),
+                "metadata": r.get("metadata", {}),
                 "score": r.get("score", 0),
                 "source": "fts",
             })

@@ -49,6 +49,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from truememory.storage import _deserialize_metadata
+
 if TYPE_CHECKING:
     pass
 
@@ -710,7 +712,7 @@ def search_vector(
         f"""
         SELECT v.rowid, v.distance,
                m.content, m.sender, m.recipient,
-               m.timestamp, m.category, m.modality, m.directive
+               m.timestamp, m.category, m.modality, m.directive, m.metadata
         FROM (
             SELECT rowid, distance
             FROM {tbl}
@@ -741,6 +743,7 @@ def search_vector(
                 "category": row[6],
                 "modality": row[7],
                 "directive": bool(row[8]),
+                "metadata": _deserialize_metadata(row[9]),
                 "score": round(score, 6),
             }
         )
@@ -772,7 +775,7 @@ def search_vector_raw(
         f"""
         SELECT v.rowid, v.distance,
                m.content, m.sender, m.recipient,
-               m.timestamp, m.category, m.modality, m.directive
+               m.timestamp, m.category, m.modality, m.directive, m.metadata
         FROM (
             SELECT rowid, distance
             FROM {tbl}
@@ -802,6 +805,7 @@ def search_vector_raw(
                 "category": row[6],
                 "modality": row[7],
                 "directive": bool(row[8]),
+                "metadata": _deserialize_metadata(row[9]),
                 "score": round(cos_sim, 6),
             }
         )
@@ -996,7 +1000,7 @@ def search_vector_separation(
         f"""
         SELECT v.rowid, v.distance,
                m.content, m.sender, m.recipient,
-               m.timestamp, m.category, m.modality, m.directive
+               m.timestamp, m.category, m.modality, m.directive, m.metadata
         FROM (
             SELECT rowid, distance
             FROM {sep_tbl}
@@ -1024,6 +1028,7 @@ def search_vector_separation(
             "category": row[6],
             "modality": row[7],
             "directive": bool(row[8]),
+            "metadata": _deserialize_metadata(row[9]),
             "score": round(score, 6),
         })
 

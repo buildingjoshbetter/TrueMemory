@@ -17,6 +17,8 @@ Key design decisions:
 
 import sqlite3
 
+from truememory.storage import _deserialize_metadata
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -79,7 +81,8 @@ def _rows_to_results(rows: list[tuple]) -> list[dict]:
             "category": row[5],
             "modality": row[6],
             "directive": bool(row[7]),
-            "raw_score": row[8],
+            "metadata": _deserialize_metadata(row[8]),
+            "raw_score": row[9],
             "score": 0.0,  # placeholder, filled by _normalize_scores
         }
         for row in rows
@@ -89,7 +92,7 @@ def _rows_to_results(rows: list[tuple]) -> list[dict]:
 _FTS_SELECT = """
     SELECT
         m.id, m.content, m.sender, m.recipient, m.timestamp,
-        m.category, m.modality, m.directive,
+        m.category, m.modality, m.directive, m.metadata,
         messages_fts.rank AS bm25_score
     FROM messages_fts
     JOIN messages m ON m.id = messages_fts.rowid
