@@ -140,12 +140,11 @@ class AntigravityAdapter(CLIAdapter):
             ("post_invocation_hooks", "compact.py", "truememory-precompress", 5000),
             ("stop_hooks", "stop.py", "truememory-sessionend", 5000),
         ]
-
-        # Enable json hooks if it isn't already
-        existing["enable_json_hooks"] = True
         
         # Remove version key if it exists, as JSONHookSpec does not support it
         existing.pop("version", None)
+        # Remove enable_json_hooks if it exists, as it causes unmarshal bool errors
+        existing.pop("enable_json_hooks", None)
 
         for event_name, script_name, hook_id, timeout in hook_entries:
             event_list = existing.setdefault(event_name, [])
