@@ -149,31 +149,20 @@ class AntigravityAdapter(CLIAdapter):
 
         for event_name, script_name, hook_id, timeout in hook_entries:
             event_list = hooks_dict.setdefault(event_name, [])
-            # Remove existing TrueMemory hook for this event across nested definitions
+            # Remove existing TrueMemory hook for this event
             cleaned_list = []
             for h in event_list:
-                if isinstance(h, dict):
-                    inner = h.get("hooks", [])
-                    if isinstance(inner, list):
-                        inner = [hc for hc in inner if not (isinstance(hc, dict) and "truememory" in hc.get("command", "").lower())]
-                        if inner:
-                            h["hooks"] = inner
-                            cleaned_list.append(h)
-                    elif "truememory" not in h.get("command", "").lower():
-                        cleaned_list.append(h)
-                else:
+                if isinstance(h, dict) and "truememory" not in h.get("command", "").lower():
+                    cleaned_list.append(h)
+                elif not isinstance(h, dict):
                     cleaned_list.append(h)
             event_list[:] = cleaned_list
             
             cmd = f"{py} {hooks_dir / script_name}"
-            # Antigravity requires nested hooks format for Cortex compatibility
+            # Antigravity requires flat hooks format for Cortex compatibility
             event_list.append({
-                "hooks": [{
-                    "type": "command",
-                    "command": cmd,
-                    "name": hook_id,
-                    "timeout": timeout
-                }]
+                "command": cmd,
+                "timeout_ms": timeout
             })
 
         _HOOKS_CONFIG.parent.mkdir(parents=True, exist_ok=True)
