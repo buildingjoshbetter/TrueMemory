@@ -147,21 +147,25 @@ class AntigravityAdapter(CLIAdapter):
         existing.pop("enable_json_hooks", None)
 
         for event_name, script_name, hook_id, timeout in hook_entries:
-            event_list = existing.setdefault(event_name, [])
+            # Each event maps directly to a JSONHookSpec object in Cortex
+            if event_name not in existing:
+                existing[event_name] = {"hooks": []}
+            elif not isinstance(existing[event_name], dict) or "hooks" not in existing[event_name]:
+                existing[event_name] = {"hooks": []}
+                
+            hook_spec = existing[event_name]
+            hooks_list = hook_spec["hooks"]
+            
             # Remove existing TrueMemory hook for this event
-            cleaned_list = []
-            for h in event_list:
-                if isinstance(h, dict) and "truememory" not in h.get("command", "").lower():
-                    cleaned_list.append(h)
-                elif not isinstance(h, dict):
-                    cleaned_list.append(h)
-            event_list[:] = cleaned_list
+            cleaned_list = [h for h in hooks_list if isinstance(h, dict) and "truememory" not in h.get("command", "").lower()]
+            hooks_list[:] = cleaned_list
             
             cmd = f"{py} {hooks_dir / script_name}"
-            # Antigravity requires flat hooks format for Cortex compatibility
-            event_list.append({
+            hooks_list.append({
+                "type": "command",
                 "command": cmd,
-                "timeout_ms": timeout
+                "name": hook_id,
+                "timeout": timeout
             })
 
         _HOOKS_CONFIG.parent.mkdir(parents=True, exist_ok=True)
