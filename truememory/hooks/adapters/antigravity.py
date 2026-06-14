@@ -138,26 +138,42 @@ class AntigravityAdapter(CLIAdapter):
         hooks_dict = existing.setdefault("hooks", {})
 
         hook_entries = [
-            ("SessionStart", "session_start.py", "truememory-sessionstart", 10000),
-            ("SessionEnd", "stop.py", "truememory-sessionend", 5000),
-            ("BeforeAgent", "user_prompt_submit.py", "truememory-beforeagent", 5000),
-            ("PreCompress", "compact.py", "truememory-precompress", 5000),
+            ("pre_invocation_hooks", "session_start.py", "truememory-sessionstart", 10000),
+            ("pre_invocation_hooks", "user_prompt_submit.py", "truememory-beforeagent", 5000),
+            ("post_invocation_hooks", "compact.py", "truememory-precompress", 5000),
+            ("stop_hooks", "stop.py", "truememory-sessionend", 5000),
         ]
+
+        # Enable json hooks if it isn't already
+        existing["enable_json_hooks"] = True
 
         for event_name, script_name, hook_id, timeout in hook_entries:
             event_list = hooks_dict.setdefault(event_name, [])
-            # Remove existing TrueMemory hook for this event
-            event_list[:] = [
-                h for h in event_list
-                if not (isinstance(h, dict) and "truememory" in h.get("command", ""))
-            ]
+            # Remove existing TrueMemory hook for this event across nested definitions
+            cleaned_list = []
+            for h in event_list:
+                if isinstance(h, dict):
+                    inner = h.get("hooks", [])
+                    if isinstance(inner, list):
+                        inner = [hc for hc in inner if not (isinstance(hc, dict) and "truememory" in hc.get("command", "").lower())]
+                        if inner:
+                            h["hooks"] = inner
+                            cleaned_list.append(h)
+                    elif "truememory" not in h.get("command", "").lower():
+                        cleaned_list.append(h)
+                else:
+                    cleaned_list.append(h)
+            event_list[:] = cleaned_list
             
             cmd = f"{py} {hooks_dir / script_name}"
-            # Antigravity uses command as the full string like Gemini
+            # Antigravity requires nested hooks format for Cortex compatibility
             event_list.append({
-                "name": hook_id,
-                "command": cmd,
-                "timeout": timeout
+                "hooks": [{
+                    "type": "command",
+                    "command": cmd,
+                    "name": hook_id,
+                    "timeout": timeout
+                }]
             })
 
         _HOOKS_CONFIG.parent.mkdir(parents=True, exist_ok=True)
