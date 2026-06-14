@@ -134,9 +134,6 @@ class AntigravityAdapter(CLIAdapter):
             except (json.JSONDecodeError, OSError):
                 pass
 
-        existing["version"] = 1
-        hooks_dict = existing.setdefault("hooks", {})
-
         hook_entries = [
             ("pre_invocation_hooks", "session_start.py", "truememory-sessionstart", 10000),
             ("pre_invocation_hooks", "user_prompt_submit.py", "truememory-beforeagent", 5000),
@@ -146,9 +143,12 @@ class AntigravityAdapter(CLIAdapter):
 
         # Enable json hooks if it isn't already
         existing["enable_json_hooks"] = True
+        
+        # Remove version key if it exists, as JSONHookSpec does not support it
+        existing.pop("version", None)
 
         for event_name, script_name, hook_id, timeout in hook_entries:
-            event_list = hooks_dict.setdefault(event_name, [])
+            event_list = existing.setdefault(event_name, [])
             # Remove existing TrueMemory hook for this event
             cleaned_list = []
             for h in event_list:
