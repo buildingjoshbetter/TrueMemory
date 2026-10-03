@@ -204,6 +204,7 @@ results = m.search_deep("career history?", user_id="alex")  # multi-round, highe
 | [MCP Tool Reference](docs/mcp-tools.md) | All 11 MCP tools |
 | [CLI Reference](docs/cli.md) | `truememory-mcp` and `truememory-ingest` |
 | [Environment Variables](docs/env-vars.md) | All `TRUEMEMORY_*` config options |
+| [Cloud Backup](docs/cloud-backup.md) | Opt-in encrypted backup to S3-compatible storage |
 | [Architecture Deep Dive](docs/architecture.md) | 6-layer retrieval pipeline, encoding gate |
 | [Tier Selection Guide](docs/guides/tier-selection.md) | Edge vs Base vs Pro |
 | [Debugging](docs/guides/debugging.md) | Logs, traces, common issues |
@@ -214,7 +215,8 @@ results = m.search_deep("career history?", user_id="alex")  # multi-round, highe
 
 <details><summary><strong>Where is my data stored? Is anything sent to the cloud?</strong></summary>
 
-Everything lives locally in `~/.truememory/memories.db`. Edge and Base tiers make zero external calls. Pro sends only your search query text to an LLM for query expansion. Your memories are never transmitted.
+Everything lives locally in `~/.truememory/memories.db`. Edge and Base tiers make zero external calls. Pro sends only your search query text to an LLM for query expansion. Your memories are never transmitted. The one opt-in exception is [encrypted cloud backup](docs/cloud-backup.md): if you explicitly enable it, backups are AES-256-GCM encrypted on your machine (with a key only you hold) before upload to S3-compatible storage you control. Off by default.
+
 </details>
 
 <details><summary><strong>Do I need Python installed?</strong></summary>

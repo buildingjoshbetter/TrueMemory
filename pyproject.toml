@@ -37,6 +37,10 @@ dependencies = [
     "psutil>=5.9,<8.0",
     "setproctitle>=1.3,<2.0",
     "packaging>=21.0",
+    # Issue #199 Phase 1: AES-256-GCM for opt-in encrypted cloud backups.
+    # Core dependency because the crypto module is security-critical and the
+    # backup path must never silently degrade; ~3MB next to torch is noise.
+    "cryptography>=42.0,<60.0",
 ]
 
 [project.optional-dependencies]
@@ -50,8 +54,11 @@ agentic = []
 # extra so `pip install truememory[clustering]` resolves it, instead of users
 # guessing the off-resolver package name from a docstring.
 clustering = ["hdbscan>=0.8,<0.9"]
+# Issue #199 Phase 1: S3-compatible upload/download for opt-in cloud backup.
+# Local-only installs never import boto3, so it stays out of the core deps.
+backup = ["boto3>=1.28,<2.0"]
 dev = ["pytest>=7.0,<10.0", "pytest-timeout>=2.2,<3.0", "ruff>=0.4,<1.0", "build>=1.2,<2.0", "twine>=5.0,<8.0"]
-all = ["truememory[agentic,clustering]"]
+all = ["truememory[agentic,backup,clustering]"]
 
 [project.scripts]
 truememory-mcp = "truememory.mcp_server:main"

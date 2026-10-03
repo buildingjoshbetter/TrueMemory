@@ -131,3 +131,40 @@ Show ingestion statistics from a trace file.
 ```bash
 truememory-ingest stats /path/to/trace.json
 ```
+
+### backup
+
+Create an encrypted cloud backup of the database. Opt-in: requires
+`TRUEMEMORY_BACKUP_ENABLED=1` plus bucket and encryption key configuration.
+See [cloud-backup.md](cloud-backup.md).
+
+```bash
+truememory-ingest backup                  # snapshot, encrypt, upload
+truememory-ingest backup --db /path/memories.db
+truememory-ingest backup --key-file /path/key.txt
+truememory-ingest backup --generate-key    # print a new encryption key and exit
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--db` | `~/.truememory/memories.db` | Path to database |
+| `--key-file` | | File containing the base64 encryption key (alternative to `TRUEMEMORY_BACKUP_KEY`) |
+| `--generate-key` | | Print a fresh random key to stdout and exit |
+
+### restore
+
+Restore the database from an encrypted cloud backup. Replaces the current
+database; a `*.backup-pre-restore-*` safety snapshot is created first. Asks for
+confirmation unless `--yes` is passed (required when stdin is not a TTY).
+
+```bash
+truememory-ingest restore                 # interactive confirmation
+truememory-ingest restore --yes           # non-interactive
+truememory-ingest restore --db /path/memories.db --key-file /path/key.txt
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--db` | `~/.truememory/memories.db` | Path to database |
+| `--key-file` | | File containing the base64 encryption key |
+| `-y`, `--yes` | | Skip the interactive confirmation |
