@@ -97,6 +97,24 @@ def main():
     p_migrate.add_argument("--no-backup", action="store_true", help="Skip backup of original MEMORY.md")
     p_migrate.add_argument("--slim", action="store_true", help="Replace MEMORY.md with slim template after migration")
 
+    # --- backup command (opt-in encrypted cloud backup; issue #199 Phase 1) ---
+    p_backup = sub.add_parser("backup", help="Create an encrypted cloud backup of the database")
+    p_backup.add_argument("--db", default=None, help="Path to truememory database")
+    p_backup.add_argument("--key-file", default=None, help="File containing the base64 encryption key")
+    p_backup.add_argument(
+        "--generate-key", action="store_true",
+        help="Print a new backup encryption key and exit",
+    )
+
+    # --- restore command (opt-in encrypted cloud restore; issue #199 Phase 1) ---
+    p_restore = sub.add_parser("restore", help="Restore the database from an encrypted cloud backup")
+    p_restore.add_argument("--db", default=None, help="Path to truememory database")
+    p_restore.add_argument("--key-file", default=None, help="File containing the base64 encryption key")
+    p_restore.add_argument(
+        "-y", "--yes", action="store_true",
+        help="Skip the interactive confirmation (required when not on a TTY)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "ingest":
@@ -121,6 +139,10 @@ def main():
         _run_upgrade_tier(args)
     elif args.command == "migrate-memory":
         _run_migrate_memory(args)
+    elif args.command == "backup":
+        _run_backup(args)
+    elif args.command == "restore":
+        _run_restore(args)
     else:
         parser.print_help()
 
@@ -1409,6 +1431,106 @@ def _run_facts(args):
             if args.all and gate:
                 print(f"        score={gate.get('score', 0):.2f}  "
                       f"reason={gate.get('reason', '')[:60]}")
+
+
+# ---------------------------------------------------------------------------
+# backup / restore commands — opt-in encrypted cloud backup (issue #199)
+# ---------------------------------------------------------------------------
+
+
+def _read_key_file(path: str) -> str:
+    key_path = Path(path)
+    if not key_path.is_file():
+        print(f"ERROR: key file not found: {path}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        key = key_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        print(f"ERROR: could not read key file {path}: {exc}", file=sys.stderr)
+        sys.exit(2)
+    if not key:
+        print(f"ERROR: key file is empty: {path}", file=sys.stderr)
+        sys.exit(2)
+    return key
+
+
+def _run_backup(args):
+    """Create a consistent snapshot, encrypt it, and upload it."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    from truememory.backup_errors import BackupError
+    from truememory.cloud_backup import BackupConfig, backup_database, generate_key
+
+    if args.generate_key:
+        print(generate_key())
+        print(
+            "\nStore this key somewhere safe.\n"
+            "Set it as TRUEMEMORY_BACKUP_KEY or pass it via --key-file.\n"
+            "If you lose it, every cloud backup is permanently undecryptable.",
+            file=sys.stderr,
+        )
+        return
+
+    key = _read_key_file(args.key_file) if args.key_file else None
+    config = BackupConfig.from_env()
+    try:
+        result = backup_database(config, db_path=args.db, key=key)
+    except BackupError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Encrypted backup uploaded: s3://{result.bucket}/{result.key}")
+    print(f"  database:       {result.db_path}")
+    print(f"  encrypted size: {result.encrypted_bytes} bytes "
+          f"(format v{result.format_version})")
+
+
+def _run_restore(args):
+    """Download, validate, and safely replace the local database."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    from truememory.backup_errors import BackupError
+    from truememory.cloud_backup import BackupConfig, resolve_db_path, restore_database
+
+    key = _read_key_file(args.key_file) if args.key_file else None
+    config = BackupConfig.from_env()
+    db = Path(args.db) if args.db else resolve_db_path()
+
+    # Fail fast on an unconfigured/disabled backup before asking the user to
+    # confirm anything; prompting first would imply the restore is possible.
+    try:
+        config.validate()
+    except BackupError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if not args.yes:
+        if not sys.stdin or not sys.stdin.isatty():
+            print(
+                "ERROR: restore REPLACES the current database. Re-run with "
+                "--yes to confirm non-interactively.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        print(f"Restore will REPLACE: {db}")
+        print("A safety backup of the current database is created first.")
+        try:
+            answer = input("Type 'yes' to continue: ").strip().lower()
+        except EOFError:
+            print("\nAborted.")
+            sys.exit(1)
+        if answer != "yes":
+            print("Aborted.")
+            sys.exit(1)
+
+    try:
+        result = restore_database(config, db_path=db, key=key)
+    except BackupError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Restored database: {result.db_path}")
+    if result.safety_backup:
+        print(f"  pre-restore safety backup: {result.safety_backup}")
+    print(f"  source: s3://{result.bucket}/{result.key}")
 
 
 def _print_result(result: IngestionResult):

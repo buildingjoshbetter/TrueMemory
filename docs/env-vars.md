@@ -71,6 +71,23 @@ All TrueMemory environment variables and their defaults.
 |----------|---------|-------------|
 | `TRUEMEMORY_TELEMETRY` | (enabled) | Set to `off`, `false`, `0`, or `no` to disable telemetry |
 
+## Cloud Backup
+
+Opt-in encrypted cloud backup (issue #199, Phase 1). Disabled unless
+`TRUEMEMORY_BACKUP_ENABLED` is truthy. See [cloud-backup.md](cloud-backup.md).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TRUEMEMORY_BACKUP_ENABLED` | (disabled) | Set to `1`/`true`/`yes`/`on` to enable cloud backup |
+| `TRUEMEMORY_BACKUP_BUCKET` | | S3-compatible bucket name (required when enabled) |
+| `TRUEMEMORY_BACKUP_KEY` | | Base64 32-byte encryption key, user-controlled (required when enabled). Generate with `truememory-ingest backup --generate-key` |
+| `TRUEMEMORY_BACKUP_ENDPOINT` | AWS endpoint | Custom endpoint for R2/MinIO/other S3-compatible providers |
+| `TRUEMEMORY_BACKUP_REGION` | `us-east-1` | Region name (usually ignored by S3-compatible providers) |
+| `TRUEMEMORY_BACKUP_PREFIX` | `truememory/` | Object key prefix |
+| `TRUEMEMORY_BACKUP_OBJECT` | `<prefix><db filename>.tmbackup` | Explicit object key override |
+| `TRUEMEMORY_BACKUP_ACCESS_KEY_ID` | provider chain | Optional explicit access key; otherwise boto3's standard chain applies |
+| `TRUEMEMORY_BACKUP_SECRET_ACCESS_KEY` | provider chain | Optional secret for the access key above |
+
 ## API Keys
 
 | Variable | Description |

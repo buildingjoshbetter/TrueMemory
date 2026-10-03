@@ -316,10 +316,14 @@ def _integrity_message(db_path: str | Path, raw: str) -> str:
     ]
     if backup is not None:
         lines.append(
-            f"Restore from the most recent pre-migration backup:\n"
+            f"Restore from the most recent pre-migration backup (stop ALL "
+            f"TrueMemory processes first):\n"
             f"  cp '{backup}' '{db_path}'\n"
-            "(also copy the matching -wal/-shm files if present, after "
-            "stopping all TrueMemory processes)."
+            "The backup is a single consistent snapshot file; it has no "
+            "-wal/-shm siblings to copy. Before or after the copy, remove any "
+            f"stale '{db_path}-wal', '{db_path}-shm' or '{db_path}-journal' "
+            "files left over from the corrupt database so they are not "
+            "replayed into the restored one."
         )
     else:
         lines.append(
@@ -354,24 +358,29 @@ _MAX_PRE_MIGRATION_BACKUPS = 3
 # failed. Its presence means "do NOT re-back-up this DB on every open" — a DB
 # that keeps failing migration would otherwise accumulate unbounded backups
 # (M-24). The migration itself is still retried (it is additive/transactional),
-# but the expensive 3-file backup is skipped.
+# but the expensive snapshot backup is skipped.
 _MIGRATION_FAILED_MARKER_SUFFIX = ".migration-failed"
 
 
-def _backup_glob_prefix(db_path: Path) -> str:
-    return f"{db_path.name}.backup-pre-migration-"
+def _backup_glob_prefix(db_path: Path, reason: str = "pre-migration") -> str:
+    return f"{db_path.name}.backup-{reason}-"
 
 
-def _prune_old_backups(db_path: Path, keep: int = _MAX_PRE_MIGRATION_BACKUPS) -> None:
-    """Keep only the newest ``keep`` pre-migration backups for ``db_path``.
+def _prune_old_backups(
+    db_path: Path,
+    reason: str = "pre-migration",
+    keep: int = _MAX_PRE_MIGRATION_BACKUPS,
+) -> None:
+    """Keep only the newest ``keep`` backups for ``db_path``/``reason``.
 
-    Each backup is a set of up to three files (the base copy plus optional
-    ``-wal``/``-shm`` siblings). We rank by the base file's mtime and delete
-    the whole set for anything beyond the newest ``keep``.
+    Backups are single-file consistent snapshots (Online Backup API), so the
+    ranking uses the base file's mtime. The sweep also removes any
+    ``-wal``/``-shm`` siblings, which a snapshot normally does not have but a
+    leftover could exist from an unusual shutdown state.
     """
     try:
         parent = db_path.parent if str(db_path.parent) else Path(".")
-        prefix = _backup_glob_prefix(db_path)
+        prefix = _backup_glob_prefix(db_path, reason)
         # Base backups only (exclude the -wal/-shm siblings from the ranking).
         bases = [
             p for p in parent.glob(f"{prefix}*")
@@ -388,20 +397,20 @@ def _prune_old_backups(db_path: Path, keep: int = _MAX_PRE_MIGRATION_BACKUPS) ->
                         sibling.unlink()
                 except OSError:
                     pass
-            log.info("Pruned old pre-migration backup: %s", stale)
+            log.info("Pruned old %s backup: %s", reason, stale)
     except Exception:
         log.debug("Backup pruning skipped", exc_info=True)
 
 
-def newest_backup(db_path: str | Path) -> Path | None:
-    """Return the newest pre-migration backup for ``db_path``, or None.
+def newest_backup(db_path: str | Path, reason: str = "pre-migration") -> Path | None:
+    """Return the newest backup for ``db_path``/``reason``, or None.
 
     Used to point users at a restore candidate when corruption is detected.
     """
     db_path = Path(str(db_path))
     try:
         parent = db_path.parent if str(db_path.parent) else Path(".")
-        prefix = _backup_glob_prefix(db_path)
+        prefix = _backup_glob_prefix(db_path, reason)
         bases = [
             p for p in parent.glob(f"{prefix}*")
             if not p.name.endswith("-wal") and not p.name.endswith("-shm")
@@ -413,44 +422,24 @@ def newest_backup(db_path: str | Path) -> Path | None:
         return None
 
 
-def _backup_database(db_path: Path) -> Path | None:
-    """Create a complete backup of the database including WAL/SHM files.
+def snapshot_sqlite(src_path: str | Path, dest_path: str | Path) -> None:
+    """Write an internally-consistent standalone snapshot of a live SQLite DB.
 
-    Rotates old backups so the degraded-legacy re-backup path cannot fill the
-    disk (M-24). Returns the backup path on success, None on failure.
+    Uses SQLite's Online Backup API (D1-6 / #691): the source stays live and
+    untouched, WAL content is folded into the destination, and the result is a
+    single file that opens without ``-wal``/``-shm`` siblings regardless of
+    concurrent writers. Unlike copying ``.db``/``-wal``/``-shm`` separately,
+    this can never produce a torn snapshot.
+
+    The destination is fully overwritten. On failure the caller owns cleanup of
+    any partially-written destination file.
     """
-    import uuid
-
-    suffix = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
-    backup = Path(f"{db_path}.backup-pre-migration-{suffix}")
-
-    if backup.exists():
-        return None
-
-    # D1-6 (#691): the old approach copied the main DB and the -wal/-shm files
-    # separately with shutil.copy2 — NON-atomic. A concurrent writer (the
-    # documented multi-process model) could change the WAL between the copies,
-    # tearing the backup pair so a restore fails ("no such table"). Use SQLite's
-    # Online Backup API instead: it produces a SINGLE, internally-consistent
-    # snapshot file (WAL folded in) regardless of concurrent writers, so a
-    # restore is a single `cp backup db` with no sibling files.
     src = dst = None
     try:
-        src = sqlite3.connect(str(db_path))
-        dst = sqlite3.connect(str(backup))
+        src = sqlite3.connect(str(src_path))
+        dst = sqlite3.connect(str(dest_path))
         with dst:
             src.backup(dst)
-        log.info("Legacy DB backup created (consistent snapshot): %s", backup)
-        _prune_old_backups(db_path)
-        return backup
-    except Exception as e:
-        log.warning("Could not back up database before migration: %s", e)
-        try:
-            if backup.exists():
-                backup.unlink()
-        except OSError:
-            pass
-        return None
     finally:
         for _c in (src, dst):
             if _c is not None:
@@ -460,11 +449,47 @@ def _backup_database(db_path: Path) -> Path | None:
                     pass
 
 
+def _backup_database(db_path: Path, reason: str = "pre-migration") -> Path | None:
+    """Create a complete backup of the database as a consistent snapshot.
+
+    ``reason`` names the backup family (``pre-migration`` by default) so
+    different call sites (legacy-schema upgrades, pre-restore protection) can
+    rotate independently. Rotates old backups so a repeated backup path cannot
+    fill the disk (M-24). Returns the backup path on success, None on failure.
+
+    The snapshot is a SINGLE, internally-consistent file (WAL folded in), so a
+    restore is a single ``cp backup db`` with no sibling files.
+    """
+    import uuid
+
+    suffix = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    backup = Path(f"{db_path}.backup-{reason}-{suffix}")
+
+    if backup.exists():
+        return None
+
+    try:
+        snapshot_sqlite(db_path, backup)
+        log.info("%s DB backup created (consistent snapshot): %s", reason, backup)
+        _prune_old_backups(db_path, reason)
+        return backup
+    except Exception as e:
+        log.warning("Could not back up database (%s): %s", reason, e)
+        try:
+            if backup.exists():
+                backup.unlink()
+        except OSError:
+            pass
+        return None
+
+
 def _migrate_messages_schema(conn: sqlite3.Connection, db_path: str | Path) -> None:
     """Add missing columns to an existing messages table (legacy DB upgrade).
 
     Safety measures:
-    - Creates a complete backup (DB + WAL + SHM) before any changes
+    - Creates a complete backup before any changes (a single consistent
+      snapshot via the SQLite Online Backup API; WAL content is folded in,
+      so no -wal/-shm siblings need to be copied alongside it)
     - If the backup fails, the migration still proceeds (with a loud
       warning): the ALTER TABLE ADD COLUMN statements are additive and
       transactional, while skipping the migration would leave the DB
@@ -490,7 +515,7 @@ def _migrate_messages_schema(conn: sqlite3.Connection, db_path: str | Path) -> N
         # If a previous migration attempt failed, a marker exists. Do NOT
         # re-back-up on every open — that is the disk-fill bug (M-24). The
         # migration is still retried below (additive/transactional), but we
-        # skip the expensive 3-file backup.
+        # skip the expensive snapshot backup.
         try:
             _skip_backup = _marker.exists()
         except OSError:
@@ -537,7 +562,7 @@ def _migrate_messages_schema(conn: sqlite3.Connection, db_path: str | Path) -> N
         log.warning("Legacy migration failed and was rolled back: %s", e)
         # Write a marker so the next open does NOT re-back-up this DB (M-24).
         # A DB that keeps failing migration would otherwise accumulate one
-        # 3-file backup per hook open (4+ per session) until the disk fills.
+        # snapshot backup per hook open (4+ per session) until the disk fills.
         if str(db_path) != ":memory:":
             try:
                 _marker.write_text(
