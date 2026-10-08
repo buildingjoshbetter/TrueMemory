@@ -9,11 +9,20 @@ _ROUTING = runpy.run_path(str(Path(__file__).with_name("test-maintenance-engine-
 
 
 class TestAutoConsolidation(_ROUTING["RoutingFixture"]):
+    def assert_empty_bootstrap(self) -> None:
+        maintenance = _ROUTING["MAINTENANCE"]
+        states = maintenance.read_layer_states(
+            self.conn, maintenance.engine_layer_specs(self.conn, self.coordinator))
+        self.assertEqual(len(states), 8)
+        self.assertTrue(all(state.outcome == "success_empty" for state in states.values()), states)
+        self.assertTrue(all(state.attempted_insert_count == 0 for state in states.values()), states)
+
     def test_default_threshold_is_twenty_five(self):
         self.assertEqual(self.engine._auto_consolidate_threshold, 25)
 
     def test_configured_threshold_uses_committed_source_inserts(self):
         self.engine.consolidate()
+        self.assert_empty_bootstrap()
         self.engine._auto_consolidate_threshold = 3
         self.engine._has_consolidation = True
         with patch.object(self.coordinator, "request_layers", wraps=self.coordinator.request_layers) as request:
@@ -27,6 +36,7 @@ class TestAutoConsolidation(_ROUTING["RoutingFixture"]):
 
     def test_close_and_reopen_does_not_reset_threshold_progress(self):
         self.engine.consolidate()
+        self.assert_empty_bootstrap()
         self.add(24)
         self.engine.close()
         reopened = self.new_engine()
