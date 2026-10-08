@@ -273,7 +273,7 @@ class TestForegroundPublication(unittest.TestCase):
 
             def execute(self, sql, parameters=()):
                 if sql == "BEGIN IMMEDIATE" or sql == "UPDATE messages SET id = id WHERE 0":
-                    case.assertFalse(case.vector._lock.locked())
+                    case.assertTrue(case.vector._lock.locked())
                     boundaries.append("writer")
                 if sql == "RELEASE SAVEPOINT rebuild_source":
                     case.assertTrue(case.vector._lock.locked())
@@ -296,13 +296,13 @@ class TestForegroundPublication(unittest.TestCase):
     def test_embed_owned_commit_stays_inside_model_fence(self):
         self._assert_foreground_writer_and_terminal_fence("embed", False)
 
-    def test_embed_caller_writer_upgrade_precedes_fence_and_release_stays_inside(self):
+    def test_embed_caller_fence_precedes_writer_upgrade_and_contains_release(self):
         self._assert_foreground_writer_and_terminal_fence("embed", True)
 
     def test_add_owned_commit_stays_inside_model_fence(self):
         self._assert_foreground_writer_and_terminal_fence("add", False)
 
-    def test_add_caller_writer_upgrade_precedes_fence_and_release_stays_inside(self):
+    def test_add_caller_fence_precedes_writer_upgrade_and_contains_release(self):
         self._assert_foreground_writer_and_terminal_fence("add", True)
 
     def test_denied_add_savepoint_release_rolls_back_only_add(self):

@@ -920,9 +920,9 @@ def _build_model_server_health() -> dict:
 def _build_health_payload() -> dict:
     """Return the `stats['health']` dict exposed by `truememory_stats`.
 
-    Each subsystem reports `{status, last_error, ...}`. ``status`` is one of
-    ``"ok"`` or ``"degraded"`` — the latter means a writer (F05 / F06 / F08)
-    stored a non-None error during the current process lifetime.
+    Every subsystem retains its ``ok`` / ``degraded`` status contract.
+    Clustering's separate ``state`` distinguishes unknown, pending and deferred
+    inspection; package presence never certifies a current published index.
     """
     # Reranker — written by F06's _set_reranker.
     with _reranker_error_lock:
@@ -948,8 +948,27 @@ def _build_health_payload() -> dict:
         eg_err = _encoding_gate_last_error
         eg_count = _encoding_gate_degradation_count
 
+    # Never construct Memory or open its database for this health observation.
+    try:
+        memory = _memory
+        if memory is None:
+            from truememory.maintenance import clustering_health
+            cluster_info = clustering_health()
+        else:
+            cluster_info = memory._engine.get_clustering_health()
+    except Exception as error:
+        category = type(error).__name__
+        cluster_info = {
+            "status": "degraded", "state": "unknown", "availability": "unknown", "outcome": None,
+            "freshness": "unknown", "coverage": "unverified", "output_count": None,
+            "last_error": category if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", category) else "UnknownError",
+            "dependency_error": None, "process_error": None, "missing_dependencies": [], "guidance": None,
+            "pending_reason": "inspection_unavailable", "pending_caller_commit": False,
+        }
+
     return {
         "model_server": model_server_info,
+        "clustering": cluster_info,
         "reranker": {
             "status": "ok" if reranker_err is None else "degraded",
             "last_error": reranker_err,
@@ -1569,8 +1588,10 @@ def truememory_status(status_id: int = 0) -> str:
     Returns a JSON object with:
       - ``rebuild``: tier-switch re-embedding progress (if any).
       - ``degradation``: per-subsystem health — model server, reranker,
-        HyDE LLM, encoding gate, and sqlite-vec. Each entry has a
-        ``status`` of ``"ok"`` or ``"degraded"`` plus diagnostic detail.
+        HyDE LLM, encoding gate, sqlite-vec, and clustering. Clustering
+        includes availability, freshness, coverage and the last attempt.
+        Every status is ``ok`` or ``degraded``; clustering's separate state
+        distinguishes ``unknown``, ``pending`` and ``deferred`` readiness.
 
     When everything is healthy every subsystem shows ``"ok"``.
     When a component silently degrades (reranker OOM, HyDE outage,

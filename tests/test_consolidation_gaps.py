@@ -1,134 +1,60 @@
-"""Regression tests for consolidation gaps (clustering + preferences).
+"""Behavioral coverage for all maintenance layers and startup provenance."""
 
-Verifies that consolidate() calls cluster_messages and extract_preferences —
-features that were previously only available via ingest().
-"""
-from __future__ import annotations
-
-import tempfile
-import os
-from unittest.mock import patch, MagicMock
+import runpy
+from pathlib import Path
+from unittest.mock import patch
 
 
-from truememory.engine import TrueMemoryEngine
-from truememory.storage import create_db
+_ROUTING = runpy.run_path(str(Path(__file__).with_name("test-maintenance-engine-routing-753.py")))
 
 
-def _make_engine_with_messages(n=20):
-    """Create an engine with messages in a temp DB (no vectors needed).
+class TestConsolidationGaps(_ROUTING["RoutingFixture"]):
+    def test_clustering_count_matches_real_published_centroids(self):
+        self.add(5)
+        self.native.fit = lambda: setattr(self.native, "labels", [0, 0, 1, 1, 2])
+        result = self.engine.consolidate()
+        self.assertIn("3 clusters", result["cluster_messages"])
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM cluster_centroids").fetchone()[0], 3)
 
-    Disables startup consolidation to prevent background threads from
-    accessing SQLite cross-thread (causes segfault on Python 3.14).
-    """
-    td = tempfile.mkdtemp()
-    db = os.path.join(td, "test.db")
-    conn = create_db(db)
-    for i in range(n):
-        conn.execute(
-            "INSERT INTO messages (content, sender, recipient, timestamp, category, modality) "
-            "VALUES (?, ?, '', '', '', '')",
-            (f"Message {i} about topic {i % 5}", "alice" if i % 2 == 0 else "bob"),
-        )
-    conn.commit()
-    conn.close()
+    def test_preferences_runs_on_the_worker_connection(self):
+        function = self.modules["truememory.personality"].extract_preferences
+        with patch.object(self.modules["truememory.personality"], "extract_preferences", wraps=function) as preference:
+            result = self.engine.consolidate()
+        self.assertIn("extract_preferences", result)
+        self.assertNotIn("ERROR", result["extract_preferences"])
+        preference.assert_called_once()
+        self.assertIsNot(preference.call_args.args[0], self.conn)
 
-    eng = TrueMemoryEngine(db_path=db)
-    eng._has_consolidation = False
-    eng._ensure_connection()
-    return eng, td
+    def test_missing_vector_index_reports_unavailable_without_skipping_siblings(self):
+        self.conn.execute("DROP TABLE vec_messages_edge")
+        self.conn.commit()
+        result = self.engine.consolidate()
+        self.assertIn("UNAVAILABLE", result["cluster_messages"])
+        self.assertIn("build_summaries", result)
+        self.assertNotIn("ERROR", result["build_summaries"])
 
+    def test_cluster_error_is_categorical_and_siblings_still_run(self):
+        with patch.object(self.cluster, "cluster_messages", side_effect=RuntimeError("synthetic private sentinel")):
+            result = self.engine.consolidate()
+        self.assertEqual(result["cluster_messages"], "ERROR (RuntimeError)")
+        self.assertNotIn("synthetic private sentinel", str(result))
+        self.assertNotIn("ERROR", result["detect_episodes"])
 
-def test_consolidate_calls_cluster_messages():
-    """consolidate() must call cluster_messages when clustering is available."""
-    eng, td = _make_engine_with_messages()
-    eng._has_vectors = True
+    def test_startup_attempts_initial_small_corpus_once(self):
+        self.add(5)
+        self.engine._has_consolidation = True
+        self.engine._maybe_startup_consolidate()
+        self.completed()
+        self.assertEqual(self.state().outcome, "success_empty")
+        with patch.object(self.coordinator, "request_layers") as request:
+            self.engine._maybe_startup_consolidate()
+            request.assert_not_called()
 
-    with patch("truememory.engine._HAS_CLUSTERING", True), \
-         patch("truememory.clustering.cluster_messages", return_value=3) as mock_cm:
-        result = eng.consolidate()
-
-    assert "cluster_messages" in result
-    assert "ERROR" not in result["cluster_messages"]
-    assert "3 clusters" in result["cluster_messages"]
-    mock_cm.assert_called_once_with(eng.conn)
-    eng.close()
-
-
-def test_consolidate_calls_extract_preferences():
-    """consolidate() must call extract_preferences when personality is available."""
-    eng, td = _make_engine_with_messages()
-
-    with patch("truememory.engine._HAS_PERSONALITY", True), \
-         patch("truememory.personality.extract_preferences", return_value={}) as mock_ep:
-        result = eng.consolidate()
-
-    assert "extract_preferences" in result
-    assert "ERROR" not in result["extract_preferences"]
-    mock_ep.assert_called_once_with(eng.conn)
-    eng.close()
-
-
-def test_consolidate_skips_clustering_without_vectors():
-    """consolidate() must skip clustering when vectors are unavailable."""
-    eng, td = _make_engine_with_messages()
-    eng._has_vectors = False
-
-    result = eng.consolidate()
-    assert "cluster_messages" not in result
-    eng.close()
-
-
-def test_consolidate_handles_cluster_error_gracefully():
-    """consolidate() must catch and report clustering errors."""
-    eng, td = _make_engine_with_messages()
-    eng._has_vectors = True
-
-    with patch("truememory.engine._HAS_CLUSTERING", True), \
-         patch("truememory.clustering.cluster_messages", side_effect=RuntimeError("boom")):
-        result = eng.consolidate()
-
-    assert "cluster_messages" in result
-    assert "ERROR" in result["cluster_messages"]
-    eng.close()
-
-
-def test_auto_consolidation_threshold_lowered():
-    """Default auto-consolidation threshold is 25 (was 100)."""
-    eng, td = _make_engine_with_messages()
-    assert eng._auto_consolidate_threshold == 25
-    eng.close()
-
-
-def test_startup_consolidation_triggers_when_clusters_empty():
-    """On startup, if messages exist but clusters are empty, consolidate fires."""
-    eng, td = _make_engine_with_messages(n=30)
-    eng._has_consolidation = True
-
-    import truememory.engine as _eng_mod
-    with patch.object(_eng_mod.threading, "Thread") as mock_thread_cls:
-        mock_thread = MagicMock()
-        mock_thread_cls.return_value = mock_thread
-        eng._maybe_startup_consolidate()
-
-    mock_thread_cls.assert_called_once()
-    assert mock_thread_cls.call_args.kwargs["name"] == "startup-consolidate"
-    mock_thread.start.assert_called_once()
-    eng.close()
-
-
-def test_startup_consolidation_skips_when_few_messages():
-    """Don't consolidate on startup if fewer messages than threshold."""
-    eng, td = _make_engine_with_messages(n=5)
-
-    consolidate_called = False
-    orig = eng._bg_consolidate
-    def spy():
-        nonlocal consolidate_called
-        consolidate_called = True
-        return orig()
-
-    eng._bg_consolidate = spy
-    eng._has_consolidation = True
-    eng._maybe_startup_consolidate()
-    assert not consolidate_called
-    eng.close()
+    def test_successful_empty_clusters_do_not_retrigger_all_layers(self):
+        self.add(30)
+        self.engine.consolidate()
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM cluster_centroids").fetchone()[0], 0)
+        self.engine._has_consolidation = True
+        with patch.object(self.coordinator, "request_layers") as request:
+            self.engine._maybe_startup_consolidate()
+            request.assert_not_called()
