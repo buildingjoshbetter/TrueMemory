@@ -147,7 +147,7 @@ def _checked_batch(values: object, count: int, total: int, field: str) -> np.nda
 
 def _store_batch_result(
     result: np.ndarray | None, values: object, offset: int, count: int, total: int,
-    field: str = "vectors",
+    field: str = "vectors", *, indices: np.ndarray | None = None,
 ) -> np.ndarray:
     """Check the complete output before allocating it; keep every float32 row."""
     batch = _checked_batch(values, count, total, field)
@@ -155,7 +155,10 @@ def _store_batch_result(
         result = np.empty((total, *batch.shape[1:]), dtype=np.float32)
     elif result.shape[1:] != batch.shape[1:]:
         raise ValueError("Model output dimensions changed between microbatches")
-    result[offset:offset + count] = batch
+    if indices is None:
+        result[offset:offset + count] = batch
+    else:
+        result[indices] = batch
     return result
 
 
@@ -572,6 +575,43 @@ class ModelServer:
         # getter can return that bound when native width is unknown; check
         # the actual first slice before allocating the complete result.
 
+    def _embed_global_order(
+        self, model: object, texts: list, limit: int, deadline: _RequestDeadline,
+    ) -> np.ndarray | None:
+        """Match modern ST's plain-text order only for the known Qwen model."""
+        deadline.check()
+        state = self._embed_state
+        if (len(texts) <= limit or state is None or state.model is not model
+                or state.model_id != "qwen3_256" or not all(isinstance(text, str) for text in texts)):
+            return None
+        length = getattr(model, "_input_length", None)
+        flatten = getattr(model, "_can_flatten_inputs", None)
+        if not callable(length) or not callable(flatten) or flatten():
+            return None
+        deadline.check()
+        lengths = [-length(text) for text in texts]
+        deadline.check()
+        order = np.argsort(lengths)
+        deadline.check()
+        return order
+
+    @staticmethod
+    def _embed_slice_indices(
+        model: object, texts: list, order: np.ndarray, offset: int, limit: int,
+        deadline: _RequestDeadline,
+    ) -> np.ndarray:
+        deadline.check()
+        indices = order[offset:offset + limit]
+        # Each encode sorts again. Invert its permutation within equal-length
+        # groups so its native rows keep the exact global order, including ties.
+        lengths = [-model._input_length(texts[index]) for index in indices]
+        deadline.check()
+        inner = np.argsort(lengths)
+        deadline.check()
+        inverse = np.argsort(inner)
+        deadline.check()
+        return indices[inverse]
+
     @staticmethod
     def _preflight_rerank_result(model_name: str | None, count: int) -> None:
         from truememory.reranker import get_current_reranker_name
@@ -800,6 +840,7 @@ class ModelServer:
                     encode_start = time.monotonic()
                     vectors = None
                     offset = 0
+                    order = None
                     while offset < len(texts) or vectors is None:
                         retry = None
                         with deadline.locked(self._lock):
@@ -808,9 +849,15 @@ class ModelServer:
                                 self._preflight_embed_result(tier, len(texts))
                                 deadline.check()
                                 model = self._get_embed_model(tier)
+                                order = self._embed_global_order(model, texts, limit, deadline)
                             while offset < len(texts) or vectors is None:
                                 deadline.check()
-                                batch = texts[offset:offset + limit]
+                                indices = None if order is None else self._embed_slice_indices(
+                                    model, texts, order, offset, limit, deadline,
+                                )
+                                batch = (texts[offset:offset + limit] if indices is None else
+                                         [texts[index] for index in indices])
+                                deadline.check()
                                 recover = False
                                 try:
                                     values = model.encode(batch, batch_size=limit, show_progress_bar=False)
@@ -824,7 +871,9 @@ class ModelServer:
                                     self._recover_embed_oom_locked(model, deadline)
                                     retry = batch
                                     break
-                                vectors = _store_batch_result(vectors, values, offset, len(batch), len(texts))
+                                vectors = _store_batch_result(
+                                    vectors, values, offset, len(batch), len(texts), indices=indices,
+                                )
                                 offset += len(batch)
                         if retry is not None:
                             # Release only the state lock; inference ownership
@@ -832,7 +881,9 @@ class ModelServer:
                             deadline.check()
                             log.warning("MPS OOM during encoding; retrying microbatch on CPU")
                             values = model.encode(retry, batch_size=limit, show_progress_bar=False)
-                            vectors = _store_batch_result(vectors, values, offset, len(retry), len(texts))
+                            vectors = _store_batch_result(
+                                vectors, values, offset, len(retry), len(texts), indices=indices,
+                            )
                             offset += len(retry)
                     self._after_request_batches(throttler, len(texts), encode_start, deadline)
 

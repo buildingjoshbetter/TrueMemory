@@ -4,7 +4,8 @@ from __future__ import annotations
 import socket
 import threading
 import types
-from collections.abc import Callable
+import unittest
+from collections.abc import Callable, Iterator
 
 import numpy as np
 import pytest
@@ -482,3 +483,404 @@ def test_output_count_or_dimension_mismatch_cannot_return_partial_success() -> N
     result = ms._store_batch_result(None, [[1, 2]], 0, 1, 2)
     with pytest.raises(ValueError, match="dimensions"):
         ms._store_batch_result(result, [[1, 2, 3]], 1, 1, 2)
+
+
+class OrderArray:
+    """Small indexing fake; these tests can run without importing NumPy."""
+
+    def __init__(self, values: list, shape: tuple | None = None) -> None:
+        self.values = list(values)
+        self.shape = shape or ((len(values), len(values[0])) if values and isinstance(values[0], list)
+                               else (len(values),))
+        self.ndim = len(self.shape)
+
+    def __len__(self) -> int:
+        return len(self.values)
+
+    def __iter__(self) -> Iterator[object]:
+        return iter(self.values)
+
+    def __getitem__(self, key: object) -> object:
+        if isinstance(key, OrderArray):
+            return OrderArray([self.values[index] for index in key], (len(key), *self.shape[1:]))
+        if isinstance(key, slice):
+            values = self.values[key]
+            return OrderArray(values, (len(values), *self.shape[1:]))
+        return self.values[key]
+
+    def __setitem__(self, key: object, value: "OrderArray") -> None:
+        indices = list(key) if isinstance(key, OrderArray) else list(range(len(self)))[key]
+        assert len(indices) == len(value)
+        for index, row in zip(indices, value):
+            self.values[index] = row
+
+
+class OrderNP:
+    ndarray = OrderArray
+    float32 = "float32"
+
+    def __init__(self) -> None:
+        self.sort_sizes: list[int] = []
+        self.allocations: list[tuple] = []
+        self.after_sort: Callable[[], None] = lambda: None
+
+    def argsort(self, values: object) -> OrderArray:
+        keys = list(values)
+        self.sort_sizes.append(len(keys))
+        # Deliberately unstable ties make a second local sort observable.
+        indices = sorted(range(len(keys)), key=lambda index: (keys[index], -index))
+        self.after_sort()
+        return OrderArray(indices)
+
+    def asarray(self, values: object, dtype: object = None) -> OrderArray:
+        return values if isinstance(values, OrderArray) else OrderArray(list(values))
+
+    def empty(self, shape: tuple, dtype: object = None) -> OrderArray:
+        self.allocations.append(shape)
+        return OrderArray([None] * shape[0], shape)
+
+
+class OrderModel:
+    """Model rows identify their entire native batch and their position in it."""
+
+    def __init__(self, numpy: OrderNP) -> None:
+        self.numpy = numpy
+        self.calls: list[list] = []
+        self.limits: list[int] = []
+        self.native_batches: list[list[str]] = []
+        self.fail_calls: set[int] = set()
+        self.after_call: Callable[[], None] = lambda: None
+        self.after_move: Callable[[], None] = lambda: None
+        self.moves: list[str] = []
+        self.default_prompt = "Instruct: retain the source\nQuery: "
+
+    @staticmethod
+    def _input_length(text: str) -> int:
+        return len(text)
+
+    def _can_flatten_inputs(self) -> bool:
+        return False
+
+    def encode(self, texts: list, *, batch_size: int, show_progress_bar: bool) -> OrderArray:
+        assert show_progress_bar is False
+        self.calls.append(list(texts))
+        self.limits.append(batch_size)
+        self.after_call()
+        if len(self.calls) in self.fail_calls:
+            raise RuntimeError("MPS backend out of memory")
+        order = self.numpy.argsort([-len(text) for text in texts])
+        rows = [None] * len(texts)
+        for start in range(0, len(texts), batch_size):
+            indices = order[start:start + batch_size]
+            features = [self.default_prompt + str(texts[index]) for index in indices]
+            self.native_batches.append(features)
+            fingerprint = sum((index + 1) * sum(map(ord, text)) for index, text in enumerate(features))
+            for position, index in enumerate(indices):
+                rows[index] = [fingerprint, position, sum(map(ord, features[position]))]
+        return OrderArray(rows, (len(texts), 3))
+
+    def to(self, device: str) -> None:
+        self.moves.append(device)
+        self.after_move()
+
+
+def load_order_runtime() -> dict:
+    """Execute actual control methods with stdlib dependencies and array fakes."""
+    import ast
+    import builtins
+    import json
+    import logging
+    import math
+    from contextlib import contextmanager
+    from dataclasses import dataclass
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "truememory/model_server.py"
+    functions = {"_array_metadata", "_array_base64_size", "_result_wire_size", "_check_result_size",
+                 "_batch_limit", "_checked_batch", "_store_batch_result"}
+    classes = {"_EmbedState", "_RequestDeadline", "_RequestDeadlineExceeded", "_ResultTooLarge"}
+    methods = {"handle_request", "_handle_request_inner", "_handle_fast_embed", "_embed_global_order",
+               "_embed_slice_indices", "_preflight_embed_result", "_resolve_embed_cache",
+               "_request_batch_limit", "_after_request_batches", "_recover_embed_oom_locked",
+               "_check_embed_recovery_deadline_locked"}
+    body = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.FunctionDef) and node.name in functions:
+            body.append(node)
+        elif isinstance(node, ast.ClassDef) and node.name in classes:
+            body.append(node)
+        elif isinstance(node, ast.ClassDef) and node.name == "ModelServer":
+            node.body = [part for part in node.body if isinstance(part, ast.Assign)
+                         or isinstance(part, ast.FunctionDef) and part.name in methods]
+            body.append(node)
+
+    mps = types.SimpleNamespace(is_mps_oom=lambda error: "out of memory" in str(error),
+                                flush_mps_cache=lambda: None)
+
+    def safe_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "__future__":
+            return builtins.__import__(name, *args, **kwargs)
+        if name == "truememory.mps_utils":
+            return mps
+        raise AssertionError("Unexpected runtime import: " + name)
+
+    numpy, clock = OrderNP(), FakeClock()
+    namespace = {"__name__": __name__, "np": numpy, "time": clock, "math": math, "json": json,
+                 "threading": threading, "contextmanager": contextmanager, "dataclass": dataclass,
+                 "log": logging.getLogger("synthetic-order"), "PROTOCOL_VERSION": 1,
+                 "_MAX_MESSAGE_SIZE": 10 * 1024**2, "_EMBED_BATCH_LIMIT": 32, "_RERANK_BATCH_LIMIT": 64,
+                 "__builtins__": dict(vars(builtins), __import__=safe_import), "mps": mps}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), str(path), "exec"), namespace)
+    return namespace
+
+
+class TestQwenGlobalOrder(unittest.TestCase):
+    def runtime(self) -> tuple[dict, object, OrderModel]:
+        module = load_order_runtime()
+        server = object.__new__(module["ModelServer"])
+        model = OrderModel(module["np"])
+        server._embed_state = module["_EmbedState"](model, "base", "qwen3_256")
+        server._lock = threading.Lock()
+        server._inference_lock = threading.Lock()
+        server._activity_lock = threading.Lock()
+        server._fast_lock = threading.Lock()
+        server._transport_context = types.SimpleNamespace()
+        server._embed_timestamps = []
+        server._throttler_active = False
+        server._throttler = None
+        server._inflight = 0
+        server._sticky_cpu = set()
+        server.loads = 0
+
+        def load(_tier: str) -> OrderModel:
+            server.loads += 1
+            return model
+
+        server._get_embed_model = load
+        server._get_fast_encoder = load
+        server._mark_sticky_cpu = server._sticky_cpu.add
+        server._deactivate_throttler = lambda: None
+        server._flush_mps_cache = lambda: None
+        return module, server, model
+
+    @staticmethod
+    def texts(count: int) -> list[str]:
+        samples = ["", "same", "same", "aa", "bb", "é", "東京", "x" * 100, "tail"]
+        return [samples[(index * 5 + index // 9) % len(samples)] for index in range(count)]
+
+    def request(self, server: object, texts: list, **kwargs: object) -> dict:
+        return server.handle_request({"op": "embed", "tier": "base", "texts": texts, **kwargs})
+
+    def reference(self, texts: list, limit: int) -> tuple[OrderArray, list[list[str]]]:
+        model = OrderModel(OrderNP())
+        values = model.encode(texts, batch_size=limit, show_progress_bar=False)
+        return values, model.native_batches
+
+    def test_native_membership_ties_duplicates_unicode_and_scatter(self) -> None:
+        for count in (0, 1, 2, 8, 31, 32, 33, 63, 64, 65, 100):
+            for requested in (1, 2, 8, 32, 100):
+                with self.subTest(count=count, requested=requested):
+                    module, server, model = self.runtime()
+                    texts = self.texts(count)
+                    limit = min(requested, 32)
+                    expected, batches = self.reference(texts, limit)
+                    response = self.request(server, texts, batch_size=requested)
+                    self.assertTrue(response["ok"])
+                    self.assertEqual(response["vectors"].values, expected.values)
+                    self.assertEqual(model.native_batches, batches)
+                    self.assertTrue(all(len(call) <= bound <= limit for call, bound in zip(model.calls, model.limits)))
+                    self.assertLessEqual(len(module["np"].allocations), 1)
+
+    def test_default_request_preserves_native_32_policy(self) -> None:
+        for count in (33, 65, 100):
+            with self.subTest(count=count):
+                _module, server, model = self.runtime()
+                texts = self.texts(count)
+                expected, batches = self.reference(texts, 32)
+                response = self.request(server, texts)
+                self.assertEqual(response["vectors"].values, expected.values)
+                self.assertEqual(model.native_batches, batches)
+                self.assertEqual(model.limits, [32] * len(model.calls))
+
+    def test_single_and_one_effective_batch_do_not_plan_or_reorder_inputs(self) -> None:
+        for count in (0, 1, 8, 32):
+            module, server, model = self.runtime()
+            texts = self.texts(count)
+            self.assertTrue(self.request(server, texts)["ok"])
+            self.assertEqual(model.calls, [texts])
+            self.assertEqual(module["np"].sort_sizes, [count])
+
+    def test_contended_single_input_retains_the_existing_fast_lane(self) -> None:
+        module, server, model = self.runtime()
+        model.after_call = lambda: self.assertTrue(server._fast_lock.locked() and not server._lock.locked())
+        with server._inference_lock:
+            response = self.request(server, ["synthetic query"])
+        self.assertTrue(response["ok"])
+        self.assertEqual(model.calls, [["synthetic query"]])
+        self.assertEqual(model.limits, [1])
+        self.assertEqual(module["np"].sort_sizes, [1])
+
+    def test_unsupported_identity_interface_flattening_and_inputs_keep_bounded_slices(self) -> None:
+        for mode in ("other-model", "legacy", "no-flatten-probe", "flattened", "non-string"):
+            with self.subTest(mode=mode):
+                module, server, model = self.runtime()
+                texts = self.texts(33)
+                if mode == "other-model":
+                    server._embed_state = module["_EmbedState"](model, "base", "model2vec")
+                elif mode == "legacy":
+                    model._input_length = None
+                elif mode == "no-flatten-probe":
+                    model._can_flatten_inputs = None
+                elif mode == "flattened":
+                    model._can_flatten_inputs = lambda: True
+                else:
+                    texts[5] = ["synthetic", "pair"]
+                self.assertTrue(self.request(server, texts, batch_size=8)["ok"])
+                self.assertEqual(model.calls, [texts[start:start + 8] for start in range(0, len(texts), 8)])
+                self.assertNotIn(33, module["np"].sort_sizes)
+
+    def test_negative_controls_detect_missing_global_order_compensation_and_scatter(self) -> None:
+        for missing in ("global-order", "tie-compensation", "scatter"):
+            with self.subTest(missing=missing):
+                module, server, model = self.runtime()
+                texts = self.texts(65)
+                expected, batches = self.reference(texts, 8)
+                if missing == "global-order":
+                    server._embed_global_order = lambda *_args: None
+                elif missing == "tie-compensation":
+                    server._embed_slice_indices = lambda _model, _texts, order, offset, limit, _deadline: order[offset:offset + limit]
+                else:
+                    store = module["_store_batch_result"]
+                    module["_store_batch_result"] = lambda *args, **_kwargs: store(*args)
+                response = self.request(server, texts, batch_size=8)
+                self.assertNotEqual(response["vectors"].values, expected.values)
+                if missing != "scatter":
+                    self.assertNotEqual(model.native_batches, batches)
+
+    def test_adaptive_limit_is_captured_once_and_cannot_raise_caller_cap(self) -> None:
+        for limits, requested, effective in (([2, 1, 16], 8, 2), ([64], 8, 8), ([64], 100, 32)):
+            module, server, model = self.runtime()
+            throttler = RecordingThrottler(limits)
+            server._throttler, server._throttler_active = throttler, True
+            texts = self.texts(65)
+            expected, batches = self.reference(texts, effective)
+            response = self.request(server, texts, batch_size=requested)
+            self.assertEqual(response["vectors"].values, expected.values)
+            self.assertEqual(model.native_batches, batches)
+            self.assertEqual(model.limits, [effective] * len(model.calls))
+            self.assertEqual(throttler.before_count, 1)
+            self.assertEqual(throttler.after_counts, [65])
+
+    def test_result_preflight_precedes_model_load_and_planning(self) -> None:
+        module, server, model = self.runtime()
+        response = self.request(server, [""] * 7680)
+        self.assertEqual(response["error_code"], "result_too_large")
+        self.assertEqual(server.loads, 0)
+        self.assertEqual(model.calls, [])
+        self.assertEqual(module["np"].sort_sizes, [])
+        self.assertEqual(module["np"].allocations, [])
+
+    def test_ordered_output_count_and_dimension_guards_remain_active(self) -> None:
+        for mismatch in ("count", "dimensions"):
+            _module, server, model = self.runtime()
+            encode = model.encode
+
+            def invalid(texts: list, **kwargs: object) -> OrderArray:
+                values = encode(texts, **kwargs)
+                if mismatch == "count":
+                    return OrderArray(values.values[:-1], (len(values) - 1, 3))
+                if len(model.calls) == 2:
+                    return OrderArray([row[:2] for row in values], (len(values), 2))
+                return values
+
+            model.encode = invalid
+            with self.assertRaisesRegex(ValueError, mismatch):
+                self.request(server, self.texts(65), batch_size=8)
+            self.assertFalse(server._inference_lock.locked())
+            self.assertFalse(server._lock.locked())
+
+    def test_expiry_before_planning_and_after_each_sort_stops_encode(self) -> None:
+        for phase in ("entry", "model-load", "flatten-probe", "lengths", "global-sort", "inner-sort", "inverse-sort"):
+            with self.subTest(phase=phase):
+                module, server, model = self.runtime()
+                clock, numpy = module["time"], module["np"]
+                expires = clock.now + 1
+
+                def expire() -> None:
+                    clock.now += 2
+
+                if phase == "entry":
+                    expires = clock.now
+                elif phase == "model-load":
+                    server._get_embed_model = lambda _tier: (expire(), model)[1]
+                elif phase == "flatten-probe":
+                    model._can_flatten_inputs = lambda: (expire(), False)[1]
+                elif phase == "lengths":
+                    model._input_length = lambda text: (expire(), len(text))[1]
+                else:
+                    wanted = {"global-sort": 1, "inner-sort": 2, "inverse-sort": 3}[phase]
+                    numpy.after_sort = lambda: expire() if len(numpy.sort_sizes) == wanted else None
+                response = self.request(server, self.texts(65), batch_size=8, deadline=expires)
+                self.assertFalse(response["ok"])
+                self.assertIn("deadline", response["error"])
+                self.assertEqual(model.calls, [])
+                self.assertEqual(numpy.sort_sizes, [] if phase in ("entry", "model-load", "flatten-probe", "lengths")
+                                 else [65, 8, 8][:wanted])
+                self.assertFalse(server._inference_lock.locked())
+                self.assertFalse(server._lock.locked())
+
+    def test_expiry_after_slice_does_not_plan_or_encode_another_slice(self) -> None:
+        module, server, model = self.runtime()
+        expires = module["time"].now + 1
+        model.after_call = lambda: setattr(module["time"], "now", expires + 1)
+        response = self.request(server, self.texts(65), batch_size=8, deadline=expires)
+        self.assertFalse(response["ok"])
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(module["np"].sort_sizes, [65, 8, 8, 8])
+
+    def test_oom_retries_exact_slice_with_frozen_cursor_and_exclusive_owner(self) -> None:
+        module, server, model = self.runtime()
+        texts = self.texts(65)
+        expected, batches = self.reference(texts, 8)
+        model.fail_calls.add(2)
+        state_locks = []
+
+        def observe() -> None:
+            self.assertTrue(server._inference_lock.locked())
+            state_locks.append(server._lock.locked())
+
+        model.after_call = observe
+        model.after_move = lambda: self.assertTrue(server._lock.locked() and server._inference_lock.locked())
+        response = self.request(server, texts, batch_size=8)
+        self.assertEqual(response["vectors"].values, expected.values)
+        self.assertEqual(model.native_batches, batches)
+        self.assertEqual(model.calls[1], model.calls[2])
+        self.assertEqual(len(model.calls), 10)
+        self.assertEqual(state_locks, [True, True, False] + [True] * 7)
+        self.assertEqual(module["np"].sort_sizes.count(65), 1)
+        self.assertEqual(module["np"].allocations, [(65, 3)])
+        self.assertEqual(model.moves, ["cpu"])
+        self.assertEqual(server._sticky_cpu, {"embed"})
+
+    def test_expiry_on_oom_or_during_recovery_never_retries(self) -> None:
+        for phase in ("oom", "flush", "move"):
+            module, server, model = self.runtime()
+            expires = module["time"].now + 1
+            model.fail_calls.add(2)
+
+            def expire() -> None:
+                module["time"].now = expires + 1
+
+            if phase == "oom":
+                model.after_call = lambda: expire() if len(model.calls) == 2 else None
+            elif phase == "flush":
+                module["mps"].flush_mps_cache = expire
+            else:
+                model.after_move = expire
+            response = self.request(server, self.texts(65), batch_size=8, deadline=expires)
+            self.assertFalse(response["ok"])
+            self.assertEqual(len(model.calls), 2)
+            self.assertEqual(model.moves, ["cpu"] if phase == "move" else [])
+            self.assertEqual(server._sticky_cpu, {"embed"})
+            self.assertFalse(server._inference_lock.locked())
+            self.assertFalse(server._lock.locked())
