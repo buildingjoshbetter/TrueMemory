@@ -303,7 +303,8 @@ class SurpriseIndexTransactions(unittest.TestCase):
                     with self.assertRaises(sqlite3.DatabaseError):
                         self.predictive.build_surprise_index(self.conn)
                 finally:
-                    self.conn.set_authorizer(None)
+                    # Disabling with None is supported only on Python 3.11+.
+                    self.conn.set_authorizer(lambda *_args: sqlite3.SQLITE_OK)
                 self.assertEqual(len(releases), 2)
                 self.assertEqual(self.conn.in_transaction, caller_owned)
                 self.assertEqual(self.stored(), previous)
