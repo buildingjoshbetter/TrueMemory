@@ -100,12 +100,27 @@ def _canonical_revision(conn: sqlite3.Connection, covered: tuple[str, ...], cons
         return None
 
 
-def _bridge_definitions(covered: tuple[str, ...], conservative: bool) -> dict[str, str]:
+def _bridge_definitions(conn: sqlite3.Connection, covered: tuple[str, ...], conservative: bool) -> dict[str, str]:
+    # SQLite's BLOB cast formats REALs as text and can lose precision. Numeric
+    # comparison restores that distinction, but signed REAL zero needs a
+    # conservative invalidation because SQL equality does not expose its sign.
     changed = " OR ".join(
         f"typeof(old.{name}) IS NOT typeof(new.{name}) "
-        f"OR CAST(old.{name} AS BLOB) IS NOT CAST(new.{name} AS BLOB)"
+        f"OR CAST(old.{name} AS BLOB) IS NOT CAST(new.{name} AS BLOB) "
+        f"OR old.{name} COLLATE BINARY IS NOT new.{name} COLLATE BINARY "
+        f"OR (typeof(old.{name}) = 'real' AND old.{name} = 0)"
         for name in covered
     )
+    update_columns = ""
+    if not conservative:
+        columns = {row[1]: row[6] for row in conn.execute("PRAGMA table_xinfo(messages)")}
+        if not any(columns[name] for name in covered):
+            # Generated source fields can depend on any column. Ordinary
+            # sources can limit zero invalidation to source writes, including
+            # unshadowed rowid aliases that also update INTEGER PRIMARY KEY id.
+            aliases = tuple(name for name in ("rowid", "_rowid_", "oid")
+                            if name not in {column.lower() for column in columns})
+            update_columns = " OF " + ", ".join((*covered, *aliases))
     update_guard = "" if conservative else f" WHEN {changed}"
     insert_fence = ("revision + 1" if conservative else
                     "CASE WHEN new.id <= max_seen_message_id THEN revision + 1 ELSE nonappend_revision END")
@@ -118,7 +133,7 @@ def _bridge_definitions(covered: tuple[str, ...], conservative: bool) -> dict[st
                 revision = revision + 1, insert_count = insert_count + 1
             WHERE singleton = 1 AND tracking_ready = 1;
         END""",
-        update: f"""CREATE TRIGGER {update} AFTER UPDATE ON messages{update_guard} BEGIN
+        update: f"""CREATE TRIGGER {update} AFTER UPDATE{update_columns} ON messages{update_guard} BEGIN
             UPDATE {_BRIDGE_TABLE} SET nonappend_revision = revision + 1,
                 max_seen_message_id = MAX(max_seen_message_id, new.id),
                 revision = revision + 1, correction_count = correction_count + 1
@@ -148,7 +163,7 @@ def _bridge_row(conn: sqlite3.Connection) -> tuple | None:
 def _valid_bridge(conn: sqlite3.Connection, covered: tuple[str, ...], signature: str,
                   conservative: bool) -> SourceRevision | None:
     row = _bridge_row(conn)
-    definitions = _bridge_definitions(covered, conservative)
+    definitions = _bridge_definitions(conn, covered, conservative)
     if (row is None or not row[8] or row[6] != signature or row[7] != json.dumps(covered)
             or _installed_triggers(conn, _BRIDGE_TRIGGERS) != {name: _normalized_sql(sql) for name, sql in definitions.items()}):
         return None
@@ -198,7 +213,7 @@ def ensure_rebuild_tracking(conn: sqlite3.Connection) -> None:
             conn.execute(_BRIDGE_SQL)
         for name in installed:
             conn.execute(f"DROP TRIGGER {name}")
-        for definition in _bridge_definitions(covered, conservative).values():
+        for definition in _bridge_definitions(conn, covered, conservative).values():
             conn.execute(definition)
         # A repair cannot certify the interval before installation. A fresh
         # epoch also prevents a later fallback from reviving a retired bridge.
