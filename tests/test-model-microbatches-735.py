@@ -676,6 +676,14 @@ class TestQwenGlobalOrder(unittest.TestCase):
         values = model.encode(texts, batch_size=limit, show_progress_bar=False)
         return values, model.native_batches
 
+    def contiguous_reference(self, texts: list, limit: int) -> tuple[OrderArray, list[list[str]]]:
+        model = OrderModel(OrderNP())
+        values = []
+        for start in range(0, max(1, len(texts)), limit):
+            values.extend(model.encode(texts[start:start + limit], batch_size=limit,
+                                       show_progress_bar=False).values)
+        return OrderArray(values, (len(texts), 3)), model.native_batches
+
     def test_native_membership_ties_duplicates_unicode_and_scatter(self) -> None:
         for count in (0, 1, 2, 8, 31, 32, 33, 63, 64, 65, 100):
             for requested in (1, 2, 8, 32, 100):
@@ -683,13 +691,18 @@ class TestQwenGlobalOrder(unittest.TestCase):
                     module, server, model = self.runtime()
                     texts = self.texts(count)
                     limit = min(requested, 32)
-                    expected, batches = self.reference(texts, limit)
+                    reference = self.reference if limit == 32 else self.contiguous_reference
+                    expected, batches = reference(texts, limit)
                     response = self.request(server, texts, batch_size=requested)
                     self.assertTrue(response["ok"])
                     self.assertEqual(response["vectors"].values, expected.values)
                     self.assertEqual(model.native_batches, batches)
                     self.assertTrue(all(len(call) <= bound <= limit for call, bound in zip(model.calls, model.limits)))
                     self.assertLessEqual(len(module["np"].allocations), 1)
+                    if limit != 32:
+                        self.assertEqual(model.calls, [texts[start:start + limit]
+                                         for start in range(0, max(1, count), limit)])
+                        self.assertEqual(module["np"].sort_sizes, [len(call) for call in model.calls])
 
     def test_default_request_preserves_native_32_policy(self) -> None:
         for count in (33, 65, 100):
@@ -735,8 +748,8 @@ class TestQwenGlobalOrder(unittest.TestCase):
                     model._can_flatten_inputs = lambda: True
                 else:
                     texts[5] = ["synthetic", "pair"]
-                self.assertTrue(self.request(server, texts, batch_size=8)["ok"])
-                self.assertEqual(model.calls, [texts[start:start + 8] for start in range(0, len(texts), 8)])
+                self.assertTrue(self.request(server, texts, batch_size=32)["ok"])
+                self.assertEqual(model.calls, [texts[start:start + 32] for start in range(0, len(texts), 32)])
                 self.assertNotIn(33, module["np"].sort_sizes)
 
     def test_negative_controls_detect_missing_global_order_compensation_and_scatter(self) -> None:
@@ -744,7 +757,7 @@ class TestQwenGlobalOrder(unittest.TestCase):
             with self.subTest(missing=missing):
                 module, server, model = self.runtime()
                 texts = self.texts(65)
-                expected, batches = self.reference(texts, 8)
+                expected, batches = self.reference(texts, 32)
                 if missing == "global-order":
                     server._embed_global_order = lambda *_args: None
                 elif missing == "tie-compensation":
@@ -752,10 +765,52 @@ class TestQwenGlobalOrder(unittest.TestCase):
                 else:
                     store = module["_store_batch_result"]
                     module["_store_batch_result"] = lambda *args, **_kwargs: store(*args)
-                response = self.request(server, texts, batch_size=8)
+                response = self.request(server, texts, batch_size=32)
                 self.assertNotEqual(response["vectors"].values, expected.values)
                 if missing != "scatter":
                     self.assertNotEqual(model.native_batches, batches)
+
+    def test_negative_control_detects_missing_effective_limit_guard(self) -> None:
+        import ast
+        from pathlib import Path
+        from unittest.mock import patch
+
+        path = Path(__file__).resolve().parents[1] / "truememory/model_server.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        server_class = next(node for node in tree.body
+                            if isinstance(node, ast.ClassDef) and node.name == "ModelServer")
+        method = next(node for node in server_class.body
+                      if isinstance(node, ast.FunctionDef) and node.name == "_embed_global_order")
+        removed = 0
+        for node in ast.walk(method):
+            if not isinstance(node, ast.BoolOp):
+                continue
+            retained = []
+            for value in node.values:
+                if (isinstance(value, ast.Compare) and isinstance(value.left, ast.Name)
+                        and value.left.id == "limit" and len(value.ops) == 1
+                        and isinstance(value.ops[0], ast.NotEq)
+                        and isinstance(value.comparators[0], ast.Constant)
+                        and value.comparators[0].value == 32):
+                    removed += 1
+                else:
+                    retained.append(value)
+            node.values = retained
+        self.assertEqual(removed, 1)
+        with patch.object(Path, "read_text", return_value=ast.unparse(tree)):
+            for adaptive in (False, True):
+                with self.subTest(adaptive=adaptive):
+                    _module, server, model = self.runtime()
+                    if adaptive:
+                        server._throttler = RecordingThrottler([8])
+                        server._throttler_active = True
+                    texts = self.texts(65)
+                    expected, batches = self.contiguous_reference(texts, 8)
+                    response = self.request(server, texts, **({} if adaptive else {"batch_size": 8}))
+                    self.assertTrue(response["ok"])
+                    self.assertNotEqual(response["vectors"].values, expected.values)
+                    self.assertNotEqual(model.native_batches, batches)
+                    self.assertNotEqual(model.calls, [texts[start:start + 8] for start in range(0, 65, 8)])
 
     def test_cyclic_ties_require_the_inverse_and_place_each_occurrence_once(self) -> None:
         from unittest.mock import patch
@@ -788,7 +843,8 @@ class TestQwenGlobalOrder(unittest.TestCase):
                 for limit in (8, 32):
                     with self.subTest(count=count, limit=limit):
                         texts = self.texts(count)
-                        expected, batches = self.reference(texts, limit)
+                        reference = self.reference if limit == 32 else self.contiguous_reference
+                        expected, batches = reference(texts, limit)
                         _module, server, model = self.runtime()
                         placements.clear()
                         response = self.request(server, texts, batch_size=limit)
@@ -796,7 +852,7 @@ class TestQwenGlobalOrder(unittest.TestCase):
                         self.assertEqual(response["vectors"].values, expected.values)
                         self.assertEqual(model.native_batches, batches)
                         self.assertEqual(sorted(placements), list(range(count)))
-                        if count <= limit:
+                        if count <= limit or limit != 32:
                             continue
 
                         module, server, model = self.runtime()
@@ -820,18 +876,24 @@ class TestQwenGlobalOrder(unittest.TestCase):
                         self.assertNotEqual(response["vectors"].values, expected.values)
 
     def test_adaptive_limit_is_captured_once_and_cannot_raise_caller_cap(self) -> None:
-        for limits, requested, effective in (([2, 1, 16], 8, 2), ([64], 8, 8), ([64], 100, 32)):
+        for limits, requested, effective in (([2, 1, 16], 8, 2), ([64], 8, 8),
+                                             ([8, 2, 32], None, 8), ([8], 32, 8),
+                                             ([8], 100, 8), ([64], 100, 32)):
             module, server, model = self.runtime()
             throttler = RecordingThrottler(limits)
             server._throttler, server._throttler_active = throttler, True
             texts = self.texts(65)
-            expected, batches = self.reference(texts, effective)
-            response = self.request(server, texts, batch_size=requested)
+            reference = self.reference if effective == 32 else self.contiguous_reference
+            expected, batches = reference(texts, effective)
+            response = self.request(server, texts, **({} if requested is None else {"batch_size": requested}))
             self.assertEqual(response["vectors"].values, expected.values)
             self.assertEqual(model.native_batches, batches)
             self.assertEqual(model.limits, [effective] * len(model.calls))
             self.assertEqual(throttler.before_count, 1)
             self.assertEqual(throttler.after_counts, [65])
+            if effective != 32:
+                self.assertEqual(model.calls, [texts[start:start + effective] for start in range(0, 65, effective)])
+                self.assertEqual(module["np"].sort_sizes, [len(call) for call in model.calls])
 
     def test_result_preflight_precedes_model_load_and_planning(self) -> None:
         module, server, model = self.runtime()
@@ -857,7 +919,7 @@ class TestQwenGlobalOrder(unittest.TestCase):
 
             model.encode = invalid
             with self.assertRaisesRegex(ValueError, mismatch):
-                self.request(server, self.texts(65), batch_size=8)
+                self.request(server, self.texts(65), batch_size=32)
             self.assertFalse(server._inference_lock.locked())
             self.assertFalse(server._lock.locked())
 
@@ -882,12 +944,12 @@ class TestQwenGlobalOrder(unittest.TestCase):
                 else:
                     wanted = {"global-sort": 1, "inner-sort": 2, "inverse-sort": 3}[phase]
                     numpy.after_sort = lambda: expire() if len(numpy.sort_sizes) == wanted else None
-                response = self.request(server, self.texts(65), batch_size=8, deadline=expires)
+                response = self.request(server, self.texts(65), batch_size=32, deadline=expires)
                 self.assertFalse(response["ok"])
                 self.assertIn("deadline", response["error"])
                 self.assertEqual(model.calls, [])
                 self.assertEqual(numpy.sort_sizes, [] if phase in ("entry", "model-load", "flatten-probe", "lengths")
-                                 else [65, 8, 8][:wanted])
+                                 else [65, 32, 32][:wanted])
                 self.assertFalse(server._inference_lock.locked())
                 self.assertFalse(server._lock.locked())
 
@@ -895,54 +957,60 @@ class TestQwenGlobalOrder(unittest.TestCase):
         module, server, model = self.runtime()
         expires = module["time"].now + 1
         model.after_call = lambda: setattr(module["time"], "now", expires + 1)
-        response = self.request(server, self.texts(65), batch_size=8, deadline=expires)
+        response = self.request(server, self.texts(65), batch_size=32, deadline=expires)
         self.assertFalse(response["ok"])
         self.assertEqual(len(model.calls), 1)
-        self.assertEqual(module["np"].sort_sizes, [65, 8, 8, 8])
+        self.assertEqual(module["np"].sort_sizes, [65, 32, 32, 32])
 
     def test_oom_retries_exact_slice_with_frozen_cursor_and_exclusive_owner(self) -> None:
-        module, server, model = self.runtime()
-        texts = self.texts(65)
-        expected, batches = self.reference(texts, 8)
-        model.fail_calls.add(2)
-        state_locks = []
+        for limit in (8, 32):
+            with self.subTest(limit=limit):
+                module, server, model = self.runtime()
+                texts = self.texts(65)
+                reference = self.reference if limit == 32 else self.contiguous_reference
+                expected, batches = reference(texts, limit)
+                model.fail_calls.add(2)
+                state_locks = []
 
-        def observe() -> None:
-            self.assertTrue(server._inference_lock.locked())
-            state_locks.append(server._lock.locked())
+                def observe() -> None:
+                    self.assertTrue(server._inference_lock.locked())
+                    state_locks.append(server._lock.locked())
 
-        model.after_call = observe
-        model.after_move = lambda: self.assertTrue(server._lock.locked() and server._inference_lock.locked())
-        response = self.request(server, texts, batch_size=8)
-        self.assertEqual(response["vectors"].values, expected.values)
-        self.assertEqual(model.native_batches, batches)
-        self.assertEqual(model.calls[1], model.calls[2])
-        self.assertEqual(len(model.calls), 10)
-        self.assertEqual(state_locks, [True, True, False] + [True] * 7)
-        self.assertEqual(module["np"].sort_sizes.count(65), 1)
-        self.assertEqual(module["np"].allocations, [(65, 3)])
-        self.assertEqual(model.moves, ["cpu"])
-        self.assertEqual(server._sticky_cpu, {"embed"})
+                model.after_call = observe
+                model.after_move = lambda: self.assertTrue(server._lock.locked() and server._inference_lock.locked())
+                response = self.request(server, texts, batch_size=limit)
+                self.assertEqual(response["vectors"].values, expected.values)
+                self.assertEqual(model.native_batches, batches)
+                self.assertEqual(model.calls[1], model.calls[2])
+                batches_count = (len(texts) + limit - 1) // limit
+                self.assertEqual(len(model.calls), batches_count + 1)
+                self.assertEqual(state_locks, [True, True, False] + [True] * (batches_count - 2))
+                self.assertEqual(module["np"].sort_sizes.count(65), int(limit == 32))
+                self.assertEqual(module["np"].allocations, [(65, 3)])
+                self.assertEqual(model.moves, ["cpu"])
+                self.assertEqual(server._sticky_cpu, {"embed"})
 
     def test_expiry_on_oom_or_during_recovery_never_retries(self) -> None:
-        for phase in ("oom", "flush", "move"):
-            module, server, model = self.runtime()
-            expires = module["time"].now + 1
-            model.fail_calls.add(2)
+        for limit in (8, 32):
+            for phase in ("oom", "flush", "move"):
+                with self.subTest(limit=limit, phase=phase):
+                    module, server, model = self.runtime()
+                    expires = module["time"].now + 1
+                    model.fail_calls.add(2)
 
-            def expire() -> None:
-                module["time"].now = expires + 1
+                    def expire() -> None:
+                        module["time"].now = expires + 1
 
-            if phase == "oom":
-                model.after_call = lambda: expire() if len(model.calls) == 2 else None
-            elif phase == "flush":
-                module["mps"].flush_mps_cache = expire
-            else:
-                model.after_move = expire
-            response = self.request(server, self.texts(65), batch_size=8, deadline=expires)
-            self.assertFalse(response["ok"])
-            self.assertEqual(len(model.calls), 2)
-            self.assertEqual(model.moves, ["cpu"] if phase == "move" else [])
-            self.assertEqual(server._sticky_cpu, {"embed"})
-            self.assertFalse(server._inference_lock.locked())
-            self.assertFalse(server._lock.locked())
+                    if phase == "oom":
+                        model.after_call = lambda: expire() if len(model.calls) == 2 else None
+                    elif phase == "flush":
+                        module["mps"].flush_mps_cache = expire
+                    else:
+                        model.after_move = expire
+                    response = self.request(server, self.texts(65), batch_size=limit, deadline=expires)
+                    self.assertFalse(response["ok"])
+                    self.assertEqual(len(model.calls), 2)
+                    self.assertEqual(model.moves, ["cpu"] if phase == "move" else [])
+                    self.assertEqual(server._sticky_cpu, {"embed"})
+                    self.assertFalse(server._inference_lock.locked())
+                    self.assertFalse(server._lock.locked())

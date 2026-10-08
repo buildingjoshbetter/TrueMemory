@@ -578,10 +578,10 @@ class ModelServer:
     def _embed_global_order(
         self, model: object, texts: list, limit: int, deadline: _RequestDeadline,
     ) -> np.ndarray | None:
-        """Match modern ST's plain-text order only for the known Qwen model."""
+        """Match modern ST's native32 order only for the known Qwen model."""
         deadline.check()
         state = self._embed_state
-        if (len(texts) <= limit or state is None or state.model is not model
+        if (limit != 32 or len(texts) <= limit or state is None or state.model is not model
                 or state.model_id != "qwen3_256" or not all(isinstance(text, str) for text in texts)):
             return None
         length = getattr(model, "_input_length", None)
