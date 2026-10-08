@@ -598,9 +598,11 @@ def _run_setup(args):
     print("  \033[1mDownloading embedding model...\033[0m")
     try:
         os.environ["TRUEMEMORY_EMBED_MODEL"] = tier
-        from truememory.vector_search import set_embedding_model, get_model
+        from truememory.vector_search import _encode_with_mps_fallback, set_embedding_model, get_model
         set_embedding_model(tier)
-        get_model().encode(["TrueMemory setup readiness check."], show_progress_bar=False)
+        _encode_with_mps_fallback(
+            get_model(), ["TrueMemory setup readiness check."], show_progress_bar=False,
+        )
         if tier in ("base", "pro"):
             print("  \033[32m✓ Qwen3-Embedding-0.6B @ 256d Matryoshka ready\033[0m")
         else:

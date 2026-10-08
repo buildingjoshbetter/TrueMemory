@@ -265,6 +265,7 @@ class TestSelectedTierSetupReadiness(unittest.TestCase):
         vectors = types.ModuleType("truememory.vector_search")
         vectors.set_embedding_model = lambda value: calls.append("embed-tier-" + value)
         vectors.get_model = lambda: load("embed")
+        vectors._encode_with_mps_fallback = lambda model, texts, **kwargs: model.encode(texts, **kwargs)
         reranker = types.ModuleType("truememory.reranker")
         reranker.set_active_tier = lambda value: calls.append("rerank-tier-" + value)
         reranker.get_reranker = lambda: load("rerank")
