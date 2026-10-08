@@ -275,6 +275,8 @@ CREATE TABLE IF NOT EXISTS maintenance_layers (
     attempted_epoch TEXT,
     attempted_revision INTEGER,
     attempted_dependency TEXT,
+    attempted_insert_count INTEGER CHECK (attempted_insert_count IS NULL OR
+        (typeof(attempted_insert_count) = 'integer' AND attempted_insert_count >= 0)),
     full_rebuild_required INTEGER NOT NULL DEFAULT 1 CHECK (full_rebuild_required IN (0, 1)),
     output_count INTEGER,
     run_generation TEXT,
@@ -332,13 +334,22 @@ def _initialize_maintenance_tracking(conn: sqlite3.Connection) -> None:
     expected = {name: " ".join(sql.split()) for name, sql in definitions.items()}
     ready = conn.execute("SELECT tracking_ready FROM maintenance_source_state WHERE singleton = 1").fetchone()
     layers = {row[0] for row in conn.execute("SELECT layer FROM maintenance_layers")}
-    if ready and ready[0] and installed() == expected and set(_MAINTENANCE_LAYERS).issubset(layers):
+    layer_columns = {row[1] for row in conn.execute("PRAGMA table_info(maintenance_layers)")}
+    if (ready and ready[0] and installed() == expected and set(_MAINTENANCE_LAYERS).issubset(layers)
+            and "attempted_insert_count" in layer_columns):
         return
 
     owned = not conn.in_transaction
     conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT truememory_maintenance_schema")
     completed = False
     try:
+        # Recheck after writer admission: a concurrent opener may migrate first.
+        if "attempted_insert_count" not in {row[1] for row in conn.execute("PRAGMA table_info(maintenance_layers)")}:
+            conn.execute(
+                "ALTER TABLE maintenance_layers ADD COLUMN attempted_insert_count INTEGER "
+                "CHECK (attempted_insert_count IS NULL OR "
+                "(typeof(attempted_insert_count) = 'integer' AND attempted_insert_count >= 0))"
+            )
         columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
         available = set(_MAINTENANCE_SOURCE_FIELDS).issubset(columns)
         conn.execute(

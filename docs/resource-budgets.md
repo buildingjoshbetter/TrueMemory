@@ -540,3 +540,57 @@ in a separate failure-status transaction. Successful output and successful
 provenance must commit atomically. A cluster run must retain validated runtime
 model ownership through that outer commit; an inner builder savepoint release
 alone does not supply that guarantee.
+
+## Durable nonvector layer runner
+
+`run_layers` now provides explicit, database-owned execution for summaries,
+structured facts, contradictions, surprise, episodes and landmarks. It requires
+a dedicated connection with no active caller transaction. Existing engine startup,
+automatic/manual consolidation and retrieval paths are not routed through it yet;
+this checkpoint neither disables nor certifies clusters or Dunbar relationships.
+
+Each layer records its last attempted source epoch/revision, dependency and insert
+count separately from its successful provenance. Dependency keys include their own
+builder version, so a failed new-version attempt cannot relabel an old success.
+Missing or untrusted layers get an initial attempt even when historical input has
+zero tracked inserts. Empty input can establish durable `success_empty`.
+
+After that initial attempt, pure append work becomes eligible at
+`current.insert_count - attempted_insert_count >= 25`. Twenty-four committed
+inserts remain pending; the twenty-fifth qualifies across connection and engine
+lifetimes. Rolled-back inserts count zero. A changed epoch, dependency or newer
+nonappend revision permits a new attempt; the latter covers edits, deletes and
+same-ID replacements. An unchanged failed/unavailable attempt is suppressed until
+explicit force. A failed or unavailable initial attempt also establishes the
+25-insert baseline even though successful output remains untrusted. Each selected
+layer is attempted at most once per run. New changes
+remain pending and do not start an immediate retry loop.
+
+Running diagnostics commit before the layer's deferred source snapshot begins.
+The builder computes without a diagnostic write transaction held open. Output,
+successful provenance and the terminal attempt token/count publish in one outer
+commit. Source snapshot upgrades and dependency checks reject stale publication.
+Failure rolls back output first, then records only the actual captured attempted
+token and a bounded error category in a separate transaction. A status-write
+failure propagates. Cancellation rolls back unpublished output and leaves an
+abandoned attempt eligible for a later run; active work retains ownership.
+
+`record_layer_success_in_transaction` is also available to future standalone full
+builders. It requires an existing transaction and matching captured source token,
+creates no schema, and never commits caller work. The builder remains responsible
+for coherent source capture and completing its output before calling it.
+`read_layer_states` reads source and checkpoint rows together. `layer_freshness`
+distinguishes exact current output from append, correction and dependency pending
+states. The last attempt's failure remains visible even when an older successful
+generation is still current. `layer_read_snapshot` lets a read-only getter read
+its output and provenance in one SQLite snapshot; it closes only its own read
+transaction and leaves an existing caller transaction untouched.
+
+The additive attempt-count migration preserves source epochs, counters and
+tracking triggers. It does not invent counts for old checkpoint rows. These
+contracts provide no wall-clock freshness guarantee, native memory bound or
+measured throughput improvement. Routing production entry points and completing
+vector, Dunbar and profile dependency contracts remain subsequent work.
+Other direct output writers must participate in the same publication contract
+before those checkpoints can certify production freshness; arbitrary external
+SQL against derived tables is not covered by source revision tracking.
