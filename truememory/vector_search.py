@@ -255,7 +255,7 @@ def get_model():
                     "Check ~/.truememory/model_server.stderr for details."
                 )
 
-        from truememory.mps_utils import resolve_device
+        from truememory.mps_utils import ensure_mps_memory_budget, resolve_device
 
         resolved = EMBEDDING_MODEL
         if resolved == "model2vec":
@@ -263,14 +263,20 @@ def get_model():
             _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
             _embedding_dim = 256
         elif resolved == "minilm":
+            device = resolve_device(None)
+            ensure_mps_memory_budget(device)
             from sentence_transformers import SentenceTransformer
-            _model = SentenceTransformer("all-MiniLM-L6-v2", device=resolve_device(None))
+            _model = SentenceTransformer("all-MiniLM-L6-v2", device=device)
             _embedding_dim = 384
         elif resolved == "bge-small":
+            device = resolve_device(None)
+            ensure_mps_memory_budget(device)
             from sentence_transformers import SentenceTransformer
-            _model = SentenceTransformer("BAAI/bge-small-en-v1.5", device=resolve_device(None))
+            _model = SentenceTransformer("BAAI/bge-small-en-v1.5", device=device)
             _embedding_dim = 384
         elif resolved == "qwen3_256":
+            device = resolve_device(None)
+            ensure_mps_memory_budget(device)
             from sentence_transformers import SentenceTransformer
             import sys as _sys
             _mkwargs = {}
@@ -280,7 +286,7 @@ def get_model():
                 "Qwen/Qwen3-Embedding-0.6B",
                 truncate_dim=256,
                 model_kwargs=_mkwargs or None,
-                device=resolve_device(None),
+                device=device,
             )
             _embedding_dim = 256
         elif resolved not in _MODEL_DIMS:
@@ -300,14 +306,16 @@ def get_model():
                 )
                 _embedding_dim = 256
             else:
-                from sentence_transformers import SentenceTransformer
                 from truememory.tier_config import resolve_custom_tier
                 cfg = resolve_custom_tier()
                 custom_dim = cfg["embed_dim"]
+                device = resolve_device(None)
+                ensure_mps_memory_budget(device)
+                from sentence_transformers import SentenceTransformer
                 _model = SentenceTransformer(
                     resolved, truncate_dim=custom_dim,
                     trust_remote_code=False,
-                    device=resolve_device(None),
+                    device=device,
                 )
                 _embedding_dim = custom_dim
         else:

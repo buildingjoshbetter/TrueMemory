@@ -10,6 +10,7 @@ import logging
 import threading
 import time
 from collections import deque
+from typing import TYPE_CHECKING
 
 import psutil
 
@@ -20,22 +21,25 @@ from truememory.tier_switch.sensors import (
 )
 from truememory.tier_switch.state_machine import ThrottlerStateMachine
 
+if TYPE_CHECKING:
+    from truememory.mps_utils import MPSMemoryBudget
+
 log = logging.getLogger(__name__)
 
 _MACHINE_PROFILES = {
-    # (min_gb, max_gb): (ratio, start, max_batch, ramp_step)
-    (0, 12): (0.50, 1, 4, 1),
-    (12, 20): (0.50, 1, 8, 1),
-    (20, 30): (0.50, 1, 12, 2),
-    (30, 1024): (0.55, 1, 16, 2),
+    # (min_gb, max_gb): (start, max_batch, ramp_step). RAM sizes batches only.
+    (0, 12): (1, 4, 1),
+    (12, 20): (1, 8, 1),
+    (20, 30): (1, 12, 2),
+    (30, 1024): (1, 16, 2),
 }
 
 
-def _get_profile(total_gb: float) -> tuple[float, int, int, int]:
+def _get_profile(total_gb: float) -> tuple[int, int, int]:
     for (lo, hi), profile in _MACHINE_PROFILES.items():
         if lo <= total_gb < hi:
             return profile
-    return (0.50, 1, 12, 2)
+    return (1, 12, 2)
 
 
 class DynamicThrottler:
@@ -48,8 +52,7 @@ class DynamicThrottler:
         self.device = device
         self.total_gb = psutil.virtual_memory().total / (1024**3)
 
-        ratio, start, max_batch, ramp_step = _get_profile(self.total_gb)
-        self.mps_cap_gb = self.total_gb * ratio
+        start, max_batch, ramp_step = _get_profile(self.total_gb)
 
         self.state_machine = ThrottlerStateMachine(
             start_batch=start,
@@ -57,7 +60,8 @@ class DynamicThrottler:
             ramp_step=ramp_step,
         )
 
-        self.growth_tracker = GrowthRateTracker(cap_gb=self.mps_cap_gb)
+        self.growth_tracker: GrowthRateTracker | None = None
+        self._growth_cap_gb: float | None = None
         self._state_lock = threading.RLock()
         self._sample_lock = threading.Lock()
         self._samples: deque[tuple[float, dict]] = deque(maxlen=3)
@@ -71,11 +75,26 @@ class DynamicThrottler:
         self._last_readings: dict = {}
 
         log.info(
-            "Throttler init: device=%s total_ram=%.0fGB mps_cap=%.1fGB "
+            "Throttler init: device=%s total_ram=%.0fGiB "
             "start=%d max=%d step=%d",
-            device, self.total_gb, self.mps_cap_gb,
+            device, self.total_gb,
             start, max_batch, ramp_step,
         )
+
+    def _budget_snapshot(self) -> "MPSMemoryBudget | None":
+        # Reading telemetry must never initialize a local allocator for a proxy
+        # or race model setup. The loader publishes only after the setter works.
+        # A shared daemon can have CPU embedding and MPS reranking (or the
+        # reverse). A configured budget describes the process's MPS allocator,
+        # regardless of which device this admission's model currently uses.
+        from truememory.mps_utils import get_mps_memory_budget
+        return get_mps_memory_budget()
+
+    @property
+    def mps_cap_gb(self) -> float | None:
+        with self._state_lock:
+            budget = self._budget_snapshot()
+            return budget.effective_bytes / (1024**3) if budget and budget.effective_bytes else None
 
     @property
     def batch_size(self) -> int:
@@ -134,11 +153,21 @@ class DynamicThrottler:
                 if not self._sample_due(time.monotonic()):
                     return
                 generation = self._fault_generation
+                budget = self._budget_snapshot()
             readings = self._read_all_channels()
             now = time.monotonic()
             with self._state_lock:
                 # An OOM during the probe invalidates its pre-fault evidence.
                 if generation != self._fault_generation:
+                    return
+                if budget is not self._budget_snapshot():
+                    # The first MPS model may finish setup while a CPU-only
+                    # thermal probe is pending. Its earlier unsupported MPS
+                    # observations cannot authorize a ramp for the new state.
+                    self._samples.clear()
+                    self._last_readings = {}
+                    self._last_sample_time = None
+                    self.state_machine.good_streak = 0
                     return
                 self._last_readings = readings
                 self._last_sample_time = now
@@ -194,20 +223,33 @@ class DynamicThrottler:
         mps = {"used_gb": None, "ratio": None, "status": "unsupported", "required": False}
         growth = {"slope_gb_per_20s": None, "slope_pct": None,
                   "status": "unsupported", "required": False}
-        if self.device == "mps":
-            try:
-                mps = read_mps_memory(self.mps_cap_gb)
-            except Exception:
-                mps = {"used_gb": None, "ratio": None, "status": "unknown"}
+        with self._state_lock:
+            budget = self._budget_snapshot()
+            is_mps = self.device == "mps" or budget is not None
+            cap_gb = budget.effective_bytes / (1024**3) if budget and budget.effective_bytes else None
+            if cap_gb != self._growth_cap_gb:
+                self.growth_tracker = GrowthRateTracker(cap_gb=cap_gb) if cap_gb else None
+                self._growth_cap_gb = cap_gb
+            tracker = self.growth_tracker
+        if is_mps:
+            # Unlimited or unconfigured is not evidence of finite headroom.
+            mps = {"used_gb": None, "ratio": None, "status": "unknown"}
             growth = {"slope_gb_per_20s": None, "slope_pct": None, "status": "unknown"}
-            if mps.get("used_gb") is not None:
+            if cap_gb is not None:
                 try:
-                    growth = self.growth_tracker.update(mps["used_gb"])
+                    mps = read_mps_memory(cap_gb)
                 except Exception:
                     pass
-            else:
+            if mps.get("used_gb") is not None and tracker is not None:
+                try:
+                    growth = tracker.update(mps["used_gb"])
+                except Exception:
+                    pass
+            elif tracker is not None:
                 # Do not calculate a slope across a gap with unknown memory.
-                self.growth_tracker = GrowthRateTracker(cap_gb=self.mps_cap_gb)
+                with self._state_lock:
+                    if self.growth_tracker is tracker:
+                        self.growth_tracker = GrowthRateTracker(cap_gb=cap_gb)
 
         try:
             thermal = read_thermal_pressure()
@@ -246,6 +288,7 @@ class DynamicThrottler:
         """Build metrics dict for status reporting."""
         readings = self._last_readings
         age = None if self._last_sample_time is None else time.monotonic() - self._last_sample_time
+        budget = self._budget_snapshot()
         return {
             "batch_size": self.state_machine.batch_size,
             "state": self.state_machine.state,
@@ -259,15 +302,26 @@ class DynamicThrottler:
             "sample_age_seconds": age,
             "sample_stale": age is None or age > self.SAMPLE_MAX_AGE,
             "sample_pending": self._sample_lock.locked(),
+            "mps_budget": {
+                "scope": "process_mps_allocator",
+                "intended_bytes": budget.intended_bytes if budget else None,
+                "recommended_bytes": budget.recommended_bytes if budget else None,
+                "effective_bytes": budget.effective_bytes if budget else None,
+                "source": budget.source if budget else None,
+                "enforcement": budget.enforcement if budget else (
+                    "unknown" if self.device == "mps" else "not_applicable"
+                ),
+            },
         }
 
     @staticmethod
     def flush_gpu_cache():
         """Flush MPS/CUDA cache and run garbage collection."""
         try:
+            from truememory.mps_utils import get_mps_memory_budget
             import torch
 
-            if torch.backends.mps.is_available():
+            if get_mps_memory_budget() is not None and torch.backends.mps.is_available():
                 torch.mps.empty_cache()
                 torch.mps.synchronize()
             elif torch.cuda.is_available():

@@ -223,14 +223,15 @@ def get_reranker(model_name: str | None = None, device: str | None = None):
                     "Check ~/.truememory/model_server.stderr for details."
                 )
 
-        from sentence_transformers import CrossEncoder
-
         if device is None:
             # Issue #577: honor TRUEMEMORY_DEVICE (cpu|mps|cuda|auto) before
             # auto-detection. An explicit device= parameter wins over the env.
             from truememory.mps_utils import auto_detect_device, resolve_device
             device = resolve_device(auto_detect_device())
 
+        from truememory.mps_utils import ensure_mps_memory_budget
+        ensure_mps_memory_budget(device)
+        from sentence_transformers import CrossEncoder
         _model = CrossEncoder(name, device=device)
         _model_name = name
         result = _model
