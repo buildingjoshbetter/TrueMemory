@@ -787,3 +787,148 @@ caller's later outer COMMIT. Other adapters with an owned publication guard must
 supply an explicit borrowed guard or report unavailable. This checkpoint does
 not route engines or ingest, change algorithms or establish a measured latency,
 memory or throughput improvement.
+
+## Standalone rebuild source streaming (issue #756, first checkpoint)
+
+`build_vectors()` and `build_separation_vectors()` read database-backed inputs
+in ascending-ID pages, using the existing native batch size. They capture a
+fixed upper ID, row count and A10 source revision, including its epoch. Each
+page read ends before inference. Publication checks the source revision,
+model generation, target manifest and database schema version under writer
+ownership. Writer acquisition precedes the nonblocking model fence; that
+fence remains held through the terminal COMMIT or SAVEPOINT RELEASE. A source correction, deletion, lower-ID insertion, epoch change or
+schema change rejects the unfinished generation. An unrelated schema change
+is conservatively invalidating. New high-ID source rows remain outside the
+captured range.
+
+A versioned metadata manifest contains model/dimension/target identity,
+revision counters, the last **consumed input ID**, consumed count and inserted
+vector count. It contains no source text. Skipped zero/nonfinite vectors still
+advance consumed input, so restart cannot infer progress from `MAX(rowid)`.
+A saved manifest without matching identity and revision is restarted once on
+the next explicit call; the builder does not run an automatic restart loop.
+Legacy boolean markers alone are insufficient resume evidence.
+
+The native batch size and `txn_batch` durability cadence remain configurable.
+Each group is encoded and serialized before its owned writer transaction.
+Serialized payload is bounded by
+`max(1, txn_batch) * batch_size * dimension * 4` bytes per resident index,
+plus Python objects, one input page, the current native output and allocator
+memory. Defaults at 256 dimensions give:
+
+- CPU: `100 * 100 * 256 * 4 = 10,240,000` bytes (`9.765625 MiB`).
+- MPS: `100 * 16 * 256 * 4 = 1,638,400` bytes (`1.5625 MiB`).
+- Custom 384-dimensional CPU example: `100 * 100 * 384 * 4 = 15,360,000`
+  bytes (`14.6484375 MiB`).
+
+Completion and separation standalone calls stage their groups separately.
+This bound is independent of corpus rows with fixed controls, but can increase
+staging for small corpora compared with immediate insertion. It is not a
+whole-process memory cap. A single record is not truncated and can itself be
+large. Native model residency and thermal behavior are not measured by the
+synthetic regression tests.
+
+One maintenance owner covers the complete operation. Same-thread nesting in
+an existing A10 maintenance worker reuses its owner. A caller's open SQLite
+transaction is preserved with savepoints; the rebuild cannot release locks
+that the caller already owns. Such callers also retain control of durability.
+Otherwise, no rebuild-owned read or writer transaction remains open during
+inference. Short page snapshots avoid pinning a job-long WAL reader; they do
+not promise globally bounded WAL when other readers exist.
+
+Explicit `messages` lists preserve caller order and text. A streamed digest
+binds restart to that exact list without making another corpus-sized copy;
+the consumed list position preserves out-of-order IDs. The caller's allocated
+list is outside the database paging bound. Concurrent mutation of a supplied
+list is not supported. Database-backed calls reuse the canonical source
+tracker only with the exact built-in `messages` definition and verified tracking.
+Older connections, including deprecated
+`engine.open()` and the minimal five-column separation schema, instead install
+a rebuild-only bridge when canonical tracking is unavailable. Completion also
+supports a legacy table containing only `id INTEGER PRIMARY KEY` and `content`.
+
+The bridge adds one namespaced state table and three source triggers. It does
+not add columns to `messages`, migrate other storage features, or mark the
+canonical maintenance tracker ready. Installation and repair own the writer
+before model loading or clearing vectors; caller transactions use savepoints.
+The token explicitly identifies its tracker, epoch, covered source fields,
+table schema and index definitions. Page/publication checks verify that source
+schema and the exact trigger definitions; missing or altered tracking starts
+a new epoch on the next call, invalidating untracked intervals. These checks
+read schema metadata and scalar counters, not corpus text. Read-only legacy
+connections and unsupported source schemas fail before model allocation.
+Bridge updates compare each covered value's SQLite storage type and bytes,
+so custom `NOCASE`/`RTRIM` collations cannot hide changed encoder input.
+Other table definitions retain the bridge even after a full storage migration
+reports canonical tracking ready. This conservative definition whitelist avoids
+inferring equality semantics from arbitrary SQL; compatible custom definitions
+remain usable with the additional bridge counters.
+
+Same-ID replacement invalidates a bridge generation even with recursive
+triggers disabled. Custom schemas with unique indexes, including indexed primary keys that
+are not rowid aliases, use a conservative bridge: every successful insert or update invalidates the
+captured prefix. This includes expression and partial unique indexes, where
+`OR REPLACE` can silently delete another row without a delete trigger. Such
+schemas remain supported, but concurrent high-ID appends cannot preserve a
+running generation. They retain this bridge even if the canonical tracker
+reports ready, because its append certificate does not cover those hidden
+replacement deletions. There is no repeated automatic restart loop.
+
+When the trusted built-in definition and canonical tracking become suitable,
+the next rebuild changes tracker
+identity and starts a fresh generation; it atomically retires only the bridge's
+owned triggers. Its inactive state table remains. The bridge never certifies
+the readiness of other maintenance layers. Normal canonical schemas need no
+bridge table, triggers or additional writer commit during setup.
+
+Foreground engine add/update and `embed_single` bind inference to the active
+model generation. Same-model appends above an in-progress database range are
+published normally and cannot advance its consumed cursor. Initial clear and
+source capture share one writer transaction, so a committed earlier append
+joins the captured range. A correction within the range publishes its current
+vector and invalidates the rebuild's source fence. A late model mismatch is
+reported categorically: add rolls back its uncommitted source row; update's
+existing storage helper has already committed its source, so its error says
+to retry vector publication. Explicit-input or unattested in-progress targets
+reject concurrent publication rather than silently reporting success.
+
+Foreground publication acquires the SQLite writer before its nonblocking
+model fence, then validates the target manifest and retains both owners
+through the owned commit or caller savepoint release. Inference finishes
+before either is acquired. Add source insertion shares that transaction;
+rejection rolls back only the new add, preserving unrelated pending caller
+writes. Successful add and `embed_single` calls inside an existing caller
+transaction also leave durability to that caller. Update retains its existing
+source-helper commit behavior; the subsequent vector publication is fenced
+separately and cannot claim the source update was rolled back.
+
+This checkpoint does **not** remove the tier-switch manager/worker's retained
+message lists or solve tier configuration publication across SQLite, config
+file and process state. Issue #756 remains open for that next checkpoint.
+No global embedder-compatibility authority, models, precision, dimensions,
+reranker selection, retrieval depth or deployment defaults change here.
+
+### Legacy rebuild value precision
+
+The rebuild bridge also compares values with explicit `BINARY` equality.
+SQLite's conversion of a REAL value to BLOB formats it as text and can lose
+precision, so the byte and storage-type checks alone cannot certify an
+unchanged source. Numeric comparison supplements both existing checks.
+
+SQL numeric equality cannot distinguish stored positive and negative REAL
+zero. A source UPDATE involving a covered REAL zero therefore invalidates
+the generation conservatively, including assigning the same zero again.
+For ordinary source columns, the trigger listens only to covered source
+fields and unshadowed `rowid` aliases. Unrelated derived-only updates do not
+invalidate solely because a source field contains zero. When a covered
+source field is generated, the trigger must listen to all updates because
+its dependencies can be other columns. Custom UNIQUE schemas retain their
+existing all-update invalidation for hidden replacement deletions.
+
+Changed trigger definitions fail the existing identity check. The next
+writer-owned repair starts a fresh epoch before model loading or clearing
+the target, so manifests captured under the earlier comparison cannot
+resume. Synthetic SQLite tests cover precise REAL metadata rendered into
+separation text, signed zero, collations, storage types, rowid aliases,
+generated fields, repair failures and caller rollback. These tests do not
+measure native model behavior or add a process memory budget.

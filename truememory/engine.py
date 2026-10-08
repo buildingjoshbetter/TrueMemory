@@ -726,9 +726,9 @@ class TrueMemoryEngine:
         if self._has_vectors:
             try:
                 from truememory.vector_search import (
-                    get_model, _encode_with_mps_fallback, _build_sep_text,
+                    _capture_rebuild_model, _encode_with_mps_fallback, _build_sep_text,
                 )
-                model = get_model()
+                model, pre_identity = _capture_rebuild_model()
                 pre_embedding = _encode_with_mps_fallback(model, [content])[0]
                 sep_text = _build_sep_text(sender, recipient, timestamp, content)
                 pre_sep_embedding = _encode_with_mps_fallback(model, [sep_text])[0]
@@ -743,7 +743,13 @@ class TrueMemoryEngine:
             except Exception:
                 logger.debug("Failed to pre-compute style vector during add()", exc_info=True)
 
-        with self._write_lock:
+        from truememory.rebuild_source import rebuild_transaction
+        publication_fence = None
+        if pre_embedding is not None:
+            from truememory.vector_search import _foreground_model_fence
+            publication_fence = _foreground_model_fence(pre_identity)
+
+        with self._write_lock, rebuild_transaction(self.conn, write=True, publication_fence=publication_fence):
             msg = {
                 "content": content,
                 "sender": sender,
@@ -757,23 +763,25 @@ class TrueMemoryEngine:
             new_id = insert_message(self.conn, msg)
 
             if pre_embedding is not None:
+                from truememory.vector_search import VectorPublicationChanged, _validate_foreground_vector_target
                 try:
                     from truememory.vector_search import (
-                        serialize_f32, _active_vec_table, _active_sep_table,
-                        _write_embedder_metadata,
+                        serialize_f32,
+                        _write_embedder_metadata_no_commit,
                     )
-                    vec_tbl = _active_vec_table(self.conn)
+                    vec_tbl, sep_tbl = _validate_foreground_vector_target(self.conn, pre_identity, new_id)
                     self.conn.execute(
                         f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
                         (new_id, serialize_f32(pre_embedding)),
                     )
                     if pre_sep_embedding is not None:
-                        sep_tbl = _active_sep_table(self.conn)
                         self.conn.execute(
                             f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
                             (new_id, serialize_f32(pre_sep_embedding)),
                         )
-                    _write_embedder_metadata(self.conn)
+                    _write_embedder_metadata_no_commit(self.conn)
+                except VectorPublicationChanged:
+                    raise
                 except Exception:
                     logger.warning("Failed to store embedding for message %s during add()", new_id, exc_info=True)
 
@@ -794,8 +802,6 @@ class TrueMemoryEngine:
                     _update_style_vec(self.conn, sender, content, _pre_computed_vec=pre_style_vec)
                 except Exception:
                     logger.debug("Failed to update style vector for %s during add()", sender, exc_info=True)
-
-            self.conn.commit()
 
         self._maybe_auto_consolidate()
 
@@ -1172,9 +1178,9 @@ class TrueMemoryEngine:
         if content is not None and self._has_vectors:
             try:
                 from truememory.vector_search import (
-                    get_model, _encode_with_mps_fallback, _build_sep_text,
+                    _capture_rebuild_model, _encode_with_mps_fallback, _build_sep_text,
                 )
-                model = get_model()
+                model, pre_identity = _capture_rebuild_model()
                 pre_embedding = _encode_with_mps_fallback(model, [content])[0]
                 row = self.conn.execute(
                     "SELECT sender, recipient, timestamp FROM messages WHERE id = ?",
@@ -1198,35 +1204,32 @@ class TrueMemoryEngine:
                 return None
 
             if pre_embedding is not None:
+                from truememory.vector_search import VectorPublicationChanged, _foreground_vector_publication
                 try:
-                    from truememory.vector_search import (
-                        serialize_f32, _active_vec_table, _active_sep_table,
-                        _write_embedder_metadata,
-                    )
-                    vec_tbl = _active_vec_table(self.conn)
-                    try:
-                        self.conn.execute(f"DELETE FROM {vec_tbl} WHERE rowid = ?", (memory_id,))
-                    except Exception:
-                        logger.debug("Failed to delete old vector embedding for message %d", memory_id, exc_info=True)
-                    self.conn.execute(
-                        f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
-                        (memory_id, serialize_f32(pre_embedding)),
-                    )
-                    if pre_sep_embedding is not None:
-                        sep_tbl = _active_sep_table(self.conn)
+                    from truememory.vector_search import serialize_f32, _write_embedder_metadata_no_commit
+                    with _foreground_vector_publication(self.conn, pre_identity, memory_id) as (vec_tbl, sep_tbl):
                         try:
-                            self.conn.execute(f"DELETE FROM {sep_tbl} WHERE rowid = ?", (memory_id,))
+                            self.conn.execute(f"DELETE FROM {vec_tbl} WHERE rowid = ?", (memory_id,))
                         except Exception:
-                            logger.debug("Failed to delete old sep vector for message %d", memory_id, exc_info=True)
+                            logger.debug("Failed to delete old vector embedding for message %d", memory_id, exc_info=True)
                         self.conn.execute(
-                            f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
-                            (memory_id, serialize_f32(pre_sep_embedding)),
+                            f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
+                            (memory_id, serialize_f32(pre_embedding)),
                         )
-                    _write_embedder_metadata(self.conn)
+                        if pre_sep_embedding is not None:
+                            try:
+                                self.conn.execute(f"DELETE FROM {sep_tbl} WHERE rowid = ?", (memory_id,))
+                            except Exception:
+                                logger.debug("Failed to delete old sep vector for message %d", memory_id, exc_info=True)
+                            self.conn.execute(
+                                f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
+                                (memory_id, serialize_f32(pre_sep_embedding)),
+                            )
+                        _write_embedder_metadata_no_commit(self.conn)
+                except VectorPublicationChanged as exc:
+                    raise VectorPublicationChanged("Source update committed; retry update to publish vectors") from exc
                 except Exception:
                     logger.warning("Vector embedding failed for message %d", memory_id, exc_info=True)
-
-            self.conn.commit()
 
         return self.get(memory_id)
 

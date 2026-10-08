@@ -65,9 +65,7 @@ _DUNBAR_OWNERSHIP_TRIGGERS = {
     END""",
 }
 
-_SCHEMA_SQL = """
--- Core messages table
-CREATE TABLE IF NOT EXISTS messages (
+_MESSAGES_TABLE_SQL = """CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content TEXT NOT NULL,
     sender TEXT DEFAULT '',
@@ -80,7 +78,9 @@ CREATE TABLE IF NOT EXISTS messages (
     embedding_separation BLOB DEFAULT NULL,
     directive INTEGER DEFAULT 0,
     metadata TEXT DEFAULT '{}'
-);
+);"""
+
+_SCHEMA_SQL = "\n-- Core messages table\n" + _MESSAGES_TABLE_SQL + """
 
 -- FTS5 virtual table for full-text search
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
