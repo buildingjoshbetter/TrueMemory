@@ -393,3 +393,39 @@ expiry and recovery. Removing global ordering, tie compensation or scatter
 fails independent negative controls. Equal native shapes alone are not parity
 evidence. Actual ordered token features, raw numeric gates, latency and native
 memory still require the bounded native diagnostic before acceptance.
+
+### ModernBERT reranker global order at the 64-row limit
+
+Reranking now preserves modern CrossEncoder's global raw-pair length order
+only for the cached `Alibaba-NLP/gte-reranker-modernbert-base` model, plain
+two-string pairs, available `_input_length` and `_can_flatten_inputs` helpers,
+disabled input flattening, an effective limit of 64, and more than 64 pairs.
+The inspected SentenceTransformers 6.1.0 implementation sorts by the combined
+query and document character lengths before prompt preprocessing. Its inner
+sort and score restoration remain active. Default prompts, tokenizer behavior,
+activation, model identity and dtype are unchanged. Older interfaces, custom
+models, other input forms, flattened modes, requests fitting one batch and
+lower caller or adaptive limits retain their previous bounded slice path.
+
+Occurrence indices are sorted once. Each supplied slice compensates for the
+inner equal-length permutation; scores scatter directly into their original
+positions, including separate occurrences of duplicate pairs. The plan adds
+O(N) indices and temporary length keys, with O(batch size) slice indices. It
+does not create a corpus token tensor or a second complete score array.
+Output preflight, once-per-request admission and all caller, server and
+adaptive ceilings remain in force.
+
+Deadline checks bracket planning and slice sorting and precede each prediction
+and retry. The inference owner spans the plan, slices and recovery. On OOM,
+the failed slice and its indices stay fixed, completed scores remain in place,
+and the cursor advances after successful publication. For this planned path,
+CPU replacement uses the actual resolved model name even when the request
+omitted it; a changed default cannot replace that model during retry.
+
+Stdlib tests exercise actual server methods with synthetic CrossEncoder
+ordering, cyclic ties, duplicate occurrences, Unicode, empty strings, prompts,
+caps, deadlines and later-slice OOM. Mutations removing global order, inverse
+tie compensation or scatter fail the output and membership checks. These
+tests do not establish native numeric or performance acceptance. The 64-row
+reference still requires ordered token-feature, raw-score and timing checks
+on the pinned runtime; lower-limit numeric failures are not waived.
