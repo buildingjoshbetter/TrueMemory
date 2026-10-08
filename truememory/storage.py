@@ -175,7 +175,9 @@ CREATE TABLE IF NOT EXISTS entity_style_vectors (
     entity TEXT PRIMARY KEY,
     vector TEXT,
     message_count INTEGER DEFAULT 0,
-    updated_at TEXT
+    updated_at TEXT,
+    vector_sum BLOB DEFAULT NULL,
+    accumulator_version INTEGER NOT NULL DEFAULT 0
 );
 
 -- Fact timeline (L5 contradiction tracking)
@@ -373,6 +375,33 @@ _MAINTENANCE_LAYERS = (
 )
 
 _SCHEMA_SQL += _DUNBAR_OWNERSHIP_SQL + ";\n"
+
+
+def _initialize_style_accumulator_schema(conn: sqlite3.Connection) -> None:
+    """Add raw-sum storage without upgrading or rebuilding legacy profiles."""
+    required = {"vector_sum", "accumulator_version"}
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(entity_style_vectors)")}
+    if required <= columns:
+        return
+    owned = not conn.in_transaction
+    conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT truememory_style_schema")
+    completed = False
+    try:
+        conn.execute("UPDATE entity_style_vectors SET entity=entity WHERE 0")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(entity_style_vectors)")}
+        if "vector_sum" not in columns:
+            conn.execute("ALTER TABLE entity_style_vectors ADD COLUMN vector_sum BLOB DEFAULT NULL")
+        if "accumulator_version" not in columns:
+            conn.execute("ALTER TABLE entity_style_vectors ADD COLUMN accumulator_version INTEGER NOT NULL DEFAULT 0")
+        conn.execute("COMMIT" if owned else "RELEASE SAVEPOINT truememory_style_schema")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO SAVEPOINT truememory_style_schema")
+                conn.execute("RELEASE SAVEPOINT truememory_style_schema")
 
 
 def _dunbar_ownership_ready(conn: sqlite3.Connection) -> bool:
@@ -1000,6 +1029,7 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
         _migrate_messages_fts_trigger(conn)
         _initialize_maintenance_tracking(conn)
         _initialize_dunbar_ownership(conn)
+        _initialize_style_accumulator_schema(conn)
     except sqlite3.Error:
         conn.close()
         raise

@@ -182,7 +182,7 @@ class TestBuildEntityStyleVectors:
 
 class TestIncrementalUpdate:
     def test_incremental_converges(self):
-        """Add messages one at a time, verify vector converges toward batch-built vector."""
+        """Incremental accumulation must equal the batch mean within float64 tolerance."""
         conn = _make_test_db()
         messages = [
             "I love hiking in the mountains",
@@ -205,10 +205,9 @@ class TestIncrementalUpdate:
         inc_vec = get_entity_style_vector(conn2, "alice")
 
         assert inc_vec is not None
-        # Cosine should be reasonably high (incremental weighted average
-        # differs slightly from batch mean-pool due to normalization order)
-        sim = cosine_similarity(batch_vec, inc_vec)
-        assert sim > 0.8, f"Expected cosine > 0.8, got {sim}"
+        assert len(inc_vec) == len(batch_vec) == DIM
+        assert all(math.isclose(expected, actual, abs_tol=1e-12, rel_tol=1e-12)
+                   for expected, actual in zip(batch_vec, inc_vec))
 
         conn.close()
         conn2.close()
