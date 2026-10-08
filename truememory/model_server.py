@@ -85,6 +85,32 @@ _HEADER_FMT = ">I"
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
 _MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
 
+# Embedding uses SentenceTransformer's default; reranking keeps the server's 64.
+# These cap items per call, not tokens, queued payloads, or total process memory.
+_EMBED_BATCH_LIMIT = 32
+_RERANK_BATCH_LIMIT = 64
+
+
+def _batch_limit(value: object, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("batch_size must be a positive integer")
+    return min(value, maximum)
+
+
+def _store_batch_result(
+    result: np.ndarray | None, values: object, offset: int, count: int, total: int,
+) -> np.ndarray:
+    """Keep one output allocation, with the existing float32 wire contract."""
+    batch = np.asarray(values, dtype=np.float32)
+    if batch.ndim == 0 or batch.shape[0] != count:
+        raise ValueError("Model output count does not match the input microbatch")
+    if result is None:
+        result = np.empty((total, *batch.shape[1:]), dtype=np.float32)
+    elif result.shape[1:] != batch.shape[1:]:
+        raise ValueError("Model output dimensions changed between microbatches")
+    result[offset:offset + count] = batch
+    return result
+
 
 def _safe_to_cleanup_artifacts() -> bool:
     """Return True when this process may remove the shared artifacts (M-20).
@@ -506,7 +532,7 @@ class ModelServer:
                 model = self._get_embed_model(tier)
                 deadline.check()
                 try:
-                    vectors = model.encode(texts, show_progress_bar=False)
+                    vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
                 except RuntimeError as exc:
                     from truememory.mps_utils import is_mps_oom
                     if not is_mps_oom(exc):
@@ -517,7 +543,7 @@ class ModelServer:
                     self._check_embed_recovery_deadline_locked(model, deadline)
                     self._recover_embed_oom_locked(model, deadline)
                     deadline.check()
-                    vectors = model.encode(texts, show_progress_bar=False)
+                    vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
                 return {"ok": True, "vectors": np.asarray(vectors, dtype=np.float32)}
             finally:
                 self._lock.release()
@@ -530,7 +556,7 @@ class ModelServer:
                     # Vector-space parity with the main path cannot be
                     # guaranteed (custom model) — decline the fast lane.
                     return None
-                vectors = model.encode(texts, show_progress_bar=False)
+                vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
             return {"ok": True, "vectors": np.asarray(vectors, dtype=np.float32)}
         except _RequestDeadlineExceeded:
             raise
@@ -570,9 +596,14 @@ class ModelServer:
         deadline = _RequestDeadline.from_wall_clock(request.get("deadline"))
         deadline.check()
 
-        if op == "embed":
+        if op in ("embed", "embed_batched"):
             texts = request["texts"]
             tier = request.get("tier", "")
+            try:
+                batch_limit = _batch_limit(request.get("batch_size", _EMBED_BATCH_LIMIT),
+                                           _EMBED_BATCH_LIMIT)
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
 
             # Single-text fast lane (issue #577): hook recall queries must
             # never queue behind batch ingestion work or OOM recovery.
@@ -597,106 +628,122 @@ class ModelServer:
                 with deadline.locked(self._lock):
                     self._activate_throttler()
 
-            # Issue #646 (M-43): capture the throttler to a local under the
-            # lock. Reading self._throttler_active then self._throttler
-            # separately raced _deactivate_throttler nulling the attribute
-            # between the two reads (AttributeError on before_batch()).
-            with deadline.locked(self._lock):
-                throttler = self._throttler if self._throttler_active else None
-            if throttler is not None:
-                deadline.check()
-                throttler.before_batch()
-                deadline.check()
-
-            encode_start = time.time()
-            # `vectors` is assigned on exactly one of two paths: inside the
-            # locked try (retry_on_cpu stays False), or by the post-lock
-            # retry (retry_on_cpu True). Any other outcome raises.
+            limit, throttler = self._request_batch_limit(batch_limit, deadline)
+            encode_start = time.monotonic()
             vectors = None
-            retry_on_cpu = False
-            with deadline.locked(self._lock):
-                model = self._get_embed_model(tier)
-                deadline.check()
-                try:
-                    vectors = model.encode(texts, show_progress_bar=False)
-                except RuntimeError as exc:
-                    from truememory.mps_utils import is_mps_oom
-                    if not is_mps_oom(exc):
-                        raise
-                    # Issue #577: sticky-CPU degradation via the single
-                    # shared recovery path, atomic in this lock hold. The
-                    # model is never re-promoted to MPS (the old re-promotion
-                    # left the MPS pool above its watermark cap and
-                    # guaranteed the next OOM — retry storms). Only the
-                    # expensive full re-encode runs OUTSIDE the lock, so
-                    # other clients are not starved for 23-112s.
-                    self._check_embed_recovery_deadline_locked(model, deadline)
-                    self._recover_embed_oom_locked(model, deadline)
-                    retry_on_cpu = True
-            if retry_on_cpu:
-                deadline.check()
-                log.warning(
-                    "MPS OOM during encoding — retrying on CPU outside the "
-                    "request lock"
-                )
-                vectors = model.encode(texts, show_progress_bar=False)
-            encode_time = time.time() - encode_start
-
-            # M-43: re-capture under the lock for the same reason as above.
-            with deadline.locked(self._lock):
-                throttler = self._throttler if self._throttler_active else None
-            if throttler is not None:
-                throttler.after_batch(len(texts), encode_time)
-                if throttler.should_flush_cache():
-                    self._flush_mps_cache()
+            model = None
+            offset = 0
+            while offset < len(texts) or vectors is None:
+                retry = None
+                with deadline.locked(self._lock):
+                    if model is None:
+                        model = self._get_embed_model(tier)
+                    # Keep the existing model ownership across successful slices.
+                    # Releasing here would let other tiers load additional models.
+                    while offset < len(texts) or vectors is None:
+                        deadline.check()
+                        batch = texts[offset:offset + limit]
+                        try:
+                            values = model.encode(batch, batch_size=limit, show_progress_bar=False)
+                        except RuntimeError as exc:
+                            from truememory.mps_utils import is_mps_oom
+                            if not is_mps_oom(exc):
+                                raise
+                            self._check_embed_recovery_deadline_locked(model, deadline)
+                            self._recover_embed_oom_locked(model, deadline)
+                            retry = batch
+                            break
+                        vectors = _store_batch_result(vectors, values, offset, len(batch), len(texts))
+                        offset += len(batch)
+                if retry is not None:
+                    # Preserve #577's unlocked CPU retry; never repeat completed slices.
+                    deadline.check()
+                    log.warning("MPS OOM during encoding; retrying microbatch on CPU")
+                    values = model.encode(retry, batch_size=limit, show_progress_bar=False)
+                    vectors = _store_batch_result(vectors, values, offset, len(retry), len(texts))
+                    offset += len(retry)
+            self._after_request_batches(throttler, len(texts), encode_start, deadline)
 
             with deadline.locked(self._lock):
                 should_deactivate = self._throttler_active and len(self._embed_timestamps) < 3
                 if should_deactivate:
                     self._deactivate_throttler()
 
-            return {"ok": True, "vectors": np.asarray(vectors, dtype=np.float32)}
+            return {"ok": True, "vectors": vectors}
 
-        if op == "rerank":
+        if op in ("rerank", "rerank_batched"):
             pairs = request["pairs"]
             model_name = request.get("model_name")
-            oom = False
-            with deadline.locked(self._lock):
-                reranker = self._get_reranker(model_name)
-                deadline.check()
-                try:
-                    scores = reranker.predict(
-                        pairs, batch_size=64, show_progress_bar=False
-                    )
-                except RuntimeError as exc:
-                    from truememory.mps_utils import is_mps_oom, flush_mps_cache
-                    if not is_mps_oom(exc):
-                        raise
-                    # Issue #577: the rerank path previously had NO OOM
-                    # handler — a raw MPS OOM reached the client (3/3 rerank
-                    # deaths in the baseline probe). Same sticky-CPU policy
-                    # as embed: drop the MPS-loaded model and reload on CPU.
-                    # Mark + reload happen ATOMICALLY under this same lock
-                    # hold so the retry below always runs on the locally
-                    # reloaded CPU instance (panel round 1, item 1).
-                    self._mark_sticky_cpu("rerank")
-                    self._reranker = None
-                    self._reranker_name = None
+            try:
+                batch_limit = _batch_limit(request.get("batch_size", _RERANK_BATCH_LIMIT),
+                                           _RERANK_BATCH_LIMIT)
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
+            limit, throttler = self._request_batch_limit(batch_limit, deadline)
+            predict_start = time.monotonic()
+            scores = None
+            reranker = None
+            offset = 0
+            while offset < len(pairs) or scores is None:
+                retry = None
+                with deadline.locked(self._lock):
+                    if reranker is None:
+                        reranker = self._get_reranker(model_name)
+                    while offset < len(pairs) or scores is None:
+                        deadline.check()
+                        batch = pairs[offset:offset + limit]
+                        try:
+                            values = reranker.predict(batch, batch_size=limit, show_progress_bar=False)
+                        except RuntimeError as exc:
+                            from truememory.mps_utils import is_mps_oom, flush_mps_cache
+                            if not is_mps_oom(exc):
+                                raise
+                            self._mark_sticky_cpu("rerank")
+                            self._reranker = None
+                            self._reranker_name = None
+                            deadline.check()
+                            flush_mps_cache()
+                            deadline.check()
+                            reranker = self._get_reranker(model_name)
+                            retry = batch
+                            break
+                        scores = _store_batch_result(scores, values, offset, len(batch), len(pairs))
+                        offset += len(batch)
+                if retry is not None:
                     deadline.check()
-                    flush_mps_cache()
-                    deadline.check()
-                    reranker = self._get_reranker(model_name)  # sticky → CPU
-                    oom = True
-            if oom:
-                # Retry outside the lock — rerank batches are the expensive
-                # part; other clients must not starve behind the recovery.
-                deadline.check()
-                scores = reranker.predict(
-                    pairs, batch_size=64, show_progress_bar=False
-                )
-            return {"ok": True, "scores": np.asarray(scores, dtype=np.float32)}
+                    values = reranker.predict(retry, batch_size=limit, show_progress_bar=False)
+                    scores = _store_batch_result(scores, values, offset, len(retry), len(pairs))
+                    offset += len(retry)
+            self._after_request_batches(throttler, len(pairs), predict_start, deadline)
+            return {"ok": True, "scores": scores}
 
         return {"ok": False, "error": f"Unknown op: {op}"}
+
+    def _request_batch_limit(
+        self, limit: int, deadline: _RequestDeadline,
+    ) -> tuple[int, object | None]:
+        # Preserve once-per-request sensing outside the model state lock: ramp
+        # sampling may block for 20 seconds. Per-slice sensing needs a scheduler.
+        # Capture the active instance under the lock, preserving #646's race fix.
+        with deadline.locked(self._lock):
+            throttler = self._throttler if self._throttler_active else None
+        if throttler is not None:
+            deadline.check()
+            safe_limit, _ = throttler.before_batch()
+            deadline.check()
+            limit = _batch_limit(safe_limit, limit)
+        return limit, throttler
+
+    def _after_request_batches(
+        self, throttler: object | None, count: int, started: float,
+        deadline: _RequestDeadline,
+    ) -> None:
+        deadline.check()
+        if throttler is not None:
+            throttler.after_batch(count, time.monotonic() - started)
+            if throttler.should_flush_cache():
+                deadline.check()
+                self._flush_mps_cache()
 
     def _activate_throttler(self):
         """Start adaptive throttling for sustained workload.

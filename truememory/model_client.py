@@ -485,6 +485,28 @@ def _request_with_autostart(request: dict, timeout: float | None = None) -> dict
     return _send_request(request)
 
 
+def _batch_request(request: dict, kwargs: dict) -> dict:
+    """Use an additive operation so old daemons cannot ignore an explicit limit."""
+    if "batch_size" not in kwargs:
+        return request
+    batch_size = kwargs["batch_size"]
+    if isinstance(batch_size, bool) or not isinstance(batch_size, (int, np.integer)):
+        raise ValueError("batch_size must be a positive integer")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be a positive integer")
+    return {**request, "op": request["op"] + "_batched", "batch_size": int(batch_size)}
+
+
+def _check_model_response(response: dict, request: dict) -> None:
+    if response.get("ok"):
+        return
+    if response.get("error") == f"Unknown op: {request['op']}" and "batch_size" in request:
+        raise ProtocolMismatchError(
+            "Model server does not support bounded batches; restart it after upgrading"
+        )
+    raise RuntimeError(f"Model server error: {response.get('error', 'unknown')}")
+
+
 class EmbeddingProxy:
     """Drop-in replacement for the embedding model with .encode() method."""
 
@@ -497,16 +519,19 @@ class EmbeddingProxy:
         *timeout* is an optional per-call deadline in seconds (issue #577);
         on expiry a :class:`TimeoutError` is raised (fast-fail, no autostart
         retry). ``None`` uses the process default / legacy 120s.
+
+        ``batch_size`` is a positive integer ceiling on items per inference
+        call. Older daemons must be restarted to support explicit ceilings.
         """
         if isinstance(texts, str):
             texts = [texts]
-        resp = _request_with_autostart({
+        request = _batch_request({
             "op": "embed",
             "texts": list(texts),
             "tier": self._tier,
-        }, timeout=timeout)
-        if not resp.get("ok"):
-            raise RuntimeError(f"Model server error: {resp.get('error', 'unknown')}")
+        }, kwargs)
+        resp = _request_with_autostart(request, timeout=timeout)
+        _check_model_response(resp, request)
         return resp["vectors"]
 
 
@@ -520,15 +545,15 @@ class RerankerProxy:
         """Rerank *pairs* via the model server.
 
         *timeout* is an optional per-call deadline in seconds (issue #577);
-        see :meth:`EmbeddingProxy.encode`.
+        see :meth:`EmbeddingProxy.encode` for deadlines and ``batch_size``.
         """
-        resp = _request_with_autostart({
+        request = _batch_request({
             "op": "rerank",
             "pairs": list(pairs),
             "model_name": self._model_name,
-        }, timeout=timeout)
-        if not resp.get("ok"):
-            raise RuntimeError(f"Model server error: {resp.get('error', 'unknown')}")
+        }, kwargs)
+        resp = _request_with_autostart(request, timeout=timeout)
+        _check_model_response(resp, request)
         return resp["scores"]
 
 
