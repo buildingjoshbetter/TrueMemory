@@ -26,6 +26,8 @@ import math
 import re
 import sqlite3
 import struct
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 
@@ -111,6 +113,86 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return num / (na * nb)
 
 
+@contextmanager
+def _l0_transaction(conn: sqlite3.Connection, *, write: bool = False) -> Iterator[None]:
+    """Own only this phase, retaining any transaction opened by the caller."""
+    owned = not conn.in_transaction
+    if owned:
+        conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+    else:
+        conn.execute("SAVEPOINT truememory_l0")
+    completed = False
+    try:
+        if write and not owned:
+            # Upgrade before validation: a stale WAL reader must not publish.
+            conn.execute("UPDATE messages SET sender = sender WHERE 0")
+        yield
+        conn.execute("COMMIT" if owned else "RELEASE SAVEPOINT truememory_l0")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                # If rollback fails, never RELEASE potentially partial writes.
+                conn.execute("ROLLBACK TO SAVEPOINT truememory_l0")
+                conn.execute("RELEASE SAVEPOINT truememory_l0")
+
+
+def _l0_source_schema(conn: sqlite3.Connection) -> tuple[tuple, ...]:
+    return tuple(tuple(row) for row in conn.execute("PRAGMA table_info(messages)"))
+
+
+def _l0_directive_filter(schema: tuple[tuple, ...]) -> str:
+    # Public builders also accept older standalone schemas without directives.
+    if any(column[1] == "directive" for column in schema):
+        return "(directive = 0 OR directive IS NULL)"
+    return "1"
+
+
+def _l0_validate_source(
+    conn: sqlite3.Connection,
+    schema: tuple[tuple, ...],
+    query: str,
+    source_rows: list[tuple],
+) -> None:
+    """Compare exact relevant source values while holding writer ownership."""
+    error = "L0 source changed during computation; retry the rebuild"
+    if _l0_source_schema(conn) != schema:
+        raise sqlite3.OperationalError(error)
+    current = conn.execute(query)
+    try:
+        for expected in source_rows:
+            row = current.fetchone()
+            if row is None or tuple(row) != expected:
+                raise sqlite3.OperationalError(error)
+        if current.fetchone() is not None:
+            raise sqlite3.OperationalError(error)
+    finally:
+        current.close()
+
+
+def _compute_entity_style_vectors(
+    rows: list[tuple],
+) -> tuple[dict[str, list[float]], list[tuple]]:
+    from collections import defaultdict
+
+    by_sender: dict[str, list[str]] = defaultdict(list)
+    for sender, content, _timestamp, ordinary in rows:
+        if ordinary:
+            by_sender[sender.lower()].append(content)
+
+    result: dict[str, list[float]] = {}
+    stored_rows: list[tuple] = []
+    now = datetime.now(timezone.utc).isoformat()
+    for sender, contents in by_sender.items():
+        vecs = [compute_style_vector(c) for c in contents]
+        mean_vec = mean_pool_vectors(vecs)
+        result[sender] = mean_vec
+        stored_rows.append((sender, json.dumps(mean_vec), len(contents), now))
+    return result, stored_rows
+
+
 def build_entity_style_vectors(conn: sqlite3.Connection) -> dict[str, list[float]]:
     """Batch-build style vectors for every entity (sender) in the database.
 
@@ -124,41 +206,39 @@ def build_entity_style_vectors(conn: sqlite3.Connection) -> dict[str, list[float
 
     Returns:
         ``{entity: vector}`` for every sender.
+
+    Only ordinary messages contribute. Computation starts no write transaction;
+    any transaction already held by the caller remains theirs. Publication
+    atomically replaces the complete table after checking the source snapshot.
+    A changed source raises ``sqlite3.OperationalError`` without retrying.
     """
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS entity_style_vectors (
-            entity TEXT PRIMARY KEY,
-            vector TEXT,
-            message_count INTEGER DEFAULT 0,
-            updated_at TEXT
-        )"""
-    )
+    with _l0_transaction(conn):
+        schema = _l0_source_schema(conn)
+        query = (
+            f"SELECT sender, content, timestamp, {_l0_directive_filter(schema)} AS ordinary "
+            "FROM messages WHERE sender != '' "
+            "ORDER BY sender, timestamp"
+        )
+        rows = [tuple(row) for row in conn.execute(query)]
+    result, stored_rows = _compute_entity_style_vectors(rows)
 
-    rows = conn.execute(
-        "SELECT sender, content FROM messages WHERE sender != '' ORDER BY sender, timestamp"
-    ).fetchall()
-
-    from collections import defaultdict
-    by_sender: dict[str, list[str]] = defaultdict(list)
-    for sender, content in rows:
-        by_sender[sender.lower()].append(content)
-
-    result: dict[str, list[float]] = {}
-    now = datetime.now(timezone.utc).isoformat()
-
-    for sender, contents in by_sender.items():
-        vecs = [compute_style_vector(c) for c in contents]
-        mean_vec = mean_pool_vectors(vecs)
-        result[sender] = mean_vec
-
+    with _l0_transaction(conn, write=True):
+        _l0_validate_source(conn, schema, query, rows)
         conn.execute(
-            """INSERT OR REPLACE INTO entity_style_vectors
+            """CREATE TABLE IF NOT EXISTS entity_style_vectors (
+                entity TEXT PRIMARY KEY,
+                vector TEXT,
+                message_count INTEGER DEFAULT 0,
+                updated_at TEXT
+            )"""
+        )
+        conn.execute("DELETE FROM entity_style_vectors")
+        conn.executemany(
+            """INSERT INTO entity_style_vectors
                (entity, vector, message_count, updated_at)
                VALUES (?, ?, ?, ?)""",
-            (sender, json.dumps(mean_vec), len(contents), now),
+            stored_rows,
         )
-
-    conn.commit()
     return result
 
 

@@ -32,6 +32,9 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from truememory.fts_search import _build_safe_fts_query, _fts_search
+from truememory.personality_style_vec import (
+    _l0_directive_filter, _l0_source_schema, _l0_transaction, _l0_validate_source,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -142,20 +145,16 @@ PERSONALITY_ASPECTS = {
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _get_all_messages(conn: sqlite3.Connection) -> list[dict]:
-    """Fetch all messages ordered by timestamp."""
-    rows = conn.execute(
-        "SELECT id, content, sender, recipient, timestamp, category, modality "
-        "FROM messages ORDER BY timestamp"
-    ).fetchall()
-    return [
-        {
-            "id": r[0], "content": r[1], "sender": r[2],
-            "recipient": r[3], "timestamp": r[4],
-            "category": r[5], "modality": r[6],
-        }
-        for r in rows
-    ]
+_PROFILE_SOURCE_COLUMNS = (
+    "id", "content", "sender", "recipient", "timestamp", "category", "modality",
+)
+
+
+def _profile_source_query(schema: tuple[tuple, ...]) -> str:
+    return (
+        "SELECT id, content, sender, recipient, timestamp, category, modality, "
+        f"{_l0_directive_filter(schema)} AS ordinary FROM messages ORDER BY timestamp"
+    )
 
 
 def _get_messages_by_sender(conn: sqlite3.Connection, sender: str,
@@ -438,32 +437,7 @@ def _warnings_ctx():
         yield
 
 
-def build_entity_profiles(conn: sqlite3.Connection) -> dict:
-    """
-    Analyze all messages and build personality profiles for key entities.
-
-    For each entity (sender), extracts:
-
-    - **message_count**: total messages sent.
-    - **topics**: frequent themes (startup, health, food, etc.).
-    - **communication_style**: average message length, emoji usage,
-      formality level, and typical greeting.
-    - **relationships**: who they message most and approximate topic focus
-      per recipient.
-    - **traits**: personality descriptors inferred from content analysis.
-
-    Results are stored in the ``entity_profiles`` table and also returned
-    as a dict keyed by entity name.
-
-    Args:
-        conn: Open database connection (from :func:`truememory.storage.create_db`).
-
-    Returns:
-        ``{entity: profile_dict}`` for every sender who has at least one
-        message in the database.
-    """
-    all_msgs = _get_all_messages(conn)
-
+def _compute_entity_profiles(all_msgs: list[dict]) -> dict[str, dict]:
     # Group messages by sender (normalized to lowercase for case-insensitive matching)
     by_sender: dict[str, list[dict]] = defaultdict(list)
     for msg in all_msgs:
@@ -534,25 +508,65 @@ def build_entity_profiles(conn: sqlite3.Connection) -> dict:
         }
         profiles[sender] = profile
 
-        # Store in database
-        now = datetime.now(timezone.utc).isoformat()
-        conn.execute(
-            """INSERT OR REPLACE INTO entity_profiles
+    return profiles
+
+
+def build_entity_profiles(conn: sqlite3.Connection) -> dict:
+    """
+    Analyze all messages and build personality profiles for key entities.
+
+    For each entity (sender), extracts:
+
+    - **message_count**: total messages sent.
+    - **topics**: frequent themes (startup, health, food, etc.).
+    - **communication_style**: average message length, emoji usage,
+      formality level, and typical greeting.
+    - **relationships**: who they message most and approximate topic focus
+      per recipient.
+    - **traits**: personality descriptors inferred from content analysis.
+
+    Results are stored in the ``entity_profiles`` table and also returned
+    as a dict keyed by entity name.
+
+    Args:
+        conn: Open database connection (from :func:`truememory.storage.create_db`).
+
+    Returns:
+        ``{entity: profile_dict}`` for every sender who has at least one
+        ordinary message in the database.
+
+    CPU computation precedes the builder's write transaction. Publication
+    checks the exact source and atomically replaces the table, including
+    obsolete entities. Changed source raises ``sqlite3.OperationalError``.
+    Existing caller transactions are preserved.
+    """
+    with _l0_transaction(conn):
+        schema = _l0_source_schema(conn)
+        query = _profile_source_query(schema)
+        source_rows = [tuple(row) for row in conn.execute(query)]
+    # Filtering via the directive index can reorder timestamp ties. Keep the
+    # original scan order and remove ineligible rows before computation.
+    all_msgs = [dict(zip(_PROFILE_SOURCE_COLUMNS, row[:-1])) for row in source_rows if row[-1]]
+    profiles = _compute_entity_profiles(all_msgs)
+    now = datetime.now(timezone.utc).isoformat()
+    stored_rows = [
+        (
+            sender, profile["message_count"], json.dumps(profile["traits"]),
+            json.dumps(profile["communication_style"]), json.dumps(profile["topics"]),
+            json.dumps(profile["relationships"]), now,
+        )
+        for sender, profile in profiles.items()
+    ]
+    with _l0_transaction(conn, write=True):
+        _l0_validate_source(conn, schema, query, source_rows)
+        conn.execute("DELETE FROM entity_profiles")
+        conn.executemany(
+            """INSERT INTO entity_profiles
                (entity, message_count, traits, communication_style,
                 topics, relationships, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                sender,
-                len(messages),
-                json.dumps(traits),
-                json.dumps(comm_style),
-                json.dumps(topics),
-                json.dumps(relationships),
-                now,
-            ),
+            stored_rows,
         )
-
-    conn.commit()
     return profiles
 
 
