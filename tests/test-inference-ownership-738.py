@@ -88,6 +88,7 @@ class TestIssue738InferenceOwnership(unittest.TestCase):
         mps.flush_mps_cache = lambda: None
         mps.auto_detect_device = lambda: "mps"
         mps.resolve_device = lambda device: device
+        mps.ensure_mps_memory_budget = lambda device: None
         reranker = types.ModuleType("truememory.reranker")
         reranker.get_current_reranker_name = lambda: "primary"
         transformers = types.ModuleType("sentence_transformers")

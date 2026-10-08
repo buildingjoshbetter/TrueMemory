@@ -1,69 +1,133 @@
-# Resource Budgets by Tier
+# Resource budgets
 
-TrueMemory's memory footprint varies by tier. These budgets were established
-in v0.7.0 after extensive benchmarking on Apple Silicon Macs.
+## Scope and model ownership
 
-## Architecture
+The shared model server normally owns embedding and reranking models for all
+MCP sessions. A contended single-query request can also load its existing CPU
+fast encoder. If the server is unavailable or disabled, a client can load
+models locally. Each process that actually constructs an MPS model configures
+its own MPS allocator budget; a proxy does not initialize a local allocator.
+Cache cleanup skips an unconfigured MPS allocator so CPU-only or proxy work
+cannot consume allocator startup settings before a later MPS model load.
 
-All tiers use a **shared model server** (`truememory-model-server`) that loads
-models once and serves all MCP sessions via a Unix domain socket. Each MCP
-session is a lightweight proxy (~80 MB) that delegates model inference to the
-shared server.
+The budget below limits allocations managed by the PyTorch MPS allocator.
+It does not cap CPU tensors, Python objects, resident memory, physical footprint,
+swap, or the sum of multiple processes. CPU fallback has no MPS protection.
+Whole-process admission, cancellation, and recovery limits remain separate
+work tracked in #297. No fixed per-tier or per-session footprint is guaranteed.
 
-## Per-Tier Budgets
+## One byte budget and one denominator
 
-| Tier | Model Server | Each MCP Session | 5 Sessions Total |
-|------|-------------|-----------------|------------------|
-| **Edge** | ~500 MB | ~80 MB | ~900 MB |
-| **Base** | ~1.5 GB | ~80 MB | ~1.9 GB |
-| **Pro** | ~1.5 GB | ~80 MB | ~1.9 GB |
-
-## MPS Watermark
-
-The PyTorch MPS memory watermark prevents over-allocation. The actual code
-in `model_server.py`:
+Let `P` be physical memory in bytes, `G = 1024**3`, and `R` be the bytes returned
+by `torch.mps.recommended_max_memory()`. TrueMemory preserves its existing
+intended default allocation policy, expressed explicitly in bytes:
 
 ```python
-ratio = min(0.08, 2.5 / total_gb) if total_gb >= 16 else 0.19
-ratio = max(ratio, 1.5 / total_gb)  # never below 1.5 GB ceiling
+B = int(max(1.5 * G, min(0.08 * P, 2.5 * G) if P >= 16 * G else 0.19 * P))
+fraction = B / R
+torch.mps.set_per_process_memory_fraction(float(fraction))
+effective_bytes = int(fraction * R)
 ```
 
-Two rules: (1) machines under 16 GB get ratio 0.19 as a floor to avoid
-crashing PyTorch, (2) a final clamp ensures no machine ever gets a ceiling
-below 1.5 GB regardless of RAM size.
+`R` is Metal's recommended working-set size, which can differ from physical
+RAM. PyTorch applies the ratio to `R`. The previous physical-RAM ratio could
+therefore enforce a different byte limit than intended. The public setter
+avoids exporting a generated HIGH ratio into child processes as if it were an
+operator override. Float conversion can change the effective byte count by
+rounding; telemetry reports that effective count.
 
-| Machine RAM | MPS Ceiling | Note |
-|-------------|------------|------|
-| 8 GB | 1.5 GB | Floor ratio (0.19) |
-| 12 GB | 2.3 GB | Floor ratio (0.19) |
-| 16 GB | 1.5 GB | Clamped up from 1.3 GB |
-| 18 GB | 1.5 GB | Clamped up from 1.4 GB |
-| 24 GB | 1.9 GB | Standard (0.08) |
-| 32 GB | 2.5 GB | Capped at 2.5 GB |
-| 48 GB | 2.5 GB | Capped at 2.5 GB |
-| 64 GB | 2.5 GB | Capped at 2.5 GB |
-| 96+ GB | 2.5 GB | Capped at 2.5 GB |
+| Physical RAM | Intended MPS budget | Calculation in GiB |
+|---|---|---|
+| 8 GiB | 1.52 GiB | max(1.5, 0.19 × 8) |
+| 12 GiB | 2.28 GiB | max(1.5, 0.19 × 12) |
+| 16 GiB | 1.5 GiB | max(1.5, min(1.28, 2.5)) |
+| 18 GiB | 1.5 GiB | max(1.5, min(1.44, 2.5)) |
+| 24 GiB | 1.92 GiB | max(1.5, min(1.92, 2.5)) |
+| 32 GiB and above | 2.5 GiB | max(1.5, min(0.08 × RAM, 2.5)) |
 
-No machine gets below 1.5 GB. The curve is monotonically non-decreasing
-from 16 GB upward.
+For example, a 2.5 GiB budget with `R = 20 GiB` needs `2.5 / 20 = 0.125`.
+With `R = 25 GiB`, it needs `2.5 / 25 = 0.1`. Both enforce the same intended
+bytes. The throttler uses the effective bytes for memory level and growth:
+warning at `used / effective >= 0.85`, critical at `>= 0.95`. For exactly
+2.5 GiB, those boundaries are 2.125 GiB and 2.375 GiB. Physical RAM still
+selects batch-size profiles; it is no longer a second MPS headroom denominator.
 
-Users can override via `PYTORCH_MPS_HIGH_WATERMARK_RATIO` environment variable.
+## Initialization and operator settings
 
-## What Consumes Memory
+All MPS transformer factories initialize this policy before constructing a
+model, including standalone embedding and reranking fallbacks. CPU, CUDA,
+Model2Vec, and proxy paths do not configure MPS. A process lock serializes
+initialization, and an immutable snapshot is published only after the public
+setter succeeds. Logs and throttler metrics expose intended, recommended,
+and effective bytes, the policy source, and enforcement status.
 
-- **PyTorch runtime**: ~800 MB (loaded by model server)
-- **Embedding model** (Base/Pro): Qwen3-Embedding-0.6B ~600 MB
-- **Embedding model** (Edge): model2vec/potion-base-8M ~30 MB
-- **Reranker** (Base/Pro): gte-reranker-modernbert-base ~300 MB on MPS
-- **Reranker** (Edge): ms-marco-MiniLM-L-6-v2 ~22 MB
-- **MPS GPU workspace**: varies by watermark ratio
-- **Each MCP session**: Python + SQLite + protocol handling ~80 MB
+| Setting | Default | Meaning |
+|---|---|---|
+| `PYTORCH_MPS_HIGH_WATERMARK_RATIO` | Derived `B / R` via public setter | An explicit finite ratio from 0 through 2 is preserved. Positive values use `ratio × R` bytes; 0 explicitly disables the hard limit. |
+| `PYTORCH_MPS_LOW_WATERMARK_RATIO` | `0.0` | Existing policy retained before the first allocator-touching query. Zero disables adaptive commit and allocator garbage collection. Native calibration of this choice is still pending. |
+| `TRUEMEMORY_DEVICE` | auto | Explicit `cpu` bypasses MPS setup; existing device selection rules apply. |
+| `TRUEMEMORY_MODEL_SERVER_IDLE` | 300 | Seconds before idle model server exit. |
+| `TRUEMEMORY_NO_MODEL_SERVER` | 0 | Set to 1 to request local model loading. |
 
-## Environment Variables
+Explicit LOW is also preserved, validated as finite and within 0 through 2,
+and must not exceed a positive effective HIGH. With HIGH 0, PyTorch permits
+LOW through 2. Settings are captured at first initialization; change them
+before launch and restart to apply a different policy. Code embedding
+TrueMemory should initialize this policy before any unrelated MPS allocation.
+External host code may already have initialized the allocator. The public API
+can set HIGH afterward, but it cannot read or change effective LOW. The snapshot
+therefore labels LOW as `requested_low_watermark_ratio`, a bootstrap intention,
+not verified native enforcement. Tests establish ordering for TrueMemory's
+owned entrypoints; they cannot establish the earlier state of an external host.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PYTORCH_MPS_HIGH_WATERMARK_RATIO` | auto | MPS memory ceiling as fraction of RAM |
-| `TRUEMEMORY_MODEL_SERVER_IDLE` | 300 | Seconds before idle model server exits |
-| `TRUEMEMORY_NO_MODEL_SERVER` | 0 | Set to 1 to disable shared model server |
-| `TRUEMEMORY_MAX_RSS_MB` | 0 | Reported in stats (informational) |
+Missing public APIs, invalid or unavailable byte metrics, conflicting ratios,
+an unsupported derived ratio, or a failing setter stop MPS model construction
+with a configuration error. Failed setup is not retried in the same process
+because allocator initialization may already have occurred; the error directs
+the operator to correct the policy or select CPU and restart. No success
+snapshot or invented effective byte count is reported.
+
+MPS budgeting requires PyTorch 2.5 or newer, which introduced
+[`recommended_max_memory()`](https://github.com/pytorch/pytorch/blob/v2.5.0/torch/mps/__init__.py#L119-L126).
+Package metadata requires `torch>=2.5,<3` when `sys_platform == 'darwin'` and
+`platform_machine == 'arm64'`. The general `torch>=2.0,<3` requirement remains
+for other environments, including CPU and CUDA use. Older Intel Mac installations
+can select `TRUEMEMORY_DEVICE=cpu` and restart; a compatible newer PyTorch wheel
+is not guaranteed to exist for that platform. A missing MPS API stops MPS model
+loading and reports the required version and the explicit CPU escape.
+
+For unconfigured or explicitly unlimited MPS, the throttler treats memory
+headroom and growth as unknown, so those readings cannot authorize a ramp.
+It still reacts to known thermal pressure. Once configured, MPS telemetry
+describes the process allocator, including when one model falls back to CPU
+and another remains on MPS. MPS pressure can still back off shared admissions;
+it never establishes a CPU memory limit. A newly initialized MPS allocator
+invalidates an in-progress sample taken before that initialization.
+
+## Model-fit and thermal calibration still required
+
+This correction establishes units and enforcement setup. It does not show
+that the retained budget accommodates every supported model or input. Models,
+precision, dimensions, retrieval depth, and rerankers remain unchanged:
+Edge uses Potion and MiniLM; Base and Pro use Qwen3-Embedding-0.6B and
+gte-reranker-modernbert-base. Custom tiers retain their selected models.
+
+Native calibration must measure both resident models, the optional CPU fast
+encoder, bounded embedding and reranking workloads, idle periods, and sticky
+CPU recovery. Record model identity and dtype, token counts, batch sizes,
+MPS current and driver allocations, recommended/effective bytes, process RSS
+and physical footprint, swap change, latency, CPU time, and thermal pressure.
+These memory measurements overlap and must not be added together. Verify
+retrieval quality and fit before changing the retained byte policy or LOW.
+Linux or CUDA tests cannot establish MPS behavior or Mac thermal performance.
+
+## PyTorch references
+
+- [Recommended working-set bytes](https://docs.pytorch.org/docs/stable/generated/torch.mps.recommended_max_memory.html)
+- [Public allocation-fraction setter](https://docs.pytorch.org/docs/stable/generated/torch.mps.set_per_process_memory_fraction.html)
+- [HIGH and LOW watermark semantics](https://docs.pytorch.org/docs/stable/mps_environment_variables.html)
+- [Allocator initialization](https://github.com/pytorch/pytorch/blob/v2.12.0/aten/src/ATen/mps/MPSAllocator.mm)
+
+The public contracts were checked against PyTorch 2.12 documentation and the
+installed 2.14.1 Python API source used for isolated validation. Native MPS
+initialization and model-fit measurements remain a separate validation gate.

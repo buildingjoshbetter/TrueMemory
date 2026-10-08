@@ -153,7 +153,9 @@ class TestIssue577DeviceEnvOverride:
     def test_issue_577_device_env_override_cpu_local_reranker(self, monkeypatch):
         """reranker.get_reranker local fallback honors TRUEMEMORY_DEVICE=cpu."""
         import sys
-        from truememory import reranker
+        from truememory import mps_utils, reranker
+
+        monkeypatch.setattr(mps_utils, "ensure_mps_memory_budget", lambda device: None)
 
         captured: dict = {}
         monkeypatch.setitem(
@@ -861,6 +863,7 @@ class TestIssue739LocalEmbeddingDevice(unittest.TestCase):
             patch.object(model_client, "_server_is_alive", self.alive),
             patch.object(model_client, "get_embedding_proxy", self.get_proxy),
             patch.object(tier_config, "resolve_custom_tier", return_value={"embed_dim": 192}),
+            patch.object(mps_utils, "ensure_mps_memory_budget"),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)

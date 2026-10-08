@@ -113,6 +113,7 @@ class TestIssue736RequestDeadlines(unittest.TestCase):
         mps = types.ModuleType("truememory.mps_utils")
         mps.is_mps_oom = lambda error: "MPS backend out of memory" in str(error)
         mps.flush_mps_cache = lambda: None
+        mps.ensure_mps_memory_budget = lambda device: None
         mps_patch = patch.dict("sys.modules", {"truememory.mps_utils": mps})
         mps_patch.start()
         self.addCleanup(mps_patch.stop)

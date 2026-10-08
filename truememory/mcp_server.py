@@ -1708,8 +1708,9 @@ def _unload_models() -> None:
 
     if unloaded_any:
         try:
+            from truememory.mps_utils import get_mps_memory_budget
             import torch
-            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            if get_mps_memory_budget() is not None and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 torch.mps.empty_cache()
                 torch.mps.synchronize()
         except Exception:
@@ -2327,15 +2328,8 @@ def main():
     os.environ.setdefault("MKL_NUM_THREADS", "1")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     os.environ.setdefault("NUMEXPR_MAX_THREADS", "1")
-    if not os.environ.get("PYTORCH_MPS_HIGH_WATERMARK_RATIO"):
-        try:
-            import psutil
-            total_gb = psutil.virtual_memory().total / (1024**3)
-            ratio = str(min(0.08, 2.5 / total_gb)) if total_gb >= 16 else "0.19"
-        except Exception:
-            ratio = "0.19"
-        os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = ratio
-        os.environ.setdefault("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.0")
+    # Model factories calibrate an MPS byte budget in the process that owns
+    # the models. Do not export a generated ratio as a child operator override.
 
     # Initialize telemetry (fire-and-forget, opt-out via TRUEMEMORY_TELEMETRY=off)
     # Update check now runs in background thread inside telemetry.init()
