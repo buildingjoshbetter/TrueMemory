@@ -286,3 +286,34 @@ model replacement overlap, fast-encoder residency and serializer copies for
 accepted results still require measured whole-process budget calibration.
 This change introduces no new process-memory threshold, token estimator,
 automatic recycling policy or claim that native allocation cannot overshoot.
+
+## Surprise-index transaction lifetime
+
+Surprise rebuilding reads messages in the existing `timestamp, id` order and
+computes scores and accumulated fact counts before opening its publication
+transaction. Foreground writers can proceed during that computation. A caller
+that already owns a write transaction keeps that transaction and its locks;
+the builder never commits or restarts it.
+
+Publication uses a savepoint. It acquires SQLite writer ownership with a
+no-row delete, then compares the exact ordered source IDs, content and
+timestamps with the computation's input. These are all source fields used by
+surprise scoring. A concurrent update, deletion, timestamp change or insertion
+rejects stale output with `sqlite3.OperationalError` and a retry message.
+A stale caller-owned WAL snapshot instead fails at SQLite's write upgrade;
+the caller retains responsibility for restarting its own transaction. There
+is no automatic retry loop or new cadence threshold.
+
+Only a matching source snapshot permits the complete clear and bulk insert.
+Both writes share the savepoint, so computation failure, partial insertion
+failure and cancellation preserve the previous scores even if the caller
+later commits unrelated work. Successful empty input clears obsolete scores.
+An outer caller transaction remains open; without one, releasing the
+savepoint commits the complete generation. The table-creation helper also
+leaves caller-owned work uncommitted.
+
+Returned scores retain their full precision. Stored scores retain four-decimal
+rounding, and fact counts and chronological accumulation are unchanged. This
+change still computes the complete corpus and validates that complete source
+under writer ownership. It does not add incremental surprise semantics,
+maintenance scheduling, revision schema or a claim of bounded corpus memory.
