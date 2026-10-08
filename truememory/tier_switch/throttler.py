@@ -7,6 +7,7 @@ batch=1, ramps up slowly, backs off quickly.
 
 import gc
 import logging
+import sys
 import threading
 import time
 from collections import deque
@@ -89,6 +90,13 @@ class DynamicThrottler:
         # regardless of which device this admission's model currently uses.
         from truememory.mps_utils import get_mps_memory_budget
         return get_mps_memory_budget()
+
+    @property
+    def adaptive_applicable(self) -> bool:
+        """Whether this process has an applicable MPS or thermal policy."""
+        # Darwin remains applicable before model loading publishes its budget,
+        # including CPU fallback while the other model can still use MPS.
+        return self.device == "mps" or sys.platform == "darwin" or self._budget_snapshot() is not None
 
     @property
     def mps_cap_gb(self) -> float | None:
