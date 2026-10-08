@@ -84,13 +84,19 @@ See [Python API Reference](../python-api.md) for full details.
 
 ## Telemetry
 
-TrueMemory collects anonymous usage telemetry (tool calls, session counts, platform info). No memory content, queries, or API keys are ever sent. To opt out:
+Usage telemetry is enabled by default and is not anonymous. Every event carries a persistent user UUID and timestamp. Session starts include tier, app version, platform, architecture, Python version, a stable hashed device ID, and your email if configured. Email is sent on each session start when present, as well as during registration. Tool events include the tool name, duration and success or failure; tier changes include the previous and new tier.
+
+The user UUID persists in the configuration. The device ID is a truncated SHA-256 hash of the operating system's machine identifier, so it can remain the same after reinstalling the app. Hashing does not make email-linked usage anonymous. Built-in telemetry events do not include memory content, query text, tool arguments or results, exception text, file paths, API keys, or credentials.
+
+To opt out, set this in the environment used to launch each TrueMemory MCP server:
 
 ```bash
 export TRUEMEMORY_TELEMETRY=off
 ```
 
-See the [Environment Variables](../env-vars.md) reference for details.
+Restart existing server processes after changing the setting. The values `false`, `0`, and `no` also disable telemetry, case-insensitively. Alternatively, add `"telemetry": false` to your existing `~/.truememory/config.json`, preserving the other fields, and restart. Disabled startup does not enqueue telemetry or start its transport threads. This also stops new telemetry-based update checks; an already cached notice may still appear.
+
+See the [complete telemetry disclosure](../../README.md#faq) for the destination and field table, and the [Environment Variables](../env-vars.md) reference. These controls apply to usage telemetry; optional cloud features have separate data flows.
 
 ## Contributing
 
