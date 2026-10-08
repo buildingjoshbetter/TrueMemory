@@ -93,6 +93,31 @@ No parameters.
 
 **Returns:** version, tier, message count, health status, and capabilities.
 
+`health.clustering` reports dependency availability, the last maintenance outcome,
+source freshness, coverage and cluster count. Zero clusters can be a successful
+empty or all-noise result. A missing dependency is reported separately.
+
+All health entries retain `status: "ok" | "degraded"`. Clustering also has a
+`state`: `unknown`, `pending`, `deferred`, `degraded` or `ready`. A disconnected
+database is unknown; busy foreground/model ownership is deferred. Pending
+caller writes and unverified vector-generation coverage cannot report ready.
+`last_error`, `dependency_error` and `process_error` contain categories only.
+The last process failure clears after committed successful clustering work.
+Success pending a caller's outer commit preserves that evidence; a later
+committed maintenance pass can clear it.
+
+Clustering remains optional. Installation guidance is included only when the
+HDBSCAN module is confirmed missing; a failed native import alone does not
+produce a missing-package recommendation.
+
+## truememory_status
+
+Inspect rebuild progress and subsystem health. `status_id` is optional and
+defaults to `0`, the most recent tier-switch rebuild. Clustering appears under
+`degradation.clustering`, with the same fields as stats. Its inspection uses an
+existing connection when available and never constructs a memory instance,
+opens a database, loads a native package/model, or starts maintenance.
+
 ---
 
 ## truememory_configure
