@@ -32,7 +32,11 @@ jobs:
 
   build-check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        mcp-version: [minimum, latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -46,6 +50,26 @@ jobs:
         run: python -m build
       - name: Verify package metadata
         run: twine check --strict dist/*
+      - name: Install wheel and verify MCP compatibility
+        shell: python
+        env:
+          MCP_VERSION: ${{ matrix.mcp-version }}
+        run: |
+          import os
+          from pathlib import Path
+          import subprocess
+          import venv
+
+          wheel, = Path("dist").glob("*.whl")
+          env_dir = Path(os.environ["RUNNER_TEMP"]) / "mcp-wheel-env"
+          venv.EnvBuilder(with_pip=True).create(env_dir)
+          python = env_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+          requirements = [str(wheel.resolve())]
+          if os.environ["MCP_VERSION"] == "minimum":
+              requirements.append("mcp[cli]==1.19.0")
+          subprocess.run([str(python), "-m", "pip", "install", *requirements], check=True)
+          subprocess.run([str(python), "-m", "pip", "check"], check=True)
+          subprocess.run([str(python), "-I", "tests/mcp-wheel-smoke.py"], check=True)
 
   version-check:
     runs-on: ubuntu-latest
