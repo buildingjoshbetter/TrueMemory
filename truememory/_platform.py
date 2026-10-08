@@ -4,9 +4,13 @@ Centralises transport detection, PID liveness checks, and subprocess
 creation flags so the two modules stay in sync.
 """
 
+import errno
+import json
+import math
 import os
 import socket
 import sys
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Transport detection
@@ -17,6 +21,77 @@ _USE_UNIX: bool = hasattr(socket, "AF_UNIX") and sys.platform != "win32"
 
 _LOOPBACK_HOST: str = "127.0.0.1"
 """TCP fallback binds/connects here on Windows."""
+
+_MODEL_SERVER_GENERATION_ENV = "TRUEMEMORY_MODEL_SERVER_GENERATION"
+
+
+def try_file_lock(path: Path) -> int | None:
+    """Acquire a process-owned, nonblocking lock; closing the fd releases it."""
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        os.close(fd)
+        if error.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+            return None
+        raise
+    return fd
+
+
+def process_birth(pid: int) -> float | None:
+    """Identify a process incarnation without trusting a reused PID alone."""
+    import psutil
+    try:
+        process = psutil.Process(pid)
+        if process.status() == psutil.STATUS_ZOMBIE:
+            return None
+        return process.create_time()
+    except psutil.NoSuchProcess:
+        return None
+    except psutil.AccessDenied as error:
+        raise OSError("Cannot verify model-server launch ownership") from error
+
+
+def read_start_claim(path: Path) -> dict | None:
+    """Read a small launch claim. Invalid generations are never authorized."""
+    try:
+        with path.open(encoding="utf-8") as stream:
+            data = stream.read(4097)
+    except FileNotFoundError:
+        return None
+    except UnicodeError:
+        return None
+    if len(data) > 4096:
+        return None
+    try:
+        claim = json.loads(data)
+    except (ValueError, UnicodeError):
+        return None
+    if not isinstance(claim, dict):
+        return None
+    generation = claim.get("generation")
+    if (not isinstance(generation, str) or len(generation) != 32
+            or any(char not in "0123456789abcdef" for char in generation)):
+        return None
+    for key in ("launcher", "child"):
+        identity = claim.get(key)
+        if identity is None and key == "child":
+            continue
+        if not isinstance(identity, dict):
+            return None
+        pid, born = identity.get("pid"), identity.get("born")
+        if (isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0
+                or isinstance(born, bool) or not isinstance(born, (int, float))
+                or not math.isfinite(born) or born <= 0):
+            return None
+    claim.setdefault("child", None)
+    return claim
 
 
 # ---------------------------------------------------------------------------

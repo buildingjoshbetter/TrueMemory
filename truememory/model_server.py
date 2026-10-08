@@ -49,7 +49,10 @@ from pathlib import Path  # noqa: E402
 
 import numpy as np  # noqa: E402
 
-from truememory._platform import _LOOPBACK_HOST, _USE_UNIX, _env_int, pid_is_alive  # noqa: E402
+from truememory._platform import (  # noqa: E402
+    _LOOPBACK_HOST, _MODEL_SERVER_GENERATION_ENV, _USE_UNIX, _env_int,
+    pid_is_alive, read_start_claim, try_file_lock,
+)
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +64,7 @@ TOKEN_PATH = _TRUEMEMORY_DIR / "model_server.token"
 IDLE_TIMEOUT = _env_int("TRUEMEMORY_MODEL_SERVER_IDLE", 300, lo=0)
 
 LOCK_PATH = _TRUEMEMORY_DIR / "model_server.lock"
+START_STATE_PATH = _TRUEMEMORY_DIR / "model_server.start.json"
 
 # Issue #646 (M-53): protocol/version handshake. Bumped whenever the wire
 # format changes incompatibly. The client echoes this back on mismatch.
@@ -1292,20 +1296,30 @@ class ModelServer:
         Returns the lock fd, or raises ``RuntimeError`` if another live
         server holds the lock.
         """
-        fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_RDWR, 0o644)
-        try:
-            if sys.platform == "win32":
-                import msvcrt
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            os.close(fd)
+        fd = try_file_lock(LOCK_PATH)
+        if fd is None:
             raise RuntimeError("another model server holds the bind lock")
         return fd
 
+    def _validate_launch_generation_locked(self) -> None:
+        """A superseded managed child must not publish endpoint artifacts."""
+        generation = os.environ.get(_MODEL_SERVER_GENERATION_ENV)
+        if generation is None:
+            return  # Explicit CLI launch still uses the lifetime bind lock.
+        try:
+            claim = read_start_claim(START_STATE_PATH)
+        except OSError as error:
+            os.close(self._lock_fd)
+            self._lock_fd = None
+            raise RuntimeError("Cannot verify model-server launch generation") from error
+        if claim is None or claim["generation"] != generation:
+            os.close(self._lock_fd)
+            self._lock_fd = None
+            raise RuntimeError("model-server launch was superseded; retry the request")
+
     def run(self):
+        if getattr(self, "_cleaned_up", False):
+            raise RuntimeError("a stopped model server cannot be restarted in the same instance")
         # M-89: keep ~/.truememory owner-only (0700) — it holds memories/PII.
         _TRUEMEMORY_DIR.mkdir(parents=True, exist_ok=True)
         try:
@@ -1315,6 +1329,7 @@ class ModelServer:
 
         # Exclusive bind lock BEFORE touching socket/pid artifacts (M-20).
         self._lock_fd = self._acquire_bind_lock()
+        self._validate_launch_generation_locked()
 
         if _USE_UNIX:
             # We hold the exclusive lock, so any socket file here is stale
@@ -1376,26 +1391,20 @@ class ModelServer:
             return
         self._cleaned_up = True
         self._stop_clients()
-        # Only remove artifacts THIS process owns (issue #646, M-20). After a
-        # crash a fresh server may already hold the lock and have rewritten
-        # PID_PATH; unlinking its live socket/token here would let concurrent
-        # hooks cycle servers indefinitely.
-        if _safe_to_cleanup_artifacts():
-            for p in (SOCK_PATH, PID_PATH, PORT_PATH, TOKEN_PATH):
-                try:
-                    p.unlink(missing_ok=True)
-                except OSError:
-                    pass
-        # Release the bind lock (lock fd is process-owned, always safe).
-        lock_fd = getattr(self, "_lock_fd", None)
-        if lock_fd is not None:
-            try:
-                os.close(lock_fd)
-            except OSError:
-                pass
-            self._lock_fd = None
-        # Reset the embed snapshot and fast-lane identity so no stale model
-        # identity survives a stop (issue #577, panel round 2).
+        with self._admission_lock:
+            with self._activity_lock:
+                retained_work = bool(self._clients) or self._inflight > 0
+        if retained_work:
+            # Native inference cannot be preempted. Keep model references and
+            # bind ownership until OS exit so another daemon cannot overlap
+            # that work. Cleanup remains nonblocking and the instance cannot
+            # be restarted; stale endpoint files are reclaimed by the next
+            # bind owner after this process exits.
+            log.info("Shutdown retains model-server ownership until process exit")
+            return
+        # Keep bind ownership until every cached model has been released,
+        # including cycles collected below. If teardown fails, retain the
+        # lock until process exit instead of overlapping a successor's load.
         self._embed_state = None
         self._reranker = None
         self._reranker_name = None
@@ -1403,6 +1412,24 @@ class ModelServer:
         self._fast_model_id = None
         self._token = None
         gc.collect()
+        # Only remove artifacts THIS process owns (issue #646, M-20). After a
+        # crash a fresh server may already hold the lock and have rewritten
+        # PID_PATH; unlinking its live socket/token here would let concurrent
+        # hooks cycle servers indefinitely.
+        lock_fd = getattr(self, "_lock_fd", None)
+        if lock_fd is not None and _safe_to_cleanup_artifacts():
+            for p in (SOCK_PATH, PID_PATH, PORT_PATH, TOKEN_PATH):
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        # Release the bind lock (lock fd is process-owned, always safe).
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+            except OSError:
+                pass
+            self._lock_fd = None
         log.info("Model server stopped")
 
 
@@ -1428,20 +1455,8 @@ def main():
     if hasattr(signal, "SIGHUP"):
         signal.signal(signal.SIGHUP, _handle_signal)
 
-    # Fast pre-check: a live PID means a server is (probably) already up.
-    # This is advisory only — the authoritative guard is the exclusive bind
-    # lock taken inside run() (issue #646, M-20), which closes the TOCTOU
-    # window this check alone left open. Stale artifacts from a crashed
-    # predecessor are reclaimed under the lock in run(), not here.
-    if PID_PATH.exists():
-        try:
-            old_pid = int(PID_PATH.read_text().strip())
-            if pid_is_alive(old_pid):
-                log.error("Model server already running (pid=%d)", old_pid)
-                sys.exit(1)
-        except (ValueError, OSError):
-            pass
-
+    # A PID file can outlive its process and point at an unrelated live PID.
+    # Only run()'s exclusive bind lock decides endpoint ownership.
     server = ModelServer()
 
     # Ensure cleanup runs even on unhandled exit.

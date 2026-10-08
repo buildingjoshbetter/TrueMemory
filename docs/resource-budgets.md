@@ -4,8 +4,8 @@
 
 The shared model server normally owns embedding and reranking models for all
 MCP sessions. A contended single-query request can also load its existing CPU
-fast encoder. If the server is unavailable or disabled, a client can load
-models locally. Each process that actually constructs an MPS model configures
+fast encoder. A client loads models locally only when sharing is explicitly disabled.
+Server unavailability is reported without loading local copies. Each process that actually constructs an MPS model configures
 its own MPS allocator budget; a proxy does not initialize a local allocator.
 Cache cleanup skips an unconfigured MPS allocator so CPU-only or proxy work
 cannot consume allocator startup settings before a later MPS model load.
@@ -15,6 +15,48 @@ It does not cap CPU tensors, Python objects, resident memory, physical footprint
 swap, or the sum of multiple processes. CPU fallback has no MPS protection.
 Whole-process admission, cancellation, and recovery limits remain separate
 work tracked in #297. No fixed per-tier or per-session footprint is guaranteed.
+
+Sharing is the default policy even when the endpoint is missing after cold
+start, idle exit or a crash. Embedding and reranker getters return lightweight
+proxies; endpoint absence or proxy failure never silently constructs local model
+copies. Set `TRUEMEMORY_NO_MODEL_SERVER=1` before loading models for explicit local
+mode. Existing model/device selection and cached-model lifetime are unchanged;
+changing the environment is not a live mode switch.
+
+### Startup and ownership
+
+Clients coordinate startup with `model_server.start.lock` and an atomic
+`model_server.start.json` generation record. Only one launch is started while
+that process identity remains live. A caller timing out leaves the pending
+child available to later callers. Child identity includes process creation time,
+so a reused PID cannot keep a dead launch alive. A crashed launcher can be
+replaced; a superseded managed child cannot publish an endpoint. These records
+contain process coordination metadata, not memory contents.
+
+The daemon's separate lifetime `model_server.lock` is the authority for binding
+and reclaiming endpoint files. Clients do not remove socket, PID, port or token
+files. A starter that never acquired bind ownership cannot remove a winner's
+files. A PID file alone does not prove readiness. Readiness requires a bounded
+protocol response, including the existing Windows loopback token exchange.
+An authenticated busy response proves presence; a foreign protocol is surfaced
+without restarting it or loading local models.
+
+Startup lock waits, optional macOS app registration and readiness probes share
+one monotonic budget: at most 30 seconds, further capped by an explicit caller's
+remaining request time. Cosmetic app construction is skipped for short budgets.
+Expired callers do not start new children. Existing legacy 120-second request
+timeouts and the single autostart/retry contract remain unchanged. Startup or
+inference unavailability is reported to the caller; inspect
+`~/.truememory/model_server.stderr` and retry. A live but stalled launch is not
+repeatedly replaced or signaled automatically.
+
+Shutdown closes admission without claiming to preempt native inference. If
+admitted or in-flight work still retains models, cleanup keeps its bind lock,
+endpoint artifacts and model references until process exit. It does not wait
+indefinitely inside cleanup, and that server instance cannot be restarted.
+The next bind owner reclaims stale files after the old process exits. This
+prevents a replacement daemon from loading models while the old daemon's native
+work is still draining.
 
 ## One byte budget and one denominator
 
@@ -55,7 +97,7 @@ selects batch-size profiles; it is no longer a second MPS headroom denominator.
 ## Initialization and operator settings
 
 All MPS transformer factories initialize this policy before constructing a
-model, including standalone embedding and reranking fallbacks. CPU, CUDA,
+model, including explicit local embedding and reranking. CPU, CUDA,
 Model2Vec, and proxy paths do not configure MPS. A process lock serializes
 initialization, and an immutable snapshot is published only after the public
 setter succeeds. Logs and throttler metrics expose intended, recommended,

@@ -954,15 +954,17 @@ class TestIssue739LocalEmbeddingDevice(unittest.TestCase):
         self.get_proxy.assert_not_called()
         self.assertEqual(self.transformer_calls[0][1].get("device"), "cpu")
 
-    def test_issue_739_unavailable_server_falls_back_with_cpu_override(self) -> None:
+    def test_issue_739_unavailable_server_keeps_shared_policy(self) -> None:
         os.environ.pop("TRUEMEMORY_NO_MODEL_SERVER")
         for ready, alive in ((False, True), (True, False)):
             with self.subTest(ready=ready, alive=alive):
                 self.ready.return_value = ready
                 self.alive.return_value = alive
-                self.assertIs(self.load("qwen3_256", "cpu"), self.local_model)
-                self.get_proxy.assert_not_called()
-                self.assertEqual(self.transformer_calls[0][1].get("device"), "cpu")
+                self.get_proxy.reset_mock()
+                self.assertIs(self.load("qwen3_256", "cpu"), self.proxy)
+                self.get_proxy.assert_called_once_with(tier="qwen3_256")
+                self.assertEqual(self.transformer_calls, [])
+                self.assertEqual(self.static_calls, [])
 
     def test_issue_739_available_server_preserves_proxy_path_without_local_device_resolution(self) -> None:
         os.environ.pop("TRUEMEMORY_NO_MODEL_SERVER")
@@ -972,12 +974,14 @@ class TestIssue739LocalEmbeddingDevice(unittest.TestCase):
         self.assertEqual(self.transformer_calls, [])
         self.assertEqual(self.static_calls, [])
 
-    def test_issue_739_proxy_failure_falls_back_with_cpu_override(self) -> None:
+    def test_issue_739_proxy_failure_does_not_construct_local_model(self) -> None:
         os.environ.pop("TRUEMEMORY_NO_MODEL_SERVER")
         self.get_proxy.side_effect = RuntimeError("synthetic unavailable proxy")
-        self.assertIs(self.load("qwen3_256", "cpu"), self.local_model)
+        with self.assertRaisesRegex(RuntimeError, "synthetic unavailable proxy"):
+            self.load("qwen3_256", "cpu")
         self.get_proxy.assert_called_once_with(tier="qwen3_256")
-        self.assertEqual(self.transformer_calls[0][1].get("device"), "cpu")
+        self.assertEqual(self.transformer_calls, [])
+        self.assertEqual(self.static_calls, [])
 
     def test_issue_739_cached_model_keeps_existing_lifetime_semantics(self) -> None:
         self.load("qwen3_256", "cpu")
