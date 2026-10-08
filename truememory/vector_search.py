@@ -45,6 +45,9 @@ import re
 import struct
 import sqlite3
 import threading
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -163,6 +166,7 @@ EMBEDDING_MODEL = _resolve_model_name(_raw_env)
 _model = None
 _embedding_dim: int = _MODEL_DIMS.get(EMBEDDING_MODEL, 256)
 _lock = threading.Lock()
+_model_generation = 0
 
 
 def _active_tier_group() -> str:
@@ -205,8 +209,9 @@ def set_embedding_model(name: str) -> None:
 
     Accepts tier names ("base", "pro") or internal model names.
     """
-    global EMBEDDING_MODEL, _model, _embedding_dim
+    global EMBEDDING_MODEL, _model, _embedding_dim, _model_generation
     with _lock:
+        _model_generation += 1
         _model = None  # Force reload
         EMBEDDING_MODEL = _resolve_model_name(name)
         _embedding_dim = get_embedding_dim(EMBEDDING_MODEL)
@@ -223,8 +228,9 @@ def get_embedding_dim(name: str | None = None) -> int:
 
 def unload_model() -> None:
     """Release the embedding model from memory."""
-    global _model
+    global _model, _model_generation
     with _lock:
+        _model_generation += 1
         _model = None
 
 
@@ -728,10 +734,206 @@ _BUILD_VECTORS_TXN_BATCH = 100
 """Number of embedding batches to accumulate before committing.
 
 Each embedding batch is ``_get_batch_size()`` messages (100 on CPU, 16 on
-MPS).  Every ``_BUILD_VECTORS_TXN_BATCH`` of those batches we commit the
-transaction and release the DB write lock so other writers (MCP servers,
-ingest pipeline) can proceed.
+MPS). Serialize a finite group before acquiring an owned DB writer transaction;
+publish the group and consumed-input checkpoint in one commit.
 """
+
+
+def _capture_rebuild_model() -> tuple[object, tuple[int, str, int]]:
+    with _lock:
+        before = (_model_generation, EMBEDDING_MODEL)
+    model = get_model()
+    with _lock:
+        if before != (_model_generation, EMBEDDING_MODEL):
+            raise RuntimeError("Embedding model changed while loading rebuild model")
+        return model, (_model_generation, EMBEDDING_MODEL, _embedding_dim)
+
+
+@contextmanager
+def _rebuild_model_fence(identity: tuple[int, str, int]) -> Iterator[None]:
+    # A writer must never wait for a model load that needs this state lock.
+    if not _lock.acquire(blocking=False):
+        raise RuntimeError("Embedding model is busy; retry rebuild publication")
+    try:
+        if identity != (_model_generation, EMBEDDING_MODEL, _embedding_dim):
+            raise RuntimeError("Embedding model changed during rebuild")
+        yield
+    finally:
+        _lock.release()
+
+
+class VectorPublicationChanged(RuntimeError):
+    """Precomputed vectors no longer match the active publication target."""
+
+
+@contextmanager
+def _foreground_model_fence(identity: tuple[int, str, int]) -> Iterator[None]:
+    if not _lock.acquire(blocking=False):
+        raise VectorPublicationChanged("Embedding model is busy; retry vector publication")
+    try:
+        if identity != (_model_generation, EMBEDDING_MODEL, _embedding_dim):
+            raise VectorPublicationChanged("Embedding model changed; retry vector publication")
+        yield
+    finally:
+        _lock.release()
+
+
+def _validate_foreground_vector_target(
+    conn: sqlite3.Connection, identity: tuple[int, str, int], message_id: int,
+) -> tuple[str, str]:
+    """Validate while the caller owns both the database writer and model fence."""
+    from truememory.rebuild_source import RebuildSourceChanged, load_manifest, manifest_key
+
+    tables = (_active_vec_table(conn), _active_sep_table(conn))
+    for table in tables:
+        manifest = load_manifest(conn, manifest_key((table,)))
+        if manifest is not None and (manifest.model != identity[1] or manifest.dimension != identity[2]):
+            raise VectorPublicationChanged("Vector target uses a different embedding model; reopen with the active tier")
+        if not _build_in_progress(conn, table):
+            continue
+        if manifest is None:
+            raise VectorPublicationChanged("Vector target is rebuilding without matching source identity")
+        if manifest.source is None:
+            # Explicit caller input has no database prefix certificate.
+            raise VectorPublicationChanged("Vector target is rebuilding explicit input; retry after completion")
+        high = manifest.source.high_id
+        if high is None or message_id > high:
+            continue
+        try:
+            manifest.source.check(conn)
+        except RebuildSourceChanged:
+            # A corrected source invalidates this generation. Publish the
+            # correction normally; the rebuild cannot later certify it.
+            continue
+        raise VectorPublicationChanged("Vector row belongs to an active rebuild; retry after completion")
+    return tables
+
+
+@contextmanager
+def _foreground_vector_publication(
+    conn: sqlite3.Connection, identity: tuple[int, str, int], message_id: int,
+) -> Iterator[tuple[str, str]]:
+    from truememory.rebuild_source import rebuild_transaction
+
+    with rebuild_transaction(conn, write=True, publication_fence=_foreground_model_fence(identity)):
+        yield _validate_foreground_vector_target(conn, identity, message_id)
+
+
+def _build_streamed_vectors(
+    conn: sqlite3.Connection, messages: list[dict] | None, *, table_name: str | None,
+    txn_batch: int | None, separation: bool,
+) -> int:
+    from truememory.maintenance import connection_database_path, maintenance_owner
+    from truememory.rebuild_source import (
+        RebuildManifest, RebuildSourceChanged, capture_source, input_fingerprint,
+        ensure_rebuild_tracking, load_manifest, manifest_key, rebuild_transaction, save_manifest,
+    )
+
+    if messages is not None and not messages:
+        return 0
+    table = table_name or (_active_sep_table(conn) if separation else _active_vec_table(conn))
+    quoted_table = '"' + table.replace('"', '""') + '"'
+    key = manifest_key((table,))
+    digest = input_fingerprint(messages, separation=separation) if messages is not None else None
+    with maintenance_owner(connection_database_path(conn)):
+        source_empty = False
+        if messages is None:
+            ensure_rebuild_tracking(conn)
+            with closing(conn.execute("SELECT 1 FROM messages LIMIT 1")) as cursor:
+                source_empty = cursor.fetchone() is None
+        if source_empty:
+            identity = (_model_generation, EMBEDDING_MODEL, _embedding_dim)
+            with rebuild_transaction(conn, write=True, publication_fence=_rebuild_model_fence(identity)):
+                empty_source = capture_source(conn)
+                if empty_source.total == 0:
+                    # An empty range needs no native model allocation. Recheck
+                    # under the writer so an append cannot slip through clear.
+                    conn.execute(f"DELETE FROM {quoted_table}")
+                    _ensure_metadata_table(conn)
+                    empty = RebuildManifest.new(identity[1], identity[2], (table,), source=empty_source)
+                    empty = replace(empty, complete=True,
+                                    schema_version=conn.execute("PRAGMA schema_version").fetchone()[0])
+                    save_manifest(conn, key, empty)
+                    _clear_build_in_progress(conn, table)
+                    return 0
+        model, identity = _capture_rebuild_model()
+        with rebuild_transaction(conn, write=True, publication_fence=_rebuild_model_fence(identity)):
+            manifest = load_manifest(conn, key)
+            resumable = (manifest is not None and not manifest.complete
+                         and manifest.model == identity[1] and manifest.dimension == identity[2]
+                         and manifest.targets == (table,) and manifest.input_digest == digest
+                         and manifest.schema_version == conn.execute("PRAGMA schema_version").fetchone()[0]
+                         and (manifest.source is not None) == (messages is None))
+            if resumable and manifest.source is not None:
+                try:
+                    manifest.source.check(conn)
+                except RebuildSourceChanged:
+                    resumable = False
+            if not resumable:
+                source = capture_source(conn) if messages is None else None
+                manifest = RebuildManifest.new(identity[1], identity[2], (table,), source=source,
+                                               input_digest=digest, total=len(messages) if messages is not None else 0)
+                conn.execute(f"DELETE FROM {quoted_table}")
+                _mark_build_in_progress(conn, table)
+                manifest = replace(manifest, schema_version=conn.execute("PRAGMA schema_version").fetchone()[0])
+                save_manifest(conn, key, manifest)
+
+        batch_size = _get_batch_size()
+        commit_every = max(1, txn_batch if txn_batch is not None else _BUILD_VECTORS_TXN_BATCH)
+        total = 0
+        try:
+            import torch
+            no_grad = torch.no_grad()
+        except ImportError:
+            from contextlib import nullcontext
+            no_grad = nullcontext()
+
+        with no_grad:
+            while manifest.consumed < manifest.total:
+                next_manifest = manifest
+                rows_to_insert = []
+                for _ in range(commit_every):
+                    if next_manifest.consumed >= next_manifest.total:
+                        break
+                    if manifest.source is not None:
+                        batch = manifest.source.page(conn, next_manifest.cursor, batch_size, include_metadata=separation)
+                    else:
+                        batch = messages[next_manifest.consumed:next_manifest.consumed + batch_size]
+                    if not batch:
+                        raise RebuildSourceChanged("Rebuild source ended before its captured row count")
+                    ids = [message["id"] for message in batch]
+                    texts = ([_build_sep_text(message.get("sender", "?"), message.get("recipient", "?"),
+                                              message.get("timestamp", "?"), message["content"]) for message in batch]
+                             if separation else [message["content"] for message in batch])
+                    embeddings = _encode_with_mps_fallback(model, texts, show_progress_bar=False)
+                    if len(embeddings) != len(ids):
+                        raise ValueError("Embedding count does not match the rebuild batch")
+                    valid = 0
+                    for mid, embedding in zip(ids, embeddings):
+                        normed = _normalize_for_cosine(embedding)
+                        if normed is None:
+                            logger.warning("Skipping undefined cosine embedding during rebuild")
+                            continue
+                        rows_to_insert.append((mid, serialize_f32(normed)))
+                        valid += 1
+                    next_manifest = next_manifest.advance(ids[-1], len(batch), valid)
+                    del embeddings, batch, texts, ids
+                    _flush_mps_cache()
+                with rebuild_transaction(conn, write=True, publication_fence=_rebuild_model_fence(identity)):
+                    manifest.check(conn, key)
+                    if rows_to_insert:
+                        conn.executemany(f"INSERT INTO {quoted_table}(rowid, embedding) VALUES (?, ?)", rows_to_insert)
+                    save_manifest(conn, key, next_manifest)
+                total += next_manifest.outputs - manifest.outputs
+                manifest = next_manifest
+                del rows_to_insert
+
+        with rebuild_transaction(conn, write=True, publication_fence=_rebuild_model_fence(identity)):
+            manifest.check(conn, key)
+            save_manifest(conn, key, replace(manifest, complete=True))
+            _clear_build_in_progress(conn, table)
+            _write_embedder_metadata_no_commit(conn)
+        return total
 
 
 def build_vectors(
@@ -748,14 +950,13 @@ def build_vectors(
     ``messages`` table.  Otherwise it uses the supplied list (each dict must
     have an ``"id"`` and ``"content"`` key).
 
-    Batch size adapts to the device: 100 on CPU (Edge tier), 16 on MPS
-    (Base/Pro tier) to keep GPU memory under ~4GB on 8GB machines.
-    MPS cache is flushed between batches to prevent memory accumulation.
+    Database inputs are read in bounded ID pages. A source revision and model
+    fence protect every publication. Resume uses consumed input, including
+    skipped invalid vectors, rather than the maximum stored vector ID.
 
-    The write transaction is committed every *txn_batch* embedding batches
-    (default ``_BUILD_VECTORS_TXN_BATCH`` = 100) so that the DB write lock
-    is not held for the entire re-embedding run.  This lets other writers
-    (MCP servers, ingest pipeline) make progress between commits.
+    Serialize *txn_batch* embedding batches (default 100) before acquiring an
+    owned writer transaction. Caller-owned transactions remain caller-owned;
+    their existing locks cannot be released by this function.
 
     Args:
         conn:       Open database connection with sqlite-vec already loaded
@@ -769,102 +970,9 @@ def build_vectors(
     Returns:
         Number of vectors inserted.
     """
-    if messages is None:
-        rows = conn.execute(
-            "SELECT id, content FROM messages ORDER BY id"
-        ).fetchall()
-        messages = [{"id": row[0], "content": row[1]} for row in rows]
+    return _build_streamed_vectors(conn, messages, table_name=table_name, txn_batch=txn_batch,
+                                   separation=False)
 
-    if not messages:
-        return 0
-
-    tbl = table_name or _active_vec_table(conn)
-
-    # Resume vs. fresh build (issue #647, M-21).
-    #
-    # If a prior run was interrupted it left an ``in_progress`` marker. The
-    # rows already written are valid (each is L2-normalized at write time), so
-    # we resume from ``max(rowid)`` instead of re-wiping — no data confusion,
-    # no redundant re-embedding. On a fresh build we wipe and set the marker in
-    # the SAME transaction, so a crash before completion never leaves an
-    # untracked partial/empty table that engine.open() would trust.
-    resume_after = 0
-    if _build_in_progress(conn, tbl):
-        try:
-            resume_after = conn.execute(
-                f"SELECT MAX(rowid) FROM {tbl}"
-            ).fetchone()[0] or 0
-        except sqlite3.OperationalError:
-            resume_after = 0
-    if resume_after > 0:
-        messages = [m for m in messages if m["id"] > resume_after]
-        if not messages:
-            # Everything was already embedded before the interruption; just
-            # finalize (clear marker + write metadata) so the table is trusted.
-            _clear_build_in_progress(conn, tbl)
-            _write_embedder_metadata(conn)
-            return 0
-    else:
-        conn.execute(f"DELETE FROM {tbl}")
-        _mark_build_in_progress(conn, tbl)
-        conn.commit()  # DELETE + marker land atomically
-
-    model = get_model()
-    batch_size = _get_batch_size()
-    commit_every = txn_batch if txn_batch is not None else _BUILD_VECTORS_TXN_BATCH
-    total = 0
-    batches_since_commit = 0
-
-    try:
-        import torch
-        no_grad = torch.no_grad()
-    except ImportError:
-        from contextlib import nullcontext
-        no_grad = nullcontext()
-
-    with no_grad:
-        for start in range(0, len(messages), batch_size):
-            batch = messages[start : start + batch_size]
-            texts = [m["content"] for m in batch]
-            ids = [m["id"] for m in batch]
-
-            embeddings = _encode_with_mps_fallback(model, texts, show_progress_bar=False)
-
-            rows_to_insert = []
-            for mid, emb in zip(ids, embeddings):
-                normed = _normalize_for_cosine(emb)
-                if normed is None:
-                    # Zero/NaN vector: undefined cosine — skip so it can't
-                    # poison the cosine table with NULL distances (C2-8).
-                    logger.warning(
-                        "Skipping message %s: zero-norm/non-finite embedding "
-                        "(undefined cosine)", mid,
-                    )
-                    continue
-                rows_to_insert.append((mid, serialize_f32(normed)))
-            if rows_to_insert:
-                conn.executemany(
-                    f"INSERT INTO {tbl}(rowid, embedding) VALUES (?, ?)",
-                    rows_to_insert,
-                )
-
-            total += len(rows_to_insert)
-            batches_since_commit += 1
-            del embeddings
-            _flush_mps_cache()
-
-            if batches_since_commit >= commit_every:
-                conn.commit()
-                batches_since_commit = 0
-
-    # Final commit: clear the in-progress marker and stamp embedder metadata in
-    # the SAME transaction so the table is only ever "trusted" once it is fully
-    # built under the current embedder (issue #647: no NEW vectors under OLD
-    # metadata, no empty/partial table accepted as built).
-    _clear_build_in_progress(conn, tbl)
-    _write_embedder_metadata_no_commit(conn)
-    conn.commit()
-    return total
 
 
 # ---------------------------------------------------------------------------
@@ -1058,102 +1166,8 @@ def build_separation_vectors(
     Returns:
         Number of separation vectors inserted.
     """
-    if messages is None:
-        rows = conn.execute(
-            "SELECT id, content, sender, recipient, timestamp FROM messages ORDER BY id"
-        ).fetchall()
-        messages = [
-            {"id": r[0], "content": r[1], "sender": r[2], "recipient": r[3], "timestamp": r[4]}
-            for r in rows
-        ]
-
-    if not messages:
-        return 0
-
-    tbl = table_name or _active_sep_table(conn)
-
-    # Resume vs. fresh build — same durability contract as build_vectors
-    # (issue #647, M-21 + M-45). Marker + DELETE land atomically; batched
-    # commits below release the write lock during the run (#619 treatment).
-    resume_after = 0
-    if _build_in_progress(conn, tbl):
-        try:
-            resume_after = conn.execute(
-                f"SELECT MAX(rowid) FROM {tbl}"
-            ).fetchone()[0] or 0
-        except sqlite3.OperationalError:
-            resume_after = 0
-    if resume_after > 0:
-        messages = [m for m in messages if m["id"] > resume_after]
-        if not messages:
-            _clear_build_in_progress(conn, tbl)
-            _write_embedder_metadata(conn)
-            return 0
-    else:
-        conn.execute(f"DELETE FROM {tbl}")
-        _mark_build_in_progress(conn, tbl)
-        conn.commit()  # DELETE + marker land atomically
-
-    model = get_model()
-    batch_size = _get_batch_size()
-    commit_every = txn_batch if txn_batch is not None else _BUILD_VECTORS_TXN_BATCH
-    total = 0
-    batches_since_commit = 0
-
-    try:
-        import torch
-        no_grad = torch.no_grad()
-    except ImportError:
-        from contextlib import nullcontext
-        no_grad = nullcontext()
-
-    with no_grad:
-        for start in range(0, len(messages), batch_size):
-            batch = messages[start : start + batch_size]
-
-            texts = []
-            ids = []
-            for m in batch:
-                sep_text = _build_sep_text(
-                    m.get("sender", "?"), m.get("recipient", "?"),
-                    m.get("timestamp", "?"), m["content"],
-                )
-                texts.append(sep_text)
-                ids.append(m["id"])
-
-            embeddings = _encode_with_mps_fallback(model, texts, show_progress_bar=False)
-
-            rows_to_insert = []
-            for mid, emb in zip(ids, embeddings):
-                normed = _normalize_for_cosine(emb)
-                if normed is None:
-                    logger.warning(
-                        "Skipping separation vector for message %s: "
-                        "zero-norm/non-finite embedding (undefined cosine)", mid,
-                    )
-                    continue
-                rows_to_insert.append((mid, serialize_f32(normed)))
-            if rows_to_insert:
-                conn.executemany(
-                    f"INSERT INTO {tbl}(rowid, embedding) VALUES (?, ?)",
-                    rows_to_insert,
-                )
-
-            total += len(rows_to_insert)
-            batches_since_commit += 1
-            del embeddings
-            _flush_mps_cache()
-
-            if batches_since_commit >= commit_every:
-                conn.commit()
-                batches_since_commit = 0
-
-    # Final commit: clear the in-progress marker + stamp embedder metadata
-    # atomically (issue #647).
-    _clear_build_in_progress(conn, tbl)
-    _write_embedder_metadata_no_commit(conn)
-    conn.commit()
-    return total
+    return _build_streamed_vectors(conn, messages, table_name=table_name, txn_batch=txn_batch,
+                                   separation=True)
 
 
 def _build_sep_text(sender: str, recipient: str, timestamp: str, content: str) -> str:
@@ -1177,48 +1191,34 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
         message_id: The ``messages.id`` of the row being embedded.
         content:    The text to embed.
     """
-    model = get_model()
-    embedding = _encode_with_mps_fallback(model, [content])[0]  # shape (dim,)
+    model, identity = _capture_rebuild_model()
+    embedding = _encode_with_mps_fallback(model, [content])[0]
     normed = _normalize_for_cosine(embedding)
     if normed is None:
-        # Zero/NaN vector has undefined cosine — skip rather than poison the
-        # cosine table with NULL distances (C2-8).
-        logger.warning(
-            "Skipping message %d: zero-norm/non-finite embedding "
-            "(undefined cosine)", message_id,
-        )
+        logger.warning("Skipping undefined cosine embedding during incremental publication")
         return
-    vec_tbl = _active_vec_table(conn)
-    conn.execute(
-        f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
-        (message_id, serialize_f32(normed)),
-    )
-
+    completion = serialize_f32(normed)
+    separation = None
     try:
         row = conn.execute(
-            "SELECT sender, recipient, timestamp FROM messages WHERE id = ?",
-            (message_id,),
+            "SELECT sender, recipient, timestamp FROM messages WHERE id = ?", (message_id,),
         ).fetchone()
         if row:
             sep_text = _build_sep_text(row[0], row[1], row[2], content)
             sep_embedding = _encode_with_mps_fallback(model, [sep_text])[0]
             sep_normed = _normalize_for_cosine(sep_embedding)
-            if sep_normed is None:
-                logger.warning(
-                    "Skipping separation vector for message %d: "
-                    "zero-norm/non-finite embedding (undefined cosine)",
-                    message_id,
-                )
-                return
-            sep_tbl = _active_sep_table(conn)
-            conn.execute(
-                f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
-                (message_id, serialize_f32(sep_normed)),
-            )
+            if sep_normed is not None:
+                separation = serialize_f32(sep_normed)
     except Exception:
-        logger.warning("Failed to create separation vector for message %d", message_id, exc_info=True)
-    _write_embedder_metadata(conn)
-    # Caller is responsible for committing
+        logger.warning("Failed to prepare separation vector during incremental publication", exc_info=True)
+    with _foreground_vector_publication(conn, identity, message_id) as (vec_tbl, sep_tbl):
+        conn.execute(f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)", (message_id, completion))
+        if separation is not None:
+            try:
+                conn.execute(f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)", (message_id, separation))
+            except Exception:
+                logger.warning("Failed to create separation vector during incremental publication", exc_info=True)
+        _write_embedder_metadata_no_commit(conn)
 
 
 def search_vector_separation(
