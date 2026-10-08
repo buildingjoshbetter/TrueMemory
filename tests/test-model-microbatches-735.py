@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import types
 from collections.abc import Callable
 
 import numpy as np
@@ -101,6 +102,58 @@ def activate(server: ms.ModelServer, limits: list[int]) -> RecordingThrottler:
     server._throttler = throttler
     server._throttler_active = True
     return throttler
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+@pytest.mark.parametrize("device", ["cpu", "cuda:0"])
+@pytest.mark.parametrize("op", ["embed", "rerank"])
+def test_sustained_unsupported_adaptive_policy_keeps_requested_bound(
+    runtime: tuple, monkeypatch: pytest.MonkeyPatch, platform: str, device: str, op: str,
+) -> None:
+    from truememory.tier_switch import throttler as tm
+
+    server, model = runtime
+    clock = FakeClock()
+    sleeps: list[float] = []
+    clock.sleep = sleeps.append
+    monkeypatch.setattr(tm, "time", clock)
+    monkeypatch.setattr(tm, "sys", types.SimpleNamespace(platform=platform))
+    throttler = tm.DynamicThrottler(device)
+    monkeypatch.setattr(throttler, "_budget_snapshot", lambda: None)
+    monkeypatch.setattr(throttler, "_read_all_channels", lambda: {
+        name: {"status": "unsupported", "required": False}
+        for name in ("mps_level", "growth_rate", "thermal")
+    })
+    server._throttler, server._throttler_active = throttler, True
+    server._embed_timestamps = [ms.time.time()] * server._SUSTAINED_THRESHOLD
+    for _ in range(300):
+        response = server.handle_request(payload(op, 17, batch_size=8))
+        assert response["ok"]
+    assert [len(items) for _, items, _ in model.calls] == [8, 8, 1] * 300
+    assert all(limit == 8 for _, _, limit in model.calls)
+    assert sleeps == []
+    assert throttler.items_processed == 0
+    assert throttler.state_machine.good_streak == 0
+
+
+@pytest.mark.parametrize("op,maximum", [("embed", 32), ("rerank", 64)])
+def test_unsupported_policy_retains_server_cap_and_rechecks_applicability(
+    runtime: tuple, op: str, maximum: int,
+) -> None:
+    server, model = runtime
+    throttler = activate(server, [2])
+    server._embed_timestamps = [ms.time.time()] * server._SUSTAINED_THRESHOLD
+    throttler.adaptive_applicable = False
+    assert server.handle_request(payload(op, maximum + 3, batch_size=maximum * 10))["ok"]
+    assert [len(items) for _, items, _ in model.calls] == [maximum, 3]
+    assert throttler.before_count == 0
+    assert throttler.after_counts == []
+    model.calls.clear()
+    throttler.adaptive_applicable = True
+    assert server.handle_request(payload(op, 5, batch_size=8))["ok"]
+    assert [len(items) for _, items, _ in model.calls] == [2, 2, 1]
+    assert throttler.before_count == 1
+    assert throttler.after_counts == [5]
 
 
 @pytest.mark.parametrize("op,key", [("embed", "vectors"), ("rerank", "scores")])

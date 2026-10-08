@@ -1550,3 +1550,27 @@ Finish distinguishes complete captured-range coverage from whole-source coverage
 at its own transaction snapshot. Neither result activates a target or promises
 future freshness. Final concurrent-tail caller adoption, native memory budgets,
 and the original Mac memory incident remain unresolved.
+
+## Adaptive policy applicability in the model daemon
+
+The daemon applies adaptive MPS/thermal admission when MPS is selected, a
+process MPS budget has been published, or the platform is Darwin. Darwin
+remains applicable before model loading, and a CPU fallback does not bypass
+monitoring when another model can still use MPS. Unknown required sensors
+remain conservative; an empty set of required sensors is never healthy ramp
+evidence. Applicability is checked for each request.
+
+On Linux/Windows CPU or CUDA with none of those policies, the daemon keeps
+the validated caller/server batch bound and skips adaptive slow-start, pacing
+and adaptive cache flushing for that request. The hard ceilings remain 32
+embedding inputs and 64 reranker pairs; a caller requesting 8 remains bounded
+by 8. For 100 pairs, `ceil(100 / 8) = 13` normal microbatches replace
+the erroneous 100 singleton microbatches. Failed-slice retries can add native
+invocations. Actual runtimes still require measurement. Request deadlines, inference ownership and output/admission
+limits continue to apply.
+
+This corrects the daemon regression observed in the first native comparison.
+It does not change the tier worker's adaptive/OOM policy, models, precision
+or retrieval depth. The initial comparison's numerical failures and latency
+regressions remain recorded until separate native validation resolves them.
+Linux/CUDA behavior does not establish MPS memory or thermal performance.
