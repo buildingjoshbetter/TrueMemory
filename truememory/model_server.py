@@ -92,6 +92,48 @@ _EMBED_BATCH_LIMIT = 32
 _RERANK_BATCH_LIMIT = 64
 
 
+class _ResultTooLarge(ValueError):
+    """The complete float32 result cannot fit the existing response frame."""
+
+
+def _array_metadata(shape: tuple, encoded: str = "") -> dict:
+    return {"__ndarray__": encoded, "dtype": "float32", "shape": list(shape)}
+
+
+def _array_base64_size(shape: tuple) -> int:
+    raw_bytes = math.prod(shape) * 4
+    return 4 * ((raw_bytes + 2) // 3)
+
+
+def _result_wire_size(shape: tuple, field: str) -> int:
+    envelope = {"ok": True, field: _array_metadata(shape), "protocol": PROTOCOL_VERSION}
+    return len(json.dumps(envelope).encode("utf-8")) + _array_base64_size(shape)
+
+
+def _check_result_size(shape: tuple, field: str) -> None:
+    size = _result_wire_size(shape, field)
+    if size > _MAX_MESSAGE_SIZE:
+        raise _ResultTooLarge(
+            f"Complete {field} response requires {size} bytes; the limit is "
+            f"{_MAX_MESSAGE_SIZE} bytes. Split the request into fewer inputs."
+        )
+
+
+def _response_wire_size(response: dict) -> int:
+    """Measure array JSON without making float32, bytes or base64 copies."""
+    array_bytes = 0
+
+    def metadata_only(obj: object) -> dict:
+        nonlocal array_bytes
+        if isinstance(obj, np.ndarray):
+            array_bytes += _array_base64_size(obj.shape)
+            return _array_metadata(obj.shape)
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+    envelope_bytes = len(json.dumps(response, default=metadata_only).encode("utf-8"))
+    return envelope_bytes + array_bytes
+
+
 def _admission_setting(name: str, default: int, minimum: int, maximum: int) -> int:
     raw = os.environ.get(name)
     if raw is None:
@@ -107,13 +149,20 @@ def _batch_limit(value: object, maximum: int) -> int:
     return min(value, maximum)
 
 
-def _store_batch_result(
-    result: np.ndarray | None, values: object, offset: int, count: int, total: int,
-) -> np.ndarray:
-    """Keep one output allocation, with the existing float32 wire contract."""
-    batch = np.asarray(values, dtype=np.float32)
+def _checked_batch(values: object, count: int, total: int, field: str) -> np.ndarray:
+    batch = values if isinstance(values, np.ndarray) else np.asarray(values, dtype=np.float32)
     if batch.ndim == 0 or batch.shape[0] != count:
         raise ValueError("Model output count does not match the input microbatch")
+    _check_result_size((total, *batch.shape[1:]), field)
+    return np.asarray(batch, dtype=np.float32)
+
+
+def _store_batch_result(
+    result: np.ndarray | None, values: object, offset: int, count: int, total: int,
+    field: str = "vectors",
+) -> np.ndarray:
+    """Check the complete output before allocating it; keep every float32 row."""
+    batch = _checked_batch(values, count, total, field)
     if result is None:
         result = np.empty((total, *batch.shape[1:]), dtype=np.float32)
     elif result.shape[1:] != batch.shape[1:]:
@@ -149,11 +198,7 @@ def _json_default(obj):
     """Encode numpy arrays as base64 for safe JSON serialization."""
     if isinstance(obj, np.ndarray):
         arr = np.ascontiguousarray(obj, dtype=np.float32)
-        return {
-            "__ndarray__": base64.b64encode(arr.tobytes()).decode("ascii"),
-            "dtype": "float32",
-            "shape": list(arr.shape),
-        }
+        return _array_metadata(arr.shape, base64.b64encode(arr.tobytes()).decode("ascii"))
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
@@ -504,6 +549,35 @@ class ModelServer:
     # declines all of those and falls through to the main path.
     _FAST_LANE_SAFE_MODEL_IDS = frozenset({"model2vec", "qwen3_256"})
 
+    def _preflight_embed_result(self, tier: str, count: int) -> None:
+        """Caller holds the state lock; mirror the actual server constructors."""
+        if not count:
+            return
+        state = self._embed_state
+        cached = state is not None and state.tier == tier
+        model_id = state.model_id if cached else self._peek_embed_model_id(tier)
+        known = model_id in ("model2vec", "qwen3_256", "minilm", "bge-small")
+        fallback = not cached and os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "").strip() != "1"
+        if known or fallback:
+            # Legacy minilm/bge-small fall through to model2vec here, not
+            # the 384-dimensional models used by the local loader.
+            _check_result_size((count, 256), "vectors")
+        # A custom truncate_dim is only an upper bound. Even ST's dimension
+        # getter can return that bound when native width is unknown; check
+        # the actual first slice before allocating the complete result.
+
+    @staticmethod
+    def _preflight_rerank_result(model_name: str | None, count: int) -> None:
+        from truememory.reranker import get_current_reranker_name
+        name = model_name or get_current_reranker_name()
+        if count and name in (
+            "cross-encoder/ms-marco-MiniLM-L-6-v2",
+            "Alibaba-NLP/gte-reranker-modernbert-base",
+        ):
+            _check_result_size((count,), "scores")
+        # Custom CrossEncoder constructors preserve num_labels=None; their
+        # output may contain several labels per pair. Inspect its real shape.
+
     def _get_embed_model(self, tier: str):
         state = self._embed_state
         if state is not None and state.tier == tier:
@@ -596,19 +670,26 @@ class ModelServer:
                     try:
                         deadline.check()
                         deadline.start_inference()
+                        self._preflight_embed_result(tier, len(texts))
+                        deadline.check()
                         model = self._get_embed_model(tier)
                         deadline.check()
+                        recover = False
                         try:
                             vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
                         except RuntimeError as exc:
                             from truememory.mps_utils import is_mps_oom
                             if not is_mps_oom(exc):
                                 raise
+                            recover = True
+                        if recover:
+                            # Leave the exception scope before recovery so the
+                            # failed forward's traceback no longer owns tensors.
                             self._check_embed_recovery_deadline_locked(model, deadline)
                             self._recover_embed_oom_locked(model, deadline)
                             deadline.check()
                             vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
-                        return {"ok": True, "vectors": np.asarray(vectors, dtype=np.float32)}
+                        return {"ok": True, "vectors": _checked_batch(vectors, len(texts), len(texts), "vectors")}
                     finally:
                         model = None
                         self._lock.release()
@@ -628,8 +709,8 @@ class ModelServer:
                     # guaranteed (custom model) — decline the fast lane.
                     return None
                 vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
-            return {"ok": True, "vectors": np.asarray(vectors, dtype=np.float32)}
-        except _RequestDeadlineExceeded:
+            return {"ok": True, "vectors": _checked_batch(vectors, len(texts), len(texts), "vectors")}
+        except (_RequestDeadlineExceeded, _ResultTooLarge):
             raise
         except Exception:
             if deadline.transport is not None:
@@ -653,6 +734,8 @@ class ModelServer:
             return self._handle_request_inner(request)
         except _RequestDeadlineExceeded as exc:
             return {"ok": False, "error": str(exc)}
+        except _ResultTooLarge as exc:
+            return {"ok": False, "error": str(exc), "error_code": "result_too_large"}
         finally:
             with self._activity_lock:
                 self._inflight -= 1
@@ -714,16 +797,21 @@ class ModelServer:
                         with deadline.locked(self._lock):
                             if model is None:
                                 deadline.start_inference()
+                                self._preflight_embed_result(tier, len(texts))
+                                deadline.check()
                                 model = self._get_embed_model(tier)
                             while offset < len(texts) or vectors is None:
                                 deadline.check()
                                 batch = texts[offset:offset + limit]
+                                recover = False
                                 try:
                                     values = model.encode(batch, batch_size=limit, show_progress_bar=False)
                                 except RuntimeError as exc:
                                     from truememory.mps_utils import is_mps_oom
                                     if not is_mps_oom(exc):
                                         raise
+                                    recover = True
+                                if recover:
                                     self._check_embed_recovery_deadline_locked(model, deadline)
                                     self._recover_embed_oom_locked(model, deadline)
                                     retry = batch
@@ -769,31 +857,40 @@ class ModelServer:
                         with deadline.locked(self._lock):
                             if reranker is None:
                                 deadline.start_inference()
+                                self._preflight_rerank_result(model_name, len(pairs))
+                                deadline.check()
                                 reranker = self._get_reranker(model_name)
                             while offset < len(pairs) or scores is None:
                                 deadline.check()
                                 batch = pairs[offset:offset + limit]
+                                recover = False
                                 try:
                                     values = reranker.predict(batch, batch_size=limit, show_progress_bar=False)
                                 except RuntimeError as exc:
                                     from truememory.mps_utils import is_mps_oom, flush_mps_cache
                                     if not is_mps_oom(exc):
                                         raise
+                                    recover = True
+                                if recover:
                                     self._mark_sticky_cpu("rerank")
                                     self._reranker = None
                                     self._reranker_name = None
+                                    # Neither the failed traceback nor this
+                                    # local may retain the obsolete accelerator
+                                    # model while its CPU replacement is built.
+                                    reranker = None
                                     deadline.check()
                                     flush_mps_cache()
                                     deadline.check()
                                     reranker = self._get_reranker(model_name)
                                     retry = batch
                                     break
-                                scores = _store_batch_result(scores, values, offset, len(batch), len(pairs))
+                                scores = _store_batch_result(scores, values, offset, len(batch), len(pairs), "scores")
                                 offset += len(batch)
                         if retry is not None:
                             deadline.check()
                             values = reranker.predict(retry, batch_size=limit, show_progress_bar=False)
-                            scores = _store_batch_result(scores, values, offset, len(retry), len(pairs))
+                            scores = _store_batch_result(scores, values, offset, len(retry), len(pairs), "scores")
                             offset += len(retry)
                     self._after_request_batches(throttler, len(pairs), predict_start, deadline)
                     return {"ok": True, "scores": scores}
@@ -1087,9 +1184,9 @@ class ModelServer:
         # an unexpected payload shape.
         if "protocol" not in response:
             response = {**response, "protocol": PROTOCOL_VERSION}
+        if _response_wire_size(response) > _MAX_MESSAGE_SIZE:
+            response = {"ok": False, "error": "Response too large", "protocol": PROTOCOL_VERSION}
         data = json.dumps(response, default=_json_default).encode("utf-8")
-        if len(data) > _MAX_MESSAGE_SIZE:
-            data = json.dumps({"ok": False, "error": "Response too large"}).encode("utf-8")
         header = struct.pack(_HEADER_FMT, len(data))
         conn.sendall(header + data)
 

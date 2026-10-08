@@ -18,6 +18,17 @@ from unittest.mock import Mock, patch
 SOURCE = Path(__file__).resolve().parents[1] / "truememory"
 
 
+class SyntheticArray(list):
+    """Keep transport fixtures JSON-readable while exposing real array shape."""
+    @property
+    def shape(self) -> tuple:
+        return (len(self), len(self[0])) if self and isinstance(self[0], list) else (len(self),)
+
+    @property
+    def ndim(self) -> int:
+        return len(self.shape)
+
+
 def load_source(name: str) -> types.ModuleType:
     tree = ast.parse((SOURCE / (name + ".py")).read_text(encoding="utf-8"))
     tree.body = [node for node in tree.body if not (
@@ -32,7 +43,8 @@ def load_source(name: str) -> types.ModuleType:
     )]
     module = types.ModuleType("synthetic_" + name)
     module.__dict__.update({
-        "np": types.SimpleNamespace(ndarray=list, float32="float32", asarray=lambda value, **kwargs: value),
+        "np": types.SimpleNamespace(ndarray=SyntheticArray, float32="float32",
+                                    asarray=lambda value, **kwargs: SyntheticArray(value)),
         "psutil": None, "_USE_UNIX": True, "_LOOPBACK_HOST": "127.0.0.1",
         "_env_int": lambda name, default, **kwargs: default,
         "pid_is_alive": lambda pid: False, "spawn_kwargs": lambda: {},
