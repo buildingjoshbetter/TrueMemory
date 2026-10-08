@@ -232,8 +232,8 @@ def get_model():
     """Lazy-load the embedding model (singleton).
 
     When the shared model server is enabled (default), returns a proxy
-    that routes inference to the server process. Falls back to local
-    loading if the server is unavailable.
+    that routes inference to the server process, including after idle exit.
+    Local loading requires explicit TRUEMEMORY_NO_MODEL_SERVER=1.
     """
     global _model, _embedding_dim
     if _model is not None:
@@ -244,16 +244,8 @@ def get_model():
 
         from truememory.model_client import use_model_server, get_embedding_proxy
         if use_model_server():
-            try:
-                proxy = get_embedding_proxy(tier=EMBEDDING_MODEL)
-                _model = proxy
-                return _model
-            except Exception:
-                logger.warning(
-                    "Model server available but embedding proxy failed — "
-                    "falling back to local model loading (high memory cost). "
-                    "Check ~/.truememory/model_server.stderr for details."
-                )
+            _model = get_embedding_proxy(tier=EMBEDDING_MODEL)
+            return _model
 
         from truememory.mps_utils import resolve_device
 

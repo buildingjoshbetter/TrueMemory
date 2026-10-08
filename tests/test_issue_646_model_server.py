@@ -59,6 +59,7 @@ class TestM20CleanupOwnership:
         ms.PORT_PATH.write_text("12345")
 
         server = ms.ModelServer()
+        server._lock_fd = server._acquire_bind_lock()
         server._cleanup()
 
         # All four artifacts survive — they belong to the successor.
@@ -77,6 +78,7 @@ class TestM20CleanupOwnership:
         ms.PORT_PATH.write_text("12345")
 
         server = ms.ModelServer()
+        server._lock_fd = server._acquire_bind_lock()
         server._cleanup()
 
         assert not ms.PID_PATH.exists()

@@ -6,8 +6,8 @@ socket (POSIX) or HMAC-authenticated TCP loopback (Windows).
 
 Auto-starts the server on first request if not running.
 
-Falls back to local model loading if the server cannot be reached.
-Set TRUEMEMORY_NO_MODEL_SERVER=1 to force local loading.
+An unavailable server raises an availability error without loading local copies.
+Set TRUEMEMORY_NO_MODEL_SERVER=1 at process startup for explicit local loading.
 """
 
 import base64
@@ -16,6 +16,7 @@ import logging
 import os
 import platform
 import plistlib
+import secrets
 import shutil
 import socket
 import struct
@@ -28,9 +29,13 @@ import numpy as np
 
 from truememory._platform import (
     _LOOPBACK_HOST,
+    _MODEL_SERVER_GENERATION_ENV,
     _USE_UNIX,
     pid_is_alive,
+    process_birth,
+    read_start_claim,
     spawn_kwargs,
+    try_file_lock,
 )
 
 log = logging.getLogger(__name__)
@@ -40,6 +45,9 @@ SOCK_PATH = _TRUEMEMORY_DIR / "model.sock"
 PID_PATH = _TRUEMEMORY_DIR / "model_server.pid"
 PORT_PATH = _TRUEMEMORY_DIR / "model_server.port"
 TOKEN_PATH = _TRUEMEMORY_DIR / "model_server.token"
+LOCK_PATH = _TRUEMEMORY_DIR / "model_server.lock"
+START_LOCK_PATH = _TRUEMEMORY_DIR / "model_server.start.lock"
+START_STATE_PATH = _TRUEMEMORY_DIR / "model_server.start.json"
 
 _HEADER_FMT = ">I"
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
@@ -97,7 +105,7 @@ _LSREGISTER = (
 )
 
 
-def _ensure_app_bundle() -> str | None:
+def _ensure_app_bundle(deadline: float | None = None) -> str | None:
     """Create a macOS .app bundle so Activity Monitor shows our icon.
 
     Returns the path to the .app executable, or None on failure.
@@ -113,6 +121,10 @@ def _ensure_app_bundle() -> str | None:
                 return str(_APP_EXECUTABLE)
         except OSError:
             pass
+
+    # Cosmetic setup must not consume a short recall/startup deadline.
+    if deadline is not None and _remaining(deadline) < 10:
+        return None
 
     try:
         if _APP_BUNDLE_PATH.exists():
@@ -157,7 +169,7 @@ def _ensure_app_bundle() -> str | None:
                 [_LSREGISTER, "-f", str(_APP_BUNDLE_PATH)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=10,
+                timeout=min(10, _remaining(deadline)) if deadline is not None else 10,
             )
 
         return str(_APP_EXECUTABLE)
@@ -215,90 +227,136 @@ def _server_ready() -> bool:
     return PORT_PATH.exists() and TOKEN_PATH.exists()
 
 
-def _start_server(wait_timeout: float | None = None) -> bool:
-    """Start the model server as a detached subprocess.
-
-    *wait_timeout* caps how long to wait for the spawned server to become
-    ready (defaults to ``_SERVER_START_TIMEOUT``). Deadline-bound callers
-    (issue #577) pass their remaining budget: the spawn still happens, so
-    the server warms up for subsequent requests even when this call
-    returns False.
-    """
-    if os.environ.get("TRUEMEMORY_NO_MODEL_SERVER", "") == "1":
+def _probe_server(deadline: float) -> bool:
+    """Validate transport/auth/protocol without renewing the caller's budget."""
+    if not _server_ready():
         return False
-    # M-89: ~/.truememory holds real memories/PII — keep it owner-only (0700),
-    # never the default-umask 0755.
-    _TRUEMEMORY_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        _TRUEMEMORY_DIR.chmod(0o700)
+        response = _send_request({"op": "ping"}, timeout=min(0.2, _remaining(deadline)))
+    except ModelServerBusyError:
+        return True  # A capacity response still proves an existing daemon.
+    except ProtocolMismatchError:
+        raise
     except OSError:
-        pass
+        return False
+    if not response.get("ok"):
+        raise ProtocolMismatchError("Model endpoint does not accept the readiness ping")
+    return True
 
-    alive = _server_is_alive()
-    if not alive:
-        # Clean up all stale artefacts in one pass.
-        for p in (SOCK_PATH, PID_PATH, PORT_PATH, TOKEN_PATH):
-            p.unlink(missing_ok=True)
-    else:
-        return True
 
-    log.info("Starting model server...")
-
-    popen_extra = spawn_kwargs()
-
-    app_exe = _ensure_app_bundle()
-    if app_exe:
-        cmd = [app_exe, "-m", "truememory.model_server"]
-        env = os.environ.copy()
-        env["PYTHONPATH"] = os.pathsep.join(sys.path)
-    else:
-        cmd = [sys.executable, "-m", "truememory.model_server"]
-        env = None
-
+def _write_start_claim(claim: dict) -> None:
+    temporary = START_STATE_PATH.with_name(START_STATE_PATH.name + "." + secrets.token_hex(8) + ".tmp")
+    fd = os.open(str(temporary), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
-        _stderr_path = _TRUEMEMORY_DIR / "model_server.stderr"
-        _stderr_fh = open(_stderr_path, "a")
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(claim, stream)
+        os.replace(temporary, START_STATE_PATH)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _launch_is_pending(claim: dict | None) -> bool:
+    if claim is None:
+        return False
+    identity = claim["child"] or claim["launcher"]
+    return process_birth(identity["pid"]) == identity["born"]
+
+
+def _spawn_server(generation: str, deadline: float) -> subprocess.Popen:
+    _remaining(deadline)
+    app_exe = _ensure_app_bundle(deadline)
+    env = os.environ.copy()
+    env[_MODEL_SERVER_GENERATION_ENV] = generation
+    if app_exe:
+        env["PYTHONPATH"] = os.pathsep.join(sys.path)
+    executables = [app_exe, sys.executable] if app_exe else [sys.executable]
+    for index, executable in enumerate(executables):
+        _remaining(deadline)
         try:
-            subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=_stderr_fh,
-                env=env,
-                **popen_extra,
-            )
-        finally:
-            _stderr_fh.close()
-    except Exception as e:
-        log.warning("Failed to start model server: %s", e)
-        if app_exe:
-            try:
-                _stderr_fh2 = open(_stderr_path, "a")
+            with (_TRUEMEMORY_DIR / "model_server.stderr").open("a") as stderr:
+                return subprocess.Popen(
+                    [executable, "-m", "truememory.model_server"],
+                    stdout=subprocess.DEVNULL, stderr=stderr, env=env, **spawn_kwargs(),
+                )
+        except OSError:
+            if index == len(executables) - 1:
+                raise
+    raise RuntimeError("No model-server executable available")
+
+
+def _start_server(wait_timeout: float | None = None) -> bool:
+    """Coordinate one launch generation and wait within one monotonic budget.
+
+    A short-lived launch lock protects the claim and Popen; the child owns a
+    separate lifetime bind lock. A timed-out caller leaves its live child
+    claimed, so concurrent or later clients wait instead of spawning copies.
+    """
+    if not use_model_server():
+        return False
+    wait = _SERVER_START_TIMEOUT if wait_timeout is None else min(_SERVER_START_TIMEOUT, max(wait_timeout, 0.0))
+    if wait <= 0:
+        return False
+    deadline = time.monotonic() + wait
+    launched = False
+    try:
+        _TRUEMEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            _TRUEMEMORY_DIR.chmod(0o700)
+        except OSError:
+            pass
+        while time.monotonic() < deadline:
+            if _probe_server(deadline):
+                return True
+            _remaining(deadline)
+            gate = try_file_lock(START_LOCK_PATH)
+            if gate is not None:
                 try:
-                    subprocess.Popen(
-                        [sys.executable, "-m", "truememory.model_server"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=_stderr_fh2,
-                        **popen_extra,
-                    )
+                    if _probe_server(deadline):
+                        return True
+                    _remaining(deadline)
+                    bind = try_file_lock(LOCK_PATH)
+                    if bind is not None:
+                        claim = None
+                        try:
+                            # Never trust a PID file or remove endpoint files.
+                            # A held bind lock is the daemon's ownership proof.
+                            previous = read_start_claim(START_STATE_PATH)
+                            if not _launch_is_pending(previous):
+                                if launched:
+                                    return False  # At most one launch per caller.
+                                born = process_birth(os.getpid())
+                                if born is None:
+                                    raise OSError("Cannot identify startup owner")
+                                claim = {"generation": secrets.token_hex(16),
+                                         "launcher": {"pid": os.getpid(), "born": born}, "child": None}
+                                _write_start_claim(claim)
+                        finally:
+                            os.close(bind)
+                        # Release bind ownership BEFORE launching the child.
+                        if claim is not None:
+                            try:
+                                child = _spawn_server(claim["generation"], deadline)
+                                launched = True
+                                child_born = process_birth(child.pid)
+                                if child_born is None:
+                                    raise OSError("Model server exited before startup")
+                                claim["child"] = {"pid": child.pid, "born": child_born}
+                                _write_start_claim(claim)
+                            except (OSError, TimeoutError):
+                                # Invalidate this generation; a late child must
+                                # not publish after its launch failed.
+                                START_STATE_PATH.unlink(missing_ok=True)
+                                raise
                 finally:
-                    _stderr_fh2.close()
-            except Exception as e2:
-                log.warning("Fallback launch also failed: %s", e2)
-                return False
-        else:
-            return False
-
-    wait = _SERVER_START_TIMEOUT
-    if wait_timeout is not None:
-        wait = min(wait, max(wait_timeout, 0.0))
-    deadline = time.time() + wait
-    while time.time() < deadline:
-        if _server_ready():
-            time.sleep(0.2)
-            return True
-        time.sleep(0.1)
-
-    log.warning("Model server did not start within %.0fs", wait)
+                    os.close(gate)
+            time.sleep(min(0.05, _remaining(deadline)))
+    except ProtocolMismatchError:
+        raise
+    except TimeoutError:
+        pass
+    except (OSError, ValueError) as error:
+        log.warning("Shared model-server startup unavailable (%s)", type(error).__name__)
+    log.warning("Shared model server unavailable within %.2fs; retry or inspect model_server.stderr", wait)
     return False
 
 
@@ -497,7 +555,12 @@ def _request_with_autostart(request: dict, timeout: float | None = None) -> dict
             raise _deadline_error(timeout)
 
     if not _start_server(wait_timeout=remaining):
-        raise ConnectionError("Cannot start model server")
+        if has_deadline and time.monotonic() - started >= timeout:
+            raise _deadline_error(timeout)
+        raise ConnectionError(
+            "Shared model server unavailable; retry the request or inspect "
+            "~/.truememory/model_server.stderr"
+        )
 
     if has_deadline:
         remaining = timeout - (time.monotonic() - started)
@@ -586,18 +649,12 @@ class RerankerProxy:
 
 
 def use_model_server() -> bool:
-    """Check if the model server should be used.
+    """Return sharing policy, independently of endpoint readiness.
 
-    Returns True only if:
-    1. TRUEMEMORY_NO_MODEL_SERVER is not set
-    2. The server endpoint exists (server is running)
-
-    Processes that want to ensure the server is running should call
-    ensure_server_running() first (e.g., during MCP server startup).
+    Configure local mode before loading models. Existing cached model lifetime
+    is unchanged; changing environment variables is not a live mode switch.
     """
-    if os.environ.get("TRUEMEMORY_NO_MODEL_SERVER", "") == "1":
-        return False
-    return _server_ready() and _server_is_alive()
+    return os.environ.get("TRUEMEMORY_NO_MODEL_SERVER", "") != "1"
 
 
 def ensure_server_running() -> bool:
@@ -606,10 +663,6 @@ def ensure_server_running() -> bool:
     Call from MCP server startup or CLI to enable the shared model server.
     Returns True if server is running after this call.
     """
-    if os.environ.get("TRUEMEMORY_NO_MODEL_SERVER", "") == "1":
-        return False
-    if _server_is_alive() and _server_ready():
-        return True
     return _start_server()
 
 

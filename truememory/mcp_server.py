@@ -2356,10 +2356,20 @@ def main():
         pass
 
     # Start shared model server (loads models once for all processes).
-    # Falls back to per-process loading if server can't start.
-    from truememory.model_client import ensure_server_running
-    if not ensure_server_running():
+    from truememory.model_client import ensure_server_running, use_model_server
+    if not use_model_server():
         _preload_models()
+    else:
+        try:
+            shared_ready = ensure_server_running()
+        except (ConnectionError, OSError) as error:
+            shared_ready = False
+            log.warning("Shared model-server readiness failed: %s", error)
+        if not shared_ready:
+            log.warning(
+                "Shared model server unavailable; inference will retry it. "
+                "Inspect ~/.truememory/model_server.stderr if this persists."
+            )
 
     # Start background backlog drainer — processes queued session
     # transcripts every 60s while the MCP server is alive, respecting

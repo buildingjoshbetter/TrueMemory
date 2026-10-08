@@ -7,7 +7,11 @@ M20: flock-based rebuild lock
 """
 
 import inspect
+import os
+from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
 
 class TestM17DtypeWhitelist(unittest.TestCase):
@@ -62,11 +66,40 @@ class TestM19PermissionError(unittest.TestCase):
         self.assertIn("PermissionError", source,
                        "pid_is_alive() should catch PermissionError")
 
-    def test_main_uses_pid_is_alive(self):
-        from truememory.model_server import main
-        source = inspect.getsource(main)
-        self.assertIn("pid_is_alive", source,
-                       "main() should use pid_is_alive for cross-platform PID check")
+    def test_main_uses_bind_owner_despite_reused_live_pid(self) -> None:
+        from truememory import model_server as module
+        acquired = []
+
+        class FakeServer:
+            def run(self) -> None:
+                fd = module.try_file_lock(module.LOCK_PATH)
+                if fd is None:
+                    raise RuntimeError("another model server holds the bind lock")
+                acquired.append(True)
+                os.close(fd)
+
+            def _cleanup(self) -> None:
+                pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pid_path = root / "model_server.pid"
+            pid_path.write_text(str(os.getpid()))
+            with patch.object(module, "PID_PATH", pid_path), \
+                    patch.object(module, "LOCK_PATH", root / "model_server.lock"), \
+                    patch.object(module, "ModelServer", FakeServer), \
+                    patch.object(module.signal, "signal"), \
+                    patch.object(module.atexit, "register"), \
+                    patch.dict("sys.modules", {"setproctitle": None}):
+                module.main()
+                self.assertEqual(acquired, [True])
+                owner = module.try_file_lock(module.LOCK_PATH)
+                try:
+                    with self.assertRaises(SystemExit):
+                        module.main()
+                    self.assertEqual(acquired, [True])
+                finally:
+                    os.close(owner)
 
 
 class TestM20RebuildLock(unittest.TestCase):

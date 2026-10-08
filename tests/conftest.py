@@ -100,9 +100,14 @@ def _isolate_truememory_home(tmp_path_factory):
             ("PORT_PATH", "model_server.port"),
             ("TOKEN_PATH", "model_server.token"),
             ("LOCK_PATH", "model_server.lock"),
+            ("START_LOCK_PATH", "model_server.start.lock"),
+            ("START_STATE_PATH", "model_server.start.json"),
         ):
             if hasattr(mod, attr):
                 setattr(mod, attr, tm_dir / name)
+        if mod_name == "truememory.model_client":
+            mod._APP_BUNDLE_PATH = tm_dir / "TrueMemory.app"
+            mod._APP_EXECUTABLE = mod._APP_BUNDLE_PATH / "Contents" / "MacOS" / "TrueMemory"
     yield
 
 
