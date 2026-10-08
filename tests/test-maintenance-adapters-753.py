@@ -57,7 +57,11 @@ class AdapterFixture(unittest.TestCase):
             ("vec_source_v1:vec_messages_edge", '{"version":1,"generation":"synthetic-a","cursor":0,"complete":true}'),
         ])
         self.conn.commit()
-        self.enterContext(patch.dict(sys.modules, {"truememory.vector_search": self.vector}))
+        # Detached production workers must not discover this fixture's model
+        # or hold its lock through the process-wide module registry.
+        self.enterContext(patch.object(MAINTENANCE, "sys", types.SimpleNamespace(
+            modules={"truememory.vector_search": self.vector}, version_info=sys.version_info,
+        )))
         self.enterContext(patch.object(MAINTENANCE, "importlib", types.SimpleNamespace(
             import_module=lambda name: self.modules[name], metadata=importlib.metadata, util=importlib.util,
         )))
