@@ -182,6 +182,16 @@ async def _check_protocol(root: Path, env: dict[str, str], origin: Path) -> None
 def main() -> None:
     _require(bool(sys.flags.isolated), "Run this probe with python -I")
     distribution = importlib.metadata.distribution("truememory")
+    # Report public package versions before subprocess checks, whose output is
+    # intentionally redacted. Dependency import failures then remain traceable.
+    print(json.dumps({
+        "stage": "dependency_versions",
+        "python_version": ".".join(str(part) for part in sys.version_info[:3]),
+        "truememory_version": distribution.version,
+        "mcp_version": importlib.metadata.version("mcp"),
+        "pydantic_version": importlib.metadata.version("pydantic"),
+        "pydantic_core_version": importlib.metadata.version("pydantic-core"),
+    }), flush=True)
     origin = Path(distribution.locate_file("truememory/__init__.py")).resolve()
     spec = importlib.util.find_spec("truememory")
     _require(origin.is_file() and spec is not None and spec.origin is not None,
