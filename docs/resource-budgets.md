@@ -349,8 +349,9 @@ changed by this checkpoint; issue #795 remains open.
 ### Qwen global input order within bounded calls
 
 Multi-batch embedding requests for the cached `qwen3_256` model now preserve
-modern SentenceTransformers' global length ordering when every input is a
-string, `_input_length` and `_can_flatten_inputs` are available, and input
+modern SentenceTransformers' global length ordering when the resolved effective
+batch limit is exactly 32, every input is a string, `_input_length` and
+`_can_flatten_inputs` are available, and input
 flattening is disabled. The verified SentenceTransformers 6.1.0 implementation
 measures string characters before prompt preprocessing. The server leaves
 prompt resolution, instruction processing, tokenization, dtype and the model's
@@ -363,10 +364,14 @@ the inner encode call's equal-length permutation, then scatters returned rows
 directly to their original positions. Duplicate text values keep distinct
 indices. Single-input requests and requests fitting one effective batch keep
 their existing call path. The effective limit remains fixed once per request,
-bounded by caller, server and applicable adaptive ceilings. Explicit eight-row
-requests remain capped at eight; restoring global order does not make their
-native shapes equivalent to a 32-row reference or waive their failed numeric
-gate.
+bounded by caller, server and applicable adaptive ceilings. Omitted limits and
+oversized limits clamped to 32 use global ordering when the adaptive ceiling
+also preserves 32 and the other eligibility conditions hold. Smaller effective
+limits, including explicit eight and
+adaptive reduction to eight, retain the prior contiguous slice membership.
+This preserves the verified native32 default ordering without extending it to
+layouts with unresolved numerical differences. Explicit eight remains capped
+at eight; retaining its prior behavior does not waive its failed numeric gate.
 
 Output preflight runs before ordering work. For the known 256-dimensional
 float32 result, 7,679 rows require 10,484,497 response bytes; 7,680 require
