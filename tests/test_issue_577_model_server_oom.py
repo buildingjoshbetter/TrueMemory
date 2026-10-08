@@ -22,10 +22,13 @@ spawns at most 2 extra threads.
 """
 from __future__ import annotations
 
+import os
 import socket
+import sys
 import threading
 import types
-from unittest.mock import MagicMock
+import unittest
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -801,6 +804,185 @@ class TestIssue577ClientDeadline:
         assert "set_request_timeout" in ups_src, (
             "user_prompt_submit auto-recall must arm the short deadline"
         )
+
+
+class TestIssue739LocalEmbeddingDevice(unittest.TestCase):
+    """Exercise real local routing and device resolution with synthetic factories."""
+
+    def setUp(self) -> None:
+        from truememory import model_client, mps_utils, tier_config, vector_search
+
+        self.vector_search = vector_search
+        self.mps_utils = mps_utils
+        self.transformer_calls: list[tuple[str, dict]] = []
+        self.static_calls: list[tuple[str, dict]] = []
+        self.availability_calls: list[str] = []
+        self.available = {"cuda": True, "mps": True}
+        self.local_model = object()
+        self.proxy = object()
+
+        def transformer(name: str, **kwargs: object) -> object:
+            self.transformer_calls.append((name, kwargs))
+            return self.local_model
+
+        def static_model(name: str, **kwargs: object) -> object:
+            self.static_calls.append((name, kwargs))
+            return self.local_model
+
+        def available(kind: str) -> bool:
+            self.availability_calls.append(kind)
+            return self.available[kind]
+
+        transformers = types.ModuleType("sentence_transformers")
+        transformers.SentenceTransformer = transformer
+        model2vec = types.ModuleType("model2vec")
+        model2vec.StaticModel = types.SimpleNamespace(from_pretrained=static_model)
+        torch = types.ModuleType("torch")
+        torch.cuda = types.SimpleNamespace(is_available=lambda: available("cuda"))
+        torch.backends = types.SimpleNamespace(
+            mps=types.SimpleNamespace(is_available=lambda: available("mps")),
+        )
+        self.ready = MagicMock(return_value=True)
+        self.alive = MagicMock(return_value=True)
+        self.get_proxy = MagicMock(return_value=self.proxy)
+        for patcher in (
+            patch.dict("sys.modules", {
+                "sentence_transformers": transformers, "model2vec": model2vec,
+                "torch": torch,
+            }),
+            patch.dict(os.environ, {
+                "TRUEMEMORY_DEVICE": "cpu", "TRUEMEMORY_NO_MODEL_SERVER": "1",
+                "TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD": "1",
+            }),
+            patch.object(vector_search, "_model", None),
+            patch.object(vector_search, "EMBEDDING_MODEL", "qwen3_256"),
+            patch.object(vector_search, "_embedding_dim", 256),
+            patch.object(model_client, "_server_ready", self.ready),
+            patch.object(model_client, "_server_is_alive", self.alive),
+            patch.object(model_client, "get_embedding_proxy", self.get_proxy),
+            patch.object(tier_config, "resolve_custom_tier", return_value={"embed_dim": 192}),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def load(self, model_id: str, override: str | None) -> object:
+        self.vector_search._model = None
+        self.vector_search.EMBEDDING_MODEL = model_id
+        self.vector_search._embedding_dim = -1
+        self.transformer_calls.clear()
+        self.static_calls.clear()
+        self.availability_calls.clear()
+        if override is None:
+            os.environ.pop("TRUEMEMORY_DEVICE", None)
+        else:
+            os.environ["TRUEMEMORY_DEVICE"] = override
+        return self.vector_search.get_model()
+
+    def test_issue_739_all_transformer_factories_preserve_identity_and_device_policy(self) -> None:
+        factories = (
+            ("minilm", "all-MiniLM-L6-v2", 384, {}),
+            ("bge-small", "BAAI/bge-small-en-v1.5", 384, {}),
+            ("qwen3_256", "Qwen/Qwen3-Embedding-0.6B", 256, {
+                "truncate_dim": 256,
+                "model_kwargs": {"attn_implementation": "eager"} if sys.platform == "darwin" else None,
+            }),
+            ("synthetic/custom-encoder", "synthetic/custom-encoder", 192, {
+                "truncate_dim": 192, "trust_remote_code": False,
+            }),
+        )
+        policies = (
+            ("cpu", True, True, "cpu"), (" CPU ", True, True, "cpu"),
+            ("cuda", True, True, "cuda:0"), ("mps", True, True, "mps"),
+            ("auto", True, True, None), (None, True, True, None),
+            ("invalid-device", True, True, None), ("cuda:99", True, True, None),
+            ("cuda", False, True, None), ("mps", True, False, None),
+        )
+        for model_id, expected_name, dimension, expected_kwargs in factories:
+            for override, cuda, mps, expected_device in policies:
+                with self.subTest(model=model_id, override=override, cuda=cuda, mps=mps):
+                    self.available.update(cuda=cuda, mps=mps)
+                    self.assertIs(self.load(model_id, override), self.local_model)
+                    self.assertEqual(len(self.transformer_calls), 1)
+                    name, kwargs = self.transformer_calls[0]
+                    self.assertEqual(name, expected_name)
+                    self.assertEqual(kwargs.get("device"), expected_device)
+                    self.assertEqual({key: value for key, value in kwargs.items() if key != "device"},
+                                     expected_kwargs)
+                    self.assertEqual(self.vector_search._embedding_dim, dimension)
+                    self.assertEqual(self.static_calls, [])
+                    if expected_device == "cpu" or override in ("auto", None):
+                        self.assertEqual(self.availability_calls, [])
+
+    def test_issue_739_unsupported_device_warnings_keep_framework_auto(self) -> None:
+        for override in ("invalid-device", "mps", "cuda"):
+            with self.subTest(override=override):
+                self.available.update(cuda=False, mps=False)
+                with self.assertLogs("truememory.mps_utils", level="WARNING") as logs:
+                    self.load("qwen3_256", override)
+                self.assertIn("auto device selection", logs.output[0])
+                self.assertIsNone(self.transformer_calls[0][1].get("device"))
+
+    def test_issue_739_qwen_platform_options_are_preserved(self) -> None:
+        for platform, model_kwargs in (("darwin", {"attn_implementation": "eager"}),
+                                       ("linux", None), ("win32", None)):
+            with self.subTest(platform=platform), patch.object(sys, "platform", platform):
+                self.load("qwen3_256", "cpu")
+                self.assertEqual(self.transformer_calls[0][1], {
+                    "truncate_dim": 256, "model_kwargs": model_kwargs, "device": "cpu",
+                })
+
+    def test_issue_739_model2vec_and_custom_opt_in_fallback_remain_cpu_only(self) -> None:
+        os.environ["TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD"] = "0"
+        for model_id in ("model2vec", "synthetic/custom-encoder"):
+            for override in ("cpu", "mps", "cuda", "auto"):
+                with self.subTest(model=model_id, override=override):
+                    self.assertIs(self.load(model_id, override), self.local_model)
+                    self.assertEqual(self.static_calls, [
+                        ("minishlab/potion-base-8M", {"force_download": False}),
+                    ])
+                    self.assertEqual(self.transformer_calls, [])
+                    self.assertEqual(self.availability_calls, [])
+                    self.assertEqual(self.vector_search._embedding_dim, 256)
+
+    def test_issue_739_explicitly_disabled_server_never_probes_endpoint(self) -> None:
+        self.load("qwen3_256", "cpu")
+        self.ready.assert_not_called()
+        self.alive.assert_not_called()
+        self.get_proxy.assert_not_called()
+        self.assertEqual(self.transformer_calls[0][1].get("device"), "cpu")
+
+    def test_issue_739_unavailable_server_falls_back_with_cpu_override(self) -> None:
+        os.environ.pop("TRUEMEMORY_NO_MODEL_SERVER")
+        for ready, alive in ((False, True), (True, False)):
+            with self.subTest(ready=ready, alive=alive):
+                self.ready.return_value = ready
+                self.alive.return_value = alive
+                self.assertIs(self.load("qwen3_256", "cpu"), self.local_model)
+                self.get_proxy.assert_not_called()
+                self.assertEqual(self.transformer_calls[0][1].get("device"), "cpu")
+
+    def test_issue_739_available_server_preserves_proxy_path_without_local_device_resolution(self) -> None:
+        os.environ.pop("TRUEMEMORY_NO_MODEL_SERVER")
+        with patch.object(self.mps_utils, "resolve_device", side_effect=AssertionError("local resolution")):
+            self.assertIs(self.load("qwen3_256", "cpu"), self.proxy)
+        self.get_proxy.assert_called_once_with(tier="qwen3_256")
+        self.assertEqual(self.transformer_calls, [])
+        self.assertEqual(self.static_calls, [])
+
+    def test_issue_739_proxy_failure_falls_back_with_cpu_override(self) -> None:
+        os.environ.pop("TRUEMEMORY_NO_MODEL_SERVER")
+        self.get_proxy.side_effect = RuntimeError("synthetic unavailable proxy")
+        self.assertIs(self.load("qwen3_256", "cpu"), self.local_model)
+        self.get_proxy.assert_called_once_with(tier="qwen3_256")
+        self.assertEqual(self.transformer_calls[0][1].get("device"), "cpu")
+
+    def test_issue_739_cached_model_keeps_existing_lifetime_semantics(self) -> None:
+        self.load("qwen3_256", "cpu")
+        os.environ["TRUEMEMORY_DEVICE"] = "mps"
+        self.assertIs(self.vector_search.get_model(), self.local_model)
+        self.assertEqual(len(self.transformer_calls), 1)
+        self.assertEqual(self.transformer_calls[0][1].get("device"), "cpu")
+        self.assertEqual(self.availability_calls, [])
 
 
 if __name__ == "__main__":

@@ -255,6 +255,8 @@ def get_model():
                     "Check ~/.truememory/model_server.stderr for details."
                 )
 
+        from truememory.mps_utils import resolve_device
+
         resolved = EMBEDDING_MODEL
         if resolved == "model2vec":
             from model2vec import StaticModel
@@ -262,11 +264,11 @@ def get_model():
             _embedding_dim = 256
         elif resolved == "minilm":
             from sentence_transformers import SentenceTransformer
-            _model = SentenceTransformer("all-MiniLM-L6-v2")
+            _model = SentenceTransformer("all-MiniLM-L6-v2", device=resolve_device(None))
             _embedding_dim = 384
         elif resolved == "bge-small":
             from sentence_transformers import SentenceTransformer
-            _model = SentenceTransformer("BAAI/bge-small-en-v1.5")
+            _model = SentenceTransformer("BAAI/bge-small-en-v1.5", device=resolve_device(None))
             _embedding_dim = 384
         elif resolved == "qwen3_256":
             from sentence_transformers import SentenceTransformer
@@ -278,6 +280,7 @@ def get_model():
                 "Qwen/Qwen3-Embedding-0.6B",
                 truncate_dim=256,
                 model_kwargs=_mkwargs or None,
+                device=resolve_device(None),
             )
             _embedding_dim = 256
         elif resolved not in _MODEL_DIMS:
@@ -304,6 +307,7 @@ def get_model():
                 _model = SentenceTransformer(
                     resolved, truncate_dim=custom_dim,
                     trust_remote_code=False,
+                    device=resolve_device(None),
                 )
                 _embedding_dim = custom_dim
         else:
