@@ -159,6 +159,147 @@ class TestTranscriptOutcomes(unittest.TestCase):
         self.assertEqual(len(outcome.messages), 1)
         self.assertIn("source_changed_during_read", outcome.error_categories)
 
+    def test_windows_stat_and_fstat_ctime_semantics_do_not_reject_stable_file(self) -> None:
+        path = self.write(b'{"role":"user","content":"synthetic stable file"}\n')
+        real = path.stat()
+        common = {name: getattr(real, name) for name in ("st_dev", "st_ino", "st_size", "st_mtime_ns")}
+        by_handle = types.SimpleNamespace(**common, st_ctime_ns=731001)
+        by_path = types.SimpleNamespace(**common, st_ctime_ns=731002)
+        with patch.object(self.parser.os, "fstat", return_value=by_handle) as fd_stat, \
+                patch.object(Path, "stat", return_value=by_path):
+            outcome = self.parser.parse_transcript_outcome(path)
+        self.assertTrue(outcome.complete, capture_diagnostic(outcome))
+        self.assertTrue(outcome.file_version.stable)
+        self.assertEqual(outcome.file_version.after.ctime_ns, 731001)
+        self.assertEqual(outcome.file_version.path_after.ctime_ns, 731001)
+        self.assertEqual(fd_stat.call_count, 3)
+
+    def test_ctime_only_change_during_read_or_final_reopen_is_not_complete(self) -> None:
+        path = self.write(b'{"role":"user","content":"synthetic timestamp change"}\n')
+        real = path.stat()
+        common = {name: getattr(real, name) for name in ("st_dev", "st_ino", "st_size", "st_mtime_ns")}
+        for changed_call in (2, 3):
+            with self.subTest(changed_call=changed_call):
+                states = [types.SimpleNamespace(**common, st_ctime_ns=731001 + int(call >= changed_call))
+                          for call in (1, 2, 3)]
+                with patch.object(self.parser.os, "fstat", side_effect=states):
+                    outcome = self.parser.parse_transcript_outcome(path)
+                self.assertFalse(outcome.complete)
+                self.assertEqual(outcome.error_categories, ("source_changed_during_read",))
+                self.assertEqual(outcome.file_version.byte_count, real.st_size)
+                self.assertEqual(len(outcome.messages), 1)
+                diagnostic = capture_diagnostic(outcome)
+                field = "changed_during_read" if changed_call == 2 else "changed_after_close"
+                self.assertEqual(diagnostic[field], ("ctime_ns",))
+
+    def test_replaced_path_after_read_is_not_the_captured_file(self) -> None:
+        data = b'{"role":"user","content":"synthetic replacement race"}\n'
+        path = self.write(data)
+        replacement = self.write(data, "replacement.jsonl")
+        real_open = Path.open
+        handles = []
+
+        def open_with_replacement(target: Path, mode: str) -> object:
+            self.assertEqual(target, path)
+            self.assertEqual(mode, "rb")
+            if handles:
+                self.assertTrue(handles[0].closed)
+                replacement.replace(path)
+            handle = real_open(target, mode)
+            handles.append(handle)
+            return handle
+
+        with patch.object(Path, "open", open_with_replacement):
+            outcome = self.parser.parse_transcript_outcome(path)
+        self.assertEqual(len(handles), 2)
+        self.assertTrue(all(handle.closed for handle in handles))
+        self.assertFalse(outcome.complete)
+        self.assertEqual(outcome.error_categories, ("source_changed_during_read",))
+        self.assertNotEqual(outcome.file_version.after.inode, outcome.file_version.path_after.inode)
+        self.assertEqual(outcome.file_version.sha256, hashlib.sha256(data).hexdigest())
+        self.assertEqual(outcome.messages[0].content, "synthetic replacement race")
+
+    def test_deleted_or_denied_path_after_read_preserves_captured_messages(self) -> None:
+        data = b'{"role":"user","content":"synthetic unavailable path"}\n'
+        real_open = Path.open
+        for cause in ("deleted", "denied"):
+            with self.subTest(cause=cause):
+                path = self.write(data)
+                handles = []
+                attempts = []
+
+                def open_with_failure(target: Path, mode: str) -> object:
+                    self.assertEqual((target, mode), (path, "rb"))
+                    attempts.append(True)
+                    if handles:
+                        self.assertTrue(handles[0].closed)
+                        if cause == "deleted":
+                            path.unlink()
+                        else:
+                            raise PermissionError(SYNTHETIC_SECRET)
+                    handle = real_open(target, mode)
+                    handles.append(handle)
+                    return handle
+
+                with patch.object(Path, "open", open_with_failure):
+                    outcome = self.parser.parse_transcript_outcome(path)
+                self.assertEqual(len(attempts), 2)
+                self.assertTrue(all(handle.closed for handle in handles))
+                self.assertEqual(outcome.status, "partial")
+                self.assertEqual(outcome.error_categories, ("source_changed_during_read",))
+                self.assertIsNone(outcome.file_version.path_after)
+                self.assertEqual(outcome.file_version.sha256, hashlib.sha256(data).hexdigest())
+                self.assertEqual(outcome.messages[0].content, "synthetic unavailable path")
+                self.assertNotIn(SYNTHETIC_SECRET, repr(outcome))
+
+    def test_final_identity_handle_never_reads_and_closes_on_fstat_failure(self) -> None:
+        path = self.write(b'{"role":"user","content":"synthetic final handle"}\n')
+        real_open, real_fstat = Path.open, self.parser.os.fstat
+        for failed_stat in (False, True):
+            with self.subTest(failed_stat=failed_stat):
+                handles = []
+                stat_calls = []
+
+                class IdentityProbe:
+                    def __init__(self, handle: object) -> None:
+                        self.handle = handle
+
+                    def __enter__(self) -> IdentityProbe:
+                        return self
+
+                    def __exit__(self, *args: object) -> None:
+                        self.handle.close()
+
+                    def fileno(self) -> int:
+                        return self.handle.fileno()
+
+                    def read(self, *args: object) -> bytes:
+                        raise AssertionError("Final identity probe must not reread source bytes")
+
+                def observed_open(target: Path, mode: str) -> object:
+                    self.assertEqual((target, mode), (path, "rb"))
+                    handle = real_open(target, mode)
+                    handles.append(handle)
+                    return handle if len(handles) == 1 else IdentityProbe(handle)
+
+                def observed_fstat(fd: int) -> object:
+                    stat_calls.append(True)
+                    if failed_stat and len(stat_calls) == 3:
+                        raise OSError(SYNTHETIC_SECRET)
+                    return real_fstat(fd)
+
+                with patch.object(Path, "open", observed_open), \
+                        patch.object(self.parser.os, "fstat", observed_fstat):
+                    outcome = self.parser.parse_transcript_outcome(path)
+                self.assertEqual(len(handles), 2)
+                self.assertEqual(len(stat_calls), 3)
+                self.assertTrue(all(handle.closed for handle in handles))
+                self.assertEqual(outcome.complete, not failed_stat, capture_diagnostic(outcome))
+                if failed_stat:
+                    self.assertIsNone(outcome.file_version.path_after)
+                    self.assertEqual(outcome.error_categories, ("source_changed_during_read",))
+                    self.assertNotIn(SYNTHETIC_SECRET, repr(outcome))
+
     def test_capture_diagnostic_reports_fields_without_identity_or_content(self) -> None:
         before = self.parser.FileState(731001, 731002, 731003, 731004, 731005)
         after = self.parser.FileState(731001, 731002, 731006, 731007, 731005)

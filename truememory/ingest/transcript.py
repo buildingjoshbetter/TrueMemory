@@ -89,8 +89,8 @@ def parse_transcript_outcome(source: str | Path) -> TranscriptOutcome:
 
     Explicit Paths are always files, including missing paths. String path
     detection follows the existing parser; other strings are inline content.
-    Diagnostics contain categories and counts only. A stable capture says
-    nothing about changes after this function returns.
+    Diagnostics contain categories and counts only. Stable means these
+    observations agreed; it does not lock the source against later changes.
     """
     path = source if isinstance(source, Path) else None
     if path is None:
@@ -117,7 +117,10 @@ def parse_transcript_outcome(source: str | Path) -> TranscriptOutcome:
         except (OSError, ValueError):
             return TranscriptOutcome([], "unreadable", error_categories=("source_unreadable",))
         try:
-            path_after = FileState.from_stat(path.stat())
+            # Windows stat() and fstat() can give ctime different meanings.
+            # Reopen the pathname to check identity using the same API.
+            with path.open("rb") as identity_handle:
+                path_after = FileState.from_stat(os.fstat(identity_handle.fileno()))
         except OSError:
             path_after = None
         version = TranscriptFileVersion(len(data), hashlib.sha256(data).hexdigest(), before, after, path_after)
