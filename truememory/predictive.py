@@ -131,7 +131,6 @@ def _ensure_surprise_table(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (message_id) REFERENCES messages(id)
         )
     """)
-    conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +306,67 @@ def compute_surprise_score(content: str, existing_facts: set) -> float:
     return max(0.05, min(1.0, score))
 
 
-def build_surprise_index(conn: sqlite3.Connection) -> dict:
+def _compute_surprise_rows(
+    rows: list[tuple],
+) -> tuple[dict[int, float], list[tuple[int, float, int, int]]]:
+    existing_facts: set[str] = set()
+    scores: dict[int, float] = {}
+    stored_rows: list[tuple[int, float, int, int]] = []
+    for msg_id, content, _timestamp in rows:
+        message_facts = extract_facts(content)
+        new_facts = message_facts - existing_facts
+        surprise = compute_surprise_score(content, existing_facts)
+        stored_rows.append(
+            (msg_id, round(surprise, 4), len(message_facts), len(new_facts))
+        )
+        scores[msg_id] = surprise
+        existing_facts.update(message_facts)
+    return scores, stored_rows
+
+
+def _publish_surprise_rows(
+    conn: sqlite3.Connection,
+    source_rows: list[tuple],
+    stored_rows: list[tuple[int, float, int, int]],
+) -> None:
+    conn.execute("SAVEPOINT truememory_surprise_publish")
+    try:
+        _ensure_surprise_table(conn)
+        # Claim SQLite writer ownership without changing rows. A stale caller
+        # WAL snapshot fails here; a fresh connection validates its source
+        # below while no other writer can change it before publication.
+        conn.execute("DELETE FROM surprise_scores WHERE 0")
+        current = conn.execute(
+            "SELECT id, content, timestamp FROM messages ORDER BY timestamp, id"
+        )
+        try:
+            for expected in source_rows:
+                if current.fetchone() != expected:
+                    raise sqlite3.OperationalError(
+                        "Surprise index source changed during computation; retry the rebuild"
+                    )
+            if current.fetchone() is not None:
+                raise sqlite3.OperationalError(
+                    "Surprise index source changed during computation; retry the rebuild"
+                )
+        finally:
+            current.close()
+        conn.execute("DELETE FROM surprise_scores")
+        conn.executemany(
+            "INSERT INTO surprise_scores "
+            "(message_id, surprise, fact_count, new_fact_count) VALUES (?, ?, ?, ?)",
+            stored_rows,
+        )
+        conn.execute("RELEASE SAVEPOINT truememory_surprise_publish")
+    except BaseException:
+        # Include cancellation. Never release the savepoint if rollback fails,
+        # because releasing an outermost savepoint could commit partial rows.
+        conn.execute("ROLLBACK TO SAVEPOINT truememory_surprise_publish")
+        conn.execute("RELEASE SAVEPOINT truememory_surprise_publish")
+        raise
+
+
+def build_surprise_index(conn: sqlite3.Connection) -> dict[int, float]:
     """
     Score all messages by surprise value and store the results.
 
@@ -327,42 +386,18 @@ def build_surprise_index(conn: sqlite3.Connection) -> dict:
 
     Returns:
         ``{message_id: surprise_score}`` for every message in the database.
+
+    Computation precedes this function's write transaction. Publication checks
+    the exact source snapshot under writer ownership and atomically replaces
+    the index. A changed source raises ``sqlite3.OperationalError`` for the
+    caller to retry. Existing caller transactions are never committed or
+    restarted; any write lock they already hold remains their responsibility.
     """
-    _ensure_surprise_table(conn)
-
-    # Clear existing scores for a clean rebuild
-    conn.execute("DELETE FROM surprise_scores")
-
-    # Fetch all messages in chronological order
     rows = conn.execute(
         "SELECT id, content, timestamp FROM messages ORDER BY timestamp, id"
     ).fetchall()
-
-    existing_facts: set[str] = set()
-    scores: dict[int, float] = {}
-
-    for msg_id, content, timestamp in rows:
-        # Extract facts from this message
-        message_facts = extract_facts(content)
-        new_facts = message_facts - existing_facts
-
-        # Compute surprise
-        surprise = compute_surprise_score(content, existing_facts)
-
-        # Store the score
-        conn.execute(
-            "INSERT INTO surprise_scores "
-            "(message_id, surprise, fact_count, new_fact_count) "
-            "VALUES (?, ?, ?, ?)",
-            (msg_id, round(surprise, 4), len(message_facts), len(new_facts)),
-        )
-
-        scores[msg_id] = surprise
-
-        # Add this message's facts to the accumulated set
-        existing_facts.update(message_facts)
-
-    conn.commit()
+    scores, stored_rows = _compute_surprise_rows(rows)
+    _publish_surprise_rows(conn, rows, stored_rows)
     return scores
 
 
