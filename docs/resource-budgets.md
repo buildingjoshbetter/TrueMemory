@@ -345,3 +345,51 @@ fast CPU instance remains separately owned. A managed preparation lifetime and
 an explicit protocol guarantee for older daemons are subsequent prerequisites.
 No tier-switch caller, local loader, target table or active configuration is
 changed by this checkpoint; issue #795 remains open.
+
+### Qwen global input order within bounded calls
+
+Multi-batch embedding requests for the cached `qwen3_256` model now preserve
+modern SentenceTransformers' global length ordering when the resolved effective
+batch limit is exactly 32, every input is a string, `_input_length` and
+`_can_flatten_inputs` are available, and input
+flattening is disabled. The verified SentenceTransformers 6.1.0 implementation
+measures string characters before prompt preprocessing. The server leaves
+prompt resolution, instruction processing, tokenization, dtype and the model's
+encode path unchanged. Legacy interfaces, other model identities, non-string
+inputs and flattened modes retain the existing bounded slice path; this
+checkpoint does not certify their global-order parity or change reranking.
+
+The server sorts occurrence indices once. For each slice it compensates for
+the inner encode call's equal-length permutation, then scatters returned rows
+directly to their original positions. Duplicate text values keep distinct
+indices. Single-input requests and requests fitting one effective batch keep
+their existing call path. The effective limit remains fixed once per request,
+bounded by caller, server and applicable adaptive ceilings. Omitted limits and
+oversized limits clamped to 32 use global ordering when the adaptive ceiling
+also preserves 32 and the other eligibility conditions hold. Smaller effective
+limits, including explicit eight and
+adaptive reduction to eight, retain the prior contiguous slice membership.
+This preserves the verified native32 default ordering without extending it to
+layouts with unresolved numerical differences. Explicit eight remains capped
+at eight; retaining its prior behavior does not waive its failed numeric gate.
+
+Output preflight runs before ordering work. For the known 256-dimensional
+float32 result, 7,679 rows require 10,484,497 response bytes; 7,680 require
+10,485,861 bytes, exceeding the existing 10,485,760-byte frame limit. Planning
+adds an O(N) index array and temporary length keys, plus O(batch size) slice
+indices. It creates neither a full-request token tensor nor a second complete
+output array. Existing frame/admission limits remain in force; these are not
+a total process-memory guarantee.
+
+Deadlines are checked before and after ordering and before each encode and
+retry. Main inference ownership spans planning, all slices and recovery. An
+OOM retry retains the exact failed slice and occurrence indices; completed
+rows are retained, and the cursor advances only after a successful result
+write. The existing CPU recovery retry releases only the state lock.
+
+Stdlib AST/fake tests cover native input membership and order, ties,
+duplicates, Unicode, empty strings, default prompts, scatter, bounds, deadline
+expiry and recovery. Removing global ordering, tie compensation or scatter
+fails independent negative controls. Equal native shapes alone are not parity
+evidence. Actual ordered token features, raw numeric gates, latency and native
+memory still require the bounded native diagnostic before acceptance.
