@@ -8,6 +8,7 @@ import importlib
 import importlib.metadata
 import importlib.util
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -24,6 +25,9 @@ from typing import NamedTuple
 
 from truememory._platform import try_file_lock
 from truememory.storage import create_db
+
+
+logger = logging.getLogger(__name__)
 
 
 class MaintenanceUnavailableError(RuntimeError):
@@ -223,6 +227,7 @@ class MaintenanceCoordinator:
         self._capability_epoch = 0
         self._capability_versions: tuple[tuple[str, str | None], ...] | None = None
         self._extension_failure: LayerDependency | None = None
+        self._clustering_warning: tuple | None = None
 
     def _check_process(self) -> None:
         if self._pid != os.getpid():
@@ -263,6 +268,32 @@ class MaintenanceCoordinator:
         with self._mutex:
             if epoch == self._capability_epoch:
                 self._extension_failure = dependency
+
+    def observe_clustering_outcome(self, outcome: str, error_category: str | None = None) -> None:
+        """Warn once per failure transition, only after an actual work attempt."""
+        self._check_process()
+        if outcome in {"success", "success_empty"}:
+            with self._mutex:
+                self._clustering_warning = None
+            return
+        if outcome not in {"unavailable", "failed"}:
+            return
+        category = _clustering_error_category(error_category) or "ClusteringUnavailable"
+        missing = _missing_clustering_dependencies()
+        key = (outcome, category, missing)
+        with self._mutex:
+            if key == self._clustering_warning:
+                return
+            self._clustering_warning = key
+        guidance = _clustering_install_guidance(missing)
+        logger.warning("Clustering %s (%s).%s", outcome, category,
+                       " " + guidance if guidance else "")
+
+    def clustering_failure(self) -> tuple[str, str] | None:
+        """Last failure observed in this process, cleared by successful work."""
+        self._check_process()
+        with self._mutex:
+            return self._clustering_warning[:2] if self._clustering_warning is not None else None
 
     def _reserve_locked(self) -> None:
         self._active = True
@@ -1191,10 +1222,14 @@ def _dependency_parameters(dependency: LayerDependency) -> dict | None:
 
 
 def engine_layer_specs(
-    conn: sqlite3.Connection, coordinator: MaintenanceCoordinator, *, evidence: tuple | None = None,
+    conn: sqlite3.Connection, coordinator: MaintenanceCoordinator | None, *, evidence: tuple | None = None,
 ) -> tuple[LayerSpec, ...]:
     """Small live probes plus one bounded worker-capability evidence record."""
-    _, versions, failure = evidence if evidence is not None else coordinator.capability_snapshot()
+    if evidence is None:
+        if coordinator is None:
+            raise ValueError("Maintenance capability evidence is required")
+        evidence = coordinator.capability_snapshot()
+    _, versions, failure = evidence
 
     def resolve() -> LayerDependency:
         dependency = _cluster_schedule_dependency(conn, versions=dict(versions))
@@ -1205,6 +1240,112 @@ def engine_layer_specs(
 
     return tuple(spec._replace(resolve_dependency=resolve) if spec.layer == "clusters" else spec
                  for spec in all_layer_specs(conn))
+
+
+def _clustering_error_category(value: str | None) -> str | None:
+    if value is None:
+        return None
+    return value if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", value) else "UnknownError"
+
+
+def _missing_clustering_dependencies() -> tuple[str, ...]:
+    """Only an absent top-level module warrants missing-package guidance."""
+    missing = []
+    for module, distribution in (("numpy", "numpy"), ("hdbscan", "hdbscan"), ("sqlite_vec", "sqlite-vec")):
+        try:
+            absent = importlib.util.find_spec(module) is None
+        except (ImportError, ValueError):
+            absent = False
+        if absent:
+            missing.append(distribution)
+    return tuple(missing)
+
+
+def _clustering_install_guidance(missing: tuple[str, ...]) -> str | None:
+    if "hdbscan" in missing:
+        return "Install the optional clustering extra: pip install 'truememory[clustering]'."
+    return None
+
+
+def clustering_health(
+    conn: sqlite3.Connection | None = None, coordinator: MaintenanceCoordinator | None = None,
+    *, pending_reason: str | None = None,
+) -> dict:
+    """Inspect existing evidence without opening a connection or loading models.
+
+    Callers serialize their existing connection. Package probes inspect only
+    top-level specs and distribution metadata; installed packages do not prove
+    that their native imports or the database's published clusters are usable.
+    """
+    health = {
+        "status": "degraded", "state": "unknown", "availability": "unknown", "outcome": None,
+        "freshness": "unknown", "coverage": "unverified", "output_count": None,
+        "last_error": None, "dependency_error": None, "missing_dependencies": [],
+        "process_error": None,
+        "guidance": None, "pending_reason": pending_reason or "not_connected",
+        "pending_caller_commit": False,
+    }
+    owned = False
+    try:
+        missing = _missing_clustering_dependencies()
+        versions = tuple((module, None if distribution in missing else _installed_dependency(module, distribution))
+                         for module, distribution in (
+            ("numpy", "numpy"), ("hdbscan", "hdbscan"), ("sqlite_vec", "sqlite-vec"),
+        ))
+        health["missing_dependencies"] = list(missing)
+        health["guidance"] = _clustering_install_guidance(missing)
+        if missing or any(version is None for _, version in versions):
+            health.update(state="degraded", availability="unavailable", dependency_error="DependencyMissing")
+        elif pending_reason is not None:
+            health["state"] = "deferred"
+        if conn is None or pending_reason is not None:
+            return health
+        health["pending_reason"] = None
+        health["pending_caller_commit"] = conn.in_transaction
+        process_failure = coordinator.clustering_failure() if coordinator is not None else None
+        if process_failure is not None:
+            health["process_error"] = process_failure[1]
+        owned = not conn.in_transaction
+        if owned:
+            conn.execute("BEGIN")
+        failure = coordinator.capability_snapshot()[2] if coordinator is not None else None
+        spec = next(spec for spec in engine_layer_specs(conn, coordinator, evidence=(0, versions, failure))
+                    if spec.layer == "clusters")
+        state = read_layer_states(conn, (spec,))["clusters"]
+        dependency = state.dependency
+        freshness = layer_freshness(state.source, state, dependency)
+        health.update(
+            availability="deferred" if dependency.deferred else "available" if dependency.available else "unavailable",
+            outcome=state.outcome, freshness=freshness, coverage=state.successful_coverage,
+            output_count=state.output_count, last_error=_clustering_error_category(state.error_category),
+            dependency_error=_clustering_error_category(dependency.error_category),
+        )
+        if dependency.deferred:
+            health.update(state="deferred", pending_reason="model_busy")
+        elif not dependency.available or state.outcome in {"failed", "unavailable"} or process_failure is not None:
+            health["state"] = "degraded"
+        elif conn.in_transaction and not owned:
+            health.update(state="pending", pending_reason="pending_caller_commit")
+        elif freshness != "current" or state.outcome not in {"success", "success_empty"}:
+            health.update(state="pending", pending_reason="maintenance_pending")
+        elif state.successful_coverage != "complete":
+            health.update(state="degraded", pending_reason="coverage_unverified")
+        else:
+            health.update(state="ready", status="ok")
+        return health
+    except Exception as error:
+        health.update(state="unknown", last_error=_clustering_error_category(type(error).__name__),
+                      pending_reason="inspection_unavailable")
+        return health
+    finally:
+        if owned and conn is not None:
+            try:
+                if conn.in_transaction:
+                    conn.rollback()
+            except sqlite3.Error as error:
+                health.update(status="degraded", state="unknown",
+                              last_error=_clustering_error_category(type(error).__name__),
+                              pending_reason="inspection_rollback_failed")
 
 
 def _prepare_worker_extensions(conn: sqlite3.Connection, coordinator: MaintenanceCoordinator) -> tuple:
@@ -1248,6 +1389,12 @@ def run_engine_maintenance(
     specs = engine_layer_specs(conn, coordinator, evidence=evidence)
     results = run_layers(conn, specs, threshold=threshold, force=force, cancel=cancel,
                          allow_caller_transaction=allow_caller_transaction)
+    for result in results:
+        if result.layer == "clusters" and result.attempted:
+            # RELEASE only publishes into the caller's still-rollbackable
+            # transaction. It cannot clear a previously observed failure.
+            if not (result.pending_caller_commit and result.outcome in {"success", "success_empty"}):
+                coordinator.observe_clustering_outcome(result.outcome, result.error_category)
     preferences = "SKIPPED (no maintenance attempt)"
     if cancel is not None and cancel.is_set():
         preferences = "CANCELLED"

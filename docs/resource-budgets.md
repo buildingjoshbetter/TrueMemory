@@ -1105,3 +1105,39 @@ vector-publication guards. Ingest database replacement, profile/style getter
 freshness and custom-schema source tracking remain separate work. Synthetic
 SQLite and event tests establish scheduling and ownership behavior; native
 latency, throughput and memory acceptance still require measurement.
+
+### Clustering health visibility (#720)
+
+Clustering health reuses the scheduler's dependency identity and persisted
+attempt/provenance row. It reports availability, outcome, freshness, coverage,
+output count and categorical errors separately. A successful empty or all-noise
+result remains `success_empty` with zero output; a missing dependency cannot
+become an empty success. Existing unverified vector-generation coverage remains
+visible and does not certify complete health.
+
+The engine accessor does not connect or initialize a coordinator. It attempts
+the foreground lock without waiting, then reads the existing connection under
+one read snapshot. Model ownership is also tried without waiting. Foreground
+and model contention report deferred observation; a disconnected engine reports
+unknown readiness. An existing caller transaction is preserved and reported as
+pending caller commit. Source mutations, pending work and failed attempts retain
+their distinct outcomes and prior published counts.
+
+Package inspection uses at most six top-level spec lookups and three distribution
+records per observation. It imports no native module and loads no model.
+Distribution metadata
+failure can report dependency unavailability, but installation guidance requires
+a confirmed absent HDBSCAN module. A cached worker extension failure is reused
+only while its dependency identity matches. Health reads do not change durable
+attempts, capability epochs or scheduling, and do not create a worker or database.
+
+Actual maintenance and bulk-ingest failures emit a categorical warning once per
+failure transition in the shared process coordinator. Repeated status reads and
+foreground notifications do not log warnings. Committed successful clustering,
+including empty output, clears that process failure. A borrowed savepoint release
+does not prove the caller's outer commit and preserves prior process failures
+through rollback. There is no outer-commit callback; a subsequent committed
+successful maintenance pass clears the retained evidence. A process failure is not a durable
+cross-process diagnostic; persisted scheduler outcomes remain independently
+visible. The optional clustering extra, eight persisted layers, nine manual
+result keys, builder algorithms and preference stage are unchanged.

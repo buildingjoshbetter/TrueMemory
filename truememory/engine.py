@@ -1442,12 +1442,18 @@ class TrueMemoryEngine:
                 n_clusters = cluster_messages(self.conn)
                 stats["build_clusters"] = f"{n_clusters} clusters in {time.time() - t0:.3f}s"
                 self._has_clustering = True
+                if not self.conn.in_transaction:
+                    self._get_maintenance_coordinator().observe_clustering_outcome(
+                        "success_empty" if n_clusters == 0 else "success")
             except Exception as exc:
                 stats["build_clusters"] = f"ERROR: {exc}"
-                logger.debug("build_clusters failed", exc_info=True)
+                self._get_maintenance_coordinator().observe_clustering_outcome(
+                    "unavailable" if isinstance(exc, ImportError) else "failed", type(exc).__name__)
                 self._has_clustering = False
         else:
             stats["build_clusters"] = "SKIPPED (clustering or vectors not available)"
+            self._get_maintenance_coordinator().observe_clustering_outcome(
+                "unavailable", "ClusteringRuntimeUnavailable" if not _HAS_CLUSTERING else "VectorRuntimeUnavailable")
             self._has_clustering = False
 
         # ── 4. Build entity profiles (L0) ─────────────────────────────────
@@ -2492,6 +2498,17 @@ class TrueMemoryEngine:
     # Stats / teardown
     # ──────────────────────────────────────────────────────────────────────
 
+    def get_clustering_health(self) -> dict:
+        """Read existing state without connecting or scheduling maintenance."""
+        from truememory.maintenance import clustering_health
+        if not self._write_lock.acquire(blocking=False):
+            return clustering_health(pending_reason="foreground_busy")
+        try:
+            coordinator = self._maintenance_coordinator if self._maintenance_handle is self.conn else None
+            return clustering_health(self.conn, coordinator)
+        finally:
+            self._write_lock.release()
+
     def get_stats(self) -> dict:
         """Return ingestion and search statistics."""
         self._ensure_connection()
@@ -2518,6 +2535,8 @@ class TrueMemoryEngine:
                 self._write_lock.release()
         else:
             stats["maintenance"] = {"status": "pending", "pending_reason": "foreground_busy"}
+
+        stats["clustering"] = self.get_clustering_health()
 
         # Add live DB stats if connected.
         if self.conn:
