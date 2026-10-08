@@ -52,6 +52,16 @@ class TestForegroundAdmission(AdmissionFixture):
     def test_style_computation_runs_outside_capture_and_publication_locks(self) -> None:
         engine = self.engine()
         engine._has_style_vec = True
+        maintenance = self.modules["maintenance"]
+        maintenance.prepare_style_maintenance(self.conn)
+        self.conn.execute("BEGIN IMMEDIATE")
+        self.conn.execute("INSERT INTO metadata(key,value) VALUES ('style_vec_hash_version','2')")
+        maintenance.record_layer_success_in_transaction(
+            self.conn, layer="style_vectors",
+            dependency=maintenance.style_layer_spec(self.conn).resolve_dependency(),
+            source=maintenance.read_source_revision(self.conn), output_count=0,
+        )
+        self.conn.commit()
         events = []
         style = [0.25, 0.75]
 

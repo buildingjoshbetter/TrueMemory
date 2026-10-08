@@ -24,7 +24,10 @@ from types import ModuleType
 from typing import NamedTuple
 
 from truememory._platform import try_file_lock
-from truememory.storage import _prepare_style_maintenance, _style_output_tracking_ready, create_db
+from truememory.storage import (
+    _STYLE_OUTPUT_INVALIDATE_SQL, _STYLE_OUTPUT_TRIGGERS,
+    _prepare_style_maintenance, _style_output_tracking_ready, create_db,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -46,7 +49,7 @@ class LayerDeferredError(RuntimeError):
     """A narrowly categorized transient condition establishes no attempt baseline."""
 
     def __init__(self, message: str, *, category: str = "ModelBusy") -> None:
-        if category not in {"ModelBusy", "StyleCancelled", "StyleSourceChanged", "StyleWriterBusy"}:
+        if category not in {"ModelBusy", "StyleCancelled", "StyleSourceChanged", "StyleWriterBusy", "StyleTriggersUnsupported"}:
             raise ValueError("Unsupported layer deferral category")
         self.category = category
         super().__init__(message)
@@ -842,11 +845,15 @@ def _borrowed_transaction(
 def _record_attempt(
     conn: sqlite3.Connection, state: LayerState, outcome: str, generation: str, error_category: str | None,
     *, borrowed: bool = False,
-) -> None:
+) -> bool | None:
     source, dependency = state.source, state.dependency
     if dependency.deferred:
         raise ValueError("Transient deferral cannot be recorded as a durable attempt")
     with (_borrowed_transaction(conn) if borrowed else _owned_transaction(conn)):
+        if state.layer == "style_vectors":
+            conn.execute("UPDATE maintenance_layers SET layer=layer WHERE 0")
+            if _style_extra_triggers(conn):
+                return False
         conn.execute(
             "INSERT INTO maintenance_layers(layer,builder_version,outcome,attempted_epoch,attempted_revision,"
             "attempted_dependency,attempted_insert_count,run_generation,error_category) VALUES (?,?,?,?,?,?,?,?,?) "
@@ -887,6 +894,8 @@ def _restore_deferred_attempt(
         raise MaintenanceBusyError("Maintenance ownership changed before diagnostic restoration")
     with _owned_transaction(conn, on_rollback=(lambda: None) if protect_rollback else None):
         conn.execute("UPDATE maintenance_layers SET layer=layer WHERE 0")
+        if layer == "style_vectors" and _style_extra_triggers(conn):
+            raise _StyleAppendChanged("StyleTriggersUnsupported")
         current = _read_layer_row(conn, layer)
         if (current != running or current is None or current[2] != "running"
                 or current[_LAYER_ROW_COLUMNS.index("run_generation")] != owner.generation):
@@ -903,6 +912,8 @@ def _restore_deferred_attempt(
 
 def _check_layer_dependency(current: LayerDependency, expected: LayerDependency) -> None:
     if current.deferred:
+        if current.error_category == "StyleTriggersUnsupported":
+            raise LayerDeferredError("Style triggers prevent publication", category="StyleTriggersUnsupported")
         raise LayerDeferredError("Embedding runtime is temporarily busy")
     if current != expected:
         raise MaintenanceUnavailableError("Layer dependency changed before publication")
@@ -925,11 +936,10 @@ def run_layers(
         raise ValueError("Layer adapters belong to another connection")
     results = []
     with maintenance_owner(connection_database_path(conn)) as owner:
-        def record_attempt(state: LayerState, outcome: str, category: str | None) -> None:
+        def record_attempt(state: LayerState, outcome: str, category: str | None) -> bool:
             if borrowed:
-                _record_attempt(conn, state, outcome, owner.generation, category, borrowed=True)
-            else:
-                _record_attempt(conn, state, outcome, owner.generation, category)
+                return _record_attempt(conn, state, outcome, owner.generation, category, borrowed=True) is not False
+            return _record_attempt(conn, state, outcome, owner.generation, category) is not False
 
         # Validate uniqueness before any builder is invoked.
         if _read_layer_run_baseline(conn, specs) is None:
@@ -958,9 +968,11 @@ def run_layers(
             started = time.monotonic()
             baseline_state = state
             if not state.dependency.available:
-                record_attempt(state, "unavailable", state.dependency.error_category)
-                results.append(LayerResult(spec.layer, spec.result_key, "unavailable", state.output_count,
-                    time.monotonic() - started, state.dependency.error_category, True, state.successful_coverage, borrowed))
+                recorded = record_attempt(state, "unavailable", state.dependency.error_category)
+                results.append(LayerResult(spec.layer, spec.result_key, "unavailable" if recorded else "deferred",
+                    state.output_count, time.monotonic() - started,
+                    state.dependency.error_category if recorded else "StyleTriggersUnsupported",
+                    recorded, state.successful_coverage, borrowed))
                 continue
             # This diagnostic commits before the read/compute snapshot starts.
             previous_row = running_row = None
@@ -975,6 +987,10 @@ def run_layers(
                     with _owned_transaction(conn, on_rollback=(
                         confirm_diagnostic_rollback if spec.layer == "style_vectors" else None
                     )):
+                        if spec.layer == "style_vectors":
+                            conn.execute("UPDATE maintenance_layers SET layer=layer WHERE 0")
+                            if _style_extra_triggers(conn):
+                                raise _StyleAppendChanged("StyleTriggersUnsupported")
                         previous_row = _read_layer_row(conn, spec.layer)
                         conn.execute(
                             "INSERT INTO maintenance_layers(layer,builder_version,outcome,run_generation,error_category) "
@@ -984,12 +1000,13 @@ def run_layers(
                             (spec.layer, state.dependency.builder_version, owner.generation),
                         )
                         running_row = _read_layer_row(conn, spec.layer)
-                except sqlite3.OperationalError as error:
+                except (sqlite3.OperationalError, _StyleAppendChanged) as error:
+                    category = error.category if isinstance(error, _StyleAppendChanged) else _style_sqlite_deferral(error)
                     if (spec.layer != "style_vectors" or not diagnostic_rolled_back
-                            or _style_sqlite_deferral(error) != "StyleWriterBusy"):
+                            or category not in {"StyleWriterBusy", "StyleTriggersUnsupported"}):
                         raise
                     results.append(LayerResult(spec.layer, spec.result_key, "deferred", state.output_count,
-                        time.monotonic() - started, "StyleWriterBusy", False, state.successful_coverage))
+                        time.monotonic() - started, category, False, state.successful_coverage))
                     continue
             count = None
             coverage = state.successful_coverage
@@ -1015,7 +1032,7 @@ def run_layers(
                         output_started = True
                         state = read_layer_states(conn, (spec,))[spec.layer]
                         if state.dependency.deferred:
-                            raise LayerDeferredError("Embedding runtime is temporarily busy")
+                            _check_layer_dependency(state.dependency, state.dependency)
                         if not state.dependency.available:
                             raise MaintenanceUnavailableError("Layer dependency became unavailable")
                         built = True
@@ -1050,6 +1067,11 @@ def run_layers(
                                                           protect_rollback=True)
                             else:
                                 _restore_deferred_attempt(conn, spec.layer, previous_row, running_row, owner)
+                        except _StyleAppendChanged as restore_error:
+                            if spec.layer != "style_vectors" or conn.in_transaction:
+                                raise
+                            error = LayerDeferredError("Style triggers prevent diagnostic restoration",
+                                                       category=restore_error.category)
                         except sqlite3.OperationalError as restore_error:
                             if (spec.layer != "style_vectors" or conn.in_transaction
                                     or _style_sqlite_deferral(restore_error) != "StyleWriterBusy"):
@@ -1068,7 +1090,8 @@ def run_layers(
                 category = "Cancelled" if interrupted else type(error).__name__[:64]
                 if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", category) is None:
                     category = "Error"
-                record_attempt(state, outcome, category)
+                if not record_attempt(state, outcome, category):
+                    outcome, category = "deferred", "StyleTriggersUnsupported"
                 results.append(LayerResult(spec.layer, spec.result_key, outcome, state.output_count,
                     time.monotonic() - started, category, True, state.successful_coverage, borrowed))
                 if not isinstance(error, Exception):
@@ -1088,11 +1111,250 @@ def prepare_style_maintenance(
     borrowed = conn.in_transaction
     try:
         read_source_revision(conn)
+        if _style_extra_triggers(conn):
+            raise _StyleAppendChanged("StyleTriggersUnsupported")
     except sqlite3.OperationalError as error:
         if _on_safe_failure is not None and conn.in_transaction == borrowed:
             _on_safe_failure(error)
         raise
-    _prepare_style_maintenance(conn, _on_safe_failure=_on_safe_failure)
+    class GuardedPreparation:
+        def __getattr__(self, name: str) -> object:
+            return getattr(conn, name)
+
+        def execute(self, sql: str, *args: object) -> sqlite3.Cursor:
+            cursor = conn.execute(sql, *args)
+            # Storage upgrades the writer with this zero-row statement before
+            # enrollment or invalidation. Its existing rollback boundary owns
+            # failures here, including a trigger installed after the first probe.
+            if sql == "UPDATE maintenance_layers SET layer=layer WHERE 0" and _style_extra_triggers(conn):
+                raise _StyleAppendChanged("StyleTriggersUnsupported")
+            return cursor
+
+    _prepare_style_maintenance(GuardedPreparation(), _on_safe_failure=_on_safe_failure)
+
+
+class _StyleAppendChanged(RuntimeError):
+    """A fixed metadata or checkpoint proof no longer permits publication."""
+
+    def __init__(self, category: str) -> None:
+        self.category = category
+        super().__init__(category)
+
+
+def _style_extra_triggers(conn: sqlite3.Connection) -> bool:
+    names = tuple(_STYLE_OUTPUT_TRIGGERS)
+    main = conn.execute(
+        "SELECT 1 FROM main.sqlite_master WHERE type='trigger' "
+        "AND lower(tbl_name) IN ('entity_style_vectors','maintenance_layers','metadata') "
+        "AND NOT (lower(tbl_name)='entity_style_vectors' AND name IN (?,?,?)) LIMIT 1", names,
+    ).fetchone()
+    temporary = conn.execute(
+        "SELECT 1 FROM temp.sqlite_master WHERE type='trigger' "
+        "AND lower(tbl_name) IN ('entity_style_vectors','maintenance_layers','metadata') LIMIT 1",
+    ).fetchone()
+    return main is not None or temporary is not None
+
+
+def _style_append_metadata(conn: sqlite3.Connection) -> tuple:
+    dependency = style_layer_spec(conn).resolve_dependency()
+    if dependency.error_category == "StyleTriggersUnsupported":
+        raise _StyleAppendChanged("StyleTriggersUnsupported")
+    if not dependency.available:
+        raise _StyleAppendChanged("StyleMetadataChanged")
+    schema = tuple(tuple(row) for row in conn.execute("PRAGMA main.table_info(entity_style_vectors)"))
+    default = next((row[4] for row in schema if row[1] == "accumulator_version"), "unsupported")
+    if default is not None and default.strip(" ()'\"") not in {"0", "1", "NULL", "null"}:
+        raise _StyleAppendChanged("StyleAccumulatorUnsupported")
+    marker = conn.execute("SELECT value FROM metadata WHERE key='style_vec_hash_version'").fetchone()
+    if marker is None or marker[0] != "2":
+        raise _StyleAppendChanged("StyleHashPending")
+    return dependency, schema, tuple(marker)
+
+
+def _style_checkpoint_projection(row: tuple, **changes: object) -> tuple:
+    fields = dict(zip(_LAYER_ROW_COLUMNS, row))
+    fields.update(changes)
+    return tuple(fields[name] for name in _LAYER_ROW_COLUMNS)
+
+
+def _style_invalidated_checkpoint(row: tuple) -> tuple:
+    return _style_checkpoint_projection(
+        row, outcome="pending", full_rebuild_required=1, successful_coverage="unverified",
+        attempted_epoch=None, attempted_revision=None, attempted_dependency=None,
+        attempted_insert_count=None, run_generation=None, error_category=None,
+    )
+
+
+class _StyleAppendSnapshot(NamedTuple):
+    connection: sqlite3.Connection
+    checkpoint: tuple | None
+    state: LayerState | None
+    error_category: str | None
+    failed: bool = False
+    metadata: tuple | None = None
+
+
+def _valid_style_source(source: SourceRevision) -> bool:
+    return (isinstance(source.epoch, str) and bool(source.epoch)
+            and all(type(value) is int and value >= 0 for value in source[1:])
+            and source.revision == source.insert_count + source.correction_count
+            and source.nonappend_revision <= source.revision)
+
+
+def _style_append_error_category(error: Exception) -> str:
+    category = type(error).__name__[:64]
+    return category if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", category) is not None else "Error"
+
+
+def _capture_style_append(conn: sqlite3.Connection) -> _StyleAppendSnapshot:
+    """Freeze metadata before one source insert, under its existing writer."""
+    if not conn.in_transaction:
+        raise RuntimeError("Style append capture requires the source transaction")
+    checkpoint = None
+    state = None
+    try:
+        checkpoint = _read_layer_row(conn, "style_vectors")
+        spec = style_layer_spec(conn)
+        state = read_layer_states(conn, (spec,))[spec.layer]
+        if state.dependency.error_category == "StyleTriggersUnsupported":
+            return _StyleAppendSnapshot(conn, checkpoint, state, "StyleTriggersUnsupported")
+        if (checkpoint is None or checkpoint[1] != state.dependency.builder_version
+                or state.outcome not in {"success", "success_empty"}
+                or state.successful_coverage != "complete"
+                or layer_freshness(state.source, state, state.dependency) != "current"
+                or type(state.output_count) is not int or state.output_count < 0
+                or (state.outcome == "success_empty") != (state.output_count == 0)
+                or not _valid_style_source(state.source)
+                or (state.attempted_epoch, state.attempted_revision, state.attempted_dependency,
+                    state.attempted_insert_count) != (state.source.epoch, state.source.revision,
+                                                     state.dependency.key, state.source.insert_count)):
+            return _StyleAppendSnapshot(conn, checkpoint, state, "StyleCoveragePending")
+        metadata = _style_append_metadata(conn)
+    except _StyleAppendChanged as error:
+        return _StyleAppendSnapshot(conn, checkpoint, state, error.category)
+    except (sqlite3.Error, MaintenanceUnavailableError, StopIteration) as error:
+        if not conn.in_transaction:
+            raise _LayerRollbackFailed("Style capture lost the source transaction") from error
+        category = _style_sqlite_deferral(error) if isinstance(error, sqlite3.OperationalError) else None
+        return _StyleAppendSnapshot(conn, checkpoint, state, category or _style_append_error_category(error), category is None)
+    return _StyleAppendSnapshot(conn, checkpoint, state, None, metadata=metadata)
+
+
+@contextmanager
+def _style_append_savepoint(conn: sqlite3.Connection) -> Iterator[None]:
+    """Keep source writes when style fails, only after complete savepoint cleanup."""
+    name = "truememory_style_coverage_" + uuid.uuid4().hex
+    conn.execute(f"SAVEPOINT {name}")
+    try:
+        yield
+        conn.execute(f"RELEASE {name}")
+    except BaseException:
+        if not conn.in_transaction:
+            raise _LayerRollbackFailed("Style append lost the source transaction")
+        try:
+            conn.execute(f"ROLLBACK TO {name}")
+            conn.execute(f"RELEASE {name}")
+        except BaseException as error:
+            raise _LayerRollbackFailed("Style append rollback or release failed") from error
+        raise
+
+
+def _publish_style_append(
+    conn: sqlite3.Connection, previous: _StyleAppendSnapshot, message_id: int, *,
+    sender: str, content: str, directive: bool, precomputed: bool, publish: Callable[[], None],
+) -> LayerResult:
+    """Advance one proven append without committing or rebuilding for its caller."""
+    if previous.connection is not conn or not conn.in_transaction:
+        raise RuntimeError("Style append publication requires its original source transaction")
+    state = previous.state
+
+    def pending(category: str, *, failed: bool = False) -> LayerResult:
+        # Keep a prior failed attempt's retry baseline. A newly missed append
+        # supersedes successful/running provenance, never a newer invalidation.
+        if previous.checkpoint is not None and previous.checkpoint[2] in {"success", "success_empty", "running"}:
+            try:
+                with _style_append_savepoint(conn):
+                    if _style_extra_triggers(conn):
+                        category = "StyleTriggersUnsupported"
+                    elif _read_layer_row(conn, "style_vectors") == previous.checkpoint:
+                        conn.execute(_STYLE_OUTPUT_INVALIDATE_SQL)
+                        expected = _style_invalidated_checkpoint(previous.checkpoint)
+                        # The invalidation itself may invoke SQL triggers. Set
+                        # its category only if every field still belongs to it.
+                        if _read_layer_row(conn, "style_vectors") == expected:
+                            predicate = " AND ".join(name + " IS ?" for name in _LAYER_ROW_COLUMNS)
+                            conn.execute("UPDATE maintenance_layers SET error_category=? WHERE " + predicate,
+                                         (category, *expected))
+            except _LayerRollbackFailed:
+                raise
+            except sqlite3.Error as error:
+                if not conn.in_transaction:
+                    raise _LayerRollbackFailed("Style pending report lost the source transaction") from error
+                category, failed = _style_append_error_category(error), True
+        return LayerResult("style_vectors", "style_vectors", "failed" if failed else "deferred",
+                           state.output_count if state is not None else None, 0.0, category,
+                           False, "unverified", True)
+
+    if previous.error_category is not None:
+        return pending(previous.error_category, failed=previous.failed)
+    try:
+        if _read_layer_row(conn, "style_vectors") != previous.checkpoint:
+            return pending("StyleCoverageChanged")
+        if _style_append_metadata(conn) != previous.metadata:
+            return pending("StyleMetadataChanged")
+        source = read_source_revision(conn)
+        before = state.source
+        if (not _valid_style_source(source) or source.epoch != before.epoch
+                or source.revision != before.revision + 1 or source.insert_count != before.insert_count + 1
+                or source.correction_count != before.correction_count
+                or source.nonappend_revision != before.nonappend_revision
+                or type(message_id) is not int or message_id <= before.max_seen_message_id
+                or source.max_seen_message_id != message_id):
+            return pending("StyleAppendUnproven")
+        row = conn.execute("SELECT sender,content,directive FROM messages WHERE id=?", (message_id,)).fetchone()
+        if (not isinstance(sender, str) or not isinstance(content, str) or not content.strip()
+                or row is None or tuple(row) != (sender, content, int(bool(directive)))):
+            return pending("StyleAppendUnproven")
+        included = bool(sender) and not directive
+        if included and not precomputed:
+            return pending("StylePrecomputeFailed", failed=True)
+        with _style_append_savepoint(conn):
+            count = state.output_count
+            if included:
+                exists = conn.execute("SELECT 1 FROM entity_style_vectors WHERE entity=?", (sender.lower(),)).fetchone()
+                publish()
+                count += int(exists is None)
+            expected = _style_invalidated_checkpoint(previous.checkpoint) if included else previous.checkpoint
+            if _read_layer_row(conn, "style_vectors") != expected:
+                raise _StyleAppendChanged("StyleCoverageChanged")
+            if _style_append_metadata(conn) != previous.metadata:
+                raise _StyleAppendChanged("StyleMetadataChanged")
+            if read_source_revision(conn) != source:
+                raise LayerDeferredError("Style source changed during append", category="StyleSourceChanged")
+            record_layer_success_in_transaction(conn, layer="style_vectors", dependency=state.dependency,
+                                                source=source, output_count=count)
+            success = _style_checkpoint_projection(
+                previous.checkpoint, builder_version=state.dependency.builder_version,
+                outcome="success" if count else "success_empty", successful_epoch=source.epoch,
+                successful_revision=source.revision, successful_dependency=state.dependency.key,
+                successful_coverage="complete", attempted_epoch=source.epoch, attempted_revision=source.revision,
+                attempted_dependency=state.dependency.key, attempted_insert_count=source.insert_count,
+                full_rebuild_required=0, output_count=count, run_generation=None, error_category=None,
+            )
+            if _read_layer_row(conn, "style_vectors") != success:
+                raise _StyleAppendChanged("StyleCoverageChanged")
+            if _style_append_metadata(conn) != previous.metadata or read_source_revision(conn) != source:
+                raise _StyleAppendChanged("StyleMetadataChanged")
+    except _LayerRollbackFailed:
+        raise
+    except Exception as error:
+        if not conn.in_transaction:
+            raise _LayerRollbackFailed("Style append lost the source transaction") from error
+        category = (error.category if isinstance(error, (LayerDeferredError, _StyleAppendChanged)) else
+                    _style_sqlite_deferral(error) if isinstance(error, sqlite3.OperationalError) else None)
+        return pending(category or _style_append_error_category(error), failed=category is None)
+    return LayerResult("style_vectors", "style_vectors", "success" if count else "success_empty",
+                       count, 0.0, None, True, "complete", True)
 
 
 def style_layer_spec(
@@ -1107,6 +1369,9 @@ def style_layer_spec(
     }
 
     def resolve_dependency() -> LayerDependency:
+        if _style_extra_triggers(conn):
+            return make_layer_dependency(1, parameters, available=False,
+                error_category="StyleTriggersUnsupported")._replace(deferred=True)
         ready = _style_output_tracking_ready(conn)
         return make_layer_dependency(1, parameters, available=ready,
                                      error_category=None if ready else "StyleTrackingUnprepared")
@@ -1179,6 +1444,8 @@ def style_layer_spec(
         # The runner owns final commit. Upgrade before both format and source
         # validation; a stale reader cannot replace a newer generation.
         connection.execute("UPDATE messages SET sender=sender WHERE 0")
+        if _style_extra_triggers(connection):
+            raise LayerDeferredError("Style triggers prevent tracked publication", category="StyleTriggersUnsupported")
         style._publish_style_vectors(connection, schema, query, rows, stored_rows,
                                      check_cancel=check_cancel, before_replace=compatible)
         if read_source_revision(connection) != source:
@@ -1216,6 +1483,9 @@ def run_style_maintenance(
 
         try:
             prepare_style_maintenance(conn, _on_safe_failure=preparation_failure)
+        except _StyleAppendChanged as error:
+            return LayerResult("style_vectors", "style_vectors", "deferred", None,
+                time.monotonic() - started, error.category, False, "unverified", borrowed)
         except LayerDeferredError as error:
             return LayerResult("style_vectors", "style_vectors", "deferred", None,
                 time.monotonic() - started, error.category, False, "unverified", borrowed)

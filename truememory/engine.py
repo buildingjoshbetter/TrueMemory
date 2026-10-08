@@ -748,6 +748,9 @@ class TrueMemoryEngine:
             _foreground_model_fence(pre_identity, blocking=not self.conn.in_transaction)
             if pre_embedding is not None else nullcontext()
         ), rebuild_transaction(self.conn, write=True):
+            if self._has_style_vec:
+                from truememory.maintenance import _capture_style_append, _publish_style_append
+                style_before = _capture_style_append(self.conn)
             msg = {
                 "content": content,
                 "sender": sender,
@@ -794,12 +797,15 @@ class TrueMemoryEngine:
                 except Exception:
                     logger.debug("Failed to update entity profile for %s during add()", sender, exc_info=True)
 
-            # Store pre-computed style vector (DB write only, computation happened outside lock)
-            if pre_style_vec is not None and not directive:
-                try:
-                    _update_style_vec(self.conn, sender, content, _pre_computed_vec=pre_style_vec)
-                except Exception:
-                    logger.debug("Failed to update style vector for %s during add()", sender, exc_info=True)
+            if self._has_style_vec:
+                style_result = _publish_style_append(
+                    self.conn, style_before, new_id, sender=sender, content=content, directive=directive,
+                    precomputed=pre_style_vec is not None,
+                    publish=lambda: _update_style_vec(self.conn, sender, content, _pre_computed_vec=pre_style_vec),
+                )
+                if style_result.error_category is not None:
+                    logger.debug("Style append %s for message %s: %s",
+                                 style_result.outcome, new_id, style_result.error_category)
 
         self._maybe_auto_consolidate()
 

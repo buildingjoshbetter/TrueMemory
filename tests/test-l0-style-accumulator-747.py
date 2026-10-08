@@ -699,16 +699,22 @@ class StyleAccumulatorTests(unittest.TestCase):
         selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "rebuild_transaction"]
         exec(compile(ast.Module(body=selected, type_ignores=[]), "rebuild_source.py", "exec"), rebuild.__dict__)
 
+        maintenance = types.ModuleType("synthetic_append_maintenance")
+        modules = {"truememory.personality_style_vec": STYLE, "truememory.rebuild_source": rebuild,
+                   "truememory.maintenance": maintenance, "truememory.storage": STORAGE,
+                   "truememory._platform": load_stdlib_source("_platform")}
+
         def safe_import(name: str, globals: dict | None = None, locals: dict | None = None,
                         fromlist: tuple[str, ...] = (), level: int = 0) -> object:
-            if name == "truememory.personality_style_vec":
-                return STYLE
-            if name == "truememory.rebuild_source":
-                return rebuild
+            if name in modules:
+                return modules[name]
             if name.split(".", 1)[0] not in sys.stdlib_module_names:
                 raise AssertionError("Unexpected import in engine.add: " + name)
             return builtins.__import__(name, globals, locals, fromlist, level)
 
+        maintenance.__dict__["__builtins__"] = dict(vars(builtins), __import__=safe_import)
+        path = ROOT / "truememory/maintenance.py"
+        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), maintenance.__dict__)
         tree = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
         engine_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
         add = next(node for node in engine_class.body if isinstance(node, ast.FunctionDef) and node.name == "add")
