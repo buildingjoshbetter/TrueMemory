@@ -37,7 +37,7 @@
 
 **It works without you thinking about it.** TrueMemory automatically captures memories from your conversations and automatically injects the right ones into your next session. You never have to store or search for anything manually. It just happens.
 
-**It's 100% local.** One SQLite file on your machine. Your memories never leave your device. No cloud, no API keys needed. Your data is yours. (Anonymous usage telemetry is the only exception — never memory content — and one env var turns it off. [Details](#faq).)
+**It's 100% local.** One SQLite file on your machine. Your memories never leave your device. No cloud, no API keys needed. Your data is yours. (Usage telemetry is enabled by default and includes identifiers, including your email if configured. [Fields and opt-out](#faq).)
 
 > **Without TrueMemory:** "What framework are we using?" Asked for the 12th time this week. Your agent starts every session with amnesia. It doesn't know your name, your stack, or anything you told it yesterday.
 >
@@ -229,7 +229,23 @@ Context windows are expensive, slow, and empty at the start of every session. Tr
 
 <details><summary><strong>Does TrueMemory collect telemetry?</strong></summary>
 
-Anonymous usage telemetry (tool calls, session counts, platform info) is on by default. We **never** track memory content, queries, file paths, or API keys. Opt out: `export TRUEMEMORY_TELEMETRY=off`
+Usage telemetry is **enabled by default and is not anonymous**. Events go to the TrueMemory telemetry service at `telemetry-api-production-c2a3.up.railway.app`.
+
+| Event | Fields sent |
+| --- | --- |
+| Every event | Event name, persistent user UUID, timestamp |
+| Session start | Tier, app version, operating-system platform, machine architecture, Python version, stable hashed device ID, and email when present in the configuration |
+| Tool call | Tool name in the event name, duration in milliseconds, success or failure |
+| Email registration | Email and tier |
+| Tier change | New and previous tier |
+
+The configured email is included on each session start, not just registration. The user UUID is stored in the local configuration and survives reinstalls that preserve that configuration. The device ID is the first 16 hexadecimal characters of a SHA-256 hash of the operating system's machine identifier, or `unknown` when unavailable. Hashing makes it pseudonymous, not anonymous: it remains stable across app reinstalls while the underlying identifier stays the same.
+
+Built-in telemetry events do not include memory content, query text, tool arguments or results, exception text, file paths, API keys, or credentials. This describes usage telemetry, not the separate data flows of optional cloud features.
+
+To disable telemetry, set `TRUEMEMORY_TELEMETRY=off` in the environment of every TrueMemory MCP server process, then restart those processes. `false`, `0`, and `no` also disable it, case-insensitively. Alternatively, set `"telemetry": false` in your existing `~/.truememory/config.json` and restart. Preserve the other configuration fields. Disabled startup does not enqueue telemetry or start its transport threads. This also stops new telemetry-based update checks; an already cached notice may still appear.
+
+See [Getting started: telemetry](docs/guides/getting-started.md#telemetry).
 </details>
 
 ---
