@@ -15,6 +15,11 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def allow_sqlite_operation(*_args: object) -> int:
+    # Disabling authorizers with None requires Python 3.11 or newer.
+    return sqlite3.SQLITE_OK
+
+
 def load_primitives() -> tuple[types.ModuleType, types.ModuleType]:
     def safe_import(name: str, globals: dict | None = None, locals: dict | None = None,
                     fromlist: tuple[str, ...] = (), level: int = 0) -> object:
@@ -368,7 +373,7 @@ class TestMigrationAndContracts(SourceFTSFixture):
             with self.assertRaises(sqlite3.DatabaseError):
                 STORAGE._migrate_messages_fts_trigger(conn)
         finally:
-            conn.set_authorizer(None)
+            conn.set_authorizer(allow_sqlite_operation)
         self.assertTrue(conn.in_transaction)
         self.assertEqual(conn.execute("SELECT episode_id FROM messages").fetchone()[0], 7)
         self.assertEqual(self.fts_rows(conn), old_fts)
@@ -459,7 +464,8 @@ class TestMigrationAndContracts(SourceFTSFixture):
             STORAGE._migrate_messages_fts_trigger(conn)
             STORAGE._initialize_maintenance_tracking(conn)
         finally:
-            conn.set_authorizer(None)
+            conn.set_authorizer(allow_sqlite_operation)
+        self.assertEqual(conn.execute("SELECT content FROM messages").fetchall(), [("synthetic original",)])
 
 
 class TestDefaultCost(SourceFTSFixture):
