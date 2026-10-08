@@ -37,6 +37,12 @@ jobs:
       fail-fast: false
       matrix:
         mcp-version: [minimum, latest]
+        pydantic-version: [latest]
+        include:
+          - mcp-version: minimum
+            pydantic-version: "2.11.0"
+          - mcp-version: minimum
+            pydantic-version: "2.14.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -54,6 +60,7 @@ jobs:
         shell: python
         env:
           MCP_VERSION: ${{ matrix.mcp-version }}
+          PYDANTIC_VERSION: ${{ matrix.pydantic-version }}
         run: |
           import os
           from pathlib import Path
@@ -66,7 +73,9 @@ jobs:
           python = env_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
           requirements = [str(wheel.resolve())]
           if os.environ["MCP_VERSION"] == "minimum":
-              requirements.append("mcp[cli]==1.19.0")
+              requirements.append("mcp[cli]==1.21.1")
+          if os.environ["PYDANTIC_VERSION"] != "latest":
+              requirements.append("pydantic==" + os.environ["PYDANTIC_VERSION"])
           subprocess.run([str(python), "-m", "pip", "install", *requirements], check=True)
           subprocess.run([str(python), "-m", "pip", "check"], check=True)
           subprocess.run([str(python), "-I", "tests/mcp-wheel-smoke.py"], check=True)
