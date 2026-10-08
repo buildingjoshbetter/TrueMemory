@@ -994,3 +994,91 @@ the current definition checks exposing that interval. Arbitrary direct FTS
 mutations can also defeat synchronization. This checkpoint adds neither a
 schema-cookie fence nor a readiness gate to FTS search, and does not certify
 either kind of external mutation.
+## Atomic L0 full generations
+
+Full personality-profile and character-style builders now read a coherent source
+snapshot, compute and serialize their complete output, then validate the exact
+relevant source values and source schema under SQLite writer ownership. A changed
+source raises a categorical `sqlite3.OperationalError`; neither builder retries
+internally. Publication replaces only its fully owned table. Vanished senders are
+removed, and successful empty input clears the previous output.
+
+Ordinary messages contribute to both full builders, matching the incremental
+add path's directive exclusion. Existing schemas without a `directive` column
+continue to treat all messages as ordinary. No maintenance tables are required
+for these public builders. Profile source order remains timestamp order; style
+source order remains sender and timestamp order. The existing formulas,
+thresholds, Python lowercase identity keys and 256-dimensional style algorithm
+remain unchanged. Generated update timestamps are incidental to the generation.
+
+When the builder owns its transaction, its read transaction ends before CPU work
+and its write transaction begins only for validation and replacement. A caller's
+existing transaction is retained instead, with savepoints around each phase. The
+builder never commits or restarts unrelated caller work. Any writer lock already
+held by the caller remains held during computation; the builder cannot release
+that lock on the caller's behalf. A stale WAL reader fails at write upgrade.
+
+Write, cancellation and terminal COMMIT/RELEASE failures roll back the attempted
+replacement. The previous complete generation survives a later caller commit
+after successful rollback. If SQLite also rejects rollback, cleanup propagates
+that failure without releasing partial output; the connection owner must recover
+or close the transaction. This is not a guarantee that a caller can ignore a
+failed rollback and safely commit.
+
+These are full recomputations. They retain source rows and computed output, and
+style computation still retains one entity's per-message 256-element vectors.
+Validation streams the source again while holding the writer; it is linear in
+the read source size, not constant-time. No memory or latency improvement is
+claimed without measurement. They perform no embedding-model work.
+
+This is the first #748 foundation stage. It does not register L0 maintenance
+checkpoints, suppress stale cache reads, change incremental updaters, schedule
+repair after source mutations or alter opt-in entity-profile summary sheets.
+Those integration steps remain necessary to resolve the complete invalidation
+issue. An A10 runner can wrap a builder in its own source transaction and commit
+the successful output/checkpoint together once that shared contract is wired.
+
+### L0 style accumulator format, checkpoint 1
+
+Style profiles retain the unnormalized sum of their per-message, unit-length
+character n-gram vectors. The `vector_sum` column stores 256 little-endian
+float64 components: `256 * 8 = 2048` bytes per entity. The existing JSON `vector`
+column remains the normalized mean exposed to readers. `message_count` counts
+contributing messages, including messages whose style vector is zero. Each
+append reads and writes one entity and performs O(256) arithmetic. Batch
+computation retains the existing source snapshot and arithmetic order and uses
+one 256-component sum while computing each entity's messages.
+
+`accumulator_version = 1` identifies this format. Additive schema migration
+leaves existing rows at version 0 with a NULL sum; it neither reconstructs lost
+magnitude from the old normalized profile nor scans source messages. Repeated
+schema initialization performs only the fixed table-column check. These
+derived-table schema changes do not advance message source revision counters.
+Batch publication creates or upgrades the format only after source validation,
+then atomically replaces profiles, sums, counts and versions in the same
+transaction. Failed publication preserves the previous generation and any
+caller-owned writes.
+
+Appending to a legacy, unsupported-version or invalid accumulator raises
+`StyleVectorRebuildRequired` with a bounded reason (`legacy`,
+`unsupported_version` or `invalid`). The previous profile remains readable.
+An append uses writer ownership before reading its sum and a savepoint around
+schema and row changes. It never commits: a successful standalone call leaves
+its transaction pending; an existing caller keeps final commit and rollback
+ownership. The engine's existing best-effort style catch can therefore retain
+its source/vector add without partially changing the style profile.
+
+Empty entity/message incremental calls remain no-ops. Batch builds retain
+their ordinary-message filter, case folding and existing empty-source behavior;
+directives remain excluded by the engine's add caller. Getters, style dimension,
+embedding and reranking models, native dtypes, and retrieval result caps are
+unchanged. The format does not certify freshness after unrelated source edits.
+
+This is a preparatory checkpoint, not production activation. Existing legacy
+profiles defer style appends until an explicit successful style rebuild. The
+production migration bridge and its pending/failed status must be integrated
+before release; otherwise legacy profiles could remain stale while source adds
+continue. This checkpoint adds no engine routing, automatic rebuild, model
+load, corpus scan on open, or user-facing maintenance status. Synthetic
+arithmetic and transaction checks do not establish retrieval quality or native
+performance acceptance.
