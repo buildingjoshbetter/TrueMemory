@@ -187,10 +187,12 @@ class RebuildWorker:
         build_sep_text,
     ) -> bool:
         """Encode and insert a single batch of messages."""
+        from truememory.mps_utils import encode_with_model_ownership
+
         texts = [m["content"] for m in batch]
         ids = [m["id"] for m in batch]
 
-        embeddings = model.encode(texts, show_progress_bar=False)
+        embeddings = encode_with_model_ownership(model, texts, show_progress_bar=False)
 
         self.conn.executemany(
             f"INSERT INTO {vec_table}(rowid, embedding) "
@@ -210,7 +212,7 @@ class RebuildWorker:
             )
             for m in batch
         ]
-        sep_embeddings = model.encode(sep_texts, show_progress_bar=False)
+        sep_embeddings = encode_with_model_ownership(model, sep_texts, show_progress_bar=False)
 
         self.conn.executemany(
             f"INSERT INTO {sep_table}(rowid, embedding) "

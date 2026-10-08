@@ -42,8 +42,8 @@ class TestMpsUtils(unittest.TestCase):
         self.assertEqual(result, [[0.1, 0.2]])
         model.encode.assert_called_once_with(["hello"])
 
-    def test_encode_with_mps_fallback_oom_falls_to_cpu_and_restores(self):
-        """H4+H8: On OOM, should move to CPU, encode, then restore to MPS."""
+    def test_encode_with_mps_fallback_oom_stays_on_cpu(self):
+        """The local policy now matches the server's no-repromotion policy."""
         from truememory.mps_utils import encode_with_mps_fallback
         model = MagicMock()
         model.encode.side_effect = [
@@ -55,11 +55,7 @@ class TestMpsUtils(unittest.TestCase):
                 result = encode_with_mps_fallback(model, ["hello"])
         self.assertEqual(result, [[0.1, 0.2]])
         to_calls = [c.args[0] for c in model.to.call_args_list]
-        self.assertIn("cpu", to_calls)
-        self.assertIn("mps", to_calls)
-        cpu_idx = to_calls.index("cpu")
-        mps_idx = to_calls.index("mps")
-        self.assertLess(cpu_idx, mps_idx)
+        self.assertEqual(to_calls, ["cpu"])
 
     def test_encode_with_mps_fallback_reraises_non_oom(self):
         from truememory.mps_utils import encode_with_mps_fallback
