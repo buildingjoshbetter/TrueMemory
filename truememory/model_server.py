@@ -16,28 +16,12 @@ TRUEMEMORY_MODEL_SERVER_IDLE env var).
 import atexit
 import os
 
-try:
-    import psutil
-except ImportError:
-    psutil = None
-
-
 def _set_mps_memory_cap():
-    """Set MPS memory cap and BLAS thread limits BEFORE torch is imported."""
+    """Keep thread defaults early; MPS byte calibration occurs at model load."""
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     os.environ.setdefault("NUMEXPR_MAX_THREADS", "1")
-    if os.environ.get("PYTORCH_MPS_HIGH_WATERMARK_RATIO"):
-        return
-    if psutil is not None:
-        total_gb = psutil.virtual_memory().total / (1024**3)
-        ratio = min(0.08, 2.5 / total_gb) if total_gb >= 16 else 0.19
-        ratio = str(max(ratio, 1.5 / total_gb))
-    else:
-        ratio = "0.19"
-    os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = ratio
-    os.environ.setdefault("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.0")
 
 
 _set_mps_memory_cap()
@@ -459,6 +443,8 @@ class ModelServer:
                 "minishlab/potion-base-8M", force_download=False
             )
         if model_id == "qwen3_256":
+            from truememory.mps_utils import ensure_mps_memory_budget
+            ensure_mps_memory_budget(device)
             from sentence_transformers import SentenceTransformer
             mkwargs = {}
             if sys.platform == "darwin":
@@ -482,10 +468,12 @@ class ModelServer:
                 return StaticModel.from_pretrained(
                     "minishlab/potion-base-8M", force_download=False
                 )
-            from sentence_transformers import SentenceTransformer
             from truememory.tier_config import resolve_custom_tier
             cfg = resolve_custom_tier()
             custom_dim = cfg["embed_dim"]
+            from truememory.mps_utils import ensure_mps_memory_budget
+            ensure_mps_memory_budget(device)
+            from sentence_transformers import SentenceTransformer
             return SentenceTransformer(
                 model_id, truncate_dim=custom_dim,
                 trust_remote_code=False,
@@ -560,13 +548,14 @@ class ModelServer:
         if self._reranker is not None and self._reranker_name == name:
             return self._reranker
 
-        from sentence_transformers import CrossEncoder
-        from truememory.mps_utils import auto_detect_device, resolve_device
+        from truememory.mps_utils import auto_detect_device, ensure_mps_memory_budget, resolve_device
         if "rerank" in self._sticky_cpu:
             device = "cpu"
         else:
             device = resolve_device(auto_detect_device())
 
+        ensure_mps_memory_budget(device)
+        from sentence_transformers import CrossEncoder
         self._reranker = CrossEncoder(name, device=device)
         self._reranker_name = name
         log.info("Loaded reranker model=%s device=%s", name, device)
@@ -875,8 +864,9 @@ class ModelServer:
     def _flush_mps_cache(self):
         """Flush MPS cache — only called when throttler says to."""
         try:
+            from truememory.mps_utils import get_mps_memory_budget
             import torch
-            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            if get_mps_memory_budget() is not None and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 torch.mps.empty_cache()
                 torch.mps.synchronize()
         except Exception:
