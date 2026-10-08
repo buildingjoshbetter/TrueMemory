@@ -125,10 +125,22 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.12"]
         mcp-version: [minimum, latest]
+        pydantic-version: [latest]
         include:
           - os: ubuntu-latest
             python-version: "3.10"
             mcp-version: minimum
+            pydantic-version: latest
+          # Exercise the MCP/Pydantic floor pair and the release that removed
+          # eval_type_backport. Other dependencies still use normal resolution.
+          - os: ubuntu-latest
+            python-version: "3.10"
+            mcp-version: minimum
+            pydantic-version: "2.11.0"
+          - os: ubuntu-latest
+            python-version: "3.12"
+            mcp-version: minimum
+            pydantic-version: "2.14.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Python ${{ matrix.python-version }}
@@ -149,6 +161,7 @@ jobs:
         shell: python
         env:
           MCP_VERSION: ${{ matrix.mcp-version }}
+          PYDANTIC_VERSION: ${{ matrix.pydantic-version }}
         run: |
           import os
           from pathlib import Path
@@ -161,7 +174,9 @@ jobs:
           python = env_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
           requirements = [str(wheel.resolve())]
           if os.environ["MCP_VERSION"] == "minimum":
-              requirements.append("mcp[cli]==1.19.0")
+              requirements.append("mcp[cli]==1.21.1")
+          if os.environ["PYDANTIC_VERSION"] != "latest":
+              requirements.append("pydantic==" + os.environ["PYDANTIC_VERSION"])
           subprocess.run([str(python), "-m", "pip", "install", *requirements], check=True)
           subprocess.run([str(python), "-m", "pip", "check"], check=True)
           subprocess.run([str(python), "-I", "tests/mcp-wheel-smoke.py"], check=True)

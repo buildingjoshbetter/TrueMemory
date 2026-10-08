@@ -14,10 +14,13 @@ each with type/role, content, and optional tool metadata.
 
 from __future__ import annotations
 
+import errno
+import hashlib
 import json
 import logging
+import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -30,6 +33,225 @@ class Message:
     content: str        # The text content
     timestamp: str = "" # ISO timestamp if available
     tool_name: str = "" # Tool name for tool_use messages
+
+
+@dataclass(frozen=True)
+class FileState:
+    """File identity without a path or transcript content."""
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+    @classmethod
+    def from_stat(cls, value: os.stat_result) -> FileState:
+        return cls(value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+@dataclass(frozen=True)
+class TranscriptFileVersion:
+    """Identity of the bytes read, not a later completion-time stat."""
+    byte_count: int
+    sha256: str
+    before: FileState
+    after: FileState
+    path_after: FileState | None
+
+    @property
+    def stable(self) -> bool:
+        return self.before == self.after == self.path_after and self.byte_count == self.after.size
+
+
+@dataclass(frozen=True)
+class TranscriptOutcome:
+    """Coverage evidence; only complete outcomes include all recognized input.
+
+    Status is complete, partial, salvaged, malformed or unreadable. Messages
+    remain available for inspection even when legacy parsing salvaged input.
+    This API does not change the ingestion pipeline's completion policy.
+    """
+    messages: list[Message] = field(repr=False)
+    status: str
+    total_records: int = 0
+    malformed_records: int = 0
+    error_categories: tuple[str, ...] = ()
+    file_version: TranscriptFileVersion | None = None
+    unrecognized_records: int = 0
+
+    @property
+    def complete(self) -> bool:
+        return self.status == "complete"
+
+
+def parse_transcript_outcome(source: str | Path) -> TranscriptOutcome:
+    """Parse with source coverage, retaining the legacy API separately.
+
+    Explicit Paths are always files, including missing paths. String path
+    detection follows the existing parser; other strings are inline content.
+    Diagnostics contain categories and counts only. Stable means these
+    observations agreed; it does not lock the source against later changes.
+    """
+    path = source if isinstance(source, Path) else None
+    if path is None:
+        try:
+            candidate = Path(source)
+            if candidate.exists() and candidate.is_file():
+                path = candidate
+        except ValueError:
+            pass
+        except OSError as error:
+            # Long inline strings are not filesystem paths; a denied path
+            # probe must not turn that path into a synthetic conversation.
+            if error.errno != errno.ENAMETOOLONG:
+                return TranscriptOutcome([], "unreadable", error_categories=("source_unreadable",))
+
+    version = None
+    errors: list[str] = []
+    if path is not None:
+        try:
+            with path.open("rb") as handle:
+                before = FileState.from_stat(os.fstat(handle.fileno()))
+                data = handle.read()
+                after = FileState.from_stat(os.fstat(handle.fileno()))
+        except (OSError, ValueError):
+            return TranscriptOutcome([], "unreadable", error_categories=("source_unreadable",))
+        try:
+            # Windows stat() and fstat() can give ctime different meanings.
+            # Reopen the pathname to check identity using the same API.
+            with path.open("rb") as identity_handle:
+                path_after = FileState.from_stat(os.fstat(identity_handle.fileno()))
+        except OSError:
+            path_after = None
+        version = TranscriptFileVersion(len(data), hashlib.sha256(data).hexdigest(), before, after, path_after)
+        if not version.stable:
+            errors.append("source_changed_during_read")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = data.decode("utf-8", errors="replace")
+            errors.append("invalid_utf8")
+    else:
+        text = source
+
+    parsed = _parse_transcript_text_outcome(text.strip(), jsonl=path is not None and path.suffix.lower() == ".jsonl")
+    errors.extend(parsed.error_categories)
+    status = parsed.status
+    if errors and status == "complete":
+        status = "partial" if parsed.messages else "malformed"
+    return TranscriptOutcome(parsed.messages, status, parsed.total_records, parsed.malformed_records,
+                             tuple(errors), version, parsed.unrecognized_records)
+
+
+def _covered_content_blocks(blocks: list, *, nested: bool = False) -> tuple[list, bool, bool]:
+    """Retain supported text without certifying silently omitted payloads."""
+    covered: list = []
+    malformed = unrecognized = False
+    for block in blocks:
+        if isinstance(block, str):
+            covered.append(block)
+            continue
+        if not isinstance(block, dict) or not isinstance(block.get("type"), str):
+            malformed = True
+            continue
+        kind = block["type"]
+        if kind == "thinking":
+            # Deliberately excluded private reasoning is not lost conversation.
+            covered.append(block)
+        elif kind == "text":
+            if isinstance(block.get("text"), str):
+                covered.append(block)
+            else:
+                malformed = True
+        elif kind == "tool_use" and not nested:
+            if isinstance(block.get("name", ""), str):
+                covered.append(block)
+            else:
+                malformed = True
+        elif kind == "tool_result" and not nested:
+            content = block.get("content")
+            if isinstance(content, list):
+                children, bad, unknown = _covered_content_blocks(content, nested=True)
+                malformed |= bad
+                unrecognized |= unknown
+                covered.append({**block, "content": children})
+            elif content is None or isinstance(content, str):
+                covered.append(block)
+            else:
+                malformed = True
+        else:
+            # Images/audio and unknown block types need an explicit future
+            # decoder. Their text-looking keys are not a supported transcript.
+            unrecognized = True
+    return covered, malformed, unrecognized
+
+
+def _parse_transcript_text_outcome(text: str, *, jsonl: bool = False) -> TranscriptOutcome:
+    if not text:
+        return TranscriptOutcome([], "complete")
+    if not jsonl and not text.startswith(("[", "{")):
+        messages = _parse_plain_text(text)
+        return TranscriptOutcome(messages, "complete", len(messages))
+    if text.startswith("["):
+        try:
+            entries = json.loads(text)
+        except json.JSONDecodeError:
+            messages = _parse_plain_text(text)
+            return TranscriptOutcome(messages, "salvaged", 1, 1, ("invalid_json_array",))
+        allow_strings = True
+    else:
+        entries = []
+        allow_strings = False
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                entries.append(None)
+        # None also represents a syntactically valid but unusable JSONL null;
+        # both count as one malformed record in the loop below.
+
+    messages: list[Message] = []
+    malformed = unrecognized = 0
+    for entry in entries:
+        if isinstance(entry, str) and allow_strings:
+            messages.append(Message(role="unknown", content=entry))
+            continue
+        if not isinstance(entry, dict):
+            malformed += 1
+            continue
+        top_type = entry.get("type") or entry.get("role") or "unknown"
+        if not isinstance(top_type, str):
+            malformed += 1
+            continue
+        if isinstance(top_type, str) and top_type in _NON_CONVERSATION_TYPES:
+            continue
+        # The supported older tool-call format has name/input instead of
+        # content. Keep its existing _extract_message behavior intact.
+        if top_type != "tool_use":
+            inner = entry.get("message")
+            payload = inner if isinstance(inner, dict) else entry
+            if "content" not in payload or not isinstance(payload["content"], (str, list)):
+                malformed += 1
+                continue
+            if isinstance(payload["content"], list):
+                blocks, bad, unknown = _covered_content_blocks(payload["content"])
+                malformed += int(bad)
+                unrecognized += int(unknown)
+                payload = {**payload, "content": blocks}
+                entry = {**entry, "message": payload} if isinstance(inner, dict) else payload
+        try:
+            message = _extract_message(entry)
+        except (TypeError, AttributeError, ValueError):
+            malformed += 1
+            continue
+        if message is not None:
+            messages.append(message)
+    status = ("partial" if messages else "malformed") if malformed else "partial" if unrecognized else "complete"
+    errors = (("malformed_records",) if malformed else ()) + (("unrecognized_content",) if unrecognized else ())
+    return TranscriptOutcome(messages, status, len(entries), malformed, errors,
+                             unrecognized_records=unrecognized)
 
 
 def parse_transcript(source: str | Path) -> list[Message]:

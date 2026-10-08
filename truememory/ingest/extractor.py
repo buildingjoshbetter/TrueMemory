@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from truememory.ingest.models import LLMConfig, LLMError, complete
 
@@ -118,6 +118,48 @@ class ExtractedFact:
     category: str = "general"
     confidence: str = "medium"
     source_role: str = "user"
+
+
+@dataclass(frozen=True)
+class ExtractionResponseOutcome:
+    """Response coverage; facts retain the compatibility parser's selection."""
+    facts: list[ExtractedFact] = field(repr=False)
+    status: str
+    invalid_items: int = 0
+    omitted_items: int = 0
+    omitted_facts: int = 0
+    salvaged: bool = False
+    error_categories: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ExtractionOutcome:
+    """Coverage of one extraction attempt, without retry or storage policy.
+
+    Chunk counters partition attempted work into successful, partial and
+    failed responses. Deferred chunks were not sent to a provider. Fact-cap
+    omissions count valid response occurrences, not globally unique facts.
+    Facts and provider errors are excluded from diagnostic representations.
+    """
+    facts: list[ExtractedFact] = field(repr=False)
+    status: str
+    total_chunks: int = 0
+    attempted_chunks: int = 0
+    successful_chunks: int = 0
+    partial_chunks: int = 0
+    failed_chunks: int = 0
+    deferred_chunks: int = 0
+    invalid_responses: int = 0
+    salvaged_responses: int = 0
+    invalid_items: int = 0
+    omitted_items: int = 0
+    chunk_fact_omissions: int = 0
+    merged_fact_omissions: int = 0
+    error_categories: tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        return self.status == "complete"
 
 
 # Chunking configuration for long transcripts.
@@ -227,10 +269,26 @@ def extract_facts(
     Returns:
         List of ExtractedFact objects, deduplicated by content.
     """
+    return extract_facts_outcome(transcript, config, max_facts, max_chunks).facts
+
+
+def extract_facts_outcome(
+    transcript: str,
+    config: LLMConfig,
+    max_facts: int = 50,
+    max_chunks: int = _DEFAULT_MAX_CHUNKS,
+) -> ExtractionOutcome:
+    """Extract once with explicit empty, failed, partial and limited coverage.
+
+    Uses the existing chunk selection, provider calls, parsing and merge
+    order. No automatic retries, fallback provider or budget changes occur.
+    Callers must not interpret returned partial facts as completed coverage.
+    """
     if not transcript.strip():
-        return []
+        return ExtractionOutcome([], "complete")
 
     chunks = _chunk_transcript(transcript, budget=_CHUNK_CHAR_BUDGET)
+    total_chunks = len(chunks)
 
     if len(chunks) > max_chunks:
         total_chars = len(transcript)
@@ -251,26 +309,49 @@ def extract_facts(
         )
 
     all_facts: list[ExtractedFact] = []
+    successful = partial = failed = invalid_responses = salvaged = 0
+    invalid_items = omitted_items = chunk_omissions = 0
+    errors: list[str] = []
+    deferred = total_chunks - len(chunks)
+    if deferred:
+        errors.append("chunk_limit")
     for i, chunk in enumerate(chunks):
         prompt = EXTRACTION_PROMPT.format(transcript=_neutralize_delimiters(chunk))
         try:
             response = complete(config, prompt, system=EXTRACTION_SYSTEM)
-        except LLMError as e:
+        except LLMError:
             log.error(
-                "LLM extraction failed for chunk %d/%d (%s): %s",
-                i + 1, len(chunks), config.provider, e,
+                "LLM extraction failed for chunk %d/%d (provider_error)",
+                i + 1, len(chunks),
             )
             # Keep whatever we've gathered from earlier chunks; don't let a
             # single mid-transcript failure wipe out the whole extraction.
+            failed += 1
+            errors.append("provider_error")
             continue
-        except Exception as e:
-            log.exception(
-                "Unexpected error during LLM extraction of chunk %d/%d: %s",
-                i + 1, len(chunks), e,
+        except Exception:
+            log.error(
+                "Unexpected error during LLM extraction of chunk %d/%d (provider_exception)",
+                i + 1, len(chunks),
             )
+            failed += 1
+            errors.append("provider_exception")
             continue
 
-        chunk_facts = _parse_extraction_response(response, max_facts)
+        outcome = _parse_extraction_response_outcome(response, max_facts)
+        chunk_facts = outcome.facts
+        if outcome.status == "failed":
+            failed += 1
+        elif outcome.status == "partial":
+            partial += 1
+        else:
+            successful += 1
+        invalid_responses += int(outcome.status in ("failed", "partial"))
+        salvaged += int(outcome.salvaged)
+        invalid_items += outcome.invalid_items
+        omitted_items += outcome.omitted_items
+        chunk_omissions += outcome.omitted_facts
+        errors.extend(outcome.error_categories)
         if len(chunks) > 1:
             log.debug("Chunk %d/%d yielded %d facts", i + 1, len(chunks), len(chunk_facts))
         all_facts.extend(chunk_facts)
@@ -280,10 +361,24 @@ def extract_facts(
     merged = _dedupe_facts_by_content(all_facts)
 
     # Respect the caller's max_facts cap on the merged result.
+    merged_omissions = 0
     if len(merged) > max_facts:
+        previous_count = len(merged)
         merged = merged[:max_facts]
+        merged_omissions = previous_count - len(merged)
+        if merged_omissions:
+            errors.append("fact_limit")
 
-    return merged
+    if failed or partial:
+        status = "partial" if successful or partial else "failed"
+    elif deferred or omitted_items or merged_omissions:
+        status = "limited"
+    else:
+        status = "complete"
+    return ExtractionOutcome(merged, status, total_chunks, len(chunks), successful, partial,
+                             failed, deferred, invalid_responses, salvaged, invalid_items,
+                             omitted_items, chunk_omissions, merged_omissions,
+                             tuple(dict.fromkeys(errors)))
 
 
 def _parse_extraction_response(response: str, max_facts: int) -> list[ExtractedFact]:
@@ -297,6 +392,30 @@ def _parse_extraction_response(response: str, max_facts: int) -> list[ExtractedF
     - Object wrapper: `{"facts": [...]}` (unwrapped automatically)
     - Malformed responses (falls back to brace-matching salvage)
     """
+    return _parse_extraction_response_outcome(response, max_facts).facts
+
+
+def _response_list_shape(text: str, selected: list) -> bool:
+    """Recognize the envelope without changing the legacy array-first choice."""
+    array_at = text.find("[")
+    object_at = text.find("{")
+    if object_at < 0 or 0 <= array_at < object_at:
+        return True
+    outer = _find_first_balanced(text, "{", "}")
+    if outer is None:
+        return False
+    try:
+        data = json.loads(outer)
+    except json.JSONDecodeError:
+        return False
+    return any(isinstance(data.get(key), list) and data[key] == selected
+               for key in ("facts", "items", "results", "data", "extracted"))
+
+
+def _parse_extraction_response_outcome(response: str, max_facts: int) -> ExtractionResponseOutcome:
+    """Keep legacy fact selection, but never label salvage as complete."""
+    if not isinstance(response, str):
+        return ExtractionResponseOutcome([], "failed", error_categories=("response_type",))
     json_str = response.strip()
 
     # Strip leading markdown code fence if present
@@ -313,14 +432,17 @@ def _parse_extraction_response(response: str, max_facts: int) -> list[ExtractedF
         extracted = _find_first_balanced(json_str, "{", "}")
     if extracted is None:
         log.warning("No JSON array or object found in extraction response")
-        return []
+        return ExtractionResponseOutcome([], "failed", error_categories=("response_missing_json",))
+    envelope = json_str
     json_str = extracted
 
     try:
         facts_data = json.loads(json_str)
-    except json.JSONDecodeError as e:
-        log.warning("Failed to parse extraction JSON: %s", e)
-        return _salvage_partial_json(json_str)
+    except json.JSONDecodeError:
+        log.warning("Failed to parse extraction JSON (response_invalid_json)")
+        facts = _salvage_partial_json(json_str)
+        return ExtractionResponseOutcome(facts, "partial" if facts else "failed",
+                                         salvaged=True, error_categories=("response_invalid_json",))
 
     # Unwrap common object wrappers: {"facts": [...]}, {"items": [...]}
     if isinstance(facts_data, dict):
@@ -331,21 +453,29 @@ def _parse_extraction_response(response: str, max_facts: int) -> list[ExtractedF
         else:
             # No list found inside the object
             log.warning("Extraction response is an object without a known list key")
-            return []
+            return ExtractionResponseOutcome([], "failed", error_categories=("response_shape",))
 
     if not isinstance(facts_data, list):
         log.warning("Extraction response is not a list after unwrap")
-        return []
+        return ExtractionResponseOutcome([], "failed", error_categories=("response_shape",))
 
     facts = []
-    for item in facts_data[:max_facts]:
+    invalid_items = omitted_facts = 0
+    kept_count = len(facts_data[:max_facts])
+    omitted_items = len(facts_data) - kept_count
+    for index, item in enumerate(facts_data):
         if not isinstance(item, dict):
+            invalid_items += 1
             continue
         content = item.get("content", "")
         if not isinstance(content, str):
             content = str(content)
         content = content.strip()
         if not content:
+            invalid_items += 1
+            continue
+        if index >= kept_count:
+            omitted_facts += 1
             continue
         facts.append(ExtractedFact(
             content=content,
@@ -355,7 +485,23 @@ def _parse_extraction_response(response: str, max_facts: int) -> list[ExtractedF
         ))
 
     log.info("Extracted %d facts from transcript", len(facts))
-    return facts
+    errors: list[str] = []
+    if not _response_list_shape(envelope, facts_data):
+        errors.append("response_shape")
+    if invalid_items:
+        errors.append("response_invalid_items")
+    if omitted_items:
+        errors.append("fact_limit")
+    if "response_shape" in errors:
+        status = "failed"
+    elif invalid_items:
+        status = "partial" if facts or omitted_facts else "failed"
+    elif omitted_items:
+        status = "limited"
+    else:
+        status = "complete"
+    return ExtractionResponseOutcome(facts, status, invalid_items, omitted_items, omitted_facts,
+                                     error_categories=tuple(errors))
 
 
 def _find_first_balanced(text: str, open_ch: str, close_ch: str) -> str | None:

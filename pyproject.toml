@@ -29,8 +29,9 @@ dependencies = [
     "model2vec>=0.6.0,<1.0",
     "sqlite-vec>=0.1.0,<1.0",
     "numpy>=1.24.0,<3.0",
-    # Tool metadata requires 1.19; SDK 2 removes the FastMCP import path.
-    "mcp[cli]>=1.19.0,<2.0",
+    # 1.21.1 removes a private Pydantic import broken by Pydantic 2.14.
+    # SDK 2 removes the FastMCP import path.
+    "mcp[cli]>=1.21.1,<2.0",
     "httpx>=0.27.0,<1.0",
     "sentence-transformers>=3.0.0,<7.0",
     "torch>=2.0.0,<3.0",

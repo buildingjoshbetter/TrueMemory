@@ -477,3 +477,84 @@ same cases against real sqlite-vec tables when the extension is available. These
 checks establish paired-write and retry behavior, not native MPS OOM behavior,
 thermal improvement or model-performance measurements. Whole-rebuild streaming
 and corpus loading remain separate work.
+## Ingestion outcome evidence (issue #768, foundation only)
+
+`parse_transcript_outcome(source)` and `extract_facts_outcome(...)` expose
+coverage without changing pipeline or CLI completion. The existing
+`parse_transcript`, `extract_facts`, and `_parse_extraction_response` list
+contracts remain available. The transcript compatibility entry retains its
+existing parsing/read behavior. The LLM compatibility entries return the
+same selected facts from the shared detailed implementation; they do not
+consume its completion status. Heuristic extraction is unchanged.
+
+The detailed transcript statuses are:
+
+| Status | Meaning |
+| --- | --- |
+| `complete` | Recognized input was parsed, including valid empty files/arrays and intentional non-conversation records |
+| `partial` | Coverage is incomplete; supported messages remain available, but malformed records, unrecognized content, invalid UTF-8 or a changed capture prevent completion |
+| `salvaged` | An invalid JSON array used the legacy plain-text salvage path |
+| `malformed` | The input was not a usable recognized transcript, or capture/decoding failed without usable messages |
+| `unreadable` | A file could not be opened or read |
+
+An explicit `Path` is always a file, including when it is missing. A string
+retains the existing file-or-inline convention. The detailed file API uses
+the `.jsonl` suffix to recognize malformed first lines; the legacy parser's
+format selection remains unchanged. Source outcomes carry malformed-record
+counts and categorical diagnostics. Message bodies are excluded from their
+diagnostic representation.
+
+Legacy top-level `tool_use` records still use their existing name/input
+representation. Known `thinking` blocks are deliberately excluded. A text
+block must have a string `text` field; an explicitly empty string is valid,
+while a missing or non-string field is malformed. Images, audio, other
+nontext blocks and unknown block types are unrecognized coverage, even when
+they contain a text-looking key. No OCR or new decoder is added. Such records
+are `partial`, including when no supported text remains, and increment
+`unrecognized_records`. Mixed records retain supported text while reporting
+loss; each affected record increments each applicable coverage counter once.
+The legacy list parser's filtering and outputs remain unchanged.
+
+File versions contain captured byte count and SHA-256, plus descriptor
+device/inode/size/mtime/ctime before and after reading and the path's identity
+at the end of capture. No path or raw transcript is stored in that metadata.
+`stable` means those states agree and byte count equals captured size. It
+does not assert that the source stayed unchanged after this API returned.
+A future completion marker must bind this captured version; a later stat
+cannot acknowledge unread appended bytes. This first API still reads a full
+file, retaining raw bytes while decoding; it is not a streaming-memory claim.
+
+LLM extraction statuses are `complete`, `partial`, `failed`, and `limited`.
+Valid empty arrays and supported empty object wrappers are complete. Provider
+failures, wrong response shapes, all-invalid item lists and brace-salvaged
+responses are distinguishable. Valid facts from incomplete responses remain
+available for legacy compatibility; their presence never proves completion.
+In particular, the old array-first parser can select a list inside an unknown
+object wrapper. Detailed status rejects that envelope while preserving the
+legacy fact selection.
+
+`attempted_chunks = successful_chunks + partial_chunks + failed_chunks` and
+`total_chunks = attempted_chunks + deferred_chunks`. Successful chunks count
+valid responses, including responses limited by the fact cap. Invalid
+response counts exclude provider calls that failed before returning a
+response. Counts separately describe malformed items, all omitted response
+items, valid fact occurrences omitted by per-chunk slicing, and unique
+merged facts omitted by the final cap. These counts can overlap; they are
+not a unique-fact coverage percentage. Failure/partial status takes precedence
+over `limited`, with both limitations retained in counts and categories.
+
+Provider calls and caps are unchanged: 20,000 characters per ordinary chunk,
+20 selected chunks by default, and 50 facts per response selection and final
+merge. A single oversized message remains intact under the existing chunker.
+For 21 chunks, `21 - 20 = 1` is deferred and exactly 20 provider calls occur.
+No new retries or fallback providers are introduced. Existing malformed-JSON
+salvage can return more than the per-response cap; its facts still pass through
+the existing final merge cap. This compatibility behavior is explicitly
+reported as incomplete instead of being silently redesigned here. Provider
+failure logs contain fixed categories and chunk counts, without raw provider
+errors or tracebacks.
+
+This checkpoint does not activate strict ingestion, change exit codes, hold
+backlog jobs, add receipts, make mutation retries safe, or fix CLI success
+markers. Durable pre-mutation guards and storage receipts remain required
+before those routes can safely change. Issue #768 remains open.

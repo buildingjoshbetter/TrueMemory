@@ -1,0 +1,550 @@
+"""Real parser/extractor coverage with synthetic files and a fake provider only."""
+from __future__ import annotations
+
+import builtins
+import hashlib
+import json
+import logging
+import sys
+import tempfile
+import types
+import unittest
+from dataclasses import asdict
+from pathlib import Path
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+SYNTHETIC_SECRET = "synthetic-private-diagnostic-sentinel"
+
+
+class FakeLLMError(Exception):
+    pass
+
+
+def load_module(name: str) -> types.ModuleType:
+    def forbidden_provider(*args: object, **kwargs: object) -> str:
+        raise AssertionError("A test must install its own synthetic provider")
+
+    models = types.SimpleNamespace(LLMConfig=object, LLMError=FakeLLMError, complete=forbidden_provider)
+
+    def safe_import(name: str, globals: dict | None = None, locals: dict | None = None,
+                    fromlist: tuple = (), level: int = 0) -> object:
+        if name == "truememory.ingest.models":
+            return models
+        if name.startswith(("truememory", "torch", "numpy", "sentence_transformers")):
+            raise AssertionError("Unexpected package or model import")
+        return builtins.__import__(name, globals, locals, fromlist, level)
+
+    module = types.ModuleType("synthetic_p01_" + name)
+    module.__dict__["__builtins__"] = dict(vars(builtins), __import__=safe_import)
+    path = ROOT / "truememory/ingest" / (name + ".py")
+    with patch.dict(sys.modules, {module.__name__: module}):
+        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
+    return module
+
+
+def capture_diagnostic(outcome: object) -> dict[str, object]:
+    """Report capture categories without source bytes, paths or identity values."""
+    version = getattr(outcome, "file_version")
+    result = {"status": getattr(outcome, "status"),
+              "errors": getattr(outcome, "error_categories"),
+              "capture_present": version is not None}
+    if version is not None:
+        fields = ("device", "inode", "size", "mtime_ns", "ctime_ns")
+        result.update(
+            stable=version.stable,
+            byte_count_matches=version.byte_count == version.after.size,
+            path_after_present=version.path_after is not None,
+            changed_during_read=tuple(name for name in fields
+                                      if getattr(version.before, name) != getattr(version.after, name)),
+            changed_after_close=None if version.path_after is None else tuple(
+                name for name in fields
+                if getattr(version.after, name) != getattr(version.path_after, name)),
+        )
+    return result
+
+
+class TestSourceLoader(unittest.TestCase):
+    def test_source_loader_selects_utf8_under_cp1252_default(self) -> None:
+        source = "# synthetic locale control \u201d\nENCODING_SENTINEL = 'synthetic-marker'\n".encode("utf-8")
+        with self.assertRaises(UnicodeDecodeError):
+            source.decode("cp1252")
+        encodings = []
+
+        def read_source(path: Path, encoding: str | None = None, errors: str | None = None) -> str:
+            encodings.append(encoding)
+            return source.decode(encoding or "cp1252", errors or "strict")
+
+        with patch.object(Path, "read_text", read_source):
+            loaded = load_module("extractor")
+        self.assertEqual(loaded.ENCODING_SENTINEL, "synthetic-marker")
+        self.assertEqual(encodings, ["utf-8"])
+
+
+class TestTranscriptOutcomes(unittest.TestCase):
+    def setUp(self) -> None:
+        self.parser = load_module("transcript")
+        self.directory = tempfile.TemporaryDirectory(prefix="synthetic-ingestion-")
+        self.addCleanup(self.directory.cleanup)
+        self.directory_path = Path(self.directory.name)
+
+    def write(self, data: bytes, name: str = "transcript.jsonl") -> Path:
+        path = self.directory_path / name
+        path.write_bytes(data)
+        return path
+
+    def test_valid_empty_and_known_nonconversation_records(self) -> None:
+        inputs = ("", "  ", "[]", '{"type":"progress"}', '{"type":"file-history-snapshot"}',
+                  '[{"type":"system","content":"synthetic metadata"}]',
+                  '[{"role":"user","content":""}]')
+        for text in inputs:
+            with self.subTest(text=text):
+                outcome = self.parser.parse_transcript_outcome(text)
+                self.assertTrue(outcome.complete)
+                self.assertEqual(outcome.messages, [])
+                self.assertEqual(outcome.error_categories, ())
+        self.assertTrue(self.parser.parse_transcript_outcome(self.write(b"")).complete)
+
+    def test_explicit_missing_path_is_unreadable_but_string_remains_inline(self) -> None:
+        path = self.directory_path / "missing.jsonl"
+        outcome = self.parser.parse_transcript_outcome(path)
+        self.assertEqual((outcome.status, outcome.messages, outcome.file_version), ("unreadable", [], None))
+        self.assertEqual(outcome.error_categories, ("source_unreadable",))
+        self.assertNotIn(str(path), repr(outcome))
+        inline = self.parser.parse_transcript_outcome(str(path))
+        self.assertTrue(inline.complete)
+        self.assertEqual(inline.messages[0].content, str(path))
+        self.assertEqual(self.parser.parse_transcript(path), [])
+
+    def test_file_version_binds_captured_bytes_not_later_file(self) -> None:
+        data = b'{"role":"user","content":"synthetic amber station"}\n'
+        path = self.write(data)
+        outcome = self.parser.parse_transcript_outcome(path)
+        version = outcome.file_version
+        self.assertTrue(outcome.complete)
+        self.assertTrue(version.stable)
+        self.assertEqual(version.byte_count, len(data))
+        self.assertEqual(version.sha256, hashlib.sha256(data).hexdigest())
+        self.assertEqual(version.before.inode, path.stat().st_ino)
+        path.write_bytes(data + data)
+        self.assertEqual(version.byte_count, len(data))
+        self.assertNotEqual(version.after.size, path.stat().st_size)
+        self.assertNotIn("synthetic amber station", repr(outcome))
+
+    def test_file_change_during_capture_is_not_complete(self) -> None:
+        path = self.write(b'{"role":"user","content":"synthetic station"}\n')
+        real_open = Path.open
+
+        class ChangingReader:
+            def __enter__(self) -> ChangingReader:
+                self.handle = real_open(path, "rb")
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                self.handle.close()
+
+            def fileno(self) -> int:
+                return self.handle.fileno()
+
+            def read(self) -> bytes:
+                data = self.handle.read()
+                with real_open(path, "ab") as writer:
+                    writer.write(b'{"role":"user","content":"synthetic later row"}\n')
+                return data
+
+        with patch.object(Path, "open", return_value=ChangingReader()):
+            outcome = self.parser.parse_transcript_outcome(path)
+        self.assertFalse(outcome.complete)
+        self.assertFalse(outcome.file_version.stable)
+        self.assertEqual(len(outcome.messages), 1)
+        self.assertIn("source_changed_during_read", outcome.error_categories)
+
+    def test_windows_stat_and_fstat_ctime_semantics_do_not_reject_stable_file(self) -> None:
+        path = self.write(b'{"role":"user","content":"synthetic stable file"}\n')
+        real = path.stat()
+        common = {name: getattr(real, name) for name in ("st_dev", "st_ino", "st_size", "st_mtime_ns")}
+        by_handle = types.SimpleNamespace(**common, st_ctime_ns=731001)
+        by_path = types.SimpleNamespace(**common, st_ctime_ns=731002)
+        with patch.object(self.parser.os, "fstat", return_value=by_handle) as fd_stat, \
+                patch.object(Path, "stat", return_value=by_path):
+            outcome = self.parser.parse_transcript_outcome(path)
+        self.assertTrue(outcome.complete, capture_diagnostic(outcome))
+        self.assertTrue(outcome.file_version.stable)
+        self.assertEqual(outcome.file_version.after.ctime_ns, 731001)
+        self.assertEqual(outcome.file_version.path_after.ctime_ns, 731001)
+        self.assertEqual(fd_stat.call_count, 3)
+
+    def test_ctime_only_change_during_read_or_final_reopen_is_not_complete(self) -> None:
+        path = self.write(b'{"role":"user","content":"synthetic timestamp change"}\n')
+        real = path.stat()
+        common = {name: getattr(real, name) for name in ("st_dev", "st_ino", "st_size", "st_mtime_ns")}
+        for changed_call in (2, 3):
+            with self.subTest(changed_call=changed_call):
+                states = [types.SimpleNamespace(**common, st_ctime_ns=731001 + int(call >= changed_call))
+                          for call in (1, 2, 3)]
+                with patch.object(self.parser.os, "fstat", side_effect=states):
+                    outcome = self.parser.parse_transcript_outcome(path)
+                self.assertFalse(outcome.complete)
+                self.assertEqual(outcome.error_categories, ("source_changed_during_read",))
+                self.assertEqual(outcome.file_version.byte_count, real.st_size)
+                self.assertEqual(len(outcome.messages), 1)
+                diagnostic = capture_diagnostic(outcome)
+                field = "changed_during_read" if changed_call == 2 else "changed_after_close"
+                self.assertEqual(diagnostic[field], ("ctime_ns",))
+
+    def test_replaced_path_after_read_is_not_the_captured_file(self) -> None:
+        data = b'{"role":"user","content":"synthetic replacement race"}\n'
+        path = self.write(data)
+        replacement = self.write(data, "replacement.jsonl")
+        real_open = Path.open
+        handles = []
+
+        def open_with_replacement(target: Path, mode: str) -> object:
+            self.assertEqual(target, path)
+            self.assertEqual(mode, "rb")
+            if handles:
+                self.assertTrue(handles[0].closed)
+                replacement.replace(path)
+            handle = real_open(target, mode)
+            handles.append(handle)
+            return handle
+
+        with patch.object(Path, "open", open_with_replacement):
+            outcome = self.parser.parse_transcript_outcome(path)
+        self.assertEqual(len(handles), 2)
+        self.assertTrue(all(handle.closed for handle in handles))
+        self.assertFalse(outcome.complete)
+        self.assertEqual(outcome.error_categories, ("source_changed_during_read",))
+        self.assertNotEqual(outcome.file_version.after.inode, outcome.file_version.path_after.inode)
+        self.assertEqual(outcome.file_version.sha256, hashlib.sha256(data).hexdigest())
+        self.assertEqual(outcome.messages[0].content, "synthetic replacement race")
+
+    def test_deleted_or_denied_path_after_read_preserves_captured_messages(self) -> None:
+        data = b'{"role":"user","content":"synthetic unavailable path"}\n'
+        real_open = Path.open
+        for cause in ("deleted", "denied"):
+            with self.subTest(cause=cause):
+                path = self.write(data)
+                handles = []
+                attempts = []
+
+                def open_with_failure(target: Path, mode: str) -> object:
+                    self.assertEqual((target, mode), (path, "rb"))
+                    attempts.append(True)
+                    if handles:
+                        self.assertTrue(handles[0].closed)
+                        if cause == "deleted":
+                            path.unlink()
+                        else:
+                            raise PermissionError(SYNTHETIC_SECRET)
+                    handle = real_open(target, mode)
+                    handles.append(handle)
+                    return handle
+
+                with patch.object(Path, "open", open_with_failure):
+                    outcome = self.parser.parse_transcript_outcome(path)
+                self.assertEqual(len(attempts), 2)
+                self.assertTrue(all(handle.closed for handle in handles))
+                self.assertEqual(outcome.status, "partial")
+                self.assertEqual(outcome.error_categories, ("source_changed_during_read",))
+                self.assertIsNone(outcome.file_version.path_after)
+                self.assertEqual(outcome.file_version.sha256, hashlib.sha256(data).hexdigest())
+                self.assertEqual(outcome.messages[0].content, "synthetic unavailable path")
+                self.assertNotIn(SYNTHETIC_SECRET, repr(outcome))
+
+    def test_final_identity_handle_never_reads_and_closes_on_fstat_failure(self) -> None:
+        path = self.write(b'{"role":"user","content":"synthetic final handle"}\n')
+        real_open, real_fstat = Path.open, self.parser.os.fstat
+        for failed_stat in (False, True):
+            with self.subTest(failed_stat=failed_stat):
+                handles = []
+                stat_calls = []
+
+                class IdentityProbe:
+                    def __init__(self, handle: object) -> None:
+                        self.handle = handle
+
+                    def __enter__(self) -> IdentityProbe:
+                        return self
+
+                    def __exit__(self, *args: object) -> None:
+                        self.handle.close()
+
+                    def fileno(self) -> int:
+                        return self.handle.fileno()
+
+                    def read(self, *args: object) -> bytes:
+                        raise AssertionError("Final identity probe must not reread source bytes")
+
+                def observed_open(target: Path, mode: str) -> object:
+                    self.assertEqual((target, mode), (path, "rb"))
+                    handle = real_open(target, mode)
+                    handles.append(handle)
+                    return handle if len(handles) == 1 else IdentityProbe(handle)
+
+                def observed_fstat(fd: int) -> object:
+                    stat_calls.append(True)
+                    if failed_stat and len(stat_calls) == 3:
+                        raise OSError(SYNTHETIC_SECRET)
+                    return real_fstat(fd)
+
+                with patch.object(Path, "open", observed_open), \
+                        patch.object(self.parser.os, "fstat", observed_fstat):
+                    outcome = self.parser.parse_transcript_outcome(path)
+                self.assertEqual(len(handles), 2)
+                self.assertEqual(len(stat_calls), 3)
+                self.assertTrue(all(handle.closed for handle in handles))
+                self.assertEqual(outcome.complete, not failed_stat, capture_diagnostic(outcome))
+                if failed_stat:
+                    self.assertIsNone(outcome.file_version.path_after)
+                    self.assertEqual(outcome.error_categories, ("source_changed_during_read",))
+                    self.assertNotIn(SYNTHETIC_SECRET, repr(outcome))
+
+    def test_capture_diagnostic_reports_fields_without_identity_or_content(self) -> None:
+        before = self.parser.FileState(731001, 731002, 731003, 731004, 731005)
+        after = self.parser.FileState(731001, 731002, 731006, 731007, 731005)
+        path_after = self.parser.FileState(731001, 731008, 731006, 731007, 731009)
+        version = self.parser.TranscriptFileVersion(731003, SYNTHETIC_SECRET, before, after, path_after)
+        outcome = self.parser.TranscriptOutcome(
+            [self.parser.Message("human", SYNTHETIC_SECRET)], "partial",
+            error_categories=("source_changed_during_read",), file_version=version,
+        )
+        diagnostic = capture_diagnostic(outcome)
+        self.assertEqual(diagnostic, {
+            "status": "partial", "errors": ("source_changed_during_read",),
+            "capture_present": True, "stable": False, "byte_count_matches": False,
+            "path_after_present": True, "changed_during_read": ("size", "mtime_ns"),
+            "changed_after_close": ("inode", "ctime_ns"),
+        })
+        rendered = repr(diagnostic)
+        self.assertNotIn(SYNTHETIC_SECRET, rendered)
+        self.assertNotIn("73100", rendered)
+        missing = self.parser.TranscriptOutcome([], "unreadable", error_categories=("source_unreadable",))
+        self.assertEqual(capture_diagnostic(missing), {
+            "status": "unreadable", "errors": ("source_unreadable",), "capture_present": False,
+        })
+
+    def test_unreadable_and_invalid_utf8_do_not_leak_diagnostics(self) -> None:
+        path = self.write(b"User: synthetic \xff station", "transcript.txt")
+        outcome = self.parser.parse_transcript_outcome(path)
+        self.assertEqual(outcome.status, "partial")
+        self.assertIn("invalid_utf8", outcome.error_categories)
+        self.assertEqual(outcome.file_version.sha256, hashlib.sha256(path.read_bytes()).hexdigest())
+        with patch.object(Path, "open", side_effect=PermissionError(SYNTHETIC_SECRET)):
+            unreadable = self.parser.parse_transcript_outcome(path)
+        self.assertEqual(unreadable.status, "unreadable")
+        self.assertNotIn(SYNTHETIC_SECRET, repr(unreadable))
+        with patch.object(Path, "exists", side_effect=PermissionError(SYNTHETIC_SECRET)):
+            denied_probe = self.parser.parse_transcript_outcome(str(path))
+        self.assertEqual((denied_probe.status, denied_probe.messages), ("unreadable", []))
+
+    def test_malformed_array_preserves_legacy_salvage_without_complete_claim(self) -> None:
+        text = '[{"role":"user","content":"synthetic"}, BROKEN]'
+        outcome = self.parser.parse_transcript_outcome(text)
+        self.assertEqual(outcome.status, "salvaged")
+        self.assertEqual(outcome.malformed_records, 1)
+        self.assertEqual(outcome.messages, self.parser.parse_transcript(text))
+
+    def test_jsonl_malformed_first_line_and_wrong_record_types_are_counted(self) -> None:
+        path = self.write(b'BROKEN\n{"role":"user","content":"synthetic station"}\nnull\n')
+        outcome = self.parser.parse_transcript_outcome(path)
+        self.assertEqual((outcome.status, outcome.total_records, outcome.malformed_records), ("partial", 3, 2))
+        self.assertEqual(len(outcome.messages), 1)
+        for text in ('{"bad":"shape"}', '[17, {"role":"user","content":false}]', '{BROKEN',
+                     '{"role":"user","content":[null,17]}'):
+            with self.subTest(text=text):
+                self.assertEqual(self.parser.parse_transcript_outcome(text).status, "malformed")
+
+    def test_valid_supported_formats_match_legacy_messages(self) -> None:
+        entries = [
+            {"type": "file-history-snapshot"},
+            {"type": "user", "message": {"content": "synthetic human message"}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "thinking", "thinking": "synthetic excluded"},
+                {"type": "text", "text": "synthetic reply"}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "content": "synthetic tool"}]}},
+        ]
+        for text in (json.dumps(entries), "\n".join(map(json.dumps, entries)),
+                     "User: synthetic station\nAssistant: synthetic reply"):
+            with self.subTest(format=text[:1]):
+                path = self.write(text.encode(), "supported.txt")
+                outcome = self.parser.parse_transcript_outcome(path)
+                self.assertTrue(outcome.complete, capture_diagnostic(outcome))
+                self.assertEqual(outcome.messages, self.parser.parse_transcript(path))
+
+    def test_top_level_legacy_tool_call_retains_its_message(self) -> None:
+        text = json.dumps({"type": "tool_use", "name": "synthetic-tool", "input": {"value": "synthetic"}})
+        outcome = self.parser.parse_transcript_outcome(text)
+        self.assertTrue(outcome.complete)
+        self.assertEqual(len(outcome.messages), 1)
+        self.assertEqual(outcome.messages, self.parser.parse_transcript(text))
+        self.assertEqual(outcome.messages[0].role, "tool_use")
+
+    def test_missing_text_is_malformed_but_recognized_empty_and_thinking_are_complete(self) -> None:
+        for block in ({"type": "text"}, {"type": "text", "text": None}):
+            with self.subTest(block=block):
+                outcome = self.parser.parse_transcript_outcome(json.dumps({"role": "user", "content": [block]}))
+                self.assertEqual((outcome.status, outcome.malformed_records), ("malformed", 1))
+                self.assertEqual(outcome.messages, [])
+        for block in ({"type": "text", "text": ""}, {"type": "thinking", "thinking": "synthetic excluded"}):
+            with self.subTest(kind=block["type"]):
+                outcome = self.parser.parse_transcript_outcome(json.dumps({"role": "assistant", "content": [block]}))
+                self.assertTrue(outcome.complete)
+                self.assertEqual(outcome.messages, [])
+
+    def test_unknown_and_nontext_payloads_are_incomplete_without_guessing_text(self) -> None:
+        for kind in ("image", "audio", "document", "synthetic-unknown"):
+            with self.subTest(kind=kind):
+                text = json.dumps({"role": "user", "content": [{"type": kind, "text": "synthetic unrecognized"}]})
+                outcome = self.parser.parse_transcript_outcome(text)
+                self.assertEqual(outcome.status, "partial")
+                self.assertEqual(outcome.unrecognized_records, 1)
+                self.assertEqual(outcome.error_categories, ("unrecognized_content",))
+                self.assertEqual(outcome.messages, [])
+                self.assertEqual(self.parser.parse_transcript(text), [])
+
+    def test_mixed_blocks_retain_supported_text_and_count_record_loss_once(self) -> None:
+        entries = [
+            {"role": "user", "content": [{"type": "text", "text": "synthetic retained"},
+                                          {"type": "text"}, {"type": "image"}, {"type": "unknown"}]},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "content": [
+                {"type": "text", "text": "synthetic tool result"}, {"type": "text"}, {"type": "image"}]}]}},
+        ]
+        path = self.write(json.dumps(entries).encode(), "mixed.json")
+        outcome = self.parser.parse_transcript_outcome(path)
+        self.assertEqual(outcome.status, "partial")
+        self.assertEqual((outcome.malformed_records, outcome.unrecognized_records), (2, 2))
+        self.assertEqual([message.content for message in outcome.messages], ["synthetic retained", "synthetic tool result"])
+        self.assertEqual(outcome.messages, self.parser.parse_transcript(path))
+        self.assertEqual(outcome.messages[1].role, "tool_result")
+        self.assertEqual(outcome.error_categories, ("malformed_records", "unrecognized_content"))
+
+
+class TestExtractionOutcomes(unittest.TestCase):
+    def setUp(self) -> None:
+        self.extractor = load_module("extractor")
+        self.config = types.SimpleNamespace(provider="synthetic")
+        self.addCleanup(logging.disable, logging.NOTSET)
+        logging.disable(logging.CRITICAL)
+
+    def run_responses(self, responses: list, *, max_facts: int = 50, max_chunks: int = 20,
+                      wrapper: bool = False) -> tuple:
+        # One over-budget message stays intact, preserving the production
+        # chunker's deliberate no-splitting policy.
+        transcript = "\n\n".join("User: synthetic " + str(index) + "x" * 20001
+                                   for index in range(len(responses)))
+        fn = self.extractor.extract_facts if wrapper else self.extractor.extract_facts_outcome
+        with patch.object(self.extractor, "complete", side_effect=responses) as provider:
+            result = fn(transcript, self.config, max_facts=max_facts, max_chunks=max_chunks)
+        return result, provider.call_count
+
+    def test_valid_empty_responses_and_empty_input(self) -> None:
+        for response in ("[]", '{"facts":[]}', '{"items":[]}', "```json\n[]\n```", "Facts: [] done"):
+            with self.subTest(response=response):
+                outcome, calls = self.run_responses([response])
+                self.assertEqual((outcome.status, outcome.facts, calls), ("complete", [], 1))
+                self.assertEqual((outcome.attempted_chunks, outcome.successful_chunks), (1, 1))
+        with patch.object(self.extractor, "complete") as provider:
+            empty = self.extractor.extract_facts_outcome("  ", self.config)
+        self.assertTrue(empty.complete)
+        self.assertEqual(empty.total_chunks, 0)
+        provider.assert_not_called()
+
+    def test_failed_response_is_distinct_from_successful_empty(self) -> None:
+        for response in ("garbage", "{}", '{"unexpected":[]}', '[null,17,{}, {"content":" "}]', None):
+            with self.subTest(response=response):
+                outcome, calls = self.run_responses([response])
+                self.assertEqual((outcome.status, calls, outcome.failed_chunks), ("failed", 1, 1))
+                self.assertEqual(outcome.invalid_responses, 1)
+                self.assertFalse(outcome.complete)
+                self.assertTrue(outcome.error_categories)
+
+    def test_mixed_provider_failure_and_valid_empty_is_partial(self) -> None:
+        responses = ['[{"content":"synthetic amber"}]', FakeLLMError(SYNTHETIC_SECRET), "[]"]
+        outcome, calls = self.run_responses(responses)
+        self.assertEqual((outcome.status, calls), ("partial", 3))
+        self.assertEqual((outcome.successful_chunks, outcome.partial_chunks, outcome.failed_chunks), (2, 0, 1))
+        self.assertEqual([fact.content for fact in outcome.facts], ["synthetic amber"])
+        self.assertEqual(outcome.error_categories, ("provider_error",))
+        self.assertNotIn(SYNTHETIC_SECRET, repr(outcome))
+        self.assertNotIn("synthetic amber", repr(outcome))
+        legacy, legacy_calls = self.run_responses(responses, wrapper=True)
+        self.assertEqual(legacy, outcome.facts)
+        self.assertEqual(legacy_calls, calls)
+
+    def test_all_provider_failures_are_failed_without_retry_or_error_text(self) -> None:
+        logging.disable(logging.NOTSET)
+        with self.assertLogs(self.extractor.log, level="ERROR") as captured:
+            outcome, calls = self.run_responses([RuntimeError(SYNTHETIC_SECRET), FakeLLMError(SYNTHETIC_SECRET)])
+        self.assertEqual((outcome.status, calls, outcome.failed_chunks), ("failed", 2, 2))
+        self.assertNotIn(SYNTHETIC_SECRET, "\n".join(captured.output) + repr(outcome))
+        self.assertEqual(outcome.error_categories, ("provider_exception", "provider_error"))
+
+    def test_mixed_invalid_items_preserve_coercion_and_order(self) -> None:
+        response = '[{"content":"synthetic first","category":"INVALID"},17,{}, {"content":42}]'
+        outcome, _ = self.run_responses([response])
+        self.assertEqual((outcome.status, outcome.invalid_items, outcome.partial_chunks), ("partial", 2, 1))
+        self.assertEqual([fact.content for fact in outcome.facts], ["synthetic first", "42"])
+        self.assertEqual(outcome.facts[0].category, "general")
+
+    def test_salvage_is_visible_and_legacy_selection_is_preserved(self) -> None:
+        response = '[{"content":"synthetic first"}, BROKEN, {"content":"synthetic second"}]'
+        outcome, calls = self.run_responses([response], max_facts=1)
+        self.assertEqual((outcome.status, calls, outcome.salvaged_responses), ("partial", 1, 1))
+        self.assertEqual(outcome.merged_fact_omissions, 1)
+        self.assertEqual([fact.content for fact in outcome.facts], ["synthetic first"])
+        # The legacy response salvage is uncapped; the extraction merge then
+        # enforces max_facts. Do not silently change this compatibility rule.
+        self.assertEqual(len(self.extractor._parse_extraction_response(response, 1)), 2)
+
+    def test_per_chunk_cap_counts_valid_omissions_before_slicing(self) -> None:
+        response = '[{"content":"synthetic first"}, {}, {"content":"synthetic omitted"},17]'
+        outcome, _ = self.run_responses([response], max_facts=1)
+        self.assertEqual((outcome.omitted_items, outcome.chunk_fact_omissions), (3, 1))
+        self.assertEqual(outcome.invalid_items, 2)
+        self.assertFalse(outcome.complete)
+        clean, _ = self.run_responses(['[{"content":"one"},{"content":"two"}]'], max_facts=1)
+        self.assertEqual((clean.status, clean.chunk_fact_omissions), ("limited", 1))
+
+    def test_merge_dedup_order_and_global_cap_match_legacy(self) -> None:
+        responses = ['[{"content":"First"},{"content":"DUP"}]',
+                     '[{"content":"dup"},{"content":"Last"}]']
+        outcome, calls = self.run_responses(responses, max_facts=2)
+        legacy, legacy_calls = self.run_responses(responses, max_facts=2, wrapper=True)
+        self.assertEqual([fact.content for fact in outcome.facts], ["First", "DUP"])
+        self.assertEqual((outcome.status, outcome.merged_fact_omissions, outcome.chunk_fact_omissions), ("limited", 1, 0))
+        self.assertEqual((legacy, legacy_calls), (outcome.facts, calls))
+
+    def test_default_chunk_limit_does_not_spend_tail_calls(self) -> None:
+        outcome, calls = self.run_responses(["[]"] * 21)
+        self.assertEqual((outcome.total_chunks, outcome.attempted_chunks, outcome.deferred_chunks), (21, 20, 1))
+        self.assertEqual((outcome.status, calls), ("limited", 20))
+        self.assertEqual(outcome.error_categories, ("chunk_limit",))
+
+    def test_zero_and_negative_controls_preserve_legacy_slicing(self) -> None:
+        for max_facts, max_chunks in ((0, 20), (-1, 20), (50, 0), (50, -1)):
+            with self.subTest(max_facts=max_facts, max_chunks=max_chunks):
+                responses = ['[{"content":"one"},{"content":"two"}]'] * 2
+                outcome, calls = self.run_responses(responses, max_facts=max_facts, max_chunks=max_chunks)
+                legacy, legacy_calls = self.run_responses(responses, max_facts=max_facts, max_chunks=max_chunks, wrapper=True)
+                self.assertEqual((legacy, legacy_calls), (outcome.facts, calls))
+                self.assertEqual(outcome.attempted_chunks + outcome.deferred_chunks, outcome.total_chunks)
+                self.assertFalse(outcome.complete)
+
+    def test_wrong_object_envelope_is_not_complete_even_when_legacy_finds_array(self) -> None:
+        response = '{"unexpected":[{"content":"synthetic compatibility fact"}]}'
+        outcome, _ = self.run_responses([response])
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(outcome.error_categories, ("response_shape",))
+        self.assertEqual(len(outcome.facts), 1)
+        self.assertEqual(self.extractor._parse_extraction_response(response, 50), outcome.facts)
+
+    def test_fact_response_records_use_only_public_schema_fields(self) -> None:
+        outcome, _ = self.run_responses(['[{"content":"synthetic","category":"PREFERENCE","extra":"ignored"}]'])
+        self.assertEqual(asdict(outcome.facts[0]), {"content": "synthetic", "category": "preference",
+                                                  "confidence": "medium", "source_role": "user"})
+
+
+if __name__ == "__main__":
+    unittest.main()
