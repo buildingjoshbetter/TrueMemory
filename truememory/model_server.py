@@ -224,6 +224,11 @@ class _EmbedState:
     model: object
     tier: str
     model_id: str
+    generation: object = None
+
+    def __post_init__(self) -> None:
+        if self.generation is None:
+            object.__setattr__(self, "generation", object())
 
 
 class _RequestDeadlineExceeded(TimeoutError):
@@ -341,9 +346,12 @@ class ModelServer:
         self._reranker = None
         self._reranker_name: str | None = None
         self._lock = threading.Lock()
+        # Only snapshot/cache publication, never model work or destruction.
+        # Main state -> residency; fast -> residency; never the reverse.
+        self._residency_lock = threading.Lock()
         # Main models stay exclusively owned through loading, recovery and
         # CPU retries, even while the state lock is released (issue #738).
-        # Lock order: inference -> state; the fast lane owns only _fast_lock.
+        # Lock order: inference -> state; fast inference owns only _fast_lock.
         self._inference_lock = threading.Lock()
         # Issue #577: idle-tracking gets its own lock so the single-text
         # fast lane (and the idle checker) never block on the global
@@ -362,10 +370,10 @@ class ModelServer:
         self._sticky_cpu: set[str] = set()
         # Issue #577: dedicated CPU encoder for the single-text fast lane,
         # loaded lazily on the first *contended* single-text request.
-        # Cached by MODEL ID (not tier string) so it always tracks the main
-        # path's actual loaded identity.
+        # A generation distinguishes A -> B -> A from an unchanged residency.
         self._fast_encoder = None
         self._fast_model_id: str | None = None
+        self._fast_generation: object = None
         self._fast_lock = threading.Lock()
         # Issue #646 (M-20): exclusive bind-lock fd, held for the process
         # lifetime; released in _cleanup. None until run() acquires it.
@@ -447,7 +455,7 @@ class ModelServer:
             # so the next request loads on CPU without moving it for dead work.
             state = self._embed_state
             if state is not None and state.model is model:
-                self._embed_state = None
+                self._publish_embed_state(None)
             raise
 
     @staticmethod
@@ -661,17 +669,56 @@ class ModelServer:
         # Custom CrossEncoder constructors preserve num_labels=None; their
         # output may contain several labels per pair. Inspect its real shape.
 
+    def _retire_stale_fast_encoder(self) -> None:
+        """Drop an idle stale clone; an active owner retries this on release."""
+        if not self._fast_lock.acquire(blocking=False):
+            return
+        release_fast = True
+        try:
+            with self._residency_lock:
+                state = self._embed_state
+                if self._fast_encoder is None or (
+                    state is not None and self._fast_generation is state.generation
+                ):
+                    # Unlock before publication can change the generation, so
+                    # a following invalidation cannot miss an idle stale cache.
+                    self._fast_lock.release()
+                    release_fast = False
+                    return
+                retired = self._fast_encoder
+                self._fast_encoder = None
+                self._fast_model_id = None
+                self._fast_generation = None
+            # Destruction stays outside residency, but before another fast load.
+            state = None
+            del retired
+        finally:
+            if release_fast:
+                self._fast_lock.release()
+
+    def _publish_embed_state(self, state: _EmbedState | None) -> None:
+        """Caller owns the main state lock; retire without waiting for fast work."""
+        with self._residency_lock:
+            retired = self._embed_state
+            self._embed_state = state
+        del retired
+        self._retire_stale_fast_encoder()
+
     def _get_embed_model(self, tier: str):
         model_id, state = self._resolve_embed_cache(tier)
         if state is not None:
             if state.tier != tier:
-                self._embed_state = _EmbedState(model=state.model, tier=tier, model_id=model_id)
+                self._publish_embed_state(_EmbedState(
+                    model=state.model, tier=tier, model_id=model_id, generation=state.generation,
+                ))
             return state.model
 
+        # Memory-first replacement: failed construction leaves the cache empty.
+        self._publish_embed_state(None)
         model = self._build_embed_model(model_id, self._embed_device())
         # ONE atomic reference assignment of an immutable snapshot — the
         # fast lane can never observe a torn (model, tier, model_id) triple.
-        self._embed_state = _EmbedState(model=model, tier=tier, model_id=model_id)
+        self._publish_embed_state(_EmbedState(model=model, tier=tier, model_id=model_id))
         log.info("Loaded embedding model for tier=%s (model=%s)", tier, model_id)
         return model
 
@@ -679,8 +726,8 @@ class ModelServer:
         """CPU-resident encoder for the single-text fast lane (issue #577).
 
         Loaded lazily on the first single-text request that finds the global
-        lock busy, then kept for the server's lifetime. Caller must hold
-        ``self._fast_lock``.
+        lock busy, then cached for that main residency. Caller must hold
+        ``self._fast_lock`` through inference and retire stale cache on release.
 
         Vector-space parity (panel rounds 1-2): the fast encoder is ONLY
         ever built from the main path's actual loaded identity, taken from
@@ -700,16 +747,33 @@ class ModelServer:
         if state.model_id not in self._FAST_LANE_SAFE_MODEL_IDS:
             return None
 
-        if self._fast_encoder is not None and self._fast_model_id == state.model_id:
+        model_id, generation = state.model_id, state.generation
+        # A slow CPU constructor must not retain the old main model snapshot.
+        state = None
+        if self._fast_encoder is not None and self._fast_generation is generation:
             return self._fast_encoder
 
-        self._fast_encoder = self._build_embed_model(state.model_id, "cpu")
-        self._fast_model_id = state.model_id
+        self._fast_encoder = None
+        self._fast_model_id = None
+        self._fast_generation = None
+        model = self._build_embed_model(model_id, "cpu")
+        # A changed generation, including A -> B -> A, must not publish this
+        # construction. Its already-captured request may still finish on it.
+        if self._residency_lock.acquire(blocking=False):
+            try:
+                state = self._embed_state
+                if state is not None and state.generation is generation:
+                    self._fast_encoder = model
+                    self._fast_model_id = model_id
+                    self._fast_generation = generation
+            finally:
+                self._residency_lock.release()
+                state = None
         log.info(
             "Fast-lane CPU encoder loaded (tier=%s, model=%s) — single-text "
-            "requests no longer queue behind batch work", tier, state.model_id,
+            "requests no longer queue behind batch work", tier, model_id,
         )
-        return self._fast_encoder
+        return model
 
     def _get_reranker(self, model_name: str | None = None):
         from truememory.reranker import get_current_reranker_name
@@ -718,6 +782,8 @@ class ModelServer:
         if self._reranker is not None and self._reranker_name == name:
             return self._reranker
 
+        self._reranker = None
+        self._reranker_name = None
         from truememory.mps_utils import auto_detect_device, ensure_mps_memory_budget, resolve_device
         if "rerank" in self._sticky_cpu:
             device = "cpu"
@@ -782,18 +848,27 @@ class ModelServer:
                 self._inference_lock.release()
 
         was_started = deadline.transport.started if deadline.transport is not None else False
+        fast_owned = False
         try:
-            with deadline.locked(self._fast_lock):
-                deadline.start_inference()
-                model = self._get_fast_encoder(tier)
-                deadline.check()
-                if model is None:
-                    if deadline.transport is not None:
-                        deadline.transport.started = was_started
-                    # Vector-space parity with the main path cannot be
-                    # guaranteed (custom model) — decline the fast lane.
-                    return None
-                vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
+            try:
+                with deadline.locked(self._fast_lock):
+                    fast_owned = True
+                    model = None
+                    try:
+                        deadline.start_inference()
+                        model = self._get_fast_encoder(tier)
+                        deadline.check()
+                        if model is None:
+                            if deadline.transport is not None:
+                                deadline.transport.started = was_started
+                            # Custom identities decline rather than drift.
+                            return None
+                        vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
+                    finally:
+                        model = None
+            finally:
+                if fast_owned:
+                    self._retire_stale_fast_encoder()
             return {"ok": True, "vectors": _checked_batch(vectors, len(texts), len(texts), "vectors")}
         except (_RequestDeadlineExceeded, _ResultTooLarge):
             raise
@@ -1539,6 +1614,7 @@ class ModelServer:
         self._reranker_name = None
         self._fast_encoder = None
         self._fast_model_id = None
+        self._fast_generation = None
         self._token = None
         gc.collect()
         # Only remove artifacts THIS process owns (issue #646, M-20). After a

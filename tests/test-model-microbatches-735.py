@@ -603,7 +603,7 @@ def load_order_runtime() -> dict:
                "_embed_slice_indices", "_preflight_embed_result", "_resolve_embed_cache",
                "_request_batch_limit", "_after_request_batches", "_recover_embed_oom_locked",
                "_check_embed_recovery_deadline_locked", "_rerank_global_order", "_rerank_slice_indices",
-               "_preflight_rerank_result"}
+               "_preflight_rerank_result", "_publish_embed_state", "_retire_stale_fast_encoder"}
     body = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
     for node in ast.parse(path.read_text(encoding="utf-8")).body:
         if isinstance(node, ast.FunctionDef) and node.name in functions:
@@ -647,6 +647,10 @@ class TestQwenGlobalOrder(unittest.TestCase):
         server._inference_lock = threading.Lock()
         server._activity_lock = threading.Lock()
         server._fast_lock = threading.Lock()
+        server._residency_lock = threading.Lock()
+        server._fast_encoder = None
+        server._fast_model_id = None
+        server._fast_generation = None
         server._transport_context = types.SimpleNamespace()
         server._embed_timestamps = []
         server._throttler_active = False
