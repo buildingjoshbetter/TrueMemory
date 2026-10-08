@@ -81,6 +81,8 @@ def _make_server(monkeypatch, tmp_path):
 
 def _seed_messages(ms, n: int) -> None:
     m = ms._get_memory()
+    # These focused tests own explicit rebuild maintenance.
+    m._engine._has_consolidation = False
     for i in range(n):
         m.add(f"memory number {i}", user_id="test")
 

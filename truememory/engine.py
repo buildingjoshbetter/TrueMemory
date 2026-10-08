@@ -31,6 +31,10 @@ import warnings
 import time
 import sqlite3
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from truememory.maintenance import LayerResult, MaintenanceCoordinator
 
 # ───────────────────────────────────────────────────────────────────────────
 # Core modules (always available)
@@ -358,18 +362,18 @@ class TrueMemoryEngine:
         # Coordination flag for background NaN re-embed thread (#485).
         self._nan_migration_in_progress = False
 
-        # Auto-consolidation: run L5 consolidation every N adds (#498)
-        self._adds_since_consolidation = 0
         self._auto_consolidate_threshold = _env_int(
             "TRUEMEMORY_AUTO_CONSOLIDATE_EVERY", 25, lo=1
         )
-        self._consolidation_thread: threading.Thread | None = None
+        self._maintenance_coordinator = None
+        self._maintenance_handle = None
+        self._maintenance_pending_reason = "not_connected"
 
     # ──────────────────────────────────────────────────────────────────────
     # Auto-connect (production API)
     # ──────────────────────────────────────────────────────────────────────
 
-    def _ensure_connection(self) -> None:
+    def _ensure_connection(self, *, _suppress_maintenance: bool = False) -> None:
         """Open (or create) the database and load extensions if needed.
 
         Called automatically by :meth:`add`, :meth:`search`, and other
@@ -385,6 +389,8 @@ class TrueMemoryEngine:
             # through to reconnect so the server self-heals once the FS recovers.
             try:
                 self.conn.execute("PRAGMA schema_version")
+                if not _suppress_maintenance:
+                    self._maybe_auto_consolidate()
                 return
             except sqlite3.Error:
                 logger.warning(
@@ -400,6 +406,8 @@ class TrueMemoryEngine:
 
         with self._init_lock:
             if self.conn is not None:
+                if not _suppress_maintenance:
+                    self._maybe_auto_consolidate()
                 return
 
             # Create parent directory if using a real path
@@ -581,7 +589,8 @@ class TrueMemoryEngine:
             self._purge_legacy_entity_profile_summaries()
 
             self.ready = True
-            self._maybe_startup_consolidate()
+            if not _suppress_maintenance:
+                self._maybe_startup_consolidate()
 
     def _purge_legacy_entity_profile_summaries(self) -> None:
         """Delete legacy ``period='entity_profile'`` summary rows once.
@@ -656,25 +665,8 @@ class TrueMemoryEngine:
             )
 
     def _maybe_startup_consolidate(self) -> None:
-        """Trigger background consolidation on startup if data looks stale."""
-        if not self._has_consolidation or self.conn is None:
-            return
-        try:
-            msg_count = self.conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-            if msg_count < self._auto_consolidate_threshold:
-                return
-            cluster_count = self.conn.execute(
-                "SELECT COUNT(*) FROM message_clusters"
-            ).fetchone()[0]
-            if cluster_count == 0:
-                self._consolidation_thread = threading.Thread(
-                    target=self._bg_consolidate,
-                    daemon=True,
-                    name="startup-consolidate",
-                )
-                self._consolidation_thread.start()
-        except Exception:
-            pass
+        """Use durable per-layer provenance, including successful empty work."""
+        self._maybe_auto_consolidate()
 
     # ──────────────────────────────────────────────────────────────────────
     # Production CRUD API
@@ -822,30 +814,54 @@ class TrueMemoryEngine:
             "metadata": metadata or {},
         }
 
+    def _get_maintenance_coordinator(self) -> MaintenanceCoordinator:
+        from truememory.maintenance import get_coordinator
+        coordinator = self._maintenance_coordinator
+        if coordinator is not None:
+            try:
+                coordinator.status
+            except RuntimeError:
+                coordinator = None
+        if coordinator is None or self._maintenance_handle is not self.conn:
+            coordinator = get_coordinator(self.db_path)
+            coordinator.refresh_capabilities()
+            self._maintenance_coordinator = coordinator
+            self._maintenance_handle = self.conn
+        return coordinator
+
     def _maybe_auto_consolidate(self) -> None:
-        """Trigger background consolidation after threshold adds."""
-        self._adds_since_consolidation += 1
-        if self._adds_since_consolidation < self._auto_consolidate_threshold:
+        """Probe fixed metadata without waiting on foreground or model work."""
+        if not self._has_consolidation or self.conn is None:
             return
-        if not self._has_consolidation:
+        if not self._write_lock.acquire(blocking=False):
+            self._maintenance_pending_reason = "foreground_busy"
             return
-        if (self._consolidation_thread is not None
-                and self._consolidation_thread.is_alive()):
-            return
-        self._adds_since_consolidation = 0
-        self._consolidation_thread = threading.Thread(
-            target=self._bg_consolidate,
-            daemon=True,
-            name="auto-consolidate",
-        )
-        self._consolidation_thread.start()
+        coordinator = None
+        eligible = ()
+        try:
+            if self.conn is None:
+                return
+            if self.conn.in_transaction:
+                self._maintenance_pending_reason = "pending_caller_commit"
+                return
+            from truememory.maintenance import engine_layer_specs, plan_layers
+            coordinator = self._get_maintenance_coordinator()
+            eligible = plan_layers(self.conn, engine_layer_specs(self.conn, coordinator),
+                                   threshold=self._auto_consolidate_threshold)
+            self._maintenance_pending_reason = "eligible" if eligible else "awaiting_eligibility"
+        except Exception as error:
+            self._maintenance_pending_reason = type(error).__name__[:64]
+        finally:
+            self._write_lock.release()
+        if eligible and coordinator is not None:
+            try:
+                coordinator.request_layers(threshold=self._auto_consolidate_threshold)
+            except Exception as error:
+                self._maintenance_pending_reason = type(error).__name__[:64]
 
     def _bg_consolidate(self) -> None:
-        """Run consolidation in a background thread with its own connection."""
-        try:
-            self.consolidate()
-        except Exception:
-            logger.debug("Auto-consolidation failed", exc_info=True)
+        """Compatibility entry point; the coordinator owns the worker handle."""
+        self._maybe_auto_consolidate()
 
     def delete(self, memory_id: int) -> bool:
         """Delete a memory by ID.
@@ -854,7 +870,10 @@ class TrueMemoryEngine:
         """
         self._ensure_connection()
         with self._write_lock:
-            return delete_message(self.conn, memory_id)
+            deleted = delete_message(self.conn, memory_id)
+        if deleted:
+            self._maybe_auto_consolidate()
+        return deleted
 
     def delete_all(self, user_id: str | None = None) -> bool:
         """Delete all memories, optionally filtered by user.
@@ -1021,147 +1040,51 @@ class TrueMemoryEngine:
                 logger.warning("Failed to rebuild FTS index during delete_all", exc_info=True)
 
             self.conn.commit()
-            return deleted
+        if deleted:
+            self._maybe_auto_consolidate()
+        return deleted
+
+    def _apply_manual_maintenance_capabilities(self, results: tuple[LayerResult, ...]) -> None:
+        completed = {result.layer for result in results
+                     if result.outcome in {"success", "success_empty"}}
+        if "summaries" in completed:
+            self._has_consolidation = True
+        if "clusters" in completed:
+            self._has_clustering = True
 
     def consolidate(self) -> dict[str, str]:
-        """Run all consolidation layers (L0-L5) under the write lock.
-
-        Returns timing stats for each step.
-        """
-        import time as _time
-
-        self._ensure_connection()
-        stats: dict[str, str] = {}
-
-        try:
-            from truememory.consolidation import (
-                build_summaries,
-                detect_contradictions,
-                build_structured_facts,
-            )
-        except (ImportError, ModuleNotFoundError):
-            stats["consolidation"] = "SKIPPED (module not available)"
-            return stats
-
-        try:
-            from truememory.predictive import build_surprise_index
-        except (ImportError, ModuleNotFoundError):
-            build_surprise_index = None
-
-        try:
-            from truememory.temporal import detect_episodes, detect_landmark_events
-        except (ImportError, ModuleNotFoundError):
-            detect_episodes = None
-            detect_landmark_events = None
-
-        try:
-            from truememory.personality import build_dunbar_hierarchy
-        except (ImportError, ModuleNotFoundError):
-            build_dunbar_hierarchy = None
-
-        _cluster_messages = None
-        if _HAS_CLUSTERING and self._has_vectors:
-            try:
-                from truememory.clustering import cluster_messages as _cm
-                _cluster_messages = _cm
-            except (ImportError, ModuleNotFoundError):
-                pass
-
-        _extract_preferences = None
-        if _HAS_PERSONALITY:
-            try:
-                from truememory.personality import extract_preferences as _ep
-                _extract_preferences = _ep
-            except (ImportError, ModuleNotFoundError):
-                pass
-
+        """Force one pass, preserving caller transactions and shared ownership."""
+        from truememory.maintenance import (
+            MaintenanceBusyError, format_maintenance_report, maintenance_busy_result,
+            maintenance_owner, run_engine_maintenance,
+        )
+        self._ensure_connection(_suppress_maintenance=True)
         with self._write_lock:
-            if _cluster_messages:
+            coordinator = self._get_maintenance_coordinator()
+            coordinator.refresh_capabilities()
+            borrowed = self.conn.in_transaction
+            if borrowed or coordinator.path is None:
                 try:
-                    t0 = _time.time()
-                    n = _cluster_messages(self.conn)
-                    stats["cluster_messages"] = f"{n} clusters in {_time.time() - t0:.3f}s"
-                    self._has_clustering = True
-                except Exception as exc:
-                    stats["cluster_messages"] = f"ERROR: {exc}"
-
-            if _extract_preferences:
+                    report = run_engine_maintenance(self.conn, coordinator, force=True,
+                        threshold=self._auto_consolidate_threshold, prepare_extensions=False,
+                        allow_caller_transaction=borrowed)
+                except MaintenanceBusyError:
+                    return maintenance_busy_result()
+                self._apply_manual_maintenance_capabilities(report.results)
+                return format_maintenance_report(report)
+        try:
+            with maintenance_owner(coordinator.path):
+                connection = create_db(coordinator.path)
                 try:
-                    t0 = _time.time()
-                    _extract_preferences(self.conn)
-                    stats["extract_preferences"] = f"{_time.time() - t0:.3f}s"
-                except Exception as exc:
-                    stats["extract_preferences"] = f"ERROR: {exc}"
-
-            try:
-                t0 = _time.time()
-                build_summaries(self.conn)
-                stats["build_summaries"] = f"{_time.time() - t0:.3f}s"
-            except Exception as exc:
-                stats["build_summaries"] = f"ERROR: {exc}"
-
-            try:
-                t0 = _time.time()
-                detect_contradictions(self.conn)
-                stats["detect_contradictions"] = f"{_time.time() - t0:.3f}s"
-            except Exception as exc:
-                stats["detect_contradictions"] = f"ERROR: {exc}"
-
-            try:
-                t0 = _time.time()
-                n = build_structured_facts(self.conn)
-                stats["structured_facts"] = f"{n} facts in {_time.time() - t0:.3f}s"
-            except Exception as exc:
-                stats["structured_facts"] = f"ERROR: {exc}"
-
-            if build_surprise_index:
-                try:
-                    t0 = _time.time()
-                    build_surprise_index(self.conn)
-                    stats["build_surprise_index"] = f"{_time.time() - t0:.3f}s"
-                except Exception as exc:
-                    stats["build_surprise_index"] = f"ERROR: {exc}"
-
-            if detect_episodes:
-                try:
-                    t0 = _time.time()
-                    ep = detect_episodes(self.conn)
-                    stats["detect_episodes"] = f"{ep} episodes in {_time.time() - t0:.3f}s"
-                except Exception as exc:
-                    stats["detect_episodes"] = f"ERROR: {exc}"
-
-            if detect_landmark_events:
-                try:
-                    t0 = _time.time()
-                    lm = detect_landmark_events(self.conn)
-                    stats["detect_landmarks"] = f"{lm} events in {_time.time() - t0:.3f}s"
-                except Exception as exc:
-                    stats["detect_landmarks"] = f"ERROR: {exc}"
-
-            if build_dunbar_hierarchy:
-                try:
-                    t0 = _time.time()
-                    primary = None
-                    try:
-                        row = self.conn.execute(
-                            "SELECT sender, COUNT(*) as cnt FROM messages "
-                            "WHERE sender != '' AND sender IS NOT NULL "
-                            "GROUP BY sender ORDER BY cnt DESC LIMIT 1"
-                        ).fetchone()
-                        if row and row[0] and row[0].strip():
-                            primary = row[0]
-                    except Exception:
-                        pass
-                    result = build_dunbar_hierarchy(self.conn, primary_entity=primary)
-                    n_rel = len(result) if isinstance(result, dict) else result
-                    stats["dunbar_hierarchy"] = f"{n_rel} relationships in {_time.time() - t0:.3f}s"
-                except Exception as exc:
-                    stats["dunbar_hierarchy"] = f"ERROR: {exc}"
-
-            self.conn.commit()
-
-        self._has_consolidation = True
-        return stats
+                    report = run_engine_maintenance(connection, coordinator, force=True,
+                                                   threshold=self._auto_consolidate_threshold)
+                finally:
+                    connection.close()
+        except MaintenanceBusyError:
+            return maintenance_busy_result()
+        with self._write_lock:
+            self._apply_manual_maintenance_capabilities(report.results)
+        return format_maintenance_report(report)
 
     def update(self, memory_id: int, content: str | None = None, **fields) -> dict | None:
         """Update a memory.
@@ -1205,41 +1128,47 @@ class TrueMemoryEngine:
             except Exception:
                 logger.debug("Failed to pre-compute embedding during update()", exc_info=True)
 
-        with self._write_lock:
-            if content is not None:
-                fields["content"] = content
+        source_committed = False
+        try:
+            with self._write_lock:
+                if content is not None:
+                    fields["content"] = content
 
-            ok = update_message(self.conn, memory_id, **fields)
-            if not ok:
-                return None
+                ok = update_message(self.conn, memory_id, **fields)
+                source_committed = ok and not self.conn.in_transaction
+                if not ok:
+                    return None
 
-            if pre_embedding is not None:
-                from truememory.vector_search import VectorPublicationChanged, _foreground_vector_publication
-                try:
-                    from truememory.vector_search import serialize_f32, _write_embedder_metadata_no_commit
-                    with _foreground_vector_publication(self.conn, pre_identity, memory_id) as (vec_tbl, sep_tbl):
-                        try:
-                            self.conn.execute(f"DELETE FROM {vec_tbl} WHERE rowid = ?", (memory_id,))
-                        except Exception:
-                            logger.debug("Failed to delete old vector embedding for message %d", memory_id, exc_info=True)
-                        self.conn.execute(
-                            f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
-                            (memory_id, serialize_f32(pre_embedding)),
-                        )
-                        if pre_sep_embedding is not None:
+                if pre_embedding is not None:
+                    from truememory.vector_search import VectorPublicationChanged, _foreground_vector_publication
+                    try:
+                        from truememory.vector_search import serialize_f32, _write_embedder_metadata_no_commit
+                        with _foreground_vector_publication(self.conn, pre_identity, memory_id) as (vec_tbl, sep_tbl):
                             try:
-                                self.conn.execute(f"DELETE FROM {sep_tbl} WHERE rowid = ?", (memory_id,))
+                                self.conn.execute(f"DELETE FROM {vec_tbl} WHERE rowid = ?", (memory_id,))
                             except Exception:
-                                logger.debug("Failed to delete old sep vector for message %d", memory_id, exc_info=True)
+                                logger.debug("Failed to delete old vector embedding for message %d", memory_id, exc_info=True)
                             self.conn.execute(
-                                f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
-                                (memory_id, serialize_f32(pre_sep_embedding)),
+                                f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
+                                (memory_id, serialize_f32(pre_embedding)),
                             )
-                        _write_embedder_metadata_no_commit(self.conn)
-                except VectorPublicationChanged as exc:
-                    raise VectorPublicationChanged("Source update committed; retry update to publish vectors") from exc
-                except Exception:
-                    logger.warning("Vector embedding failed for message %d", memory_id, exc_info=True)
+                            if pre_sep_embedding is not None:
+                                try:
+                                    self.conn.execute(f"DELETE FROM {sep_tbl} WHERE rowid = ?", (memory_id,))
+                                except Exception:
+                                    logger.debug("Failed to delete old sep vector for message %d", memory_id, exc_info=True)
+                                self.conn.execute(
+                                    f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
+                                    (memory_id, serialize_f32(pre_sep_embedding)),
+                                )
+                            _write_embedder_metadata_no_commit(self.conn)
+                    except VectorPublicationChanged as exc:
+                        raise VectorPublicationChanged("Source update committed; retry update to publish vectors") from exc
+                    except Exception:
+                        logger.warning("Vector embedding failed for message %d", memory_id, exc_info=True)
+        finally:
+            if source_committed:
+                self._maybe_auto_consolidate()
 
         return self.get(memory_id)
 
@@ -2567,6 +2496,28 @@ class TrueMemoryEngine:
         """Return ingestion and search statistics."""
         self._ensure_connection()
         stats = dict(self.stats)
+        if self._write_lock.acquire(blocking=False):
+            try:
+                from truememory.maintenance import engine_layer_specs, layer_freshness, read_layer_states
+                coordinator = self._get_maintenance_coordinator()
+                maintenance = coordinator.snapshot()
+                maintenance["last_results"] = [result._asdict() for result in maintenance["last_results"]]
+                maintenance["pending_reason"] = self._maintenance_pending_reason
+                maintenance["pending_caller_commit"] = self.conn.in_transaction
+                states = read_layer_states(self.conn, engine_layer_specs(self.conn, coordinator))
+                maintenance["layers"] = {name: {
+                    "outcome": state.outcome, "freshness": layer_freshness(state.source, state, state.dependency),
+                    "coverage": state.successful_coverage, "error_category": state.error_category,
+                    "dependency_error": state.dependency.error_category, "output_count": state.output_count,
+                    "pending_inserts": state.source.insert_count - (state.attempted_insert_count or 0),
+                } for name, state in states.items()}
+                stats["maintenance"] = maintenance
+            except Exception as error:
+                stats["maintenance"] = {"status": "unavailable", "error_category": type(error).__name__[:64]}
+            finally:
+                self._write_lock.release()
+        else:
+            stats["maintenance"] = {"status": "pending", "pending_reason": "foreground_busy"}
 
         # Add live DB stats if connected.
         if self.conn:
@@ -2589,19 +2540,18 @@ class TrueMemoryEngine:
         return stats
 
     def close(self):
-        """Close database connection and join background threads."""
-        if self._consolidation_thread is not None and self._consolidation_thread.is_alive():
-            try:
-                self._consolidation_thread.join(timeout=5)
-            except Exception:
-                pass
-        if self.conn:
-            try:
-                self.conn.close()
-            except Exception:
-                logger.debug("Failed to close database connection", exc_info=True)
-            self.conn = None
-            self.ready = False
+        """Detach this engine; a shared worker retains its own connection."""
+        with self._init_lock, self._write_lock:
+            self._maintenance_coordinator = None
+            self._maintenance_handle = None
+            self._maintenance_pending_reason = "not_connected"
+            if self.conn:
+                try:
+                    self.conn.close()
+                except sqlite3.Error:
+                    logger.debug("Failed to close database connection", exc_info=True)
+                self.conn = None
+                self.ready = False
 
     def __enter__(self):
         return self
