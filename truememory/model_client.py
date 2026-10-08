@@ -54,6 +54,12 @@ PROTOCOL_VERSION = 1
 class ProtocolMismatchError(ConnectionError):
     """Raised when the server speaks an incompatible/foreign protocol."""
 
+
+class ModelServerBusyError(RuntimeError):
+    """Capacity rejection: do not restart the daemon or load another model."""
+
+    retry_after_ms = 250
+
 _SERVER_START_TIMEOUT = 30.0
 _REQUEST_TIMEOUT = 120.0
 
@@ -373,22 +379,38 @@ def _send_request(request: dict, timeout: float | None = None) -> dict:
         data = json.dumps(payload).encode("utf-8")
         header = struct.pack(_HEADER_FMT, len(data))
         sock.settimeout(_remaining(deadline) if deadline is not None else _REQUEST_TIMEOUT)
-        sock.sendall(header + data)
-
-        sock.settimeout(_remaining(deadline) if deadline is not None else _REQUEST_TIMEOUT)
-        resp_header = _recv_exact(sock, _HEADER_SIZE)
-        if not resp_header:
-            raise ConnectionError("Server closed connection")
-        resp_len = struct.unpack(_HEADER_FMT, resp_header)[0]
-        if resp_len > _MAX_MESSAGE_SIZE:
-            raise ConnectionError(f"Response too large: {resp_len} bytes")
-        sock.settimeout(_remaining(deadline) if deadline is not None else _REQUEST_TIMEOUT)
-        resp_data = _recv_exact(sock, resp_len)
-        if not resp_data:
-            raise ConnectionError("Incomplete response")
-        return _decode_response(resp_data)
+        try:
+            sock.sendall(header + data)
+        except OSError:
+            # A bounded server may reject the header before our full send ends.
+            # Preserve that explicit error without mistaking overload for death.
+            recovery_deadline = time.monotonic() + 0.25
+            if deadline is not None:
+                recovery_deadline = min(recovery_deadline, deadline)
+            try:
+                _receive_response(sock, recovery_deadline)
+            except ModelServerBusyError:
+                raise
+            except (OSError, ValueError):
+                pass
+            raise
+        return _receive_response(sock, deadline)
     finally:
         sock.close()
+
+
+def _receive_response(sock: socket.socket, deadline: float | None) -> dict:
+    response_deadline = deadline if deadline is not None else time.monotonic() + _REQUEST_TIMEOUT
+    resp_header = _recv_exact(sock, _HEADER_SIZE, response_deadline)
+    if not resp_header:
+        raise ConnectionError("Server closed connection")
+    resp_len = struct.unpack(_HEADER_FMT, resp_header)[0]
+    if resp_len > _MAX_MESSAGE_SIZE:
+        raise ConnectionError(f"Response too large: {resp_len} bytes")
+    resp_data = _recv_exact(sock, resp_len, response_deadline)
+    if not resp_data:
+        raise ConnectionError("Incomplete response")
+    return _decode_response(resp_data)
 
 
 def _decode_response(resp_data: bytes) -> dict:
@@ -415,12 +437,16 @@ def _decode_response(resp_data: bytes) -> dict:
         raise ProtocolMismatchError(
             "protocol mismatch — old model server running; restart it"
         )
+    if resp.get("error_code") == "server_busy":
+        raise ModelServerBusyError("Model server busy: request capacity exhausted")
     return resp
 
 
-def _recv_exact(sock: socket.socket, n: int) -> bytes | None:
+def _recv_exact(sock: socket.socket, n: int, deadline: float | None = None) -> bytes | None:
     buf = bytearray()
     while len(buf) < n:
+        if deadline is not None:
+            sock.settimeout(_remaining(deadline))
         chunk = sock.recv(n - len(buf))
         if not chunk:
             return None
@@ -500,6 +526,8 @@ def _batch_request(request: dict, kwargs: dict) -> dict:
 def _check_model_response(response: dict, request: dict) -> None:
     if response.get("ok"):
         return
+    if response.get("error_code") == "server_busy":
+        raise ModelServerBusyError("Model server busy: request capacity exhausted")
     if response.get("error") == f"Unknown op: {request['op']}" and "batch_size" in request:
         raise ProtocolMismatchError(
             "Model server does not support bounded batches; restart it after upgrading"
