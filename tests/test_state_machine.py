@@ -78,7 +78,7 @@ def test_backoff_cooldown_returns_to_probing():
     sm = ThrottlerStateMachine(start_batch=8, max_batch=12, ramp_step=2)
     sm.safety_check(_critical_mps())
     assert sm.state == ThrottlerStateMachine.BACKOFF
-    sm.last_backoff_time = time.time() - 121
+    sm.last_backoff_time = time.monotonic() - 121
     sm.good_streak = 3
     assert sm.should_ramp_check() is True
     assert sm.state == ThrottlerStateMachine.PROBING
@@ -86,7 +86,7 @@ def test_backoff_cooldown_returns_to_probing():
 
 def test_ramp_requires_3_good_streaks():
     sm = ThrottlerStateMachine(start_batch=4, max_batch=12, ramp_step=2)
-    sm.last_ramp_time = time.time() - 200
+    sm.last_ramp_time = time.monotonic() - 200
     sm.good_streak = 2
     assert sm.should_ramp_check() is False
     sm.good_streak = 3
@@ -96,9 +96,9 @@ def test_ramp_requires_3_good_streaks():
 def test_ramp_requires_120s_cooldown():
     sm = ThrottlerStateMachine(start_batch=4, max_batch=12, ramp_step=2)
     sm.good_streak = 5
-    sm.last_ramp_time = time.time() - 60
+    sm.last_ramp_time = time.monotonic() - 60
     assert sm.should_ramp_check() is False
-    sm.last_ramp_time = time.time() - 121
+    sm.last_ramp_time = time.monotonic() - 121
     assert sm.should_ramp_check() is True
 
 
