@@ -15,7 +15,7 @@ import time
 import uuid
 import weakref
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from pathlib import Path
 from typing import NamedTuple
 
@@ -352,6 +352,7 @@ class LayerSpec(NamedTuple):
     resolve_dependency: Callable[[], LayerDependency]
     build: Callable[[sqlite3.Connection], object]
     count_output: Callable[[sqlite3.Connection], int]
+    publication_guard: Callable[[sqlite3.Connection], AbstractContextManager[Callable[[], None]]] | None = None
 
 
 class LayerState(NamedTuple):
@@ -601,22 +602,34 @@ def run_layers(
                 )
             count = None
             try:
-                with _owned_transaction(conn):
-                    state = read_layer_states(conn, (spec,))[spec.layer]
-                    if not state.dependency.available:
-                        raise MaintenanceUnavailableError("Layer dependency became unavailable")
-                    spec.build(conn)
-                    if not conn.in_transaction:
-                        raise RuntimeError("Layer builder committed the runner transaction")
-                    count = spec.count_output(conn)
-                    if cancel is not None and cancel.is_set():
-                        raise _LayerCancelled()
-                    if spec.resolve_dependency() != state.dependency:
-                        raise MaintenanceUnavailableError("Layer dependency changed before publication")
-                    record_layer_success_in_transaction(conn, layer=spec.layer, dependency=state.dependency,
-                        source=state.source, output_count=count, run_generation=owner.generation)
-                    if spec.resolve_dependency() != state.dependency:
-                        raise MaintenanceUnavailableError("Layer dependency changed before commit")
+                # Factories capture identity before the attempt's read snapshot.
+                # The deferred guard enters only at publication, then outlives
+                # the transaction so both COMMIT and rollback retain ownership.
+                guard = spec.publication_guard(conn) if spec.publication_guard is not None else None
+                with ExitStack() as publication:
+                    with _owned_transaction(conn):
+                        state = read_layer_states(conn, (spec,))[spec.layer]
+                        if not state.dependency.available:
+                            raise MaintenanceUnavailableError("Layer dependency became unavailable")
+                        spec.build(conn)
+                        if not conn.in_transaction:
+                            raise RuntimeError("Layer builder committed the runner transaction")
+                        count = spec.count_output(conn)
+                        if cancel is not None and cancel.is_set():
+                            raise _LayerCancelled()
+                        if spec.resolve_dependency() != state.dependency:
+                            raise MaintenanceUnavailableError("Layer dependency changed before publication")
+                        record_layer_success_in_transaction(conn, layer=spec.layer, dependency=state.dependency,
+                            source=state.source, output_count=count, run_generation=owner.generation)
+                        if spec.resolve_dependency() != state.dependency:
+                            raise MaintenanceUnavailableError("Layer dependency changed before commit")
+                        if guard is not None:
+                            # Register release before validation can fail, so
+                            # validation errors also roll back under ownership.
+                            validate_publication = publication.enter_context(guard)
+                            validate_publication()
+                        if cancel is not None and cancel.is_set():
+                            raise _LayerCancelled()
             except BaseException as error:
                 interrupted = not isinstance(error, Exception) or isinstance(error, _LayerCancelled)
                 outcome = "abandoned" if interrupted else ("failed" if state.dependency.available else "unavailable")

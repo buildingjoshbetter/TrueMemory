@@ -636,3 +636,44 @@ reports managed rows, unowned contacts and invalid ownership, with `partial`,
 source freshness. Ambiguous legacy rows are preserved and remain visible as
 partial coverage. This checkpoint neither adopts those rows nor routes the
 maintenance scheduler or changes profile/style/summary-sheet builders.
+
+## Cluster ownership through the runner's outer commit
+
+`LayerSpec` accepts an optional publication-guard factory. Existing six nonvector
+specs leave it unset. The runner invokes the factory after committing its running
+diagnostic and before opening the attempt read transaction. A factory captures
+identity and returns an unentered context; it must not load a model or retain a
+database transaction across that return.
+
+After builder output, the success checkpoint and the final dependency resolver,
+the runner enters that context. The context yields a validator, which runs only
+after its release has been registered in an `ExitStack` outside the transaction.
+Ownership therefore remains held through outer COMMIT or rollback, including a
+failed identity validation, cancellation or failed COMMIT. Dependency resolvers
+run before guard entry and cannot recursively acquire its non-reentrant lock.
+Trusted guards release resources without suppressing transaction failures.
+
+The cluster guard captures model name, embedding dimension, tier group, active
+table/schema identity, the complete relevant registry row and embed/build metadata
+in a short coherent read snapshot under the model lock. If present, the whole
+`vec_source_v1:<table>` descriptor participates in identity comparison, so a
+changed generation or committed progress within that generation is distinguishable.
+The descriptor comparison is not a complete all-writer vector-freshness proof.
+The existing in-progress index marker still rejects clustering.
+
+At final publication, the guard takes SQLite writer admission first and acquires
+the model lock nonblocking. A busy lock or changed identity rejects output and
+its checkpoint. Successful validation retains the lock through the runner's
+terminal write. Initial model-lock waiting occurs before the attempt snapshot
+and outside any writer transaction. No model load or blocking model-lock wait is
+introduced under SQLite writer ownership.
+
+This guard is intended for the existing `cluster_messages` builder: its raw-vector
+and source fingerprint checks already run before it publishes, and its nested
+RELEASE leaves the runner's writer held. Other connections cannot change those
+inputs before outer COMMIT. The runner's remaining writes affect only provenance;
+trusted adapters must not modify vector/source inputs after the builder returns.
+The outer guard therefore adds no third raw-vector/source scan. It does not
+replace the builder's raw-input fence, certify arbitrary external vector writes,
+or make a borrowed caller's later COMMIT safe. This checkpoint adds no cluster
+adapter, engine routing or coverage migration.
