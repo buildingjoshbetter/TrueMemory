@@ -39,8 +39,46 @@ def load_module(name: str) -> types.ModuleType:
     module.__dict__["__builtins__"] = dict(vars(builtins), __import__=safe_import)
     path = ROOT / "truememory/ingest" / (name + ".py")
     with patch.dict(sys.modules, {module.__name__: module}):
-        exec(compile(path.read_text(), str(path), "exec"), module.__dict__)
+        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
     return module
+
+
+def capture_diagnostic(outcome: object) -> dict[str, object]:
+    """Report capture categories without source bytes, paths or identity values."""
+    version = getattr(outcome, "file_version")
+    result = {"status": getattr(outcome, "status"),
+              "errors": getattr(outcome, "error_categories"),
+              "capture_present": version is not None}
+    if version is not None:
+        fields = ("device", "inode", "size", "mtime_ns", "ctime_ns")
+        result.update(
+            stable=version.stable,
+            byte_count_matches=version.byte_count == version.after.size,
+            path_after_present=version.path_after is not None,
+            changed_during_read=tuple(name for name in fields
+                                      if getattr(version.before, name) != getattr(version.after, name)),
+            changed_after_close=None if version.path_after is None else tuple(
+                name for name in fields
+                if getattr(version.after, name) != getattr(version.path_after, name)),
+        )
+    return result
+
+
+class TestSourceLoader(unittest.TestCase):
+    def test_source_loader_selects_utf8_under_cp1252_default(self) -> None:
+        source = "# synthetic locale control \u201d\nENCODING_SENTINEL = 'synthetic-marker'\n".encode("utf-8")
+        with self.assertRaises(UnicodeDecodeError):
+            source.decode("cp1252")
+        encodings = []
+
+        def read_source(path: Path, encoding: str | None = None, errors: str | None = None) -> str:
+            encodings.append(encoding)
+            return source.decode(encoding or "cp1252", errors or "strict")
+
+        with patch.object(Path, "read_text", read_source):
+            loaded = load_module("extractor")
+        self.assertEqual(loaded.ENCODING_SENTINEL, "synthetic-marker")
+        self.assertEqual(encodings, ["utf-8"])
 
 
 class TestTranscriptOutcomes(unittest.TestCase):
@@ -121,6 +159,30 @@ class TestTranscriptOutcomes(unittest.TestCase):
         self.assertEqual(len(outcome.messages), 1)
         self.assertIn("source_changed_during_read", outcome.error_categories)
 
+    def test_capture_diagnostic_reports_fields_without_identity_or_content(self) -> None:
+        before = self.parser.FileState(731001, 731002, 731003, 731004, 731005)
+        after = self.parser.FileState(731001, 731002, 731006, 731007, 731005)
+        path_after = self.parser.FileState(731001, 731008, 731006, 731007, 731009)
+        version = self.parser.TranscriptFileVersion(731003, SYNTHETIC_SECRET, before, after, path_after)
+        outcome = self.parser.TranscriptOutcome(
+            [self.parser.Message("human", SYNTHETIC_SECRET)], "partial",
+            error_categories=("source_changed_during_read",), file_version=version,
+        )
+        diagnostic = capture_diagnostic(outcome)
+        self.assertEqual(diagnostic, {
+            "status": "partial", "errors": ("source_changed_during_read",),
+            "capture_present": True, "stable": False, "byte_count_matches": False,
+            "path_after_present": True, "changed_during_read": ("size", "mtime_ns"),
+            "changed_after_close": ("inode", "ctime_ns"),
+        })
+        rendered = repr(diagnostic)
+        self.assertNotIn(SYNTHETIC_SECRET, rendered)
+        self.assertNotIn("73100", rendered)
+        missing = self.parser.TranscriptOutcome([], "unreadable", error_categories=("source_unreadable",))
+        self.assertEqual(capture_diagnostic(missing), {
+            "status": "unreadable", "errors": ("source_unreadable",), "capture_present": False,
+        })
+
     def test_unreadable_and_invalid_utf8_do_not_leak_diagnostics(self) -> None:
         path = self.write(b"User: synthetic \xff station", "transcript.txt")
         outcome = self.parser.parse_transcript_outcome(path)
@@ -167,7 +229,7 @@ class TestTranscriptOutcomes(unittest.TestCase):
             with self.subTest(format=text[:1]):
                 path = self.write(text.encode(), "supported.txt")
                 outcome = self.parser.parse_transcript_outcome(path)
-                self.assertTrue(outcome.complete)
+                self.assertTrue(outcome.complete, capture_diagnostic(outcome))
                 self.assertEqual(outcome.messages, self.parser.parse_transcript(path))
 
     def test_top_level_legacy_tool_call_retains_its_message(self) -> None:
