@@ -410,3 +410,39 @@ vectors still occupy their existing NumPy arrays. Synthetic SQLite tests establi
 rollback, writer progress during paused computation and atomic reader views.
 Actual HDBSCAN runtime, validation duration, WAL growth, native peak memory and
 retrieval quality on representative corpora remain release measurement gates.
+
+## Tier rebuild batch durability
+
+The tier-switch worker computes and serializes both completion and separation
+embeddings before starting its batch write transaction. Each output must contain
+one vector per input message. Model choice, dimensions, precision and the existing
+encoding ownership wrapper remain unchanged. Completion output arrays are released
+after serialization; the two serialized batches remain in memory until publication.
+This is one throttled batch of staging, not a corpus-wide staging operation or a
+new process-memory bound.
+
+The vector pair and an existing cache registry's progress checkpoint commit in one
+transaction. A failure in either encode, serialization, insertion, checkpoint or
+commit leaves the previous committed batch intact. OOM retry uses the same input
+offset after rollback, so it cannot retry on top of partial completion vectors.
+Exceptions used for cancellation also roll back before propagating. A cancel flag
+retains the existing behavior of finishing the current batch before stopping.
+
+Full-rebuild clearing removes both target tables' rows and resets an existing
+checkpoint in one transaction. A failed clear reports failure without proceeding
+to encoding. A target with no registry row retains the existing full-restart
+behavior; this change does not invent model metadata or create a new resume policy.
+
+`run()` requires its manager-owned connection to have no active caller transaction
+before initialization. The batch helper uses a savepoint if explicitly called
+inside a caller transaction and does not commit unrelated caller work. Status
+writes use a separate transaction after the batch checkpoint is committed. Status
+failure rolls back its own changes and cannot cause a committed batch to be retried.
+Database rollback failure still requires caller recovery; no transaction helper
+can promise successful rollback after SQLite itself rejects that operation.
+
+The regression suite uses synthetic encoders with ordinary SQLite tables and the
+same cases against real sqlite-vec tables when the extension is available. These
+checks establish paired-write and retry behavior, not native MPS OOM behavior,
+thermal improvement or model-performance measurements. Whole-rebuild streaming
+and corpus loading remain separate work.
