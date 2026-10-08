@@ -32,8 +32,16 @@ class ThrottlerStateMachine:
         self.state = self.PROBING
         self.good_streak = 0
         self.batch_count = 0
-        self.last_ramp_time = 0.0
-        self.last_backoff_time = 0.0
+        self.last_ramp_time = -float("inf")
+        self.last_backoff_time = -float("inf")
+
+    @staticmethod
+    def all_required_channels_ok(readings: dict) -> bool:
+        """Unsupported channels are explicit; no evidence must not enable ramping."""
+        required = [readings.get(channel, {}) for channel in
+                    ("mps_level", "growth_rate", "thermal")
+                    if readings.get(channel, {}).get("required", True)]
+        return bool(required) and all(reading.get("status") == "ok" for reading in required)
 
     def on_batch_complete(self):
         """Call after every batch. Increments batch counter."""
@@ -63,13 +71,16 @@ class ThrottlerStateMachine:
             if readings.get(channel, {}).get("status") == "warning":
                 return self._do_step_down(channel, readings[channel])
 
-        self.good_streak += 1
+        if self.all_required_channels_ok(readings):
+            self.good_streak += 1
+        else:
+            self.good_streak = 0
         return self.batch_size
 
     def should_ramp_check(self) -> bool:
         """Returns True if conditions are met to consider a ramp-up."""
         if self.state == self.BACKOFF:
-            if time.time() - self.last_backoff_time >= self.BACKOFF_COOLDOWN:
+            if time.monotonic() - self.last_backoff_time >= self.BACKOFF_COOLDOWN:
                 self.state = self.PROBING
                 log.info("Backoff cooldown expired, re-entering PROBING")
             else:
@@ -88,9 +99,9 @@ class ThrottlerStateMachine:
             return False
         if self.good_streak < self.GOOD_WINDOWS_REQUIRED:
             return False
-        if time.time() - self.last_ramp_time < self.RAMP_COOLDOWN:
+        if time.monotonic() - self.last_ramp_time < self.RAMP_COOLDOWN:
             return False
-        if time.time() - self.last_backoff_time < self.BACKOFF_COOLDOWN:
+        if time.monotonic() - self.last_backoff_time < self.BACKOFF_COOLDOWN:
             return False
 
         return True
@@ -105,14 +116,13 @@ class ThrottlerStateMachine:
         Returns:
             Updated batch_size (may or may not have increased)
         """
-        for channel in ("mps_level", "growth_rate", "thermal"):
-            if triple_sample_means.get(channel, {}).get("status") != "ok":
-                self.good_streak = 0
-                return self.batch_size
+        if not self.all_required_channels_ok(triple_sample_means):
+            self.good_streak = 0
+            return self.batch_size
 
         old = self.batch_size
         self.batch_size = min(self.max_batch, self.batch_size + self.ramp_step)
-        self.last_ramp_time = time.time()
+        self.last_ramp_time = time.monotonic()
         self.good_streak = 0
         log.info("Ramp-up: %d → %d", old, self.batch_size)
         return self.batch_size
@@ -134,7 +144,7 @@ class ThrottlerStateMachine:
         self.batch_size = max(1, self.batch_size // 2)
         self.state = self.BACKOFF
         self.good_streak = 0
-        self.last_backoff_time = time.time()
+        self.last_backoff_time = time.monotonic()
         log.warning(
             "BACKOFF: %d → %d (CRITICAL on %s)", old, self.batch_size, channel
         )
