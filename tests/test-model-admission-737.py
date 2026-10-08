@@ -222,7 +222,7 @@ class TestModelAdmission(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 self.server._recv_exact(drip, 4, 1.0)
         self.assertEqual(drip.reads, 3)
-        self.assertAlmostEqual(drip.timeouts[-1], 0.2)
+        self.assertAlmostEqual(drip.timeouts[-1], 0.1)
         self.server._frame_timeout = 0.02
         client, future = self.send(b"", advertised=20)
         self.assertIn("timed out", self.response(client)["error"])
@@ -233,6 +233,51 @@ class TestModelAdmission(unittest.TestCase):
         client.sendall(b"\x00")
         self.assertIsNone(self.server._dispatch_client(peer))
         self.assertEqual(client.recv(1), b"")
+
+    def test_receive_observes_shutdown_without_a_socket_wakeup(self) -> None:
+        clock = [0.0]
+        server = self.server
+
+        class NonWakingSocket:
+            timeout = 30.0
+
+            def settimeout(self, seconds: float) -> None:
+                self.timeout = seconds
+
+            def recv(self, count: int) -> bytes:
+                clock[0] += self.timeout
+                # Model a platform whose blocking read only returns when its
+                # own timeout expires, even after another thread stops service.
+                server._stopped.set()
+                raise TimeoutError("timed out")
+
+        with patch.object(self.server_module.time, "monotonic", side_effect=lambda: clock[0]):
+            self.assertIsNone(server._recv_exact(NonWakingSocket(), 20, 30.0))
+        self.assertLessEqual(clock[0], 0.1)
+
+    def test_receive_poll_timeouts_preserve_partial_data_and_absolute_expiry(self) -> None:
+        clock = [0.0]
+
+        class DelayedSocket:
+            timeout = 30.0
+            chunks = iter((b"a", None, b"b"))
+
+            def settimeout(self, seconds: float) -> None:
+                self.timeout = seconds
+
+            def recv(self, count: int) -> bytes:
+                chunk = next(self.chunks, None)
+                if chunk is not None:
+                    return chunk
+                clock[0] += self.timeout
+                raise TimeoutError("timed out")
+
+        peer = DelayedSocket()
+        with patch.object(self.server_module.time, "monotonic", side_effect=lambda: clock[0]):
+            self.assertEqual(self.server._recv_exact(peer, 2, 0.35), b"ab")
+            with self.assertRaisesRegex(TimeoutError, "deadline exceeded"):
+                self.server._recv_exact(peer, 1, 0.35)
+        self.assertAlmostEqual(clock[0], 0.35)
 
     def test_total_frame_budget_includes_header_time_and_caps_header_budget(self) -> None:
         for header_timeout, frame_timeout, expected_header in ((10, 30, 110), (30, 10, 110)):

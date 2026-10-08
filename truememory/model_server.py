@@ -1158,12 +1158,21 @@ class ModelServer:
     def _recv_exact(self, conn: socket.socket, n: int, expires_at: float | None = None) -> bytes | None:
         buf = bytearray()
         while len(buf) < n:
+            if self._stopped.is_set():
+                return None
             if expires_at is not None:
                 remaining = expires_at - time.monotonic()
                 if remaining <= 0:
-                    raise TimeoutError("request frame receive deadline exceeded")
-                conn.settimeout(remaining)
-            chunk = conn.recv(min(n - len(buf), 65536))
+                    raise TimeoutError("request frame receive timed out: deadline exceeded")
+                # Cross-thread shutdown does not reliably interrupt recv on
+                # every platform. Poll shutdown without extending the frame budget.
+                conn.settimeout(min(remaining, 0.1))
+            try:
+                chunk = conn.recv(min(n - len(buf), 65536))
+            except TimeoutError:
+                if expires_at is None:
+                    raise
+                continue
             if not chunk:
                 return None
             buf.extend(chunk)
