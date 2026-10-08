@@ -501,3 +501,42 @@ responsible for its serialization. The engine's existing manual path is unchange
 in this foundation checkpoint. Per-layer freshness enforcement, scheduler routing,
 vector dependency generations and measured maintenance performance remain later
 integration work; initially pending rows are not success claims.
+
+## Composable summary and landmark publication
+
+Monthly summary refresh owns only `monthly` and `entity_monthly` rows. Empty
+eligible input removes those periods while preserving structured facts, opt-in
+entity-profile sheets and other summary producers. Sentence selection, salience,
+entity thresholds, dates and returned counts retain the existing rules.
+
+The shared consolidation savepoint now covers its terminal `RELEASE` as well as
+the writes. A failed outermost commit or nested release rolls back that builder's
+changes before cleanup releases the savepoint. If SQLite rejects rollback, the
+error propagates without attempting a release that could commit failed output;
+the connection's owner must recover or close that transaction. This applies to
+summaries, structured facts and contradictions without committing caller work.
+
+Landmark detection collects and computes its complete event rows before writer
+admission. It then compares the exact ordered source IDs, content, sender,
+recipient and timestamps while holding the writer, before replacing events.
+Concurrent source changes reject publication. A stale caller-owned WAL snapshot
+raises at write upgrade and remains the caller's transaction. Pattern order,
+one-event-per-message selection, context clipping and related-entity limits are
+unchanged. Empty source clears previous events atomically. Write, release and
+cancellation failures preserve the previous complete output; later caller commit
+cannot expose a partially replaced generation after successful rollback.
+
+These builders can compose inside an owned transaction, but this checkpoint does
+not enable the scheduler or claim durable layer freshness. Summary builders still
+need the runner's source snapshot to fence concurrent changes during computation.
+Landmarks still stage the eligible corpus and validate it under writer ownership;
+no corpus-memory or constant-time publication bound is claimed.
+
+The future layer runner must commit any `running` diagnostic in a separate short
+transaction before opening its read snapshot. It must not update attempt metadata
+and retain that writer transaction during computation. The actual attempted
+source/dependency token is recorded at terminal publication or, after rollback,
+in a separate failure-status transaction. Successful output and successful
+provenance must commit atomically. A cluster run must retain validated runtime
+model ownership through that outer commit; an inner builder savepoint release
+alone does not supply that guarantee.
