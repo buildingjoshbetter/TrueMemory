@@ -473,13 +473,12 @@ class ModelServer:
 
     @staticmethod
     def _resolve_embed_model_id(tier: str) -> str:
-        """Resolve a tier name to the internal embedding model ID, keeping
-        vector_search's globals in sync (main-path behavior, pre-#577)."""
-        from truememory.vector_search import EMBEDDING_MODEL, set_embedding_model
-
-        if tier and tier != EMBEDDING_MODEL:
-            set_embedding_model(tier)
-
+        """Resolve this request without changing the daemon's default model."""
+        if tier and tier.strip().lower() == "qwen3":
+            # Retain the removed-model error formerly raised by the setter,
+            # without adopting its broader normalization or changing globals.
+            from truememory.vector_search import _resolve_model_name
+            _resolve_model_name(tier)
         return ModelServer._peek_embed_model_id(tier)
 
     @staticmethod
@@ -541,13 +540,28 @@ class ModelServer:
     # declines all of those and falls through to the main path.
     _FAST_LANE_SAFE_MODEL_IDS = frozenset({"model2vec", "qwen3_256"})
 
+    def _resolve_embed_cache(self, tier: str) -> tuple[str, _EmbedState | None]:
+        """Return the requested identity and its compatible cached snapshot."""
+        state = self._embed_state
+        if state is not None and state.tier == tier:
+            # A queued empty-tier request must follow the load it waited for,
+            # even if the default changed mid-load. Custom keys likewise keep
+            # the identity actually built rather than re-reading their config.
+            return state.model_id, state
+
+        model_id = self._resolve_embed_model_id(tier)
+        if state is not None and state.model_id == model_id and (
+            model_id in self._FAST_LANE_SAFE_MODEL_IDS or state.tier == tier
+        ):
+            return model_id, state
+        return model_id, None
+
     def _preflight_embed_result(self, tier: str, count: int) -> None:
         """Caller holds the state lock; mirror the actual server constructors."""
         if not count:
             return
-        state = self._embed_state
-        cached = state is not None and state.tier == tier
-        model_id = state.model_id if cached else self._peek_embed_model_id(tier)
+        model_id, state = self._resolve_embed_cache(tier)
+        cached = state is not None
         known = model_id in ("model2vec", "qwen3_256", "minilm", "bge-small")
         fallback = not cached and os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "").strip() != "1"
         if known or fallback:
@@ -571,11 +585,12 @@ class ModelServer:
         # output may contain several labels per pair. Inspect its real shape.
 
     def _get_embed_model(self, tier: str):
-        state = self._embed_state
-        if state is not None and state.tier == tier:
+        model_id, state = self._resolve_embed_cache(tier)
+        if state is not None:
+            if state.tier != tier:
+                self._embed_state = _EmbedState(model=state.model, tier=tier, model_id=model_id)
             return state.model
 
-        model_id = self._resolve_embed_model_id(tier)
         model = self._build_embed_model(model_id, self._embed_device())
         # ONE atomic reference assignment of an immutable snapshot — the
         # fast lane can never observe a torn (model, tier, model_id) triple.
@@ -601,8 +616,8 @@ class ModelServer:
         state = self._embed_state  # single atomic reference read
         if state is None or state.tier != tier:
             # No main model loaded for this tier yet — declining means the
-            # one-time load happens exactly once, on the main path, with
-            # its usual global sync.
+            # one-time load happens exactly once, on the main path,
+            # without changing the daemon's default selection.
             return None
 
         if state.model_id not in self._FAST_LANE_SAFE_MODEL_IDS:

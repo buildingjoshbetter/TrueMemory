@@ -310,3 +310,38 @@ It does not change the tier worker's adaptive/OOM policy, models, precision
 or retrieval depth. The initial comparison's numerical failures and latency
 regressions remain recorded until separate native validation resolves them.
 Linux/CUDA behavior does not establish MPS memory or thermal performance.
+
+## Server target identity prerequisite (#795)
+
+An explicit embedding request no longer changes the daemon's default model,
+dimension or generation. The same raw tier keeps its loaded snapshot, including
+an empty tier whose default changed while its initial load was in progress.
+Main and fast requests retain that captured identity. A cache miss or a
+different tier request resolves the current selection; changing the global
+default alone does not invalidate an already published empty-tier snapshot.
+`base`, `pro` and `qwen3_256` reuse the same loaded Qwen3 instance; `edge` and
+`model2vec` reuse the same loaded Model2Vec instance. These are the two
+deterministic identities already allowed by the fast lane. Alias updates
+publish one immutable cache snapshot. A failed distinct load preserves the
+previous snapshot.
+
+The removed `qwen3` name still raises the existing migration error, including
+case and whitespace variants. This validation does not mutate the default or
+adopt broader alias normalization from the active-model setter.
+
+Explicit custom and other configuration-dependent cache entries retain their
+existing raw-key reuse policy, including a custom entry that loaded a built-in
+identity or Model2Vec fallback before its configuration changed. They gain no
+new identity or dimension attestation, and the legacy server fallback for `minilm` and `bge-small`
+remains unchanged. Result-size preflight uses the same cache-selection rule
+as loading. Fast-lane inference continues to follow its captured loaded-model
+snapshot, without resolving current global settings.
+
+This correction preserves inference/state lock ownership, request deadlines,
+native batch ceilings and sticky CPU recovery. It does not bound the lifetime
+of separately retained old model references: the previous main instance can
+still be alive while a distinct replacement is constructed, and the optional
+fast CPU instance remains separately owned. A managed preparation lifetime and
+an explicit protocol guarantee for older daemons are subsequent prerequisites.
+No tier-switch caller, local loader, target table or active configuration is
+changed by this checkpoint; issue #795 remains open.
