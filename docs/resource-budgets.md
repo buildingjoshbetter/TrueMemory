@@ -286,3 +286,51 @@ model replacement overlap, fast-encoder residency and serializer copies for
 accepted results still require measured whole-process budget calibration.
 This change introduces no new process-memory threshold, token estimator,
 automatic recycling policy or claim that native allocation cannot overshoot.
+
+## Episode and full-text index maintenance
+
+The `messages_au` trigger replaces an FTS row only when its message ID or an
+indexed value changes: content, sender, recipient, category or modality. The
+comparison is NULL-safe and also detects updates through SQLite's rowid aliases.
+Changes to episode IDs, timestamps and other unindexed metadata leave FTS alone.
+Opening an older database replaces the unconditional trigger atomically once;
+subsequent opens check its definition without repeating trigger DDL or rebuilding
+the index. Concurrent openers recheck the definition after obtaining the writer
+lock. A failed replacement restores the previous trigger.
+
+Episode detection keeps the existing timestamp ordering and parsing: timestamps
+are sorted lexically, timezone suffixes are stripped before computing gaps, and
+only a gap strictly greater than six hours starts another group by default.
+Invalid timestamps retain the previous grouping behavior. Empty and NULL
+timestamps are ineligible. This change does not correct timezone semantics.
+
+Exact member sets retain their episode IDs when the stored member count also
+matches. An addition, deletion, merge or split creates new IDs for the affected
+groups; unaffected groups retain theirs. Changed bounds or counts update episode
+metadata, and only changed message assignments are written. Obsolete episodes
+and assignments on ineligible messages are cleared, including when no eligible
+messages remain. Source messages and their full-text search results are preserved.
+
+Nonempty derived episode summaries are cleared, as in the previous detector.
+Equal member IDs cannot prove that source content was unchanged, so retaining
+those summaries would risk stale derived text. Empty summaries cause no write.
+No source content, revision counter or dirty-ID queue is added to episode metadata.
+
+Detection reads one deferred SQLite transaction snapshot before writing its
+changes. With no caller transaction, it owns the final commit and retries a stale
+WAL snapshot at most twice: `1 initial attempt + 2 retries = 3 attempts`. Other
+errors propagate after rollback. Inside a caller transaction it uses a savepoint,
+never commits unrelated writes, and leaves snapshot conflicts for the caller to
+resolve. Connections must not be used concurrently by multiple callers. WAL
+readers can continue searching while episode changes await commit; another writer
+still shares SQLite's single writer lock.
+
+The synthetic 12-message regression checks `12` first-pass message assignments,
+`0` FTS replacements from those assignments, and `0` row writes on the next
+unchanged pass. It also checks real FTS results, transactional rollback and reader
+progress during a held writer transaction. These are correctness and write-count
+checks, not measured production latency or memory improvements. Detection still
+reads the eligible timestamps, existing assignments and episode metadata on every
+pass, with work and Python bookkeeping proportional to the corpus size. Database
+size, WAL growth and duration on larger corpora still need measurement; scheduling
+and database-wide maintenance coordination remain separate work.

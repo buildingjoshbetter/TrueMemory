@@ -27,6 +27,21 @@ log = logging.getLogger(__name__)
 # Schema DDL
 # ---------------------------------------------------------------------------
 
+_MESSAGES_FTS_UPDATE_TRIGGER_SQL = """
+CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages
+WHEN old.id IS NOT new.id
+  OR old.content IS NOT new.content
+  OR old.sender IS NOT new.sender
+  OR old.recipient IS NOT new.recipient
+  OR old.category IS NOT new.category
+  OR old.modality IS NOT new.modality
+BEGIN
+    DELETE FROM messages_fts WHERE rowid = old.id;
+    INSERT INTO messages_fts(rowid, content, sender, recipient, category, modality)
+    VALUES (new.id, new.content, new.sender, new.recipient, new.category, new.modality);
+END;
+"""
+
 _SCHEMA_SQL = """
 -- Core messages table
 CREATE TABLE IF NOT EXISTS messages (
@@ -61,11 +76,7 @@ CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
     DELETE FROM messages_fts WHERE rowid = old.id;
 END;
 
-CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-    DELETE FROM messages_fts WHERE rowid = old.id;
-    INSERT INTO messages_fts(rowid, content, sender, recipient, category, modality)
-    VALUES (new.id, new.content, new.sender, new.recipient, new.category, new.modality);
-END;
+""" + _MESSAGES_FTS_UPDATE_TRIGGER_SQL + """
 
 -- Entity profiles (L0 Personality Engram)
 CREATE TABLE IF NOT EXISTS entity_profiles (
@@ -548,6 +559,39 @@ def _migrate_messages_schema(conn: sqlite3.Connection, db_path: str | Path) -> N
                 pass
 
 
+def _migrate_messages_fts_trigger(conn: sqlite3.Connection) -> None:
+    """Replace the legacy unconditional trigger once, without rebuilding FTS."""
+    def definition() -> str:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'messages_au'"
+        ).fetchone()
+        return " ".join(row[0].strip().rstrip(";").split()) if row else ""
+
+    expected = " ".join(
+        _MESSAGES_FTS_UPDATE_TRIGGER_SQL.replace("IF NOT EXISTS ", "", 1).strip().rstrip(";").split()
+    )
+    if definition() == expected:
+        return
+
+    owned = not conn.in_transaction
+    conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT truememory_fts_trigger")
+    completed = False
+    try:
+        # Another opener can complete this migration while BEGIN waits.
+        if definition() != expected:
+            conn.execute("DROP TRIGGER IF EXISTS messages_au")
+            conn.execute(_MESSAGES_FTS_UPDATE_TRIGGER_SQL)
+        conn.execute("COMMIT" if owned else "RELEASE truememory_fts_trigger")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO truememory_fts_trigger")
+                conn.execute("RELEASE truememory_fts_trigger")
+
+
 def create_db(db_path: str | Path) -> sqlite3.Connection:
     """
     Create (or open) a TrueMemory database with the full schema.
@@ -640,6 +684,11 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
 
     _migrate_messages_schema(conn, db_path)
     conn.executescript(_SCHEMA_SQL)
+    try:
+        _migrate_messages_fts_trigger(conn)
+    except sqlite3.Error:
+        conn.close()
+        raise
     # The directive index lives outside _SCHEMA_SQL on purpose: if a legacy
     # DB's migration could not add messages.directive (e.g. a rolled-back
     # ALTER), an unconditional CREATE INDEX inside executescript would turn a
