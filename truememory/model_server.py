@@ -47,6 +47,7 @@ import gc  # noqa: E402
 import hmac  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
+import math  # noqa: E402
 import secrets  # noqa: E402
 import signal  # noqa: E402
 import socket  # noqa: E402
@@ -55,6 +56,9 @@ import struct  # noqa: E402
 import sys  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
+from _thread import LockType  # noqa: E402
+from collections.abc import Iterator  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
 
@@ -150,6 +154,53 @@ class _EmbedState:
     model_id: str
 
 
+class _RequestDeadlineExceeded(TimeoutError):
+    """Stop this request without triggering model fallback or another retry."""
+
+
+@dataclass(frozen=True)
+class _RequestDeadline:
+    expires_at: float | None = None
+
+    @classmethod
+    def from_wall_clock(cls, value: object) -> "_RequestDeadline":
+        if value is None:
+            return cls()
+        try:
+            wall_deadline = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return cls()  # Preserve legacy handling of malformed deadlines.
+        if math.isnan(wall_deadline) or wall_deadline == math.inf:
+            return cls()
+        remaining = wall_deadline - time.time()
+        return cls(time.monotonic() + remaining)
+
+    def remaining(self) -> float | None:
+        if self.expires_at is None:
+            return None
+        remaining = self.expires_at - time.monotonic()
+        if remaining <= 0:
+            raise _RequestDeadlineExceeded("deadline exceeded before encode")
+        return remaining
+
+    def check(self) -> None:
+        self.remaining()
+
+    @contextmanager
+    def locked(self, lock: LockType) -> Iterator[None]:
+        remaining = self.remaining()
+        if remaining is None:
+            lock.acquire()
+        elif not lock.acquire(timeout=min(remaining, threading.TIMEOUT_MAX)):
+            raise _RequestDeadlineExceeded("deadline exceeded before encode")
+        try:
+            # A successful wakeup can still occur after the request expired.
+            self.check()
+            yield
+        finally:
+            lock.release()
+
+
 class ModelServer:
     """Serves embedding and reranking over a Unix domain socket (POSIX)
     or HMAC-authenticated TCP loopback (Windows)."""
@@ -240,7 +291,9 @@ class ModelServer:
         from truememory.mps_utils import resolve_device
         return resolve_device(None)
 
-    def _recover_embed_oom_locked(self, model) -> None:
+    def _recover_embed_oom_locked(
+        self, model: object, deadline: _RequestDeadline | None = None,
+    ) -> None:
         """The single recovery path for an embed MPS OOM (issue #577).
 
         Caller MUST hold ``self._lock``. Marks the embed path sticky-CPU
@@ -252,8 +305,25 @@ class ModelServer:
         from truememory.mps_utils import flush_mps_cache
         self._mark_sticky_cpu("embed")
         flush_mps_cache()
+        if deadline is not None:
+            self._check_embed_recovery_deadline_locked(model, deadline)
         if hasattr(model, "to"):
             model.to("cpu")
+
+    def _check_embed_recovery_deadline_locked(
+        self, model: object, deadline: _RequestDeadline,
+    ) -> None:
+        """Record the OOM even if its request cannot recover; caller holds the lock."""
+        self._mark_sticky_cpu("embed")
+        try:
+            deadline.check()
+        except _RequestDeadlineExceeded:
+            # Cached models bypass device resolution. Drop this failed instance
+            # so the next request loads on CPU without moving it for dead work.
+            state = self._embed_state
+            if state is not None and state.model is model:
+                self._embed_state = None
+            raise
 
     @staticmethod
     def _peek_embed_model_id(tier: str) -> str:
@@ -413,7 +483,9 @@ class ModelServer:
         log.info("Loaded reranker model=%s device=%s", name, device)
         return self._reranker
 
-    def _handle_fast_embed(self, texts: list, tier: str) -> dict | None:
+    def _handle_fast_embed(
+        self, texts: list, tier: str, deadline: _RequestDeadline | None = None,
+    ) -> dict | None:
         """Single-text fast lane (issue #577).
 
         Tries the main path without blocking; when the global lock is busy
@@ -426,9 +498,13 @@ class ModelServer:
         Returns a response dict, or None to fall through to the normal
         (locked) path.
         """
+        deadline = deadline or _RequestDeadline()
+        deadline.check()
         if self._lock.acquire(blocking=False):
             try:
+                deadline.check()
                 model = self._get_embed_model(tier)
+                deadline.check()
                 try:
                     vectors = model.encode(texts, show_progress_bar=False)
                 except RuntimeError as exc:
@@ -438,21 +514,26 @@ class ModelServer:
                     # Same recovery path as the batch handler, atomic in
                     # this lock hold; a single text on CPU is ms-scale, so
                     # the retry stays under the lock too.
-                    self._recover_embed_oom_locked(model)
+                    self._check_embed_recovery_deadline_locked(model, deadline)
+                    self._recover_embed_oom_locked(model, deadline)
+                    deadline.check()
                     vectors = model.encode(texts, show_progress_bar=False)
                 return {"ok": True, "vectors": np.asarray(vectors, dtype=np.float32)}
             finally:
                 self._lock.release()
 
         try:
-            with self._fast_lock:
+            with deadline.locked(self._fast_lock):
                 model = self._get_fast_encoder(tier)
+                deadline.check()
                 if model is None:
                     # Vector-space parity with the main path cannot be
                     # guaranteed (custom model) — decline the fast lane.
                     return None
                 vectors = model.encode(texts, show_progress_bar=False)
             return {"ok": True, "vectors": np.asarray(vectors, dtype=np.float32)}
+        except _RequestDeadlineExceeded:
+            raise
         except Exception:
             log.warning(
                 "Fast-lane CPU encode failed — falling back to the main "
@@ -471,6 +552,8 @@ class ModelServer:
             self._inflight += 1
         try:
             return self._handle_request_inner(request)
+        except _RequestDeadlineExceeded as exc:
+            return {"ok": False, "error": str(exc)}
         finally:
             with self._activity_lock:
                 self._inflight -= 1
@@ -482,18 +565,10 @@ class ModelServer:
         if op == "ping":
             return {"ok": True}
 
-        # Issue #646 (M-44): server-side deadline. The client ships an
-        # absolute monotonic-equivalent deadline as wall-clock epoch seconds
-        # ("deadline"). If it has already passed, fail cheap BEFORE acquiring
-        # the global lock or running a full encode — the client has already
-        # abandoned the request and fallen back to FTS-only.
-        deadline = request.get("deadline")
-        if deadline is not None:
-            try:
-                if time.time() >= float(deadline):
-                    return {"ok": False, "error": "deadline exceeded before encode"}
-            except (TypeError, ValueError):
-                pass
+        # Convert the wire epoch once. Queueing, loading and recovery consume
+        # one monotonic budget; wall-clock adjustments cannot renew it.
+        deadline = _RequestDeadline.from_wall_clock(request.get("deadline"))
+        deadline.check()
 
         if op == "embed":
             texts = request["texts"]
@@ -502,12 +577,12 @@ class ModelServer:
             # Single-text fast lane (issue #577): hook recall queries must
             # never queue behind batch ingestion work or OOM recovery.
             if len(texts) <= self._FAST_LANE_MAX_TEXTS:
-                fast = self._handle_fast_embed(texts, tier)
+                fast = self._handle_fast_embed(texts, tier, deadline)
                 if fast is not None:
                     return fast
 
             now = time.time()
-            with self._lock:
+            with deadline.locked(self._lock):
                 self._embed_timestamps.append(now)
                 self._embed_timestamps = [
                     t for t in self._embed_timestamps
@@ -519,17 +594,19 @@ class ModelServer:
                 )
 
             if should_activate:
-                with self._lock:
+                with deadline.locked(self._lock):
                     self._activate_throttler()
 
             # Issue #646 (M-43): capture the throttler to a local under the
             # lock. Reading self._throttler_active then self._throttler
             # separately raced _deactivate_throttler nulling the attribute
             # between the two reads (AttributeError on before_batch()).
-            with self._lock:
+            with deadline.locked(self._lock):
                 throttler = self._throttler if self._throttler_active else None
             if throttler is not None:
+                deadline.check()
                 throttler.before_batch()
+                deadline.check()
 
             encode_start = time.time()
             # `vectors` is assigned on exactly one of two paths: inside the
@@ -537,8 +614,9 @@ class ModelServer:
             # retry (retry_on_cpu True). Any other outcome raises.
             vectors = None
             retry_on_cpu = False
-            with self._lock:
+            with deadline.locked(self._lock):
                 model = self._get_embed_model(tier)
+                deadline.check()
                 try:
                     vectors = model.encode(texts, show_progress_bar=False)
                 except RuntimeError as exc:
@@ -552,9 +630,11 @@ class ModelServer:
                     # guaranteed the next OOM — retry storms). Only the
                     # expensive full re-encode runs OUTSIDE the lock, so
                     # other clients are not starved for 23-112s.
-                    self._recover_embed_oom_locked(model)
+                    self._check_embed_recovery_deadline_locked(model, deadline)
+                    self._recover_embed_oom_locked(model, deadline)
                     retry_on_cpu = True
             if retry_on_cpu:
+                deadline.check()
                 log.warning(
                     "MPS OOM during encoding — retrying on CPU outside the "
                     "request lock"
@@ -563,14 +643,14 @@ class ModelServer:
             encode_time = time.time() - encode_start
 
             # M-43: re-capture under the lock for the same reason as above.
-            with self._lock:
+            with deadline.locked(self._lock):
                 throttler = self._throttler if self._throttler_active else None
             if throttler is not None:
                 throttler.after_batch(len(texts), encode_time)
                 if throttler.should_flush_cache():
                     self._flush_mps_cache()
 
-            with self._lock:
+            with deadline.locked(self._lock):
                 should_deactivate = self._throttler_active and len(self._embed_timestamps) < 3
                 if should_deactivate:
                     self._deactivate_throttler()
@@ -581,8 +661,9 @@ class ModelServer:
             pairs = request["pairs"]
             model_name = request.get("model_name")
             oom = False
-            with self._lock:
+            with deadline.locked(self._lock):
                 reranker = self._get_reranker(model_name)
+                deadline.check()
                 try:
                     scores = reranker.predict(
                         pairs, batch_size=64, show_progress_bar=False
@@ -599,14 +680,17 @@ class ModelServer:
                     # hold so the retry below always runs on the locally
                     # reloaded CPU instance (panel round 1, item 1).
                     self._mark_sticky_cpu("rerank")
-                    flush_mps_cache()
                     self._reranker = None
                     self._reranker_name = None
+                    deadline.check()
+                    flush_mps_cache()
+                    deadline.check()
                     reranker = self._get_reranker(model_name)  # sticky → CPU
                     oom = True
             if oom:
                 # Retry outside the lock — rerank batches are the expensive
                 # part; other clients must not starve behind the recovery.
+                deadline.check()
                 scores = reranker.predict(
                     pairs, batch_size=64, show_progress_bar=False
                 )
