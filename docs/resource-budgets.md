@@ -286,3 +286,48 @@ model replacement overlap, fast-encoder residency and serializer copies for
 accepted results still require measured whole-process budget calibration.
 This change introduces no new process-memory threshold, token estimator,
 automatic recycling policy or claim that native allocation cannot overshoot.
+
+## Cluster cache publication
+
+Clustering reads embeddings, source fields and categories from one SQLite
+snapshot. For an owned transaction, it closes that read snapshot before vector
+normalization, HDBSCAN, centroid arithmetic and serialization. These computations
+open no writer transaction. HDBSCAN parameters, normalized inputs, noise label
+`-1`, centroid arithmetic and sorted distinct session categories are unchanged.
+
+Publication obtains SQLite writer ownership, validates the input state again,
+then replaces assignments and centroids in one transaction. Validation includes
+raw vector bytes and row IDs; source IDs, content, sender, recipient, timestamp,
+category and modality; active vector table/schema; the selected cache registry
+row; embedder metadata/build marker; and runtime model, dimension and tier group.
+A typed, length-prefixed SHA-256 fingerprint allows streaming validation without
+retaining another full vector matrix. It is a content fingerprint, not a durable
+source-generation counter. Unrelated metadata updates do not invalidate it.
+
+If inputs changed, the vector index is marked in progress, a vector has no source
+message, or the existing model lock is busy at publication, clustering raises an
+error and retains the previous cache. There is no automatic retry. A genuinely
+empty, completed vector table clears both cache tables atomically. Missing
+HDBSCAN remains an error, including for empty input.
+
+Publication tries the model lock without waiting after acquiring the database
+writer lock. It holds that model lock through an owned commit or caller savepoint
+release, then releases it on success or failure. Native model loading cannot make
+publication wait while it holds the writer lock. Computation, insertion, commit,
+savepoint-release and cancellation failures roll back this operation's changes,
+so a later caller commit cannot publish an incomplete replacement. Table creation
+also participates in publication instead of implicitly committing caller work.
+
+An existing caller transaction remains caller-owned. Its preexisting writer lock,
+if any, necessarily remains held during computation; this operation does not
+commit it to release that lock. A stale caller WAL snapshot raises rather than
+being restarted. The caller is responsible for keeping source and model state
+consistent until its later commit. The fence establishes consistency at
+publication, not absolute freshness through arbitrary later caller changes.
+
+Snapshot capture and publication validation still scan the input rows; validation
+under the writer lock is proportional to the corpus size. Embeddings and normalized
+vectors still occupy their existing NumPy arrays. Synthetic SQLite tests establish
+rollback, writer progress during paused computation and atomic reader views.
+Actual HDBSCAN runtime, validation duration, WAL growth, native peak memory and
+retrieval quality on representative corpora remain release measurement gates.

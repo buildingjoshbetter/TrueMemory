@@ -24,10 +24,14 @@ Dependencies:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sqlite3
 import struct
 from collections import defaultdict
+from collections.abc import Iterator
+from contextlib import contextmanager
+from types import ModuleType
 
 import numpy as np
 
@@ -57,10 +61,107 @@ CREATE INDEX IF NOT EXISTS idx_cluster_id ON message_clusters(cluster_id);
 """
 
 
-def _init_cluster_tables(conn: sqlite3.Connection):
-    """Create clustering tables if they don't exist."""
-    conn.executescript(_CLUSTER_SCHEMA)
-    conn.commit()
+def _init_cluster_tables(conn: sqlite3.Connection) -> None:
+    """Create tables inside the publication transaction without committing it."""
+    for statement in _CLUSTER_SCHEMA.split(";"):
+        if statement.strip():
+            conn.execute(statement)
+
+
+@contextmanager
+def _cluster_transaction(conn: sqlite3.Connection, *, write: bool = False) -> Iterator[None]:
+    owned = not conn.in_transaction
+    if owned:
+        conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+    else:
+        conn.execute("SAVEPOINT truememory_clusters")
+    completed = False
+    try:
+        if write and not owned:
+            # Acquire the writer before validating a caller's read snapshot.
+            # A stale WAL snapshot fails here; no source row is changed.
+            conn.execute("UPDATE messages SET id = id WHERE 0")
+        yield
+        conn.execute("COMMIT" if owned else "RELEASE truememory_clusters")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO truememory_clusters")
+                conn.execute("RELEASE truememory_clusters")
+
+
+def _cluster_source_state(
+    conn: sqlite3.Connection, vector_search: ModuleType, *, collect_categories: bool = False,
+) -> tuple[bytes, dict[int, str | None]]:
+    """Fingerprint raw source values, without retaining a second vector matrix.
+
+    The caller holds a database snapshot and vector_search's model lock. Typed,
+    length-prefixed cells distinguish NULL, empty strings, numeric values and
+    blob bytes. Table/model identities are included even for empty inputs.
+    """
+    digest = hashlib.sha256()
+
+    def add(row: tuple) -> None:
+        digest.update(struct.pack(">Q", len(row)))
+        for value in row:
+            if value is None:
+                tag, data = b"n", b""
+            elif isinstance(value, bytes):
+                tag, data = b"b", value
+            elif isinstance(value, str):
+                tag, data = b"s", value.encode("utf-8")
+            elif isinstance(value, int):
+                tag, data = b"i", str(value).encode("ascii")
+            elif isinstance(value, float):
+                tag, data = b"f", struct.pack(">d", value)
+            else:
+                raise TypeError("Unsupported SQLite value in clustering source")
+            digest.update(tag)
+            digest.update(struct.pack(">Q", len(data)))
+            digest.update(data)
+
+    group = vector_search._active_tier_group()
+    vec_table = vector_search._active_vec_table(conn)
+    add(("model", vector_search.EMBEDDING_MODEL, vector_search._embedding_dim, group, vec_table))
+    definitions = conn.execute(
+        "SELECT type, name, rootpage, sql FROM sqlite_master "
+        "WHERE name IN (?, 'messages', 'metadata', 'vector_cache_registry') ORDER BY name",
+        (vec_table,),
+    ).fetchall()
+    add(("schema",))
+    for row in definitions:
+        add(tuple(row))
+    tables = {row[1] for row in definitions}
+    add(("registry",))
+    if "vector_cache_registry" in tables:
+        for row in conn.execute("SELECT * FROM vector_cache_registry WHERE tier_group = ?", (group,)):
+            add(tuple(row))
+    add(("metadata",))
+    if "metadata" in tables:
+        build_key = f"vec_build_state:{vec_table}"
+        for row in conn.execute(
+            "SELECT key, value, updated_at FROM metadata "
+            "WHERE key IN ('embed_model', 'embed_dim', ?) ORDER BY key", (build_key,),
+        ):
+            if row[0] == build_key and row[1] == "in_progress":
+                raise RuntimeError("Clustering requires a completed vector index; rebuild is in progress")
+            add(tuple(row))
+    add(("vectors",))
+    quoted_table = '"' + vec_table.replace('"', '""') + '"'
+    for row in conn.execute(f"SELECT rowid, embedding FROM {quoted_table} ORDER BY rowid"):
+        add(tuple(row))
+    add(("messages",))
+    categories = {}
+    for row in conn.execute(
+        "SELECT id, content, sender, recipient, timestamp, category, modality FROM messages ORDER BY id"
+    ):
+        add(tuple(row))
+        if collect_categories:
+            categories[row[0]] = row[5]
+    return digest.digest(), categories
 
 
 # ---------------------------------------------------------------------------
@@ -124,43 +225,39 @@ def cluster_messages(
         Number of clusters found (excluding noise).
     """
     import hdbscan
+    from truememory import vector_search
 
-    _init_cluster_tables(conn)
+    # Model loading may also hold this lock. Wait before opening our read
+    # transaction, and release both before any clustering computation.
+    with vector_search._lock:
+        with _cluster_transaction(conn):
+            source_state, categories = _cluster_source_state(conn, vector_search, collect_categories=True)
+            msg_ids, embeddings = _get_all_embeddings(conn)
+    if any(mid not in categories for mid in msg_ids):
+        raise RuntimeError("Clustering found vectors without source messages; rebuild the vector index")
 
-    # Clear existing clusters
-    conn.execute("DELETE FROM message_clusters")
-    conn.execute("DELETE FROM cluster_centroids")
+    labels = []
+    if msg_ids:
+        # Normalize for cosine-like clustering.
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        normed = embeddings / norms
 
-    # Get embeddings
-    msg_ids, embeddings = _get_all_embeddings(conn)
-    if len(msg_ids) == 0:
-        conn.commit()
-        return 0
-
-    # Normalize for cosine-like clustering
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    normed = embeddings / norms
-
-    # Run HDBSCAN
-    clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=min_cluster_size,
-        min_samples=min_samples,
-        metric="euclidean",  # on normalized vectors ≈ cosine
-        cluster_selection_method="eom",
-    )
-    labels = clusterer.fit_predict(normed)
+        clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
+            metric="euclidean",  # on normalized vectors ≈ cosine
+            cluster_selection_method="eom",
+        )
+        labels = clusterer.fit_predict(normed)
+        if len(labels) != len(msg_ids):
+            raise ValueError("Clustering returned an incomplete assignment set")
 
     # Store cluster assignments
     rows = []
     for msg_id, label in zip(msg_ids, labels):
         is_noise = 1 if label == -1 else 0
         rows.append((msg_id, int(label), is_noise))
-
-    conn.executemany(
-        "INSERT INTO message_clusters (message_id, cluster_id, noise) VALUES (?, ?, ?)",
-        rows,
-    )
 
     # Build centroids
     cluster_vecs = defaultdict(list)
@@ -170,25 +267,38 @@ def cluster_messages(
             cluster_vecs[label].append(emb)
             cluster_msg_ids[label].append(msg_id)
 
+    centroids = []
     for cid, vecs in cluster_vecs.items():
         centroid = np.mean(vecs, axis=0).astype(np.float32)
-        # Get session range for this cluster
-        placeholders = ",".join("?" * len(cluster_msg_ids[cid]))
-        sessions = conn.execute(
-            f"SELECT DISTINCT category FROM messages WHERE id IN ({placeholders})",
-            cluster_msg_ids[cid],
-        ).fetchall()
-        session_range = ", ".join(sorted(s[0] for s in sessions if s[0]))
+        sessions = {categories[mid] for mid in cluster_msg_ids[cid] if categories[mid]}
+        session_range = ", ".join(sorted(sessions))
+        centroids.append((int(cid), _serialize_f32(centroid), len(vecs), session_range))
 
-        conn.execute(
-            "INSERT INTO cluster_centroids (cluster_id, centroid, message_count, session_range) "
-            "VALUES (?, ?, ?, ?)",
-            (int(cid), _serialize_f32(centroid), len(vecs), session_range),
-        )
-
-    conn.commit()
-    n_clusters = len(cluster_vecs)
-    return n_clusters
+    model_lock_acquired = False
+    try:
+        with _cluster_transaction(conn, write=True):
+            # Never hold SQLite's writer lock while waiting for native model
+            # load or a tier change. Keep the model stable through commit.
+            model_lock_acquired = vector_search._lock.acquire(blocking=False)
+            if not model_lock_acquired:
+                raise RuntimeError("Embedding model is busy; retry clustering after model loading or tier switching")
+            current_state, _ = _cluster_source_state(conn, vector_search)
+            if current_state != source_state:
+                raise RuntimeError("Clustering source changed during computation; retry consolidation")
+            _init_cluster_tables(conn)
+            conn.execute("DELETE FROM message_clusters")
+            conn.execute("DELETE FROM cluster_centroids")
+            conn.executemany(
+                "INSERT INTO message_clusters (message_id, cluster_id, noise) VALUES (?, ?, ?)", rows,
+            )
+            conn.executemany(
+                "INSERT INTO cluster_centroids (cluster_id, centroid, message_count, session_range) "
+                "VALUES (?, ?, ?, ?)", centroids,
+            )
+    finally:
+        if model_lock_acquired:
+            vector_search._lock.release()
+    return len(cluster_vecs)
 
 
 # ---------------------------------------------------------------------------
