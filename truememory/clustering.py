@@ -223,9 +223,10 @@ def search_clustered(
         List of result dicts sorted by similarity.
     """
     from truememory.vector_search import get_model
+    from truememory.mps_utils import encode_with_model_ownership
 
     model = get_model()
-    query_vec = model.encode([query])[0].astype(np.float32)
+    query_vec = encode_with_model_ownership(model, [query])[0].astype(np.float32)
 
     # Check if clusters exist
     try:

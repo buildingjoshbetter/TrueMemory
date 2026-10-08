@@ -515,9 +515,11 @@ class EncodingGate:
             return 0.0
 
         try:
-            embeddings = model.encode([fact, mem_content,
-                                       fact + " [SEP] " + mem_content,
-                                       mem_content + " [SEP] " + mem_content])
+            from truememory.mps_utils import encode_with_model_ownership
+            embeddings = encode_with_model_ownership(
+                model, [fact, mem_content, fact + " [SEP] " + mem_content,
+                        mem_content + " [SEP] " + mem_content],
+            )
             emb_fact = embeddings[0]
             emb_mem = embeddings[1]
 

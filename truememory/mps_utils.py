@@ -10,10 +10,45 @@ import gc
 import logging
 import os
 import threading
+from _thread import LockType
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
 _device_lock = threading.Lock()
+
+
+@dataclass
+class _ModelOwnership:
+    lock: LockType = field(default_factory=threading.Lock)
+    users: int = 0
+
+
+# Entries live only while a caller owns or waits for that exact instance. The
+# caller keeps the model alive, so its id cannot be reused during this interval.
+_model_owners: dict[int, _ModelOwnership] = {}
+
+
+@contextmanager
+def _own_model(model: object) -> Iterator[None]:
+    key = id(model)
+    with _device_lock:
+        owner = _model_owners.get(key)
+        if owner is None:
+            owner = _ModelOwnership()
+            _model_owners[key] = owner
+        owner.users += 1
+    try:
+        with owner.lock:
+            yield
+    finally:
+        with _device_lock:
+            owner.users -= 1
+            if owner.users == 0:
+                del _model_owners[key]
+
 
 _VALID_DEVICE_VALUES = ("cpu", "mps", "cuda", "auto")
 
@@ -110,31 +145,35 @@ def flush_mps_cache() -> None:
     gc.collect()
 
 
-def encode_with_mps_fallback(model, texts, **kwargs):
-    """Encode texts, falling back to CPU if MPS runs out of memory.
+def encode_with_model_ownership(model: object, texts: object, **kwargs: object) -> object:
+    """Serialize local inference while preserving the caller's recovery policy."""
+    from truememory.model_client import EmbeddingProxy
 
-    Thread-safe: acquires _device_lock around model.to() transitions.
-    Restores model to MPS after successful CPU fallback.
-    """
-    try:
+    if isinstance(model, EmbeddingProxy):
         return model.encode(texts, **kwargs)
-    except RuntimeError as exc:
-        if not is_mps_oom(exc):
-            raise
-        logger.warning("MPS OOM during encoding — flushing cache and retrying on CPU")
-        flush_mps_cache()
+    with _own_model(model):
+        return model.encode(texts, **kwargs)
+
+
+def encode_with_mps_fallback(model: object, texts: object, **kwargs: object) -> object:
+    """Own a local model through inference and recovery; keep recovered models on CPU."""
+    from truememory.model_client import EmbeddingProxy
+
+    if isinstance(model, EmbeddingProxy):
+        # The daemon owns native inference. Serializing its proxy here would
+        # prevent recall from using the daemon's independent fast lane.
+        return model.encode(texts, **kwargs)
+
+    with _own_model(model):
+        try:
+            return model.encode(texts, **kwargs)
+        except RuntimeError as exc:
+            if not is_mps_oom(exc):
+                raise
+            logger.warning("MPS OOM during local encoding; retrying on CPU without MPS re-promotion")
+        # Leave the exception block first so the failed forward traceback can
+        # release its tensors. Move live weights before flushing freed storage.
         if hasattr(model, "to"):
-            with _device_lock:
-                model.to("cpu")
-            try:
-                result = model.encode(texts, **kwargs)
-            finally:
-                try:
-                    import torch
-                    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                        with _device_lock:
-                            model.to("mps")
-                except Exception:
-                    pass
-            return result
+            model.to("cpu")
+        flush_mps_cache()
         return model.encode(texts, **kwargs)
