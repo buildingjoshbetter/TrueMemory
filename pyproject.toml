@@ -71,6 +71,8 @@ Changelog = "https://github.com/buildingjoshbetter/TrueMemory/blob/main/CHANGELO
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Retain pytest's defaults while discovering kebab-case regression scripts.
+python_files = ["test_*.py", "*_test.py", "test-*.py"]
 # Issue #426: register custom markers and fail on typos so the gate can
 # reliably exclude network/model-download tests via `-m "not network"`.
 addopts = "--strict-markers --timeout=120"
