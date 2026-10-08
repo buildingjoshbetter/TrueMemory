@@ -991,16 +991,22 @@ class ModelServer:
                                     reranker = self._get_reranker(recovery_name)
                                     retry = batch
                                     break
-                                scores = _store_batch_result(
-                                    scores, values, offset, len(batch), len(pairs), "scores", indices=indices,
-                                )
+                                if indices is None:
+                                    scores = _store_batch_result(scores, values, offset, len(batch), len(pairs), "scores")
+                                else:
+                                    scores = _store_batch_result(
+                                        scores, values, offset, len(batch), len(pairs), "scores", indices=indices,
+                                    )
                                 offset += len(batch)
                         if retry is not None:
                             deadline.check()
                             values = reranker.predict(retry, batch_size=limit, show_progress_bar=False)
-                            scores = _store_batch_result(
-                                scores, values, offset, len(retry), len(pairs), "scores", indices=indices,
-                            )
+                            if indices is None:
+                                scores = _store_batch_result(scores, values, offset, len(retry), len(pairs), "scores")
+                            else:
+                                scores = _store_batch_result(
+                                    scores, values, offset, len(retry), len(pairs), "scores", indices=indices,
+                                )
                             offset += len(retry)
                     self._after_request_batches(throttler, len(pairs), predict_start, deadline)
                     return {"ok": True, "scores": scores}

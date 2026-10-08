@@ -1323,6 +1323,39 @@ class TestModernBertGlobalOrder(unittest.TestCase):
         self.assertEqual(server.loads, [None, None])
         self.assertEqual(server._reranker_name, "synthetic-other")
 
+    def test_unplanned_success_and_retry_keep_positional_result_writer(self) -> None:
+        for count, requested, failure in ((17, 8, None), (17, 8, 2), (64, None, None), (64, None, 1)):
+            with self.subTest(count=count, requested=requested, failure=failure):
+                module, server, model = self.runtime()
+                pairs = self.pairs(count)
+                limit = requested or 64
+                reference = PairOrderModel(PairOrderNP())
+                expected = []
+                for offset in range(0, count, limit):
+                    expected.extend(reference.predict(pairs[offset:offset + limit], batch_size=limit,
+                                                      show_progress_bar=False).values)
+                writes = []
+                store = module["_store_batch_result"]
+
+                def positional_store(result: object, values: object, *args: object) -> OrderArray:
+                    writes.append((args[0], args[1]))
+                    return store(result, values, *args)
+
+                module["_store_batch_result"] = positional_store
+                if failure is not None:
+                    model.fail_calls.add(failure)
+                response = self.request(server, pairs, **({} if requested is None else {"batch_size": requested}))
+                self.assertTrue(response["ok"])
+                self.assertEqual(response["scores"].values, expected)
+                self.assertEqual(writes, [(offset, min(limit, count - offset)) for offset in range(0, count, limit)])
+                self.assertEqual([batch for loaded in server.models for batch in loaded.native_batches],
+                                 reference.native_batches)
+                self.assertEqual(module["np"].allocations, [(count,)])
+                if failure is not None:
+                    self.assertEqual(model.calls[failure - 1], server.models[1].calls[0])
+                self.assertFalse(server._inference_lock.locked())
+                self.assertFalse(server._lock.locked())
+
     def test_deadline_on_oom_or_during_replacement_prevents_retry(self) -> None:
         for phase in ("oom", "flush", "replacement"):
             module, server, model = self.runtime()
