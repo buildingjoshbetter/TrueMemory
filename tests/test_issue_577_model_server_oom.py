@@ -567,11 +567,10 @@ class TestIssue577FastLane:
         monkeypatch.setattr(vs, "EMBEDDING_MODEL", "edge")
 
         server = ModelServer()
-        # Arm the snapshot via a main-path load (the historical mutating
-        # sync happens exactly here, under the lock).
+        # Arm the snapshot without changing the daemon's default selection.
         resp = server.handle_request({"op": "embed", "texts": ["a", "b"], "tier": "base"})
         assert resp["ok"] is True
-        assert calls == ["base"]
+        assert calls == []
         calls.clear()
 
         # Contended fast lane: serves from the snapshot, zero mutation.
