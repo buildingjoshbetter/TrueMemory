@@ -932,3 +932,65 @@ resume. Synthetic SQLite tests cover precise REAL metadata rendered into
 separation text, signed zero, collations, storage types, rowid aliases,
 generated fields, repair failures and caller rollback. These tests do not
 measure native model behavior or add a process memory budget.
+
+### Canonical source comparisons and FTS replacement cleanup
+
+Canonical maintenance tracking and FTS synchronization compare storage types
+and values with explicit `BINARY` collation. Declared `NOCASE` or `RTRIM`
+collations cannot hide source edits, and adjacent REAL values do not depend on
+SQLite's lossy REAL-to-text conversion. SQL equality cannot distinguish retained
+positive and negative REAL zero, so an explicit source UPDATE involving REAL
+zero invalidates conservatively, including assigning the same zero again.
+
+For ordinary columns, comparison triggers listen to their covered fields and
+unshadowed `rowid`, `_rowid_`, and `oid` aliases. Default derived-only updates
+therefore remain clean. A generated source field can depend on any column, so
+its comparison trigger listens to all updates; REAL zero in such a field can
+conservatively invalidate an otherwise-derived update. The rebuild bridge keeps
+its separate, existing schema contract and canonical-reuse restriction.
+
+Any UNIQUE index on messages selects conservative source tracking dynamically:
+every INSERT fences append-only reuse, and every UPDATE is a correction. This
+includes ordinary, expression, partial and composite UNIQUE indexes. It also
+includes writes that do not delete a conflicting row. Default-schema inserts
+remain append-only, and their derived-only updates remain clean. Hidden deletes
+from `INSERT OR REPLACE` or `UPDATE OR REPLACE` cannot escape this fence when
+`recursive_triggers` is disabled.
+
+Separate FTS cleanup triggers run only when messages has a UNIQUE index. They
+remove indexed row IDs absent from messages. Their trigger-level guard avoids a
+content scan on the default schema. A custom UNIQUE schema pays an O(N) orphan
+scan for each inserted or updated message, where N is its FTS row count. Source
+certification does not depend on FTS completeness or trigger execution order.
+
+These canonical guarantees require `messages.id` to be an ordinary INTEGER
+PRIMARY KEY rowid alias. An indexed `INTEGER PRIMARY KEY DESC` can retain NULL
+and REAL IDs; a WITHOUT ROWID INTEGER primary key can retain REAL IDs. FTS may
+allocate an unrelated rowid for NULL or reject a REAL ID. Unsupported IDs leave
+canonical source tracking unavailable, and FTS repair is skipped with a warning;
+the database remains readable. Missing source or indexed fields likewise retain
+the degraded legacy path. This checkpoint does not change the rebuild bridge's
+broader ID support or establish FTS synchronization for these unsupported schemas.
+
+Changed source-trigger definitions rotate the epoch and mark maintenance layers
+pending. Changed or missing owned FTS definitions are repaired and the index is
+refilled from current messages in one transaction. The refill repairs stale,
+missing and orphan indexed rows. It happens once per definition repair, not on
+ordinary repeated opens. A caller transaction retains its writes and ownership;
+rollback restores both trigger definitions and indexed contents. The runtime
+must provide FTS5, `table_xinfo`, and table-valued `pragma_index_list`.
+
+Synthetic SQLite 3.50.4 progress-handler measurements were identical at 100 and
+10,000 source rows: 289 virtual-machine steps for append, 232 for a derived-only
+update, and 15 for revision read. The row-count ratio is 10,000 / 100 = 100;
+each measured step ratio is 1. These counts cover the tested SQL paths, not
+native inference, overall database-open cost, memory use, or UNIQUE schemas.
+An authorizer-based regression also rejects any source/FTS content read during
+ordinary repeated tracking initialization and FTS migration.
+
+Interval trust remains a separate unresolved contract. A writer can drop
+tracking triggers, mutate messages, and recreate identical definitions without
+the current definition checks exposing that interval. Arbitrary direct FTS
+mutations can also defeat synchronization. This checkpoint adds neither a
+schema-cookie fence nor a readiness gate to FTS search, and does not certify
+either kind of external mutation.

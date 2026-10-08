@@ -982,10 +982,10 @@ class TestLegacyRebuildBridge(unittest.TestCase):
                 conn.executescript("CREATE TABLE vec_messages(embedding BLOB); CREATE TABLE vec_messages_sep(embedding BLOB);")
                 with self.assertRaises(self.source.RebuildSourceChanged):
                     self.vector.build_vectors(conn, txn_batch=1)
-                # Negative control: canonical counters alone do not see the
-                # hidden conflict deletion under these custom constraints.
+                # Canonical tracking also fences these UNIQUE writes; the
+                # rebuild retains its independently scoped bridge certificate.
                 canonical_after = self.modules["maintenance"].read_source_revision(conn)
-                self.assertTrue(canonical_after.is_append_only_since(canonical_before))
+                self.assertFalse(canonical_after.is_append_only_since(canonical_before))
                 manifest = self.source.load_manifest(conn, self.source.manifest_key(("vec_messages",)))
                 self.assertEqual(manifest.source.tracker, "rebuild-bridge-conservative-v1")
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM vec_messages").fetchone()[0], 0)
@@ -1111,9 +1111,12 @@ class TestLegacyRebuildBridge(unittest.TestCase):
                     with self.assertRaises(self.source.RebuildSourceChanged):
                         self.vector.build_vectors(conn, txn_batch=1)
                     if canonical_ready:
-                        # These custom collations remain outside canonical
-                        # tracking's guarantees even when it reports ready.
-                        self.assertEqual(self.modules["maintenance"].read_source_revision(conn), canonical_before)
+                        # Explicit BINARY comparison also invalidates the
+                        # canonical source counters for this collated edit.
+                        canonical_after = self.modules["maintenance"].read_source_revision(conn)
+                        self.assertGreater(canonical_after.revision, canonical_before.revision)
+                        self.assertGreater(canonical_after.correction_count, canonical_before.correction_count)
+                        self.assertFalse(canonical_after.is_append_only_since(canonical_before))
                     self.assertEqual(conn.execute("SELECT COUNT(*) FROM vec_messages").fetchone()[0], 0)
                     manifest = self.source.load_manifest(conn, self.source.manifest_key(("vec_messages",)))
                     self.assertEqual(manifest.source.tracker, "rebuild-bridge-v1")
