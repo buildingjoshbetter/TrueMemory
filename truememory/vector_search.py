@@ -739,13 +739,23 @@ publish the group and consumed-input checkpoint in one commit.
 """
 
 
-def _capture_rebuild_model() -> tuple[object, tuple[int, str, int]]:
+def _capture_rebuild_model(conn: sqlite3.Connection | None = None) -> tuple[object, tuple[int, str, int]]:
+    """Caller transactions can borrow a cached model, but cannot wait or load."""
+    if conn is not None and conn.in_transaction:
+        if not _lock.acquire(blocking=False):
+            raise VectorPublicationChanged("Embedding model is busy; retry outside the caller transaction")
+        try:
+            if _model is None:
+                raise VectorPublicationChanged("Embedding model is not loaded; load it outside the caller transaction")
+            return _model, (_model_generation, EMBEDDING_MODEL, _embedding_dim)
+        finally:
+            _lock.release()
     with _lock:
         before = (_model_generation, EMBEDDING_MODEL)
     model = get_model()
     with _lock:
         if before != (_model_generation, EMBEDDING_MODEL):
-            raise RuntimeError("Embedding model changed while loading rebuild model")
+            raise VectorPublicationChanged("Embedding model changed while loading rebuild model")
         return model, (_model_generation, EMBEDDING_MODEL, _embedding_dim)
 
 
@@ -767,8 +777,9 @@ class VectorPublicationChanged(RuntimeError):
 
 
 @contextmanager
-def _foreground_model_fence(identity: tuple[int, str, int]) -> Iterator[None]:
-    if not _lock.acquire(blocking=False):
+def _foreground_model_fence(identity: tuple[int, str, int], *, blocking: bool = False) -> Iterator[None]:
+    """Blocking admission is permitted only before an owned writer starts."""
+    if not _lock.acquire(blocking=blocking):
         raise VectorPublicationChanged("Embedding model is busy; retry vector publication")
     try:
         if identity != (_model_generation, EMBEDDING_MODEL, _embedding_dim):
@@ -815,7 +826,7 @@ def _foreground_vector_publication(
 ) -> Iterator[tuple[str, str]]:
     from truememory.rebuild_source import rebuild_transaction
 
-    with rebuild_transaction(conn, write=True, publication_fence=_foreground_model_fence(identity)):
+    with _foreground_model_fence(identity, blocking=not conn.in_transaction), rebuild_transaction(conn, write=True):
         yield _validate_foreground_vector_target(conn, identity, message_id)
 
 
@@ -856,7 +867,7 @@ def _build_streamed_vectors(
                     save_manifest(conn, key, empty)
                     _clear_build_in_progress(conn, table)
                     return 0
-        model, identity = _capture_rebuild_model()
+        model, identity = _capture_rebuild_model(conn)
         with rebuild_transaction(conn, write=True, publication_fence=_rebuild_model_fence(identity)):
             manifest = load_manifest(conn, key)
             resumable = (manifest is not None and not manifest.complete
@@ -1191,7 +1202,7 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
         message_id: The ``messages.id`` of the row being embedded.
         content:    The text to embed.
     """
-    model, identity = _capture_rebuild_model()
+    model, identity = _capture_rebuild_model(conn)
     embedding = _encode_with_mps_fallback(model, [content])[0]
     normed = _normalize_for_cosine(embedding)
     if normed is None:
