@@ -29,8 +29,8 @@ import logging
 import sqlite3
 import struct
 from collections import defaultdict
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from types import ModuleType
 
 import numpy as np
@@ -93,15 +93,77 @@ def _cluster_transaction(conn: sqlite3.Connection, *, write: bool = False) -> It
                 conn.execute("RELEASE truememory_clusters")
 
 
+def _cluster_dependency_identity(conn: sqlite3.Connection, vector_search: ModuleType) -> tuple[tuple, ...]:
+    """Read cheap identity under the model lock and a coherent SQLite snapshot."""
+    group = vector_search._active_tier_group()
+    vec_table = vector_search._active_vec_table(conn)
+    identity = [("model", vector_search.EMBEDDING_MODEL, vector_search._embedding_dim, group, vec_table)]
+    definitions = conn.execute(
+        "SELECT type, name, rootpage, sql FROM sqlite_master "
+        "WHERE name IN (?, 'messages', 'metadata', 'vector_cache_registry') ORDER BY name",
+        (vec_table,),
+    ).fetchall()
+    identity.append(("schema",))
+    identity.extend(tuple(row) for row in definitions)
+    tables = {row[1] for row in definitions}
+    identity.append(("registry",))
+    if "vector_cache_registry" in tables:
+        for row in conn.execute("SELECT * FROM vector_cache_registry WHERE tier_group = ?", (group,)):
+            identity.append(tuple(row))
+    identity.append(("metadata",))
+    if "metadata" in tables:
+        build_key = f"vec_build_state:{vec_table}"
+        for row in conn.execute(
+            "SELECT key, value, updated_at FROM metadata "
+            "WHERE key IN ('embed_model', 'embed_dim', ?, ?) ORDER BY key",
+            (build_key, f"vec_source_v1:{vec_table}"),
+        ):
+            if row[0] == build_key and row[1] == "in_progress":
+                raise RuntimeError("Clustering requires a completed vector index; rebuild is in progress")
+            identity.append(tuple(row))
+    return tuple(identity)
+
+
+def cluster_publication_guard(conn: sqlite3.Connection) -> AbstractContextManager[Callable[[], None]]:
+    """Capture now; later hold model identity through the runner's terminal write.
+
+    The caller must run cluster_messages in its owned transaction before entering
+    this guard. Its raw-input fence and retained SQLite writer protect source and
+    vector bytes; this guard closes the runtime-model gap after nested RELEASE.
+    """
+    if conn.in_transaction:
+        raise RuntimeError("Cluster publication capture requires a clean transaction boundary")
+    from truememory import vector_search
+
+    with vector_search._lock:
+        with _cluster_transaction(conn):
+            expected = _cluster_dependency_identity(conn, vector_search)
+
+    def validate() -> None:
+        if _cluster_dependency_identity(conn, vector_search) != expected:
+            raise RuntimeError("Clustering dependency changed before outer commit")
+
+    @contextmanager
+    def hold() -> Iterator[Callable[[], None]]:
+        if not conn.in_transaction:
+            raise RuntimeError("Cluster publication requires the runner's active transaction")
+        # Ensure writer admission before taking the nonblocking model lock.
+        conn.execute("UPDATE messages SET id=id WHERE 0")
+        acquired = vector_search._lock.acquire(blocking=False)
+        if not acquired:
+            raise RuntimeError("Embedding model is busy before cluster commit")
+        try:
+            yield validate
+        finally:
+            vector_search._lock.release()
+
+    return hold()
+
+
 def _cluster_source_state(
     conn: sqlite3.Connection, vector_search: ModuleType, *, collect_categories: bool = False,
 ) -> tuple[bytes, dict[int, str | None]]:
-    """Fingerprint raw source values, without retaining a second vector matrix.
-
-    The caller holds a database snapshot and vector_search's model lock. Typed,
-    length-prefixed cells distinguish NULL, empty strings, numeric values and
-    blob bytes. Table/model identities are included even for empty inputs.
-    """
+    """Fingerprint raw inputs under the model lock and a database snapshot."""
     digest = hashlib.sha256()
 
     def add(row: tuple) -> None:
@@ -123,32 +185,10 @@ def _cluster_source_state(
             digest.update(struct.pack(">Q", len(data)))
             digest.update(data)
 
-    group = vector_search._active_tier_group()
-    vec_table = vector_search._active_vec_table(conn)
-    add(("model", vector_search.EMBEDDING_MODEL, vector_search._embedding_dim, group, vec_table))
-    definitions = conn.execute(
-        "SELECT type, name, rootpage, sql FROM sqlite_master "
-        "WHERE name IN (?, 'messages', 'metadata', 'vector_cache_registry') ORDER BY name",
-        (vec_table,),
-    ).fetchall()
-    add(("schema",))
-    for row in definitions:
-        add(tuple(row))
-    tables = {row[1] for row in definitions}
-    add(("registry",))
-    if "vector_cache_registry" in tables:
-        for row in conn.execute("SELECT * FROM vector_cache_registry WHERE tier_group = ?", (group,)):
-            add(tuple(row))
-    add(("metadata",))
-    if "metadata" in tables:
-        build_key = f"vec_build_state:{vec_table}"
-        for row in conn.execute(
-            "SELECT key, value, updated_at FROM metadata "
-            "WHERE key IN ('embed_model', 'embed_dim', ?) ORDER BY key", (build_key,),
-        ):
-            if row[0] == build_key and row[1] == "in_progress":
-                raise RuntimeError("Clustering requires a completed vector index; rebuild is in progress")
-            add(tuple(row))
+    identity = _cluster_dependency_identity(conn, vector_search)
+    for row in identity:
+        add(row)
+    vec_table = identity[0][-1]
     add(("vectors",))
     quoted_table = '"' + vec_table.replace('"', '""') + '"'
     for row in conn.execute(f"SELECT rowid, embedding FROM {quoted_table} ORDER BY rowid"):
