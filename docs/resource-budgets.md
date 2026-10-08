@@ -647,3 +647,41 @@ resume. Synthetic SQLite tests cover precise REAL metadata rendered into
 separation text, signed zero, collations, storage types, rowid aliases,
 generated fields, repair failures and caller rollback. These tests do not
 measure native model behavior or add a process memory budget.
+
+### Foreground model admission before writer ownership
+
+Owned foreground add and incremental vector publication now acquire the model
+identity fence before opening the SQLite write transaction. Add first owns its
+engine write lock, so another mutation on that same engine cannot hold the
+engine lock while waiting for a model fence held by the queued add. The model
+fence validates the captured generation and remains held through commit or
+rollback. There is one model acquisition, with no nested acquisition of the
+nonreentrant model lock.
+
+This permits an owned foreground call to wait for a concurrent cluster source
+snapshot without holding SQLite's writer or failing a valid vector publication.
+Model loading and inference finish before owned writer admission. A model
+generation change during loading, encoding or admission still rejects stale
+publication; add and update propagate those typed errors instead of silently
+falling back to a source-only write. Update retains its existing distinction:
+capture failure precedes its source write, while a later vector-publication
+failure can occur after the source update committed.
+
+Caller transactions use nonblocking model capture and publication admission.
+Add and update classify the connection during model capture under their engine
+write lock, so another same-engine mutation's transaction cannot be mistaken
+for borrowed caller work. They release that lock before encoding.
+Capture accepts only a cached model observed together with its identity under
+the model lock. Busy ownership or an unloaded model produces a typed retry
+error before any additional source write; the caller's transaction remains
+intact. Cached-model inference can still run inside a caller-held transaction.
+The publication fence protects the nested savepoint release, not a later outer
+commit controlled by that caller. Streamed rebuilds retain nonblocking model
+fences after writer admission and use the same cached-only borrowed capture.
+
+SQLite and event regressions cover actual clustering snapshot contention,
+same-engine mutation ordering, stale generations, borrowed sentinels, atomic
+add publication, and model release after admission/publication/commit failures.
+This checkpoint changes admission ordering rather than bounding wait duration:
+cluster snapshots may still hold the model lock while scanning the corpus.
+Native integration and latency remain separate acceptance checks.
