@@ -72,3 +72,42 @@ truememory-ingest status
 - **Existing config**: TrueMemory uses additive merges — your existing Codex config is preserved.
 - **Hooks not firing**: Check that the hook script paths are absolute and the Python executable is correct.
 - **Windows Defender ASR**: If commands are blocked, use `python -m` form instead. See [debugging guide](guides/debugging.md#windows-defender-asr-blocks-truememory-mcpexe).
+
+## Native rollout parsing
+
+The parser supports Codex JSONL and JSON arrays containing native
+`response_item` message envelopes. User and assistant text blocks retain file
+order and repeated occurrences. Legacy `user_message` / `agent_message`
+events and Paginated `item_completed` events are coverage evidence, not extra
+conversation turns. Ordinary plain-text lifecycle records, including
+`task_started` / `task_complete` and their `turn_*` aliases, are reconciled
+against the canonical responses. A terminal summary uses its identified turn
+and never supplies another echo credit.
+
+This subset follows the [pinned Codex producer](https://github.com/openai/codex/tree/0b755b1945bf4a31560df2ce1469aeb044dccbc9/codex-rs).
+It excludes explicit harness, skill, AGENTS, tool, inherited, compaction and
+retained-delivery context. Positional provenance must align with the original
+content array. Explicit unknown provenance cannot authorize text. Older
+records without attribution retain role/text compatibility; JSON metadata
+does not authenticate authorship or prove that earlier history is present.
+
+The detailed parser reports partial coverage for unmatched events, ambiguous
+lifecycles, unknown variants, media, unavailable delivery and unsupported
+assistant rewriting. Citation and proposed-plan markup projections are not
+implemented in this subset. Supported canonical text remains available for
+inspection, with categorical diagnostics that omit input text and identifiers.
+`complete` describes the supported supplied bytes, not the success of the
+model's task or an authenticated record of the whole session.
+
+The stop admission check counts parsed human messages after removing
+TrueMemory-injected blocks. The default threshold of five means five nonempty
+human occurrences. A long message, metadata, tool results or repeated event
+echoes cannot meet that threshold through byte length. Role-marked plain text
+still counts; unmarked prose does not. Supported human messages can count in
+a partial transcript; admission is not a completion verdict.
+
+Parser support alone does not establish automatic capture. Native hook
+delivery and path admission remain separate integration requirements. Capture
+currently uses the list parser API; detailed coverage does not yet control
+durable success receipts. The #768 completion-policy work must preserve
+partial coverage before automatic-capture completeness can be claimed.

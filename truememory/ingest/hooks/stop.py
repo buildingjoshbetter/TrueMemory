@@ -224,56 +224,15 @@ def _writable_dirs_ok() -> bool:
 
 
 def _has_enough_messages(transcript_path: str, min_messages: int) -> bool:
-    """Check whether the transcript has at least `min_messages` user turns.
+    """Count meaningful canonical human turns, independently of completion coverage."""
+    from truememory.ingest.transcript import parse_transcript_outcome, strip_truememory_blocks
 
-    Parses the transcript properly instead of substring-counting so that
-    conversations containing the literal strings "human"/"user" in content
-    don't inflate the count.
-    """
-    try:
-        content = Path(transcript_path).read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    outcome = parse_transcript_outcome(Path(transcript_path))
+    if outcome.status == "unreadable":
         return False
-
-    if not content.strip():
-        return False
-
-    # Try JSON array first (Claude Code format)
-    count = 0
-    try:
-        if content.lstrip().startswith("["):
-            data = json.loads(content)
-            if isinstance(data, list):
-                for entry in data:
-                    if isinstance(entry, dict):
-                        role = entry.get("type") or entry.get("role") or ""
-                        if role in ("human", "user"):
-                            count += 1
-                return count >= min_messages
-    except json.JSONDecodeError:
-        pass
-
-    # Try JSONL
-    try:
-        for line in content.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-                if isinstance(entry, dict):
-                    role = entry.get("type") or entry.get("role") or ""
-                    if role in ("human", "user"):
-                        count += 1
-            except json.JSONDecodeError:
-                continue
-        if count > 0:
-            return count >= min_messages
-    except Exception:
-        pass
-
-    # Fall back to length heuristic for plain text
-    return len(content) > min_messages * 50
+    count = sum(message.role == "human" and bool(strip_truememory_blocks(message.content).strip())
+                for message in outcome.messages)
+    return count >= min_messages
 
 
 def _count_active_ingest_processes() -> int:

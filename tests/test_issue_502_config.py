@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import threading
 import time
 
@@ -86,11 +87,14 @@ class TestIssue502ConfigCache:
         # Second call within staleness window, file NOT modified on disk
         # (mtime unchanged) — should use cache, no disk read
         read_count = 0
-        original_read_text = type(server._CONFIG_PATH).read_text
+        config_path = server._CONFIG_PATH
+        invoking_thread = threading.get_ident()
+        original_read_text = type(config_path).read_text
 
-        def counting_read(self_path, *args, **kwargs):
+        def counting_read(self_path: Path, *args: object, **kwargs: object) -> str:
             nonlocal read_count
-            read_count += 1
+            if self_path == config_path and threading.get_ident() == invoking_thread:
+                read_count += 1
             return original_read_text(self_path, *args, **kwargs)
 
         monkeypatch.setattr(type(server._CONFIG_PATH), "read_text", counting_read)
@@ -99,6 +103,28 @@ class TestIssue502ConfigCache:
         assert result1 == result2, (
             "_load_config() did not return cached result within staleness window"
         )
+
+        # Prove that unrelated reads cannot contaminate this caller's count.
+        # Run controls after the second call so they cannot consume its TTL.
+        unrelated_path = config_path.with_name("unrelated.json")
+        unrelated_path.write_text(json.dumps(cfg), encoding="utf-8")
+        assert json.loads(unrelated_path.read_text(encoding="utf-8")) == cfg
+        background_results: list[str] = []
+        background_errors: list[Exception] = []
+
+        def background_read() -> None:
+            try:
+                background_results.append(config_path.read_text(encoding="utf-8"))
+            except Exception as error:
+                background_errors.append(error)
+
+        reader = threading.Thread(target=background_read)
+        reader.start()
+        reader.join(timeout=5)
+        assert not reader.is_alive()
+        assert not background_errors
+        assert len(background_results) == 1
+        assert json.loads(background_results[0]) == cfg
         assert read_count == 0, (
             f"_load_config() re-read disk {read_count} times within staleness window"
         )
