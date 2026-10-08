@@ -58,6 +58,7 @@ import threading  # noqa: E402
 import time  # noqa: E402
 from _thread import LockType  # noqa: E402
 from collections.abc import Iterator  # noqa: E402
+from concurrent.futures import Future, ThreadPoolExecutor  # noqa: E402
 from contextlib import contextmanager  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -89,6 +90,15 @@ _MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
 # These cap items per call, not tokens, queued payloads, or total process memory.
 _EMBED_BATCH_LIMIT = 32
 _RERANK_BATCH_LIMIT = 64
+
+
+def _admission_setting(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    if not raw.isascii() or not raw.isdecimal() or not minimum <= int(raw) <= maximum:
+        raise ValueError(f"{name} must be an integer between {minimum} and {maximum}")
+    return int(raw)
 
 
 def _batch_limit(value: object, maximum: int) -> int:
@@ -184,9 +194,21 @@ class _RequestDeadlineExceeded(TimeoutError):
     """Stop this request without triggering model fallback or another retry."""
 
 
+@dataclass
+class _TransportRequest:
+    length: int
+    queue_expires_at: float
+    stopped: threading.Event
+    frame_expires_at: float = math.inf
+    started: bool = False
+    claimed: bool = False
+    withdrawn: bool = False
+
+
 @dataclass(frozen=True)
 class _RequestDeadline:
     expires_at: float | None = None
+    transport: _TransportRequest | None = None
 
     @classmethod
     def from_wall_clock(cls, value: object) -> "_RequestDeadline":
@@ -202,9 +224,15 @@ class _RequestDeadline:
         return cls(time.monotonic() + remaining)
 
     def remaining(self) -> float | None:
-        if self.expires_at is None:
+        expires_at = self.expires_at
+        if self.transport is not None:
+            if self.transport.stopped.is_set():
+                raise _RequestDeadlineExceeded("model server is shutting down")
+            if expires_at is None and not self.transport.started:
+                expires_at = self.transport.queue_expires_at
+        if expires_at is None:
             return None
-        remaining = self.expires_at - time.monotonic()
+        remaining = expires_at - time.monotonic()
         if remaining <= 0:
             raise _RequestDeadlineExceeded("deadline exceeded before encode")
         return remaining
@@ -212,10 +240,18 @@ class _RequestDeadline:
     def check(self) -> None:
         self.remaining()
 
+    def start_inference(self) -> None:
+        self.check()
+        if self.transport is not None:
+            self.transport.started = True
+
     @contextmanager
     def locked(self, lock: LockType) -> Iterator[None]:
         remaining = self.remaining()
-        if remaining is None:
+        if self.transport is not None:
+            while not lock.acquire(timeout=min(0.1, remaining) if remaining is not None else 0.1):
+                remaining = self.remaining()
+        elif remaining is None:
             lock.acquire()
         elif not lock.acquire(timeout=min(remaining, threading.TIMEOUT_MAX)):
             raise _RequestDeadlineExceeded("deadline exceeded before encode")
@@ -239,6 +275,29 @@ class ModelServer:
     _FAST_LANE_MAX_TEXTS = 1
 
     def __init__(self):
+        self._max_handlers = _admission_setting("TRUEMEMORY_MODEL_SERVER_MAX_HANDLERS", 16, 1, 128)
+        self._max_request_bytes = _admission_setting(
+            "TRUEMEMORY_MODEL_SERVER_MAX_REQUEST_BYTES", 32 * 1024**2, _MAX_MESSAGE_SIZE, 1024**3,
+        )
+        self._header_timeout = _admission_setting(
+            "TRUEMEMORY_MODEL_SERVER_HEADER_TIMEOUT_MS", 1000, 100, 30000,
+        ) / 1000
+        self._frame_timeout = _admission_setting(
+            "TRUEMEMORY_MODEL_SERVER_FRAME_TIMEOUT_MS", 30000, 100, 120000,
+        ) / 1000
+        self._queue_timeout = 120.0
+        self._admission_lock = threading.Lock()
+        self._staging_lock = threading.Lock()
+        self._staging: socket.socket | None = None
+        self._clients: dict[socket.socket, _TransportRequest] = {}
+        self._reserved_request_bytes = 0
+        self._admission_high_water = {"handlers": 0, "request_bytes": 0}
+        self._busy_rejections = 0
+        self._stopped = threading.Event()
+        self._transport_context = threading.local()
+        # Submission requires a slot+bytes lease; at most max_handlers futures
+        # can be running or waiting in this executor.
+        self._workers = ThreadPoolExecutor(max_workers=self._max_handlers, thread_name_prefix="model-client")
         # Loaded embedding model + identity as ONE immutable snapshot,
         # assigned only under self._lock; the fast lane reads the single
         # reference lock-free (issue #577, panel round 2).
@@ -536,6 +595,7 @@ class ModelServer:
                     model = None
                     try:
                         deadline.check()
+                        deadline.start_inference()
                         model = self._get_embed_model(tier)
                         deadline.check()
                         try:
@@ -555,11 +615,15 @@ class ModelServer:
             finally:
                 self._inference_lock.release()
 
+        was_started = deadline.transport.started if deadline.transport is not None else False
         try:
             with deadline.locked(self._fast_lock):
+                deadline.start_inference()
                 model = self._get_fast_encoder(tier)
                 deadline.check()
                 if model is None:
+                    if deadline.transport is not None:
+                        deadline.transport.started = was_started
                     # Vector-space parity with the main path cannot be
                     # guaranteed (custom model) — decline the fast lane.
                     return None
@@ -568,6 +632,8 @@ class ModelServer:
         except _RequestDeadlineExceeded:
             raise
         except Exception:
+            if deadline.transport is not None:
+                deadline.transport.started = was_started
             log.warning(
                 "Fast-lane CPU encode failed — falling back to the main "
                 "embed path", exc_info=True,
@@ -595,13 +661,14 @@ class ModelServer:
     def _handle_request_inner(self, request: dict) -> dict:
         op = request.get("op")
 
-        if op == "ping":
-            return {"ok": True}
-
         # Convert the wire epoch once. Queueing, loading and recovery consume
         # one monotonic budget; wall-clock adjustments cannot renew it.
         deadline = _RequestDeadline.from_wall_clock(request.get("deadline"))
+        deadline = _RequestDeadline(deadline.expires_at, getattr(self._transport_context, "request", None))
         deadline.check()
+
+        if op == "ping":
+            return {"ok": True}
 
         if op in ("embed", "embed_batched"):
             texts = request["texts"]
@@ -646,6 +713,7 @@ class ModelServer:
                         retry = None
                         with deadline.locked(self._lock):
                             if model is None:
+                                deadline.start_inference()
                                 model = self._get_embed_model(tier)
                             while offset < len(texts) or vectors is None:
                                 deadline.check()
@@ -700,6 +768,7 @@ class ModelServer:
                         retry = None
                         with deadline.locked(self._lock):
                             if reranker is None:
+                                deadline.start_inference()
                                 reranker = self._get_reranker(model_name)
                             while offset < len(pairs) or scores is None:
                                 deadline.check()
@@ -814,61 +883,199 @@ class ModelServer:
             pass
         gc.collect()
 
-    _CLIENT_TIMEOUT = 30.0  # seconds; caps how long any single client can block
+    _CLIENT_TIMEOUT = 30.0
+    _REJECT_TIMEOUT = 0.25
 
-    def handle_client(self, conn: socket.socket):
+    def _admit_client(self, conn: socket.socket) -> _TransportRequest | None:
+        # run() has one accept/staging slot. Direct synchronous users cannot
+        # create a second staging queue behind it.
+        if not self._staging_lock.acquire(blocking=False):
+            conn.close()
+            return None
+        admitted = None
+        accepted_at = time.monotonic()
         try:
-            conn.settimeout(self._CLIENT_TIMEOUT)
-
-            # --- HMAC authentication for TCP transport ---
+            with self._admission_lock:
+                if self._stopped.is_set():
+                    return None
+                self._staging = conn
+            frame_deadline = accepted_at + self._frame_timeout
+            header_deadline = min(accepted_at + self._header_timeout, frame_deadline)
             if not _USE_UNIX:
                 if self._token is None:
-                    # Fail closed: TCP transport must always have a token.
-                    log.warning("TCP client rejected: no HMAC token configured")
-                    conn.close()
-                    return
-                token_bytes = self._recv_exact(conn, _HMAC_TOKEN_BYTES)
-                if token_bytes is None:
-                    # Connection closed before sending token (e.g. idle-timeout
-                    # dummy connection).  Drop silently -- not a real auth failure.
-                    conn.close()
-                    return
-                if not hmac.compare_digest(token_bytes, self._token):
-                    log.warning("TCP client failed HMAC authentication")
-                    conn.close()
-                    return
-
-            header = self._recv_exact(conn, _HEADER_SIZE)
-            if not header:
-                return
+                    return None
+                token = self._recv_exact(conn, _HMAC_TOKEN_BYTES, header_deadline)
+                if token is None or not hmac.compare_digest(token, self._token):
+                    return None
+            header = self._recv_exact(conn, _HEADER_SIZE, header_deadline)
+            if header is None:
+                return None
             length = struct.unpack(_HEADER_FMT, header)[0]
-            if length > _MAX_MESSAGE_SIZE:
-                log.warning(
-                    "Rejecting oversized request (%d bytes, max %d)",
-                    length,
-                    _MAX_MESSAGE_SIZE,
-                )
+            if not 0 < length <= _MAX_MESSAGE_SIZE:
+                log.warning("Rejecting invalid request frame length (%d bytes)", length)
+                return None
+            with self._admission_lock:
+                if self._stopped.is_set():
+                    return None
+                if (len(self._clients) >= self._max_handlers
+                        or self._reserved_request_bytes + length > self._max_request_bytes):
+                    self._busy_rejections += 1
+                else:
+                    admitted = _TransportRequest(
+                        length, accepted_at + self._queue_timeout, self._stopped,
+                        frame_deadline,
+                    )
+                    self._clients[conn] = admitted
+                    self._reserved_request_bytes += length
+                    self._admission_high_water["handlers"] = max(
+                        self._admission_high_water["handlers"], len(self._clients),
+                    )
+                    self._admission_high_water["request_bytes"] = max(
+                        self._admission_high_water["request_bytes"], self._reserved_request_bytes,
+                    )
+            if admitted is None:
+                self._reject_client(conn, length, "server_busy", "Model server busy: request capacity exhausted")
+            return admitted
+        except (OSError, TimeoutError):
+            return None
+        finally:
+            with self._admission_lock:
+                self._staging = None
+            self._staging_lock.release()
+            if admitted is None:
                 conn.close()
-                return
-            data = self._recv_exact(conn, length)
-            if not data:
-                return
 
-            request = json.loads(data, object_hook=_json_object_hook)
-            response = self.handle_request(request)
+    def _reject_client(self, conn: socket.socket, length: int, code: str, message: str) -> None:
+        expires_at = time.monotonic() + self._REJECT_TIMEOUT
+        try:
+            conn.settimeout(self._REJECT_TIMEOUT)
+            response = {"ok": False, "error_code": code, "error": message}
+            if code == "server_busy":
+                response["retry_after_ms"] = 250
             self._send_response(conn, response)
-        except Exception as e:
+            conn.shutdown(socket.SHUT_WR)
+            # Legacy clients send before reading. Drain without retaining their
+            # body so closing unread input does not discard the busy response.
+            while length > 0:
+                remaining = expires_at - time.monotonic()
+                if remaining <= 0:
+                    break
+                conn.settimeout(remaining)
+                chunk = conn.recv(min(length, 4096))
+                if not chunk:
+                    break
+                length -= len(chunk)
+        except OSError:
+            pass
+
+    def _dispatch_client(self, conn: socket.socket) -> Future | None:
+        admitted = self._admit_client(conn)
+        if admitted is None:
+            return None
+        try:
+            return self._workers.submit(self._run_admitted_client, conn, admitted)
+        except (RuntimeError, OSError, MemoryError):
+            # submit() may enqueue before thread.start fails. Withdraw unclaimed
+            # leases and disable the executor rather than leaving orphan work.
+            self._stop_clients()
+            raise
+
+    def handle_client(self, conn: socket.socket) -> None:
+        admitted = self._admit_client(conn)
+        if admitted is not None:
+            self._run_admitted_client(conn, admitted)
+
+    def _run_admitted_client(self, conn: socket.socket, admitted: _TransportRequest) -> None:
+        with self._admission_lock:
+            if admitted.withdrawn:
+                return
+            admitted.claimed = True
+        try:
+            self._serve_client(conn, admitted)
+        finally:
+            # The serving frame and exception traceback have returned. No
+            # decoded request, raw body, or response survives credit release.
+            self._release_client(conn)
+
+    def _release_client(self, conn: socket.socket) -> None:
+        try:
+            conn.close()
+        finally:
+            with self._admission_lock:
+                admitted = self._clients.pop(conn, None)
+                if admitted is not None:
+                    self._reserved_request_bytes -= admitted.length
+            with self._activity_lock:
+                self._last_activity = time.time()
+
+    def _serve_client(self, conn: socket.socket, admitted: _TransportRequest) -> None:
+        data = request = response = None
+        try:
+            data = self._recv_exact(conn, admitted.length, admitted.frame_expires_at)
+            if data is None:
+                return
+            request = json.loads(data, object_hook=_json_object_hook)
+            data = None
+            if not isinstance(request, dict):
+                raise ValueError("Request must be a JSON object")
+            self._transport_context.request = admitted
+            response = self.handle_request(request)
+            conn.settimeout(self._CLIENT_TIMEOUT)
+            self._send_response(conn, response)
+        except Exception as error:
             try:
-                self._send_response(conn, {"ok": False, "error": str(e)})
+                conn.settimeout(self._REJECT_TIMEOUT)
+                self._send_response(conn, {"ok": False, "error": str(error)})
             except Exception:
+                # The connection is already failing. Keep serialization errors
+                # inside this boundary so their tracebacks do not retain input.
                 pass
         finally:
-            conn.close()
+            self._transport_context.request = None
+            data = request = response = None
 
-    def _recv_exact(self, conn: socket.socket, n: int) -> bytes | None:
+    def _stop_clients(self) -> None:
+        self._running = False
+        self._stopped.set()
+        with self._admission_lock:
+            connections = list(self._clients)
+            if self._staging is not None:
+                connections.append(self._staging)
+            for conn, admitted in list(self._clients.items()):
+                if not admitted.claimed:
+                    admitted.withdrawn = True
+                    del self._clients[conn]
+                    self._reserved_request_bytes -= admitted.length
+        for conn in connections:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+        self._workers.shutdown(wait=False, cancel_futures=True)
+        for conn in connections:
+            with self._admission_lock:
+                retained = conn in self._clients
+            if not retained:
+                conn.close()
+
+    def _recv_exact(self, conn: socket.socket, n: int, expires_at: float | None = None) -> bytes | None:
         buf = bytearray()
         while len(buf) < n:
-            chunk = conn.recv(n - len(buf))
+            if self._stopped.is_set():
+                return None
+            if expires_at is not None:
+                remaining = expires_at - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("request frame receive timed out: deadline exceeded")
+                # Cross-thread shutdown does not reliably interrupt recv on
+                # every platform. Poll shutdown without extending the frame budget.
+                conn.settimeout(min(remaining, 0.1))
+            try:
+                chunk = conn.recv(min(n - len(buf), 65536))
+            except TimeoutError:
+                if expires_at is None:
+                    raise
+                continue
             if not chunk:
                 return None
             buf.extend(chunk)
@@ -891,18 +1098,23 @@ class ModelServer:
             time.sleep(60)
             if not self._running:
                 break
-            with self._activity_lock:
-                last = self._last_activity
-                inflight = self._inflight
-            elapsed = time.time() - last
+            with self._admission_lock:
+                admitted = bool(self._clients) or self._staging is not None
+                with self._activity_lock:
+                    last = self._last_activity
+                    inflight = self._inflight
+                    elapsed = time.time() - last
+                    should_stop = elapsed >= IDLE_TIMEOUT and inflight == 0 and not admitted
+                    if should_stop:
+                        self._running = False
+                        self._stopped.set()
             # Issue #646 (M-74): never idle-shut-down while a request is
             # mid-flight, even if its start timestamp is older than the idle
             # horizon (a long batch encode can outlast IDLE_TIMEOUT).
-            if elapsed >= IDLE_TIMEOUT and inflight == 0:
+            if should_stop:
                 log.info(
                     "Idle timeout (%.0fs), shutting down model server", elapsed
                 )
-                self._running = False
                 # Send a dummy connection to unblock accept().
                 try:
                     if _USE_UNIX:
@@ -1067,10 +1279,7 @@ class ModelServer:
                 if not self._running:
                     conn.close()
                     break
-                t = threading.Thread(
-                    target=self.handle_client, args=(conn,), daemon=True
-                )
-                t.start()
+                self._dispatch_client(conn)
         finally:
             srv.close()
             self._cleanup()
@@ -1079,6 +1288,7 @@ class ModelServer:
         if getattr(self, "_cleaned_up", False):
             return
         self._cleaned_up = True
+        self._stop_clients()
         # Only remove artifacts THIS process owns (issue #646, M-20). After a
         # crash a fresh server may already hold the lock and have rewritten
         # PID_PATH; unlinking its live socket/token here would let concurrent
