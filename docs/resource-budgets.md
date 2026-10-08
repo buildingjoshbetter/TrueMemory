@@ -540,3 +540,47 @@ in a separate failure-status transaction. Successful output and successful
 provenance must commit atomically. A cluster run must retain validated runtime
 model ownership through that outer commit; an inner builder savepoint release
 alone does not supply that guarantee.
+
+## Atomic L0 full generations
+
+Full personality-profile and character-style builders now read a coherent source
+snapshot, compute and serialize their complete output, then validate the exact
+relevant source values and source schema under SQLite writer ownership. A changed
+source raises a categorical `sqlite3.OperationalError`; neither builder retries
+internally. Publication replaces only its fully owned table. Vanished senders are
+removed, and successful empty input clears the previous output.
+
+Ordinary messages contribute to both full builders, matching the incremental
+add path's directive exclusion. Existing schemas without a `directive` column
+continue to treat all messages as ordinary. No maintenance tables are required
+for these public builders. Profile source order remains timestamp order; style
+source order remains sender and timestamp order. The existing formulas,
+thresholds, Python lowercase identity keys and 256-dimensional style algorithm
+remain unchanged. Generated update timestamps are incidental to the generation.
+
+When the builder owns its transaction, its read transaction ends before CPU work
+and its write transaction begins only for validation and replacement. A caller's
+existing transaction is retained instead, with savepoints around each phase. The
+builder never commits or restarts unrelated caller work. Any writer lock already
+held by the caller remains held during computation; the builder cannot release
+that lock on the caller's behalf. A stale WAL reader fails at write upgrade.
+
+Write, cancellation and terminal COMMIT/RELEASE failures roll back the attempted
+replacement. The previous complete generation survives a later caller commit
+after successful rollback. If SQLite also rejects rollback, cleanup propagates
+that failure without releasing partial output; the connection owner must recover
+or close the transaction. This is not a guarantee that a caller can ignore a
+failed rollback and safely commit.
+
+These are full recomputations. They retain source rows and computed output, and
+style computation still retains one entity's per-message 256-element vectors.
+Validation streams the source again while holding the writer; it is linear in
+the read source size, not constant-time. No memory or latency improvement is
+claimed without measurement. They perform no embedding-model work.
+
+This is the first #748 foundation stage. It does not register L0 maintenance
+checkpoints, suppress stale cache reads, change incremental updaters, schedule
+repair after source mutations or alter opt-in entity-profile summary sheets.
+Those integration steps remain necessary to resolve the complete invalidation
+issue. An A10 runner can wrap a builder in its own source transaction and commit
+the successful output/checkpoint together once that shared contract is wired.
