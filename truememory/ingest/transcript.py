@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -84,6 +85,24 @@ class TranscriptOutcome:
         return self.status == "complete"
 
 
+def _transcript_path(source: str | Path) -> Path | None:
+    if isinstance(source, Path):
+        return source
+    try:
+        candidate = Path(source)
+        # exists()/is_file() suppress access errors on Python 3.14. A single
+        # stat keeps unreadable sources distinct from ordinary inline text.
+        if stat.S_ISREG(candidate.stat().st_mode):
+            return candidate
+    except ValueError:
+        pass
+    except OSError as error:
+        if (error.errno not in (errno.ENOENT, errno.ENOTDIR, errno.ENAMETOOLONG)
+                and getattr(error, "winerror", None) != 123):
+            raise
+    return None
+
+
 def parse_transcript_outcome(source: str | Path) -> TranscriptOutcome:
     """Parse with source coverage, retaining the legacy API separately.
 
@@ -92,19 +111,10 @@ def parse_transcript_outcome(source: str | Path) -> TranscriptOutcome:
     Diagnostics contain categories and counts only. Stable means these
     observations agreed; it does not lock the source against later changes.
     """
-    path = source if isinstance(source, Path) else None
-    if path is None:
-        try:
-            candidate = Path(source)
-            if candidate.exists() and candidate.is_file():
-                path = candidate
-        except ValueError:
-            pass
-        except OSError as error:
-            # Long inline strings are not filesystem paths; a denied path
-            # probe must not turn that path into a synthetic conversation.
-            if error.errno != errno.ENAMETOOLONG:
-                return TranscriptOutcome([], "unreadable", error_categories=("source_unreadable",))
+    try:
+        path = _transcript_path(source)
+    except OSError:
+        return TranscriptOutcome([], "unreadable", error_categories=("source_unreadable",))
 
     version = None
     errors: list[str] = []
@@ -267,7 +277,7 @@ def parse_transcript(source: str | Path) -> list[Message]:
     This avoids the fragile "len < 500 = path" heuristic from earlier
     versions, which mis-classified long absolute paths as content.
 
-    Once we commit to path mode (``candidate.exists() and is_file()``),
+    Once we commit to path mode (a stat identifies a regular file),
     any read failure (``PermissionError``, ``OSError``) is treated as a
     real error and returns an empty list — **never** silently fall back
     to interpreting the path string itself as content. Silently re-parsing
@@ -277,36 +287,22 @@ def parse_transcript(source: str | Path) -> list[Message]:
     """
     text: str
 
-    if isinstance(source, Path):
-        # Explicit Path — always a file
+    try:
+        path = _transcript_path(source)
+    except OSError:
+        log.error("Cannot read transcript", extra={"error_category": "source_unreadable"})
+        return []
+
+    if path is not None:
         try:
-            text = source.read_text(encoding="utf-8", errors="replace")
+            text = path.read_text(encoding="utf-8", errors="replace")
         except FileNotFoundError:
             return []
-        except (PermissionError, OSError) as e:
-            log.error("Cannot read transcript file %s: %s", source, e)
+        except (OSError, ValueError):
+            log.error("Cannot read transcript", extra={"error_category": "source_unreadable"})
             return []
     else:
-        # String: figure out whether it's a path or inline content.
-        # Interpreting a string as a Path can itself raise (embedded nulls,
-        # ValueError on some platforms) — that's the only case where we
-        # fall back to treating the string as content.
-        candidate: Path | None = None
-        try:
-            candidate = Path(source)
-        except (OSError, ValueError):
-            candidate = None
-
-        if candidate is not None and candidate.exists() and candidate.is_file():
-            # Commit to path mode. A read failure here is a real error —
-            # do NOT silently reinterpret the path string as content.
-            try:
-                text = candidate.read_text(encoding="utf-8", errors="replace")
-            except (PermissionError, OSError) as e:
-                log.error("Cannot read transcript file %s: %s", candidate, e)
-                return []
-        else:
-            text = source
+        text = source
 
     text = text.strip()
     if not text:

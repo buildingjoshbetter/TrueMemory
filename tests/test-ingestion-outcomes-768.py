@@ -334,7 +334,7 @@ class TestTranscriptOutcomes(unittest.TestCase):
             unreadable = self.parser.parse_transcript_outcome(path)
         self.assertEqual(unreadable.status, "unreadable")
         self.assertNotIn(SYNTHETIC_SECRET, repr(unreadable))
-        with patch.object(Path, "exists", side_effect=PermissionError(SYNTHETIC_SECRET)):
+        with patch.object(Path, "stat", side_effect=PermissionError(SYNTHETIC_SECRET)):
             denied_probe = self.parser.parse_transcript_outcome(str(path))
         self.assertEqual((denied_probe.status, denied_probe.messages), ("unreadable", []))
 
