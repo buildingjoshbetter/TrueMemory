@@ -612,6 +612,43 @@ class ModelServer:
         deadline.check()
         return indices[inverse]
 
+    def _rerank_global_order(
+        self, model: object, pairs: list, limit: int, deadline: _RequestDeadline,
+    ) -> np.ndarray | None:
+        """Match modern CrossEncoder's native 64-row policy for ModernBERT."""
+        deadline.check()
+        if (limit != 64 or len(pairs) <= limit or self._reranker is not model
+                or self._reranker_name != "Alibaba-NLP/gte-reranker-modernbert-base"
+                or not all(isinstance(pair, (list, tuple)) and len(pair) == 2
+                           and all(isinstance(text, str) for text in pair) for pair in pairs)):
+            return None
+        length = getattr(model, "_input_length", None)
+        flatten = getattr(model, "_can_flatten_inputs", None)
+        if not callable(length) or not callable(flatten) or flatten():
+            return None
+        deadline.check()
+        lengths = [-length(pair) for pair in pairs]
+        deadline.check()
+        order = np.argsort(lengths)
+        deadline.check()
+        return order
+
+    @staticmethod
+    def _rerank_slice_indices(
+        model: object, pairs: list, order: np.ndarray, offset: int, limit: int,
+        deadline: _RequestDeadline,
+    ) -> np.ndarray:
+        deadline.check()
+        indices = order[offset:offset + limit]
+        # Predict sorts each supplied batch again, including equal-length pairs.
+        lengths = [-model._input_length(pairs[index]) for index in indices]
+        deadline.check()
+        inner = np.argsort(lengths)
+        deadline.check()
+        inverse = np.argsort(inner)
+        deadline.check()
+        return indices[inverse]
+
     @staticmethod
     def _preflight_rerank_result(model_name: str | None, count: int) -> None:
         from truememory.reranker import get_current_reranker_name
@@ -911,6 +948,8 @@ class ModelServer:
                     predict_start = time.monotonic()
                     scores = None
                     offset = 0
+                    order = None
+                    recovery_name = model_name
                     while offset < len(pairs) or scores is None:
                         retry = None
                         with deadline.locked(self._lock):
@@ -919,9 +958,17 @@ class ModelServer:
                                 self._preflight_rerank_result(model_name, len(pairs))
                                 deadline.check()
                                 reranker = self._get_reranker(model_name)
+                                order = self._rerank_global_order(reranker, pairs, limit, deadline)
+                                if order is not None:
+                                    recovery_name = self._reranker_name
                             while offset < len(pairs) or scores is None:
                                 deadline.check()
-                                batch = pairs[offset:offset + limit]
+                                indices = None if order is None else self._rerank_slice_indices(
+                                    reranker, pairs, order, offset, limit, deadline,
+                                )
+                                batch = (pairs[offset:offset + limit] if indices is None else
+                                         [pairs[index] for index in indices])
+                                deadline.check()
                                 recover = False
                                 try:
                                     values = reranker.predict(batch, batch_size=limit, show_progress_bar=False)
@@ -941,15 +988,25 @@ class ModelServer:
                                     deadline.check()
                                     flush_mps_cache()
                                     deadline.check()
-                                    reranker = self._get_reranker(model_name)
+                                    reranker = self._get_reranker(recovery_name)
                                     retry = batch
                                     break
-                                scores = _store_batch_result(scores, values, offset, len(batch), len(pairs), "scores")
+                                if indices is None:
+                                    scores = _store_batch_result(scores, values, offset, len(batch), len(pairs), "scores")
+                                else:
+                                    scores = _store_batch_result(
+                                        scores, values, offset, len(batch), len(pairs), "scores", indices=indices,
+                                    )
                                 offset += len(batch)
                         if retry is not None:
                             deadline.check()
                             values = reranker.predict(retry, batch_size=limit, show_progress_bar=False)
-                            scores = _store_batch_result(scores, values, offset, len(retry), len(pairs), "scores")
+                            if indices is None:
+                                scores = _store_batch_result(scores, values, offset, len(retry), len(pairs), "scores")
+                            else:
+                                scores = _store_batch_result(
+                                    scores, values, offset, len(retry), len(pairs), "scores", indices=indices,
+                                )
                             offset += len(retry)
                     self._after_request_batches(throttler, len(pairs), predict_start, deadline)
                     return {"ok": True, "scores": scores}

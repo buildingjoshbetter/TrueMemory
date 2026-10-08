@@ -602,7 +602,8 @@ def load_order_runtime() -> dict:
     methods = {"handle_request", "_handle_request_inner", "_handle_fast_embed", "_embed_global_order",
                "_embed_slice_indices", "_preflight_embed_result", "_resolve_embed_cache",
                "_request_batch_limit", "_after_request_batches", "_recover_embed_oom_locked",
-               "_check_embed_recovery_deadline_locked"}
+               "_check_embed_recovery_deadline_locked", "_rerank_global_order", "_rerank_slice_indices",
+               "_preflight_rerank_result"}
     body = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
     for node in ast.parse(path.read_text(encoding="utf-8")).body:
         if isinstance(node, ast.FunctionDef) and node.name in functions:
@@ -622,6 +623,8 @@ def load_order_runtime() -> dict:
             return builtins.__import__(name, *args, **kwargs)
         if name == "truememory.mps_utils":
             return mps
+        if name == "truememory.reranker":
+            return types.SimpleNamespace(get_current_reranker_name=lambda: "Alibaba-NLP/gte-reranker-modernbert-base")
         raise AssertionError("Unexpected runtime import: " + name)
 
     numpy, clock = OrderNP(), FakeClock()
@@ -1014,3 +1017,383 @@ class TestQwenGlobalOrder(unittest.TestCase):
                     self.assertEqual(server._sticky_cpu, {"embed"})
                     self.assertFalse(server._inference_lock.locked())
                     self.assertFalse(server._lock.locked())
+
+
+class PairOrderNP(OrderNP):
+    def argsort(self, values: object) -> OrderArray:
+        keys = list(values)
+        self.sort_sizes.append(len(keys))
+        groups: dict[int, list[int]] = {}
+        for index, key in enumerate(keys):
+            groups.setdefault(key, []).append(index)
+        order = []
+        for key in sorted(groups):
+            group = groups[key]
+            order.extend(group[1:] + group[:1])
+        self.after_sort()
+        return OrderArray(order)
+
+
+class PairOrderModel:
+    """Predict's pinned ST 6.1 pair sorting and restoration, with synthetic scores.
+
+    cross_encoder/model.py SHA256 c8688911838df2acd48550e80dce2743c1f31dd85187f98d688517af1ce575e8:
+    lines 695-736 resolve the prompt, sort raw pair lengths, preprocess batches,
+    and restore scores. Features and scores here expose membership and position.
+    """
+
+    def __init__(self, numpy: OrderNP) -> None:
+        self.numpy = numpy
+        self.calls: list[list] = []
+        self.limits: list[int] = []
+        self.native_batches: list[list[tuple[str, str]]] = []
+        self.fail_calls: set[int] = set()
+        self.after_call: Callable[[], None] = lambda: None
+        self.default_prompt = "Synthetic instruction: "
+
+    @staticmethod
+    def _input_length(pair: tuple | list) -> int:
+        return sum(len(str(text)) for text in pair)
+
+    def _can_flatten_inputs(self) -> bool:
+        return False
+
+    def predict(self, pairs: list, *, batch_size: int, show_progress_bar: bool) -> OrderArray:
+        assert show_progress_bar is False
+        self.calls.append(list(pairs))
+        self.limits.append(batch_size)
+        self.after_call()
+        if len(self.calls) in self.fail_calls:
+            raise RuntimeError("MPS backend out of memory")
+        order = self.numpy.argsort([-PairOrderModel._input_length(pair) for pair in pairs])
+        rows = [None] * len(pairs)
+        for start in range(0, len(pairs), batch_size):
+            indices = order[start:start + batch_size]
+            features = [(self.default_prompt + str(pairs[index][0]), str(pairs[index][1])) for index in indices]
+            self.native_batches.append(features)
+            fingerprint = sum((index + 1) * sum((offset + 1) * ord(char) for offset, char in enumerate(str(pair)))
+                              for index, pair in enumerate(features))
+            for position, index in enumerate(indices):
+                rows[index] = float(fingerprint * 1000 + position)
+        return OrderArray(rows, (len(pairs),))
+
+
+class TestModernBertGlobalOrder(unittest.TestCase):
+    identity = "Alibaba-NLP/gte-reranker-modernbert-base"
+
+    def runtime(self) -> tuple[dict, object, PairOrderModel]:
+        module = load_order_runtime()
+        module["np"] = PairOrderNP()
+        server = object.__new__(module["ModelServer"])
+        model = PairOrderModel(module["np"])
+        server._lock = threading.Lock()
+        server._inference_lock = threading.Lock()
+        server._activity_lock = threading.Lock()
+        server._inflight = 0
+        server._transport_context = types.SimpleNamespace()
+        server._throttler_active, server._throttler = False, None
+        server._sticky_cpu = set()
+        server._reranker, server._reranker_name = None, None
+        server._mark_sticky_cpu = server._sticky_cpu.add
+        server.default_name = self.identity
+        server.loads, server.models = [], []
+        server.after_load = lambda _model: None
+
+        def load(name: str | None) -> PairOrderModel:
+            server.loads.append(name)
+            loaded = model if not server.models else PairOrderModel(module["np"])
+            loaded.default_prompt = model.default_prompt
+            server.models.append(loaded)
+            server._reranker, server._reranker_name = loaded, name or server.default_name
+            server.after_load(loaded)
+            return loaded
+
+        server._get_reranker = load
+        return module, server, model
+
+    @staticmethod
+    def pairs(count: int) -> list[tuple[str, str]]:
+        samples = [("", ""), ("same", "same"), ("same", "same"), ("雪", "a"),
+                   ("e\u0301", ""), ("q" * 100, "d"), ("q", "d" * 100), ("query", "doc")]
+        return [samples[(index * 3 + index // 8) % len(samples)] for index in range(count)]
+
+    def request(self, server: object, pairs: list, **kwargs: object) -> dict:
+        return server.handle_request({"op": "rerank", "pairs": pairs, **kwargs})
+
+    def reference(self, pairs: list, *, prompt: str = "Synthetic instruction: ") -> PairOrderModel:
+        model = PairOrderModel(PairOrderNP())
+        model.default_prompt = prompt
+        model.output = model.predict(pairs, batch_size=64, show_progress_bar=False)
+        return model
+
+    def test_default_64_native_membership_cyclic_ties_duplicates_and_scatter(self) -> None:
+        for count in (63, 64, 65, 100, 127, 128, 129):
+            for prompt in ("", "Synthetic instruction: "):
+                with self.subTest(count=count, prompt=prompt):
+                    module, server, model = self.runtime()
+                    model.default_prompt = prompt
+                    pairs = self.pairs(count)
+                    expected = self.reference(pairs, prompt=prompt)
+                    response = self.request(server, pairs)
+                    self.assertTrue(response["ok"])
+                    self.assertEqual(response["scores"].values, expected.output.values)
+                    self.assertEqual(model.native_batches, expected.native_batches)
+                    self.assertEqual(model.limits, [64] * len(model.calls))
+                    self.assertEqual(module["np"].allocations, [(count,)])
+
+    def test_each_duplicate_occurrence_is_written_exactly_once(self) -> None:
+        from unittest.mock import patch
+
+        for count in (65, 100, 129):
+            placements = []
+            original = OrderArray.__setitem__
+
+            def store(array: OrderArray, key: object, values: OrderArray) -> None:
+                placements.extend(list(key) if isinstance(key, OrderArray) else list(range(len(array)))[key])
+                original(array, key, values)
+
+            _module, server, _model = self.runtime()
+            with patch.object(OrderArray, "__setitem__", store):
+                response = self.request(server, self.pairs(count))
+            self.assertTrue(response["ok"])
+            self.assertEqual(sorted(placements), list(range(count)))
+
+    def test_negative_controls_reject_global_ties_inverse_scatter_and_document_only_lengths(self) -> None:
+        for mutation in ("global", "compensation", "inverse", "scatter", "document-length"):
+            with self.subTest(mutation=mutation):
+                module, server, model = self.runtime()
+                pairs = self.pairs(129)
+                expected = self.reference(pairs)
+                if mutation == "global":
+                    server._rerank_global_order = lambda *_args: None
+                elif mutation == "compensation":
+                    server._rerank_slice_indices = lambda _model, _pairs, order, offset, limit, _deadline: order[offset:offset + limit]
+                elif mutation == "inverse":
+                    def wrong_inverse(model: object, pairs: list, order: OrderArray, offset: int,
+                                      limit: int, deadline: object) -> OrderArray:
+                        deadline.check()
+                        indices = order[offset:offset + limit]
+                        inner = module["np"].argsort([-model._input_length(pairs[index]) for index in indices])
+                        return indices[inner]
+                    server._rerank_slice_indices = wrong_inverse
+                elif mutation == "scatter":
+                    store = module["_store_batch_result"]
+                    module["_store_batch_result"] = lambda *args, **_kwargs: store(*args)
+                else:
+                    model._input_length = lambda pair: len(pair[1])
+                response = self.request(server, pairs)
+                self.assertTrue(response["ok"])
+                self.assertNotEqual(response["scores"].values, expected.output.values)
+                if mutation != "scatter":
+                    self.assertNotEqual(model.native_batches, expected.native_batches)
+
+    def test_single_empty_one_batch_and_lower_caps_preserve_contiguous_calls(self) -> None:
+        for count, requested in ((0, 64), (1, 64), (8, 64), (64, 64), (129, 1), (129, 8), (129, 32)):
+            with self.subTest(count=count, requested=requested):
+                module, server, model = self.runtime()
+                pairs = self.pairs(count)
+                self.assertTrue(self.request(server, pairs, batch_size=requested)["ok"])
+                self.assertEqual(model.calls, [pairs[i:i + requested] for i in range(0, count, requested)] or [[]])
+                self.assertEqual(module["np"].sort_sizes, [len(call) for call in model.calls])
+
+    def test_unsupported_identity_interface_flattening_and_pairs_keep_old_path(self) -> None:
+        for mode in ("custom", "stale-cache", "legacy", "missing-flatten", "flattened", "three-strings", "non-string"):
+            with self.subTest(mode=mode):
+                module, server, model = self.runtime()
+                pairs = self.pairs(100)
+                if mode == "custom":
+                    server.default_name = "synthetic-custom"
+                elif mode == "stale-cache":
+                    server.after_load = lambda _model: setattr(server, "_reranker", object())
+                elif mode == "legacy":
+                    model._input_length = None
+                elif mode == "missing-flatten":
+                    model._can_flatten_inputs = None
+                elif mode == "flattened":
+                    model._can_flatten_inputs = lambda: True
+                elif mode == "three-strings":
+                    pairs[5] = ("q", "d", "extra")
+                else:
+                    pairs[5] = ("q", 17)
+                self.assertTrue(self.request(server, pairs)["ok"])
+                self.assertEqual(model.calls, [pairs[:64], pairs[64:]])
+                self.assertEqual(module["np"].sort_sizes, [64, 36])
+
+    def test_caller_server_and_once_per_request_adaptive_limits(self) -> None:
+        for requested, samples, effective in ((8, [128], 8), (128, [128], 64), (64, [8, 64], 8), (128, [64, 1], 64)):
+            module, server, model = self.runtime()
+            throttler = RecordingThrottler(samples)
+            server._throttler, server._throttler_active = throttler, True
+            pairs = self.pairs(129)
+            self.assertTrue(self.request(server, pairs, batch_size=requested)["ok"])
+            self.assertEqual(model.limits, [effective] * len(model.calls))
+            self.assertEqual(throttler.before_count, 1)
+            self.assertEqual(throttler.after_counts, [129])
+            if effective == 64:
+                self.assertEqual(model.native_batches, self.reference(pairs).native_batches)
+            else:
+                self.assertEqual(model.calls, [pairs[i:i + effective] for i in range(0, len(pairs), effective)])
+
+    def test_result_preflight_precedes_loading_and_ordering(self) -> None:
+        module, server, model = self.runtime()
+        module["_MAX_MESSAGE_SIZE"] = 200
+        response = self.request(server, self.pairs(129))
+        self.assertEqual(response["error_code"], "result_too_large")
+        self.assertEqual(server.loads, [])
+        self.assertEqual(model.calls, [])
+        self.assertEqual(module["np"].sort_sizes, [])
+        self.assertEqual(module["np"].allocations, [])
+
+    def test_deadlines_before_work_and_after_each_sort_stop_prediction(self) -> None:
+        for phase in ("entry", "load", "flatten", "length", "global", "inner", "inverse"):
+            with self.subTest(phase=phase):
+                module, server, model = self.runtime()
+                clock, numpy = module["time"], module["np"]
+                expires = clock.now + 1
+
+                def expire() -> None:
+                    clock.now = expires + 1
+
+                if phase == "entry":
+                    expires = clock.now
+                elif phase == "load":
+                    server.after_load = lambda _model: expire()
+                elif phase == "flatten":
+                    model._can_flatten_inputs = lambda: (expire(), False)[1]
+                elif phase == "length":
+                    model._input_length = lambda pair: (expire(), PairOrderModel._input_length(pair))[1]
+                else:
+                    wanted = {"global": 1, "inner": 2, "inverse": 3}[phase]
+                    numpy.after_sort = lambda: expire() if len(numpy.sort_sizes) == wanted else None
+                response = self.request(server, self.pairs(129), deadline=expires)
+                self.assertFalse(response["ok"])
+                self.assertIn("deadline", response["error"])
+                self.assertEqual(model.calls, [])
+                self.assertEqual(numpy.sort_sizes, [] if phase in ("entry", "load", "flatten", "length") else [129, 64, 64][:wanted])
+                self.assertFalse(server._inference_lock.locked())
+                self.assertFalse(server._lock.locked())
+
+    def test_expiry_after_first_slice_stops_following_work(self) -> None:
+        module, server, model = self.runtime()
+        expires = module["time"].now + 1
+        model.after_call = lambda: setattr(module["time"], "now", expires + 1)
+        response = self.request(server, self.pairs(129), deadline=expires)
+        self.assertFalse(response["ok"])
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(module["np"].sort_sizes, [129, 64, 64, 64])
+
+    def test_later_oom_retries_frozen_slice_with_captured_omitted_identity(self) -> None:
+        module, server, model = self.runtime()
+        pairs = self.pairs(129)
+        expected = self.reference(pairs)
+        model.fail_calls.add(2)
+        locks = []
+
+        def observe() -> None:
+            self.assertTrue(server._inference_lock.locked())
+            locks.append(server._lock.locked())
+            if len(model.calls) == 2:
+                server.default_name = "synthetic-different-reranker"
+
+        model.after_call = observe
+
+        def loaded(replacement: PairOrderModel) -> None:
+            self.assertTrue(server._inference_lock.locked() and server._lock.locked())
+            if replacement is not model:
+                replacement.after_call = observe
+
+        server.after_load = loaded
+        response = self.request(server, pairs)
+        replacement = server.models[1]
+        self.assertEqual(server.loads, [None, self.identity])
+        self.assertEqual(server._reranker_name, self.identity)
+        self.assertEqual(model.calls[1], replacement.calls[0])
+        self.assertEqual(model.native_batches + replacement.native_batches, expected.native_batches)
+        self.assertEqual(response["scores"].values, expected.output.values)
+        self.assertEqual(locks, [True, True, False, True])
+        self.assertEqual(module["np"].sort_sizes.count(129), 1)
+        self.assertEqual(module["np"].allocations, [(129,)])
+        self.assertEqual(server._sticky_cpu, {"rerank"})
+
+    def test_lower_limit_recovery_keeps_existing_resolution_behavior(self) -> None:
+        _module, server, model = self.runtime()
+        model.fail_calls.add(2)
+        model.after_call = lambda: setattr(server, "default_name", "synthetic-other") if len(model.calls) == 2 else None
+        self.assertTrue(self.request(server, self.pairs(17), batch_size=8)["ok"])
+        self.assertEqual(server.loads, [None, None])
+        self.assertEqual(server._reranker_name, "synthetic-other")
+
+    def test_unplanned_success_and_retry_keep_positional_result_writer(self) -> None:
+        for count, requested, failure in ((17, 8, None), (17, 8, 2), (64, None, None), (64, None, 1)):
+            with self.subTest(count=count, requested=requested, failure=failure):
+                module, server, model = self.runtime()
+                pairs = self.pairs(count)
+                limit = requested or 64
+                reference = PairOrderModel(PairOrderNP())
+                expected = []
+                for offset in range(0, count, limit):
+                    expected.extend(reference.predict(pairs[offset:offset + limit], batch_size=limit,
+                                                      show_progress_bar=False).values)
+                writes = []
+                store = module["_store_batch_result"]
+
+                def positional_store(result: object, values: object, *args: object) -> OrderArray:
+                    writes.append((args[0], args[1]))
+                    return store(result, values, *args)
+
+                module["_store_batch_result"] = positional_store
+                if failure is not None:
+                    model.fail_calls.add(failure)
+                response = self.request(server, pairs, **({} if requested is None else {"batch_size": requested}))
+                self.assertTrue(response["ok"])
+                self.assertEqual(response["scores"].values, expected)
+                self.assertEqual(writes, [(offset, min(limit, count - offset)) for offset in range(0, count, limit)])
+                self.assertEqual([batch for loaded in server.models for batch in loaded.native_batches],
+                                 reference.native_batches)
+                self.assertEqual(module["np"].allocations, [(count,)])
+                if failure is not None:
+                    self.assertEqual(model.calls[failure - 1], server.models[1].calls[0])
+                self.assertFalse(server._inference_lock.locked())
+                self.assertFalse(server._lock.locked())
+
+    def test_deadline_on_oom_or_during_replacement_prevents_retry(self) -> None:
+        for phase in ("oom", "flush", "replacement"):
+            module, server, model = self.runtime()
+            expires = module["time"].now + 1
+            model.fail_calls.add(2)
+
+            def expire() -> None:
+                module["time"].now = expires + 1
+
+            if phase == "oom":
+                model.after_call = lambda: expire() if len(model.calls) == 2 else None
+            elif phase == "flush":
+                module["mps"].flush_mps_cache = expire
+            else:
+                server.after_load = lambda replacement: expire() if replacement is not model else None
+            response = self.request(server, self.pairs(129), deadline=expires)
+            self.assertFalse(response["ok"])
+            self.assertEqual(len(model.calls), 2)
+            self.assertTrue(all(not replacement.calls for replacement in server.models[1:]))
+            self.assertEqual(server.loads, [None, self.identity] if phase == "replacement" else [None])
+            self.assertFalse(server._inference_lock.locked())
+            self.assertFalse(server._lock.locked())
+
+    def test_ordered_score_count_and_shape_validation_remain_active(self) -> None:
+        for mismatch in ("count", "dimensions"):
+            _module, server, model = self.runtime()
+            predict = model.predict
+
+            def invalid(pairs: list, **kwargs: object) -> OrderArray:
+                result = predict(pairs, **kwargs)
+                if mismatch == "count":
+                    return OrderArray(result.values[:-1])
+                if len(model.calls) == 2:
+                    return OrderArray([[value, value] for value in result])
+                return result
+
+            model.predict = invalid
+            with self.assertRaisesRegex(ValueError, mismatch):
+                self.request(server, self.pairs(129))
+            self.assertFalse(server._inference_lock.locked())
+            self.assertFalse(server._lock.locked())
