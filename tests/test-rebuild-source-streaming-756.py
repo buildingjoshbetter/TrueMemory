@@ -78,6 +78,7 @@ class TestStreamingBuilders(unittest.TestCase):
         self.addCleanup(self.conn.close)
         self.conn.executescript("CREATE TABLE vec_messages(embedding BLOB); CREATE TABLE vec_messages_sep(embedding BLOB);")
         self.model = object()
+        self.vector._model = self.model
         self.vector.get_model = lambda: self.model
         self.calls = []
         self.on_encode = None

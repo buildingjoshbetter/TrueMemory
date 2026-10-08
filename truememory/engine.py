@@ -724,14 +724,18 @@ class TrueMemoryEngine:
         pre_embedding = None
         pre_sep_embedding = None
         if self._has_vectors:
+            from truememory.vector_search import VectorPublicationChanged
             try:
                 from truememory.vector_search import (
                     _capture_rebuild_model, _encode_with_mps_fallback, _build_sep_text,
                 )
-                model, pre_identity = _capture_rebuild_model()
+                with self._write_lock:
+                    model, pre_identity = _capture_rebuild_model(self.conn)
                 pre_embedding = _encode_with_mps_fallback(model, [content])[0]
                 sep_text = _build_sep_text(sender, recipient, timestamp, content)
                 pre_sep_embedding = _encode_with_mps_fallback(model, [sep_text])[0]
+            except VectorPublicationChanged:
+                raise
             except Exception:
                 logger.debug("Failed to pre-compute embedding during add()", exc_info=True)
 
@@ -743,13 +747,15 @@ class TrueMemoryEngine:
             except Exception:
                 logger.debug("Failed to pre-compute style vector during add()", exc_info=True)
 
+        from contextlib import nullcontext
         from truememory.rebuild_source import rebuild_transaction
-        publication_fence = None
         if pre_embedding is not None:
             from truememory.vector_search import _foreground_model_fence
-            publication_fence = _foreground_model_fence(pre_identity)
 
-        with self._write_lock, rebuild_transaction(self.conn, write=True, publication_fence=publication_fence):
+        with self._write_lock, (
+            _foreground_model_fence(pre_identity, blocking=not self.conn.in_transaction)
+            if pre_embedding is not None else nullcontext()
+        ), rebuild_transaction(self.conn, write=True):
             msg = {
                 "content": content,
                 "sender": sender,
@@ -1176,11 +1182,13 @@ class TrueMemoryEngine:
         pre_embedding = None
         pre_sep_embedding = None
         if content is not None and self._has_vectors:
+            from truememory.vector_search import VectorPublicationChanged
             try:
                 from truememory.vector_search import (
                     _capture_rebuild_model, _encode_with_mps_fallback, _build_sep_text,
                 )
-                model, pre_identity = _capture_rebuild_model()
+                with self._write_lock:
+                    model, pre_identity = _capture_rebuild_model(self.conn)
                 pre_embedding = _encode_with_mps_fallback(model, [content])[0]
                 row = self.conn.execute(
                     "SELECT sender, recipient, timestamp FROM messages WHERE id = ?",
@@ -1192,6 +1200,8 @@ class TrueMemoryEngine:
                     timestamp_val = fields.get("timestamp", row[2])
                     sep_text = _build_sep_text(sender_val, recipient_val, timestamp_val, content)
                     pre_sep_embedding = _encode_with_mps_fallback(model, [sep_text])[0]
+            except VectorPublicationChanged:
+                raise
             except Exception:
                 logger.debug("Failed to pre-compute embedding during update()", exc_info=True)
 
