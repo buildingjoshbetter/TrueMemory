@@ -18,13 +18,13 @@ import time
 import uuid
 import weakref
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, ExitStack, contextmanager
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from types import ModuleType
 from typing import NamedTuple
 
 from truememory._platform import try_file_lock
-from truememory.storage import create_db
+from truememory.storage import _prepare_style_maintenance, _style_output_tracking_ready, create_db
 
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,45 @@ class LayerUnavailableError(MaintenanceUnavailableError):
 
 
 class LayerDeferredError(RuntimeError):
-    """Transient model ownership contention does not establish an attempt baseline."""
+    """A narrowly categorized transient condition establishes no attempt baseline."""
+
+    def __init__(self, message: str, *, category: str = "ModelBusy") -> None:
+        if category not in {"ModelBusy", "StyleCancelled", "StyleSourceChanged", "StyleWriterBusy"}:
+            raise ValueError("Unsupported layer deferral category")
+        self.category = category
+        super().__init__(message)
+
+
+class StyleAccumulatorUnsupported(LayerUnavailableError):
+    """Tracked publication cannot replace a newer accumulator format."""
+
+
+class _StyleSQLInterrupted(LayerDeferredError):
+    """Only the owned progress callback can attest SQLite's automatic rollback."""
+
+    def __init__(self, *, automatic_rollback: bool) -> None:
+        super().__init__("Style work cancelled", category="StyleCancelled")
+        self.automatic_rollback = automatic_rollback
+
+
+def _style_sqlite_deferral(error: sqlite3.OperationalError, *, cancelled: bool = False) -> str | None:
+    # SQLite's primary result codes are stable; Python 3.10 exposes neither
+    # these named constants nor sqlite_errorcode on native exceptions.
+    code = getattr(error, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        primary = code & 255
+        if primary in {5, 6}:  # SQLITE_BUSY / SQLITE_LOCKED, including extended codes.
+            return "StyleWriterBusy"
+        if primary == 9 and cancelled:  # SQLITE_INTERRUPT.
+            return "StyleCancelled"
+        return None
+    message = str(error)
+    if cancelled and message == "interrupted":
+        return "StyleCancelled"
+    if (message in {"database is locked", "database table is locked", "database schema is locked"}
+            or message.startswith(("database table is locked: ", "database schema is locked: "))):
+        return "StyleWriterBusy"
+    return None
 
 
 class MaintenanceOwnership(NamedTuple):
@@ -532,6 +570,7 @@ class LayerSpec(NamedTuple):
     read_coverage: Callable[[sqlite3.Connection], str] | None = None
     borrowed_publication_guard: Callable[[sqlite3.Connection], AbstractContextManager[Callable[[], None]]] | None = None
     connection: sqlite3.Connection | None = None
+    execution_guard: Callable[[sqlite3.Connection, bool], AbstractContextManager[None]] | None = None
 
 
 class LayerState(NamedTuple):
@@ -631,6 +670,29 @@ def read_layer_states(conn: sqlite3.Connection, specs: tuple[LayerSpec, ...]) ->
     return states
 
 
+def _read_layer_run_baseline(
+    conn: sqlite3.Connection, specs: tuple[LayerSpec, ...],
+) -> dict[str, LayerState] | None:
+    """Return no style observation only for a read lock with unchanged ownership.
+
+    This boundary is used before running diagnostics and for cancelled reads,
+    never around builders or publication transactions.
+    """
+    borrowed = conn.in_transaction
+    try:
+        return read_layer_states(conn, specs)
+    except sqlite3.OperationalError as error:
+        if (len(specs) == 1 and specs[0].layer == "style_vectors" and conn.in_transaction == borrowed
+                and _style_sqlite_deferral(error) == "StyleWriterBusy"):
+            return None
+        raise
+
+
+def _style_baseline_busy_result(spec: LayerSpec, borrowed: bool) -> LayerResult:
+    return LayerResult(spec.layer, spec.result_key, "deferred", None, 0.0,
+                       "StyleWriterBusy", False, "unverified", borrowed)
+
+
 @contextmanager
 def layer_read_snapshot(
     conn: sqlite3.Connection, layer: str, dependency: LayerDependency,
@@ -725,10 +787,14 @@ def _owned_transaction(
         raise RuntimeError("Maintenance runner requires a clean transaction boundary")
     conn.execute("BEGIN")
     completed = False
+    automatic_rollback = False
     try:
         yield
         conn.execute("COMMIT")
         completed = True
+    except _StyleSQLInterrupted as error:
+        automatic_rollback = error.automatic_rollback
+        raise
     finally:
         if not completed:
             if conn.in_transaction:
@@ -741,7 +807,10 @@ def _owned_transaction(
                 if on_rollback is not None:
                     on_rollback()
             elif on_rollback is not None:
-                raise _LayerRollbackFailed("Output transaction ended without a confirmed rollback")
+                if automatic_rollback:
+                    on_rollback()
+                else:
+                    raise _LayerRollbackFailed("Output transaction ended without a confirmed rollback")
 
 
 @contextmanager
@@ -808,7 +877,7 @@ def _read_layer_row(conn: sqlite3.Connection, layer: str) -> tuple | None:
 
 def _restore_deferred_attempt(
     conn: sqlite3.Connection, layer: str, previous: tuple | None, running: tuple,
-    owner: MaintenanceOwnership,
+    owner: MaintenanceOwnership, *, protect_rollback: bool = False,
 ) -> None:
     """Restore only this owner's unchanged diagnostic, after output rollback."""
     if conn.in_transaction:
@@ -816,7 +885,7 @@ def _restore_deferred_attempt(
     current_owner = getattr(_thread_owners, "owners", {}).get(owner.path)
     if current_owner != owner or owner.process_id != os.getpid():
         raise MaintenanceBusyError("Maintenance ownership changed before diagnostic restoration")
-    with _owned_transaction(conn):
+    with _owned_transaction(conn, on_rollback=(lambda: None) if protect_rollback else None):
         conn.execute("UPDATE maintenance_layers SET layer=layer WHERE 0")
         current = _read_layer_row(conn, layer)
         if (current != running or current is None or current[2] != "running"
@@ -863,11 +932,16 @@ def run_layers(
                 _record_attempt(conn, state, outcome, owner.generation, category)
 
         # Validate uniqueness before any builder is invoked.
-        read_layer_states(conn, specs)
+        if _read_layer_run_baseline(conn, specs) is None:
+            return (_style_baseline_busy_result(specs[0], borrowed),)
         for spec in specs:
             if cancel is not None and cancel.is_set():
                 break
-            state = read_layer_states(conn, (spec,))[spec.layer]
+            observed = _read_layer_run_baseline(conn, (spec,))
+            if observed is None:
+                results.append(_style_baseline_busy_result(spec, borrowed))
+                continue
+            state = observed[spec.layer]
             if state.dependency.deferred:
                 results.append(LayerResult(spec.layer, spec.result_key, "deferred", state.output_count, 0.0,
                     state.dependency.error_category, False, state.successful_coverage, borrowed))
@@ -891,16 +965,32 @@ def run_layers(
             # This diagnostic commits before the read/compute snapshot starts.
             previous_row = running_row = None
             if not borrowed:
-                with _owned_transaction(conn):
-                    previous_row = _read_layer_row(conn, spec.layer)
-                    conn.execute(
-                        "INSERT INTO maintenance_layers(layer,builder_version,outcome,run_generation,error_category) "
-                        "VALUES (?,?,'running',?,NULL) ON CONFLICT(layer) DO UPDATE SET "
-                        "builder_version=excluded.builder_version,outcome='running',"
-                        "run_generation=excluded.run_generation,error_category=NULL",
-                        (spec.layer, state.dependency.builder_version, owner.generation),
-                    )
-                    running_row = _read_layer_row(conn, spec.layer)
+                diagnostic_rolled_back = False
+
+                def confirm_diagnostic_rollback() -> None:
+                    nonlocal diagnostic_rolled_back
+                    diagnostic_rolled_back = True
+
+                try:
+                    with _owned_transaction(conn, on_rollback=(
+                        confirm_diagnostic_rollback if spec.layer == "style_vectors" else None
+                    )):
+                        previous_row = _read_layer_row(conn, spec.layer)
+                        conn.execute(
+                            "INSERT INTO maintenance_layers(layer,builder_version,outcome,run_generation,error_category) "
+                            "VALUES (?,?,'running',?,NULL) ON CONFLICT(layer) DO UPDATE SET "
+                            "builder_version=excluded.builder_version,outcome='running',"
+                            "run_generation=excluded.run_generation,error_category=NULL",
+                            (spec.layer, state.dependency.builder_version, owner.generation),
+                        )
+                        running_row = _read_layer_row(conn, spec.layer)
+                except sqlite3.OperationalError as error:
+                    if (spec.layer != "style_vectors" or not diagnostic_rolled_back
+                            or _style_sqlite_deferral(error) != "StyleWriterBusy"):
+                        raise
+                    results.append(LayerResult(spec.layer, spec.result_key, "deferred", state.output_count,
+                        time.monotonic() - started, "StyleWriterBusy", False, state.successful_coverage))
+                    continue
             count = None
             coverage = state.successful_coverage
             built = output_started = rolled_back = False
@@ -919,7 +1009,9 @@ def run_layers(
                 guard = factory(conn) if factory is not None else None
                 with ExitStack() as publication:
                     transaction = _borrowed_transaction if borrowed else _owned_transaction
-                    with transaction(conn, on_rollback=confirm_rollback):
+                    with transaction(conn, on_rollback=confirm_rollback), (
+                        spec.execution_guard(conn, not borrowed) if spec.execution_guard is not None else nullcontext()
+                    ):
                         output_started = True
                         state = read_layer_states(conn, (spec,))[spec.layer]
                         if state.dependency.deferred:
@@ -952,9 +1044,21 @@ def run_layers(
                     if output_started and not rolled_back:
                         raise _LayerRollbackFailed("Deferred output has no confirmed rollback") from error
                     if not borrowed:
-                        _restore_deferred_attempt(conn, spec.layer, previous_row, running_row, owner)
+                        try:
+                            if spec.layer == "style_vectors":
+                                _restore_deferred_attempt(conn, spec.layer, previous_row, running_row, owner,
+                                                          protect_rollback=True)
+                            else:
+                                _restore_deferred_attempt(conn, spec.layer, previous_row, running_row, owner)
+                        except sqlite3.OperationalError as restore_error:
+                            if (spec.layer != "style_vectors" or conn.in_transaction
+                                    or _style_sqlite_deferral(restore_error) != "StyleWriterBusy"):
+                                raise
+                            # Another writer still owns SQLite. Keep the
+                            # committed running row for later owner recovery;
+                            # do not claim restoration or retry under this owner.
                     results.append(LayerResult(spec.layer, spec.result_key, "deferred", baseline_state.output_count,
-                        time.monotonic() - started, "ModelBusy", built, baseline_state.successful_coverage, borrowed))
+                        time.monotonic() - started, error.category, built, baseline_state.successful_coverage, borrowed))
                     if cancel is not None and cancel.is_set():
                         break
                     continue
@@ -975,6 +1079,157 @@ def run_layers(
                 results.append(LayerResult(spec.layer, spec.result_key, "success" if count else "success_empty",
                     count, time.monotonic() - started, None, True, coverage, borrowed))
     return tuple(results)
+
+
+def prepare_style_maintenance(
+    conn: sqlite3.Connection, *, _on_safe_failure: Callable[[sqlite3.OperationalError], None] | None = None,
+) -> None:
+    """Explicit lazy enrollment; preserve a caller's final commit/rollback."""
+    borrowed = conn.in_transaction
+    try:
+        read_source_revision(conn)
+    except sqlite3.OperationalError as error:
+        if _on_safe_failure is not None and conn.in_transaction == borrowed:
+            _on_safe_failure(error)
+        raise
+    _prepare_style_maintenance(conn, _on_safe_failure=_on_safe_failure)
+
+
+def style_layer_spec(
+    conn: sqlite3.Connection, *, cancel: threading.Event | None = None, connection_owned: bool = False,
+) -> LayerSpec:
+    """Describe private style work without installing schema or reading profiles."""
+    if type(connection_owned) is not bool:
+        raise ValueError("Connection ownership opt-in must be a boolean")
+    parameters = {
+        "accumulator_version": 1, "hash_version": 2, "dimension": 256,
+        "ngrams": [3, 4, 5], "sum_format": "<256d",
+    }
+
+    def resolve_dependency() -> LayerDependency:
+        ready = _style_output_tracking_ready(conn)
+        return make_layer_dependency(1, parameters, available=ready,
+                                     error_category=None if ready else "StyleTrackingUnprepared")
+
+    def check_cancel() -> None:
+        if cancel is not None and cancel.is_set():
+            raise LayerDeferredError("Style work cancelled", category="StyleCancelled")
+
+    @contextmanager
+    def execution_guard(connection: sqlite3.Connection, owned: bool) -> Iterator[None]:
+        style = importlib.import_module("truememory.personality_style_vec")
+        progress = connection_owned and owned and cancel is not None
+        interrupted_by_callback = False
+
+        def progress_handler() -> int:
+            nonlocal interrupted_by_callback
+            if cancel.is_set():
+                interrupted_by_callback = True
+                return 1
+            return 0
+
+        if progress:
+            connection.set_progress_handler(progress_handler, 1000)
+        try:
+            check_cancel()
+            yield
+        except _LayerCancelled as error:
+            raise LayerDeferredError("Style work cancelled", category="StyleCancelled") from error
+        except style._StyleSourceChanged as error:
+            raise LayerDeferredError("Style source changed", category="StyleSourceChanged") from error
+        except sqlite3.OperationalError as error:
+            category = _style_sqlite_deferral(error, cancelled=cancel is not None and cancel.is_set())
+            if category == "StyleCancelled":
+                code = getattr(error, "sqlite_errorcode", None)
+                native_interrupt = (isinstance(code, int) and (code & 255) == 9) or (
+                    code is None and not hasattr(sqlite3, "SQLITE_INTERRUPT") and str(error) == "interrupted"
+                )
+                raise _StyleSQLInterrupted(automatic_rollback=bool(
+                    progress and interrupted_by_callback and native_interrupt and not connection.in_transaction
+                )) from error
+            if category == "StyleWriterBusy":
+                raise LayerDeferredError("Style writer busy", category="StyleWriterBusy") from error
+            raise
+        finally:
+            # Exit before the runner rolls back or commits. Borrowed handlers
+            # cannot be recovered through SQLite's API, so never replace them.
+            if progress:
+                connection.set_progress_handler(None, 0)
+
+    def compatible(connection: sqlite3.Connection) -> None:
+        # A custom future schema can be empty. Do not downgrade its declared
+        # accumulator format merely because no row demonstrates it yet.
+        default = next(row[4] for row in connection.execute("PRAGMA table_info(entity_style_vectors)")
+                       if row[1] == "accumulator_version")
+        if default is not None:
+            literal = default.strip(" ()'\"")
+            if literal not in {"0", "1", "NULL", "null"}:
+                raise StyleAccumulatorUnsupported("Unsupported style accumulator default")
+        if connection.execute(
+            "SELECT 1 FROM entity_style_vectors WHERE accumulator_version > 1 LIMIT 1"
+        ).fetchone():
+            raise StyleAccumulatorUnsupported("Unsupported style accumulator version")
+
+    def build(connection: sqlite3.Connection) -> object:
+        style = importlib.import_module("truememory.personality_style_vec")
+        source = read_source_revision(connection)
+        schema, query, rows = style._capture_style_source(connection, check_cancel)
+        result, stored_rows = style._compute_entity_style_vectors(rows, check_cancel=check_cancel)
+        check_cancel()
+        # The runner owns final commit. Upgrade before both format and source
+        # validation; a stale reader cannot replace a newer generation.
+        connection.execute("UPDATE messages SET sender=sender WHERE 0")
+        style._publish_style_vectors(connection, schema, query, rows, stored_rows,
+                                     check_cancel=check_cancel, before_replace=compatible)
+        if read_source_revision(connection) != source:
+            raise style._StyleSourceChanged("Style source changed before publication")
+        connection.execute("INSERT INTO metadata(key,value) VALUES ('style_vec_hash_version','2') "
+                           "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        return result
+
+    return LayerSpec("style_vectors", "style_vectors", resolve_dependency, build,
+        lambda connection: connection.execute("SELECT count(*) FROM entity_style_vectors").fetchone()[0],
+        connection=conn, execution_guard=execution_guard)
+
+
+def run_style_maintenance(
+    conn: sqlite3.Connection, *, force: bool = False, threshold: int = 25,
+    cancel: threading.Event | None = None, allow_caller_transaction: bool = False,
+    connection_owned: bool = False,
+) -> LayerResult:
+    """Explicit tracked style rebuild, separate from all eight public adapters."""
+    if type(allow_caller_transaction) is not bool:
+        raise ValueError("Caller transaction opt-in must be a boolean")
+    if type(connection_owned) is not bool:
+        raise ValueError("Connection ownership opt-in must be a boolean")
+    borrowed = conn.in_transaction
+    if borrowed and not allow_caller_transaction:
+        raise RuntimeError("Maintenance runner requires a clean transaction boundary")
+    if type(threshold) is not int or threshold < 1:
+        raise ValueError("Maintenance threshold must be a positive integer")
+    with maintenance_owner(connection_database_path(conn)):
+        started = time.monotonic()
+
+        def preparation_failure(error: sqlite3.OperationalError) -> None:
+            if _style_sqlite_deferral(error) == "StyleWriterBusy":
+                raise LayerDeferredError("Style preparation writer busy", category="StyleWriterBusy") from error
+
+        try:
+            prepare_style_maintenance(conn, _on_safe_failure=preparation_failure)
+        except LayerDeferredError as error:
+            return LayerResult("style_vectors", "style_vectors", "deferred", None,
+                time.monotonic() - started, error.category, False, "unverified", borrowed)
+        spec = style_layer_spec(conn, cancel=cancel, connection_owned=connection_owned)
+        results = run_layers(conn, (spec,), force=force, threshold=threshold, cancel=cancel,
+                             allow_caller_transaction=allow_caller_transaction)
+        if results:
+            return results[0]
+        observed = _read_layer_run_baseline(conn, (spec,))
+        if observed is None:
+            return _style_baseline_busy_result(spec, borrowed)
+        state = observed[spec.layer]
+        return LayerResult(spec.layer, spec.result_key, "deferred", state.output_count, 0.0,
+                           "StyleCancelled", False, state.successful_coverage, borrowed)
 
 
 def nonvector_layer_specs() -> tuple[LayerSpec, ...]:

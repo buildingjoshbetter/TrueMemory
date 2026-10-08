@@ -1230,3 +1230,59 @@ successful maintenance pass clears the retained evidence. A process failure is n
 cross-process diagnostic; persisted scheduler outcomes remain independently
 visible. The optional clustering extra, eight persisted layers, nine manual
 result keys, builder algorithms and preference stage are unchanged.
+
+### Private style maintenance preparation (#747)
+
+Explicit style maintenance can enroll a private `style_vectors` checkpoint.
+Ordinary database initialization and spec construction do not enroll it or
+scan profiles. The eight public adapters and nine consolidation result keys
+remain unchanged; explicit enrollment adds a ninth physical checkpoint row.
+Fixed output INSERT/UPDATE/DELETE triggers invalidate only that private row
+and clear its attempt baseline. Trigger repair invalidates provenance using
+metadata without scanning messages or profiles. Caller rollback also rolls
+back enrollment, trigger installation and invalidation.
+
+Tracked rebuilds retain the existing 256-dimensional character n-gram
+arithmetic, sender ordering, case merging and ordinary-message filter. They
+capture source before computation, acquire writer ownership before checking
+source and future accumulator versions, then publish profiles, raw sums,
+hash version 2 and complete provenance in the runner's final transaction.
+Unsupported future formats are retained. Valid legacy getter output remains
+readable; getters never rebuild. Low-level standalone builders retain their
+existing SQLite-fenced contract and do not gain global coordination or the
+tracked future-format guard.
+
+Style work checks cooperative cancellation during capture, computation and
+publication. SQLite progress-handler installation additionally requires the
+explicit `connection_owned=True` opt-in and an owned runner transaction; a
+clean transaction alone does not establish ownership of the connection. That
+handler is disabled before rollback or commit. Other connections keep their
+caller's unknown handler, and borrowed transactions retain final commit
+ownership. Verified stale source, cancellation and SQLite writer
+contention defer without establishing a failure baseline after confirmed
+rollback; unexpected SQL failures remain failures. Failed publication retains
+the previous output and successful provenance.
+
+Initial enrollment and trigger repair can also defer on lock contention:
+the preparation boundary must establish that no writes started or confirm
+its owned rollback or caller savepoint rollback. Caller work stays pending;
+unknown errors and an unconfirmed transaction end do not become deferral.
+Read-only baseline probes before a running diagnostic, including the repeated
+layer probe and cancelled-result probe, can defer only for a known lock error
+with unchanged transaction ownership. Unavailable observations report an
+unknown count and unverified coverage; no attempt baseline is advanced.
+Lock contention before the running diagnostic leaves its prior checkpoint
+unchanged. If a writer instead blocks restoration after a deferred build, the
+running diagnostic remains persisted; a later owner can recover it after the
+writer releases. The deferred result does not claim that restoration succeeded.
+An owned SQLite interruption can attest automatic rollback only when this
+operation's installed callback returned cancellation and SQLite reported the
+interrupt code, or the exact legacy interrupt message on Python 3.10. The
+callback is cleared before cleanup. Merely observing an ended transaction
+does not establish rollback. Error categories also support Python 3.10's
+missing SQLite code attributes without hiding unexpected SQL errors.
+
+This checkpoint does not activate engine routing, automatic migration,
+incremental coverage, style status or coordinator style-only jobs. Those
+remaining migration steps are required before release. Synthetic transaction
+proofs do not establish native performance or retrieval quality.
