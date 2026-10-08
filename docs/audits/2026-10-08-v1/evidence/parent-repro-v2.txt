@@ -1,0 +1,25 @@
+{
+  "source_revision": "063e5b8844af735a52fde886217a5d26a0f13064",
+  "method": "AST-selected real functions, synthetic collaborators, no network or model imports",
+  "P01": {
+    "stored": 0,
+    "trace_action": "storage_failed",
+    "cli_events": [
+      "mark_session_extracted",
+      "clear_backlog_processing"
+    ]
+  },
+  "P02": {
+    "text_events": [
+      "stored"
+    ],
+    "transcript_events": [
+      "stored",
+      "invalidate_recall_cache"
+    ]
+  },
+  "refinement_prompt": {
+    "retrieved_memory_sentinel_in_llm_prompt": true,
+    "external_request_performed": false
+  }
+}

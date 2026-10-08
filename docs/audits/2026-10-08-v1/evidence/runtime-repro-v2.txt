@@ -1,0 +1,108 @@
+{
+  "canonical_commit": "063e5b8844af735a52fde886217a5d26a0f13064",
+  "pr729_head": "693ac64f4bb9d806c555e2030d8444e133d1cff7",
+  "probe_count": 10,
+  "real_models_loaded": 0,
+  "real_torch_imported": false,
+  "source_mutated": false,
+  "results": [
+    {
+      "probe": "R01_batch_controls",
+      "requested_proxy_batch": 1,
+      "wire_batch_size_present": false,
+      "throttler_batch": 1,
+      "actual_encode_sizes": [
+        4
+      ]
+    },
+    {
+      "probe": "R02_cpu_builder",
+      "factory_call": {
+        "name": "Qwen/Qwen3-Embedding-0.6B",
+        "truncate_dim": 256,
+        "model_kwargs": {
+          "attn_implementation": "eager"
+        },
+        "device": "cpu"
+      },
+      "one_fp32_attention_tensor_gib_at_8192": 4.0,
+      "real_inference_run": false
+    },
+    {
+      "probe": "R03_queued_deadline",
+      "encoded_after_deadline": true,
+      "response_ok": true,
+      "controlled_lock_wait_seconds": 0.15
+    },
+    {
+      "probe": "R05_retry_concurrency",
+      "same_model_peak_concurrent_encodes": 2,
+      "real_models": false
+    },
+    {
+      "probe": "R06_local_device_override",
+      "environment_device": "cpu",
+      "factory_device_argument_present": false,
+      "factory_calls": [
+        {
+          "name": "Qwen/Qwen3-Embedding-0.6B",
+          "truncate_dim": 256,
+          "model_kwargs": {
+            "attn_implementation": "eager"
+          }
+        },
+        {
+          "name": "Qwen/Qwen3-Embedding-0.6B",
+          "truncate_dim": 256,
+          "model_kwargs": {
+            "attn_implementation": "eager"
+          }
+        }
+      ]
+    },
+    {
+      "probe": "R08_server_absent_local_copies",
+      "independent_loader_namespaces": 2,
+      "distinct_models_loaded": 2,
+      "real_processes_spawned": 0
+    },
+    {
+      "probe": "R07_local_device_race",
+      "device_moves": [
+        {
+          "device": "cpu",
+          "another_encode_active": false
+        },
+        {
+          "device": "mps",
+          "another_encode_active": true
+        }
+      ],
+      "real_torch_imported": false
+    },
+    {
+      "probe": "R09_throttler_sleep",
+      "before_batch_calls": 15,
+      "ten_second_sleeps": 2,
+      "simulated_total_sleep_seconds": 21.09,
+      "real_sleep_seconds": 0,
+      "cpu_throttler_mps_cap_gib": 17.6
+    },
+    {
+      "probe": "R11_pr729_recycle_noop",
+      "pressure_before_and_after_mb": 2000,
+      "limit_mb": 1500,
+      "running_after_recycle_log": true,
+      "models_cleared": true,
+      "scope": "unmerged PR729"
+    },
+    {
+      "probe": "R12_pr729_cache_view_retention",
+      "cache_entries": 1,
+      "visible_vector_bytes": 1024,
+      "retained_backing_bytes": 1048576,
+      "amplification": 1024,
+      "scope": "unmerged PR729"
+    }
+  ]
+}
