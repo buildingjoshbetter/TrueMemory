@@ -115,17 +115,26 @@ jobs:
 
   # Hunter F26: catch packaging regressions (missing py.typed, metadata
   # errors, broken README rendering, sdist contents) in CI instead of
-  # at release time. Runs once on 3.12 only — duplicating across the
-  # matrix wastes CI minutes without additional signal.
+  # at release time. Exercise both MCP dependency boundaries on each OS.
   build-check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.12"]
+        mcp-version: [minimum, latest]
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+            mcp-version: minimum
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up Python 3.12
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: 'pip'
           cache-dependency-path: pyproject.toml
       - name: Install build tooling
@@ -134,10 +143,25 @@ jobs:
         run: python -m build
       - name: Verify package metadata
         run: twine check --strict dist/*
-      # Issue #654 (M-83): actually install the built wheel and exercise the
-      # console entry point, so a broken/missing entry-point or import-time
-      # failure is caught here (not just at release).
-      - name: Install wheel and smoke-test console script
+      # Issue #757: an editable install or --help alone does not exercise
+      # the installed wheel's MCP handshake and serialized tool metadata.
+      - name: Install wheel and verify MCP compatibility
+        shell: python
+        env:
+          MCP_VERSION: ${{ matrix.mcp-version }}
         run: |
-          pip install dist/*.whl
-          truememory-mcp --help
+          import os
+          from pathlib import Path
+          import subprocess
+          import venv
+
+          wheel, = Path("dist").glob("*.whl")
+          env_dir = Path(os.environ["RUNNER_TEMP"]) / "mcp-wheel-env"
+          venv.EnvBuilder(with_pip=True).create(env_dir)
+          python = env_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+          requirements = [str(wheel.resolve())]
+          if os.environ["MCP_VERSION"] == "minimum":
+              requirements.append("mcp[cli]==1.19.0")
+          subprocess.run([str(python), "-m", "pip", "install", *requirements], check=True)
+          subprocess.run([str(python), "-m", "pip", "check"], check=True)
+          subprocess.run([str(python), "-I", "tests/mcp-wheel-smoke.py"], check=True)
