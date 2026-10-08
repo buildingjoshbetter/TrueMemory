@@ -143,6 +143,7 @@ class SharedModelOwnership(unittest.TestCase):
         mps = types.ModuleType("truememory.mps_utils")
         mps.resolve_device = lambda _value=None: "cpu"
         mps.auto_detect_device = lambda: "cpu"
+        mps.ensure_mps_memory_budget = lambda _device: None
         namespace = {"_model": None, "_lock": threading.Lock(), "_embedding_dim": 256,
                      "EMBEDDING_MODEL": "qwen3_256", "os": os, "sys": sys,
                      "_model_name": None, "get_current_reranker_name": lambda: "synthetic-reranker"}
