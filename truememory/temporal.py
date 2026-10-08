@@ -25,6 +25,8 @@ Design:
 
 import re
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from truememory.storage import _row_to_dict, select_message_cols
@@ -673,38 +675,17 @@ def _parse_naive(ts: str) -> datetime:
     return datetime.fromisoformat(stripped)
 
 
-def detect_episodes(conn, gap_hours=6):
-    """
-    Group messages into episodes using a time-gap heuristic.
-    Messages within gap_hours of each other belong to the same episode.
-    Stores episodes in the episodes table and updates episode_id on messages.
-
-    Args:
-        conn:      Open database connection.
-        gap_hours: Maximum gap (in hours) between consecutive messages
-                   within the same episode (default 6).
-
-    Returns:
-        Number of episodes detected.
-    """
-    rows = conn.execute(
-        "SELECT id, timestamp FROM messages WHERE timestamp != '' ORDER BY timestamp"
-    ).fetchall()
-
+def _group_episode_rows(rows: list[tuple], gap_hours: float) -> list[list[tuple]]:
+    """Keep the existing lexical ordering and naive timestamp gap semantics."""
     if not rows:
-        return 0
-
-    # Clear existing episodes
-    conn.execute("DELETE FROM episodes")
-    conn.execute("UPDATE messages SET episode_id = NULL")
-
+        return []
     episodes = []
     current_episode_msgs = [rows[0]]
     gap_delta = timedelta(hours=gap_hours)
 
     for i in range(1, len(rows)):
-        msg_id, ts = rows[i]
-        prev_id, prev_ts = rows[i - 1]
+        ts = rows[i][1]
+        prev_ts = rows[i - 1][1]
 
         try:
             curr_dt = _parse_naive(ts)
@@ -713,37 +694,120 @@ def detect_episodes(conn, gap_hours=6):
             if (curr_dt - prev_dt) > gap_delta:
                 # New episode
                 episodes.append(current_episode_msgs)
-                current_episode_msgs = [(msg_id, ts)]
+                current_episode_msgs = [rows[i]]
             else:
-                current_episode_msgs.append((msg_id, ts))
+                current_episode_msgs.append(rows[i])
         except (ValueError, TypeError):
-            current_episode_msgs.append((msg_id, ts))
+            current_episode_msgs.append(rows[i])
 
     # Don't forget the last episode
     if current_episode_msgs:
         episodes.append(current_episode_msgs)
+    return episodes
 
-    # Store episodes and update messages
-    for ep_msgs in episodes:
-        if not ep_msgs:
-            continue
 
+@contextmanager
+def _episode_transaction(conn: sqlite3.Connection) -> Iterator[None]:
+    owned = not conn.in_transaction
+    conn.execute("BEGIN" if owned else "SAVEPOINT truememory_episodes")
+    completed = False
+    try:
+        yield
+        conn.execute("COMMIT" if owned else "RELEASE truememory_episodes")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO truememory_episodes")
+                conn.execute("RELEASE truememory_episodes")
+
+
+def _reconcile_episodes(conn: sqlite3.Connection, gap_hours: float) -> int:
+    rows = conn.execute(
+        "SELECT id, timestamp, episode_id FROM messages WHERE timestamp != '' ORDER BY timestamp"
+    ).fetchall()
+    assigned = conn.execute(
+        "SELECT id, episode_id FROM messages WHERE episode_id IS NOT NULL"
+    ).fetchall()
+    previous = conn.execute(
+        "SELECT id, start_time, end_time, message_count, summary FROM episodes"
+    ).fetchall()
+    groups = _group_episode_rows(rows, gap_hours)
+    members: dict[int, set[int]] = {}
+    for mid, episode_id in assigned:
+        members.setdefault(episode_id, set()).add(mid)
+    matching = {
+        frozenset(members[episode[0]]): episode
+        for episode in previous
+        if episode[0] in members and len(members[episode[0]]) == episode[3]
+    }
+
+    kept: set[int] = set()
+    eligible: set[int] = set()
+    assignments = []
+    for ep_msgs in groups:
+        member_ids = frozenset(message[0] for message in ep_msgs)
+        eligible.update(member_ids)
         start_time = ep_msgs[0][1]
         end_time = ep_msgs[-1][1]
         msg_count = len(ep_msgs)
+        old = matching.get(member_ids)
+        if old is None:
+            cursor = conn.execute(
+                "INSERT INTO episodes (start_time, end_time, message_count) VALUES (?, ?, ?)",
+                (start_time, end_time, msg_count),
+            )
+            episode_id = cursor.lastrowid
+        else:
+            episode_id = old[0]
+            # Membership alone cannot prove a summary's source text unchanged.
+            # Preserve the old detector's invalidation without rewriting empties.
+            if tuple(old[1:4]) != (start_time, end_time, msg_count) or old[4] not in ("", None):
+                conn.execute(
+                    "UPDATE episodes SET start_time = ?, end_time = ?, message_count = ?, summary = '' WHERE id = ?",
+                    (start_time, end_time, msg_count, episode_id),
+                )
+        kept.add(episode_id)
+        assignments.extend((episode_id, message[0], episode_id)
+                           for message in ep_msgs if message[2] != episode_id)
 
-        cursor = conn.execute(
-            "INSERT INTO episodes (start_time, end_time, message_count) VALUES (?, ?, ?)",
-            (start_time, end_time, msg_count)
-        )
-        episode_id = cursor.lastrowid
+    assignments.extend((None, mid, None) for mid, _ in assigned if mid not in eligible)
+    conn.executemany(
+        "UPDATE messages SET episode_id = ? WHERE id = ? AND episode_id IS NOT ?",
+        assignments,
+    )
+    conn.executemany("DELETE FROM episodes WHERE id = ?",
+                     ((episode[0],) for episode in previous if episode[0] not in kept))
+    return len(groups)
 
-        msg_ids = [m[0] for m in ep_msgs]
-        for mid in msg_ids:
-            conn.execute("UPDATE messages SET episode_id = ? WHERE id = ?", (episode_id, mid))
 
-    conn.commit()
-    return len(episodes)
+def detect_episodes(conn: sqlite3.Connection, gap_hours: float = 6) -> int:
+    """Reconcile six-hour groups atomically, preserving unchanged episode IDs.
+
+    Exact member sets keep their IDs. Merges, splits and membership changes
+    get new IDs; nonempty derived summaries are invalidated. Only changed rows
+    are written. A caller transaction remains open and owns the final commit.
+    """
+    owned = not conn.in_transaction
+    for attempt in range(3):
+        version = conn.execute("PRAGMA data_version").fetchone()[0] if owned else None
+        try:
+            with _episode_transaction(conn):
+                return _reconcile_episodes(conn, gap_hours)
+        except sqlite3.OperationalError as error:
+            # WAL readers cannot upgrade a snapshot after another writer
+            # commits. Retry only our own transaction, at most twice; never
+            # restart a caller's snapshot or commit its unrelated writes.
+            code = getattr(error, "sqlite_errorcode", None)
+            stale = code == 517  # SQLITE_BUSY_SNAPSHOT
+            if code is None and str(error) == "database is locked" and owned:
+                # Python 3.10 does not expose extended SQLite error codes.
+                stale = conn.execute("PRAGMA data_version").fetchone()[0] != version
+            if not owned or not stale or attempt == 2:
+                raise
+    raise AssertionError("Episode snapshot retry limit was not enforced")
 
 
 def get_episode_messages(conn, episode_id):
