@@ -45,6 +45,8 @@ esac
 # Functions shadow external tools in this child PowerShell process only.
 # The actual installer body still controls statuses, summaries, and branches.
 POWERSHELL_WRAPPER = r"""
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 function Get-ExecutionPolicy { param($Scope) return 'Bypass' }
 function uv {
     $global:LASTEXITCODE = 0
@@ -149,7 +151,7 @@ class TestShellInstallerReadiness(InstallerFixture):
         return subprocess.run(
             ["/bin/sh", str(ROOT / "install.sh")],
             env=self.environment(outcomes, **extra), cwd=self.root,
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", timeout=30,
         )
 
     def test_all_model_outcome_combinations(self) -> None:
@@ -189,7 +191,7 @@ class TestPowerShellInstallerReadiness(InstallerFixture):
         return subprocess.run(
             [str(POWERSHELL), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
             env=self.environment(outcomes, SYNTHETIC_INSTALLER=str(ROOT / "install.ps1"), **extra),
-            cwd=self.root, capture_output=True, text=True, timeout=30,
+            cwd=self.root, capture_output=True, text=True, encoding="utf-8", timeout=30,
         )
 
     def test_all_model_outcome_combinations(self) -> None:
