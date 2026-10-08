@@ -125,3 +125,58 @@ until it returns; graceful interpreter exit also waits for active pool workers.
 A valid client may half-close its write side while awaiting a response, so EOF
 after a complete frame alone does not cancel queued work. Its caller deadline or
 the legacy queue ceiling still bounds the wait.
+
+## Complete-result allocation and recovery lifetime
+
+The model server now checks whether a complete inference result can fit the
+existing 10 MiB response frame before allocating its full result array. This is
+an exact output and transport check, not a limit on total process memory.
+
+For a float32 result with shape `S`, the arithmetic is:
+
+- Raw array bytes: `R = 4 * product(S)`.
+- Base64 bytes: `E = 4 * ceil(R / 3)`.
+- JSON envelope bytes: `J`, measured using the actual field name, shape, dtype,
+  protocol version and JSON formatting, with an empty base64 value.
+- A successful response requires `E + J <= 10485760`.
+
+For 256-dimensional embeddings, 7679 inputs require
+`R = 4 * 7679 * 256 = 7863296`, `E = 10484396`, and `J = 101` bytes:
+`10484396 + 101 = 10484497 <= 10485760`. At 7680 inputs,
+`R = 7864320`, `E = 10485760`, and `J = 101`:
+`10485760 + 101 = 10485861 > 10485760`. The second request is rejected before
+loading its known built-in embedding model. A smaller inference microbatch
+cannot make that complete response fit. The caller must split the request into
+separate requests; successful responses still contain every input in order.
+
+The built-in embedding constructors and their existing model2vec fallbacks have
+known 256-dimensional output. The built-in scalar rerankers have one float32
+score per input. These shapes are checked before model loading. An opted-in
+custom embedding model's configured `truncate_dim` is an upper bound, and its
+dimension getter can report that bound when its native width is unknown. Custom
+rerankers may return multiple labels per pair. These unknown shapes are checked
+against the actual first native result, before allocating the complete result
+or converting that native array to float32. Every later slice must retain its
+output dimensions and expected input count. Empty outputs retain their native
+rank. Custom model loading and its first forward pass can still allocate memory
+before this check; they are not covered by an estimated native-memory budget.
+
+The response serializer independently measures actual array shapes before
+making contiguous float32, raw-byte, base64 or full JSON copies. Oversized
+results return an error rather than a partial result. Embedding models,
+rerankers, precision, retrieval depth and wire format are unchanged.
+
+Shared-model MPS recovery now leaves the failed exception scope before flushing
+caches or starting CPU recovery. This releases the failed forward traceback's
+references to temporary workspaces. Reranker recovery also drops both the cached
+and local obsolete model references before constructing its CPU replacement.
+Main inference ownership remains held through recovery and the failed-slice
+retry. Sticky CPU state and deadline checks still apply, and completed slices
+are not recomputed. This releases Python references; it does not guarantee that
+a native allocator immediately returns pages to the operating system.
+
+Model weights, native activation/workspace peaks, CPU transfer demand, normal
+model replacement overlap, fast-encoder residency and serializer copies for
+accepted results still require measured whole-process budget calibration.
+This change introduces no new process-memory threshold, token estimator,
+automatic recycling policy or claim that native allocation cannot overshoot.
