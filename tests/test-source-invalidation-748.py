@@ -406,7 +406,10 @@ class TestSourceInvalidation748(unittest.TestCase):
         conn.execute("INSERT INTO messages VALUES ('Alice','hello ordinary content','2026-01-01')")
         conn.commit()
         result = self.style.build_entity_style_vectors(conn)
-        self.assertEqual(result, {"alice": self.style.compute_style_vector("hello ordinary content")})
+        expected = self.style.mean_pool_vectors([
+            self.style.compute_style_vector("hello ordinary content"),
+        ])
+        self.assertEqual(result, {"alice": expected})
         self.assertEqual(conn.execute("SELECT message_count FROM entity_style_vectors").fetchone()[0], 1)
 
     def test_failed_source_read_does_not_leave_owned_transaction(self) -> None:
