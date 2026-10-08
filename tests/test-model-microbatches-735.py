@@ -41,7 +41,7 @@ class RecordingModel:
         if len(self.calls) in self.fail_calls:
             raise RuntimeError("MPS backend out of memory")
 
-    def encode(self, texts: list[str], *, batch_size: int,
+    def encode(self, texts: list[str], *, batch_size: int = 32,
                show_progress_bar: bool) -> np.ndarray:
         assert show_progress_bar is False
         self.record("embed", texts, batch_size)
@@ -130,8 +130,8 @@ def test_each_actual_call_obeys_caller_and_captured_throttler_limit(
 
 
 @pytest.mark.parametrize("op,key,maximum", [
-    ("embed", "vectors", ms._EMBED_BATCH_LIMIT),
-    ("rerank", "scores", ms._RERANK_BATCH_LIMIT),
+    ("embed", "vectors", 32),
+    ("rerank", "scores", 64),
 ])
 @pytest.mark.parametrize("explicit", [False, True])
 def test_server_cap_also_bounds_legacy_and_oversized_caller_requests(
