@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import stat
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -83,6 +84,425 @@ class TranscriptOutcome:
     @property
     def complete(self) -> bool:
         return self.status == "complete"
+
+
+# Pinned Codex rollout grammar: openai/codex 0b755b1945bf4a31560df2ce1469aeb044dccbc9.
+# These are exact exclusions, never prefix rules or recursive payload discovery.
+_CODEX_CONTEXT = {
+    "session_meta", "turn_context", "compacted", "token_usage_record", "world_state",
+    "retained_context", "security_risk_score", "inter_agent_communication",
+    "inter_agent_communication_metadata",
+}
+_CODEX_RESPONSE_CONTEXT = {
+    "additional_tools", "agent_message", "reasoning", "local_shell_call", "function_call",
+    "function_call_output", "custom_tool_call", "custom_tool_call_output", "tool_search_call",
+    "tool_search_output", "web_search_call", "image_generation_call", "compaction",
+    "compaction_summary", "configuration_update", "compaction_trigger", "context_compaction",
+}
+_CODEX_EVENT_CONTEXT = {
+    "token_count", "agent_reasoning", "agent_reasoning_raw_content", "context_compacted",
+    "exec_command_begin", "exec_command_end", "exec_command_output_delta",
+    "mcp_tool_call_begin", "mcp_tool_call_end", "dynamic_tool_call_request",
+    "dynamic_tool_call_response", "patch_apply_begin", "patch_apply_end", "patch_apply_updated",
+    "web_search_begin", "web_search_end", "view_image_tool_call", "image_generation_begin",
+    "image_generation_end", "stream_error", "stream_info", "error", "warning",
+}
+_CODEX_ITEM_CONTEXT = {
+    "FunctionCallOutput", "HookPrompt", "Reasoning", "CommandExecution", "DynamicToolCall",
+    "CollabAgentToolCall", "SubAgentActivity", "WebSearch", "ImageView", "ImageGeneration",
+    "EnteredReviewMode", "ExitedReviewMode", "FileChange", "McpToolCall", "ContextCompaction",
+}
+_CODEX_SCAFFOLD_KINDS = {
+    "agents_md.instructions", "hooks.additional_context", "guardian.retained_instructions",
+}
+_CODEX_PHASES = {"commentary", "partial_answer", "final_answer"}
+_CODEX_START = {"task_started", "turn_started"}
+_CODEX_END = {"task_complete", "turn_complete"}
+_CODEX_ANY = object()
+_CODEX_WHITE_SPACE = "\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+
+
+@dataclass
+class _CodexRecord:
+    kind: str
+    message: Message | None = field(default=None, repr=False)
+    role: str = ""
+    projection: str | None = field(default=None, repr=False)
+    turn_id: str | None = field(default=None, repr=False)
+    item_id: str | None = field(default=None, repr=False)
+    phase: str | None = None
+    payload: dict = field(default_factory=dict, repr=False)
+    malformed: bool = False
+    unrecognized: bool = False
+    errors: set[str] = field(default_factory=set)
+
+    def reject(self, category: str, *, malformed: bool = False) -> None:
+        self.errors.add(category)
+        if malformed:
+            self.malformed = True
+        else:
+            self.unrecognized = True
+
+
+def _codex_attribution(value: dict) -> tuple[str, bool]:
+    """Return absent/user/excluded/unknown, validating even legacy selectors."""
+    for key, expected in (("harness_injected", bool), ("source_tool_namespace", str)):
+        if key in value and value[key] is not None and type(value[key]) is not expected:
+            return "unknown", True
+    if "provenance" in value:
+        provenance = value["provenance"]
+        if not isinstance(provenance, dict) or not isinstance(provenance.get("type"), str):
+            return "unknown", True
+        kind = provenance["type"]
+        if kind == "developer_instructions":
+            if type(provenance.get("from_additional_requirements")) is not bool:
+                return "unknown", True
+        if kind == "harness" and type(provenance.get("hook", False)) is not bool:
+            return "unknown", True
+        if kind == "tool" and provenance.get("namespace") is not None:
+            if not isinstance(provenance["namespace"], str):
+                return "unknown", True
+        if kind == "user":
+            return "user", False
+        if kind in {"developer_instructions", "skills", "agents_md", "harness", "tool"}:
+            return "excluded", False
+        return "unknown", False
+    if value.get("source_tool_namespace") is not None or value.get("harness_injected") is True:
+        return "excluded", False
+    # Empty historical metadata and harness_injected:false are not positive
+    # provenance. They use only the documented older role/text compatibility.
+    return "absent", False
+
+
+def _codex_optional_string(record: _CodexRecord, payload: dict, key: str) -> str | None:
+    value = payload.get(key)
+    if value is not None and not isinstance(value, str):
+        record.reject("codex_invalid_metadata", malformed=True)
+        return None
+    return value or None
+
+
+def _decode_codex_record(entry: dict) -> _CodexRecord | None:
+    """Decode exact native envelopes without interpreting arbitrary nested prose."""
+    kind = entry.get("type")
+    native = kind in _CODEX_CONTEXT if isinstance(kind, str) else False
+    native |= kind in ("response_item", "event_msg", "realtime_item")
+    if not native:
+        generic_kind = kind or entry.get("role")
+        if ("payload" not in entry
+                or (isinstance(generic_kind, str) and generic_kind in _NON_CONVERSATION_TYPES)
+                or generic_kind in ("user", "human", "assistant", "tool_use", "tool_result", "system")
+                or (not kind and "role" in entry and "content" in entry)):
+            return None
+    record = _CodexRecord(kind=kind if isinstance(kind, str) else "unknown")
+    if not isinstance(kind, str):
+        record.reject("codex_invalid_record", malformed=True)
+        return record
+    if not isinstance(entry.get("timestamp", ""), str):
+        record.reject("codex_invalid_metadata", malformed=True)
+    payload = entry.get("payload")
+    if not isinstance(payload, dict):
+        record.reject("codex_invalid_record", malformed=True)
+        return record
+    record.payload = payload
+    if kind in _CODEX_CONTEXT:
+        return record
+    if kind == "event_msg":
+        return _decode_codex_event(record)
+    if kind != "response_item":
+        record.reject("codex_unrecognized_record")
+        return record
+    variant = payload.get("type")
+    if not isinstance(variant, str):
+        record.reject("codex_invalid_record", malformed=True)
+        return record
+    if variant in _CODEX_RESPONSE_CONTEXT:
+        return record
+    if variant != "message":
+        record.reject("codex_unrecognized_record")
+        return record
+    role, content = payload.get("role"), payload.get("content")
+    if not isinstance(role, str) or not isinstance(content, list):
+        record.reject("codex_invalid_record", malformed=True)
+        return record
+    if role in ("system", "developer", "tool"):
+        return record
+    if role not in ("user", "assistant"):
+        record.reject("codex_unrecognized_record")
+        return record
+    record.role = "human" if role == "user" else "assistant"
+    outer, metadata = entry.get("metadata"), payload.get("internal_chat_message_metadata_passthrough")
+    if any(value is not None and not isinstance(value, dict) for value in (outer, metadata)):
+        record.reject("codex_invalid_metadata", malformed=True)
+        return record
+    outer, metadata = outer or {}, metadata or {}
+    excluded = False
+    for key in ("compaction_output", "inherited_user_message"):
+        if key in outer:
+            if type(outer[key]) is not bool:
+                record.reject("codex_invalid_metadata", malformed=True)
+                return record
+            excluded |= outer[key]
+    if "delivered_assistant_message" in outer:
+        marker = outer["delivered_assistant_message"]
+        if not isinstance(marker, str):
+            record.reject("codex_invalid_metadata", malformed=True)
+        elif marker.startswith("codex:code-mode-delivery:v1:incomplete:"):
+            record.reject("codex_delivery_unavailable")
+        elif marker != "codex:code-mode-delivery:v1:complete":
+            record.reject("codex_unrecognized_record")
+        return record
+    if excluded:
+        return record
+    record.turn_id = _codex_optional_string(record, metadata, "turn_id")
+    record.item_id = _codex_optional_string(record, payload, "id")
+    record.phase = _codex_optional_string(record, payload, "phase")
+    if record.phase is not None and record.phase not in _CODEX_PHASES:
+        record.reject("codex_unrecognized_record")
+    annotations, kinds = metadata.get("content_item_metadata"), metadata.get("content_item_kinds")
+    for values, value_type in ((annotations, dict), (kinds, str)):
+        if values is not None and (not isinstance(values, list) or len(values) != len(content)
+                                   or any(not isinstance(value, value_type) for value in values)):
+            record.reject("codex_invalid_metadata", malformed=True)
+            return record
+    parts: list[str] = []
+    projection_allowed = True
+    for index, block in enumerate(content):
+        attribution, bad = _codex_attribution(annotations[index]) if annotations is not None else ("absent", False)
+        block_kind = kinds[index] if kinds is not None else ""
+        if bad:
+            record.reject("codex_invalid_metadata", malformed=True)
+            projection_allowed = False
+            continue
+        if attribution == "excluded":
+            # Proven attribution already covers generated context, including
+            # new fragment kinds. Kind fallback cannot re-authorize it.
+            projection_allowed = False
+            continue
+        if block_kind in _CODEX_SCAFFOLD_KINDS:
+            if attribution == "user":
+                record.reject("codex_unrecognized_provenance")
+            projection_allowed = False
+            continue
+        if block_kind not in ("", "unknown"):
+            record.reject("codex_unrecognized_provenance")
+            projection_allowed = False
+            continue
+        if attribution == "unknown" or (attribution == "user" and role != "user"):
+            record.reject("codex_unrecognized_provenance")
+            projection_allowed = False
+            continue
+        if not isinstance(block, dict) or not isinstance(block.get("type"), str):
+            record.reject("codex_invalid_content", malformed=True)
+            continue
+        if block["type"] not in ("input_text", "output_text"):
+            record.reject("codex_unrecognized_content")
+            continue
+        if not isinstance(block.get("text"), str):
+            record.reject("codex_invalid_content", malformed=True)
+            continue
+        parts.append(block["text"])
+        if role == "user" and block["type"] != "input_text":
+            projection_allowed = False
+    public_text = "\n".join(part for part in parts if part).strip()
+    if public_text:
+        timestamp = entry.get("timestamp", "")
+        record.message = Message(record.role, public_text, timestamp if isinstance(timestamp, str) else "")
+    if projection_allowed and not record.malformed and not record.unrecognized:
+        raw = "".join(parts)
+        # Contributor/citation/plan rewriting is outside this plain-text
+        # projection. Never try alternative normalizations until an echo fits.
+        if role == "assistant" and any(tag in raw for tag in ("<oai-mem-citation>", "<proposed_plan>", "</proposed_plan>")):
+            record.reject("codex_unsupported_projection")
+        else:
+            record.projection = raw
+    return record
+
+
+def _decode_codex_event(record: _CodexRecord) -> _CodexRecord:
+    payload = record.payload
+    kind = payload.get("type")
+    if not isinstance(kind, str):
+        record.reject("codex_invalid_record", malformed=True)
+        return record
+    record.kind = kind
+    if kind in _CODEX_START | _CODEX_END | {"turn_aborted"}:
+        record.turn_id = _codex_optional_string(record, payload, "turn_id")
+        if record.turn_id is None:
+            record.reject("codex_unsupported_lifecycle")
+        if kind in _CODEX_END:
+            summary = payload.get("last_agent_message")
+            if summary is not None:
+                if not isinstance(summary, str) or not summary.strip(_CODEX_WHITE_SPACE):
+                    record.reject("codex_unmatched_terminal")
+                else:
+                    record.projection = summary
+        return record
+    if kind in _CODEX_EVENT_CONTEXT:
+        return record
+    if kind in ("item_started", "item_completed"):
+        item = payload.get("item")
+        if not isinstance(item, dict) or not isinstance(item.get("type"), str):
+            record.reject("codex_invalid_record", malformed=True)
+            return record
+        item_kind = item["type"]
+        if item_kind in _CODEX_ITEM_CONTEXT:
+            return record
+        if item_kind not in ("UserMessage", "AgentMessage"):
+            record.reject("codex_unrecognized_record")
+            return record
+        if kind == "item_started":
+            return record
+        record.turn_id = _codex_optional_string(record, payload, "turn_id")
+        record.item_id = _codex_optional_string(record, item, "id")
+        if record.turn_id is None or record.item_id is None:
+            record.reject("codex_unmatched_conversation_event")
+        record.role = "human" if item_kind == "UserMessage" else "assistant"
+        record.phase = _codex_optional_string(record, item, "phase")
+        content = item.get("content")
+        expected_type = "text" if record.role == "human" else "Text"
+        if not isinstance(content, list) or any(
+            not isinstance(block, dict) or block.get("type") != expected_type
+            or not isinstance(block.get("text"), str) for block in content
+        ):
+            record.reject("codex_unmatched_conversation_event")
+        elif record.role == "assistant" and len(content) != 1:
+            record.reject("codex_unsupported_projection")
+        else:
+            record.projection = "".join(block["text"] for block in content)
+        if any(item.get(key) not in (None, []) for key in ("delivery", "questions", "memory_citation")):
+            record.reject("codex_unsupported_projection")
+        return record
+    if kind not in ("user_message", "agent_message"):
+        record.reject("codex_unrecognized_record")
+        return record
+    record.role = "human" if kind == "user_message" else "assistant"
+    record.phase = _codex_optional_string(record, payload, "phase")
+    if not isinstance(payload.get("message"), str):
+        record.reject("codex_unmatched_conversation_event")
+    else:
+        record.projection = payload["message"]
+    # These native event fields carry additional conversation unavailable to
+    # the plain-text decoder. Empty producer defaults do not add evidence.
+    media = ("images", "image_details", "file_ids", "file_id_details", "image_order", "local_images",
+             "local_image_details", "audio", "local_audio", "delivery", "questions", "memory_citation")
+    if any(payload.get(key) not in (None, []) for key in media):
+        record.reject("codex_unmatched_conversation_event")
+    return record
+
+
+def _codex_echo_index(credits: list[tuple[int, _CodexRecord]], turn_id: str | None) -> dict[tuple, list[int]]:
+    """Eight bounded index entries per occurrence cover optional echo selectors."""
+    index: dict[tuple, list[int]] = {}
+    for position, (_, candidate) in enumerate(credits):
+        for phase in (candidate.phase, _CODEX_ANY):
+            for turn in (turn_id or candidate.turn_id, _CODEX_ANY):
+                for item in (candidate.item_id, _CODEX_ANY):
+                    key = (candidate.role, candidate.projection, phase, turn, item)
+                    index.setdefault(key, []).append(position)
+    return index
+
+
+def _codex_next_echo(index: dict[tuple, list[int]], event: _CodexRecord, cursor: int) -> int | None:
+    """Find the next compatible occurrence with at most two binary searches."""
+    prefix = (event.role, event.projection, event.phase if event.phase is not None else _CODEX_ANY,
+              event.turn_id if event.turn_id is not None else _CODEX_ANY)
+    # Missing canonical IDs are compatible with a supplied event ID. An event
+    # without an ID queries all occurrences, not only those missing an ID.
+    item_keys = (_CODEX_ANY,) if event.item_id is None else (event.item_id, None)
+    matches: list[int] = []
+    for item in item_keys:
+        positions = index.get((*prefix, item), ())
+        offset = bisect_left(positions, cursor)
+        if offset < len(positions):
+            matches.append(positions[offset])
+    return min(matches) if matches else None
+
+
+def _reconcile_codex(records: list[tuple[int, _CodexRecord]]) -> None:
+    """Reconcile supplied-byte evidence; events never create canonical turns."""
+    scopes: dict[int, list[tuple[int, _CodexRecord]]] = {}
+    scope_ids: dict[int, str | None] = {}
+    invalid_scopes: set[int] = set()
+    terminals: list[tuple[int, int, _CodexRecord]] = []
+    scope = 0
+    active = False
+    closed_ids: set[str] = set()
+    for index, record in records:
+        if record.kind == "session_meta":
+            scope += 1
+            active = False
+            closed_ids.clear()
+            continue
+        if record.kind in _CODEX_START:
+            overlapping = active
+            if overlapping:
+                invalid_scopes.add(scope)
+                record.reject("codex_unsupported_lifecycle")
+            scope += 1
+            active = True
+            scope_ids[scope] = record.turn_id
+            if overlapping or record.turn_id is None or record.malformed:
+                invalid_scopes.add(scope)
+            scopes.setdefault(scope, [])
+            continue
+        if record.kind in _CODEX_END | {"turn_aborted"}:
+            if active:
+                if record.turn_id != scope_ids.get(scope):
+                    invalid_scopes.add(scope)
+                    record.reject("codex_unsupported_lifecycle")
+                terminals.append((index, scope, record))
+                active = False
+            elif record.turn_id in closed_ids or record.turn_id is None:
+                record.reject("codex_unsupported_lifecycle")
+            else:
+                # No start in this supplied segment: only explicit response
+                # turn metadata can explain a nonnull terminal summary.
+                terminals.append((index, scope, record))
+            if record.turn_id is not None:
+                closed_ids.add(record.turn_id)
+            scope += 1
+            continue
+        if active and record.turn_id is not None and record.turn_id != scope_ids.get(scope):
+            record.reject("codex_unsupported_lifecycle")
+        scopes.setdefault(scope, []).append((index, record))
+
+    for group, items in scopes.items():
+        if group in invalid_scopes:
+            for _, record in items:
+                if record.role:
+                    record.reject("codex_unsupported_lifecycle")
+        credits = [(index, record) for index, record in items if record.kind == "response_item"
+                   and record.projection is not None and not record.malformed and not record.unrecognized]
+        credit_index = _codex_echo_index(credits, scope_ids.get(group))
+        cursors: dict[str, int] = {}
+        for _, event in items:
+            if event.kind not in ("user_message", "agent_message", "item_completed") or not event.role:
+                continue
+            if event.malformed or event.unrecognized:
+                continue
+            position = _codex_next_echo(credit_index, event, cursors.get(event.role, 0))
+            if position is None:
+                event.reject("codex_unmatched_conversation_event")
+            else:
+                cursors[event.role] = position + 1
+    for index, group, terminal in terminals:
+        if terminal.projection is None or terminal.malformed or terminal.unrecognized:
+            continue
+        # Terminal evidence is independent of echo credit consumption. Only
+        # earlier canonical occurrences in this lifecycle may explain it.
+        candidates = scopes.get(group, [])
+        explicit_ids = {candidate.turn_id for before, candidate in candidates
+                        if before < index and candidate.kind == "response_item" and candidate.role
+                        and candidate.turn_id is not None}
+        ambiguous = group not in scope_ids and explicit_ids != {terminal.turn_id}
+        if ambiguous or group in invalid_scopes or not any(
+            before < index and candidate.kind == "response_item" and candidate.role == "assistant"
+            and candidate.projection == terminal.projection and not candidate.malformed and not candidate.unrecognized
+            and terminal.turn_id == (scope_ids.get(group) or candidate.turn_id)
+            for before, candidate in reversed(candidates)
+        ):
+            terminal.reject("codex_unmatched_terminal")
 
 
 def _transcript_path(source: str | Path) -> Path | None:
@@ -224,12 +644,19 @@ def _parse_transcript_text_outcome(text: str, *, jsonl: bool = False) -> Transcr
 
     messages: list[Message] = []
     malformed = unrecognized = 0
-    for entry in entries:
+    native_records: list[tuple[int, _CodexRecord]] = []
+    for index, entry in enumerate(entries):
         if isinstance(entry, str) and allow_strings:
             messages.append(Message(role="unknown", content=entry))
             continue
         if not isinstance(entry, dict):
             malformed += 1
+            continue
+        native = _decode_codex_record(entry)
+        if native is not None:
+            native_records.append((index, native))
+            if native.message is not None:
+                messages.append(native.message)
             continue
         top_type = entry.get("type") or entry.get("role") or "unknown"
         if not isinstance(top_type, str):
@@ -258,8 +685,12 @@ def _parse_transcript_text_outcome(text: str, *, jsonl: bool = False) -> Transcr
             continue
         if message is not None:
             messages.append(message)
+    _reconcile_codex(native_records)
+    malformed += sum(record.malformed for _, record in native_records)
+    unrecognized += sum(record.unrecognized for _, record in native_records)
     status = ("partial" if messages else "malformed") if malformed else "partial" if unrecognized else "complete"
     errors = (("malformed_records",) if malformed else ()) + (("unrecognized_content",) if unrecognized else ())
+    errors += tuple(sorted({category for _, record in native_records for category in record.errors}))
     return TranscriptOutcome(messages, status, len(entries), malformed, errors,
                              unrecognized_records=unrecognized)
 
@@ -398,6 +829,10 @@ def _extract_message(entry: dict) -> Message | None:
     Non-conversation entries like ``file-history-snapshot`` and ``progress``
     are filtered out.
     """
+    native = _decode_codex_record(entry)
+    if native is not None:
+        return native.message
+
     # Handle different field names across formats
     top_type = entry.get("type") or entry.get("role") or "unknown"
 
