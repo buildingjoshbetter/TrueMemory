@@ -622,3 +622,28 @@ message lists or solve tier configuration publication across SQLite, config
 file and process state. Issue #756 remains open for that next checkpoint.
 No global embedder-compatibility authority, models, precision, dimensions,
 reranker selection, retrieval depth or deployment defaults change here.
+
+### Legacy rebuild value precision
+
+The rebuild bridge also compares values with explicit `BINARY` equality.
+SQLite's conversion of a REAL value to BLOB formats it as text and can lose
+precision, so the byte and storage-type checks alone cannot certify an
+unchanged source. Numeric comparison supplements both existing checks.
+
+SQL numeric equality cannot distinguish stored positive and negative REAL
+zero. A source UPDATE involving a covered REAL zero therefore invalidates
+the generation conservatively, including assigning the same zero again.
+For ordinary source columns, the trigger listens only to covered source
+fields and unshadowed `rowid` aliases. Unrelated derived-only updates do not
+invalidate solely because a source field contains zero. When a covered
+source field is generated, the trigger must listen to all updates because
+its dependencies can be other columns. Custom UNIQUE schemas retain their
+existing all-update invalidation for hidden replacement deletions.
+
+Changed trigger definitions fail the existing identity check. The next
+writer-owned repair starts a fresh epoch before model loading or clearing
+the target, so manifests captured under the earlier comparison cannot
+resume. Synthetic SQLite tests cover precise REAL metadata rendered into
+separation text, signed zero, collations, storage types, rowid aliases,
+generated fields, repair failures and caller rollback. These tests do not
+measure native model behavior or add a process memory budget.
