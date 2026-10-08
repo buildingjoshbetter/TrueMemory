@@ -7,7 +7,9 @@ batch=1, ramps up slowly, backs off quickly.
 
 import gc
 import logging
+import threading
 import time
+from collections import deque
 
 import psutil
 
@@ -39,6 +41,9 @@ def _get_profile(total_gb: float) -> tuple[float, int, int, int]:
 class DynamicThrottler:
     """Adaptive 3-channel throttler with state machine."""
 
+    SAMPLE_SPACING = 10.0
+    SAMPLE_MAX_AGE = 30.0
+
     def __init__(self, device: str = "cpu"):
         self.device = device
         self.total_gb = psutil.virtual_memory().total / (1024**3)
@@ -53,9 +58,14 @@ class DynamicThrottler:
         )
 
         self.growth_tracker = GrowthRateTracker(cap_gb=self.mps_cap_gb)
+        self._state_lock = threading.RLock()
+        self._sample_lock = threading.Lock()
+        self._samples: deque[tuple[float, dict]] = deque(maxlen=3)
+        self._last_sample_time: float | None = None
+        self._fault_generation = 0
 
         self.items_processed = 0
-        self.start_time = time.time()
+        self.start_time = time.monotonic()
         self.batch_times: list[float] = []
         self.last_throttle_time = 0.0  # backward compat: worker sets this on OOM
         self._last_readings: dict = {}
@@ -69,42 +79,95 @@ class DynamicThrottler:
 
     @property
     def batch_size(self) -> int:
-        return self.state_machine.batch_size
+        with self._state_lock:
+            return self.state_machine.batch_size
 
     @batch_size.setter
     def batch_size(self, value: int):
-        self.state_machine.batch_size = value
+        with self._state_lock:
+            self.state_machine.batch_size = value
 
     def before_batch(self) -> tuple[int, dict]:
-        """Check sensors, update state machine, return (batch_size, metrics)."""
-        self.state_machine.on_batch_complete()
+        """Use bounded observations; never wait for a three-sample ramp window."""
+        with self._state_lock:
+            self.state_machine.on_batch_complete()
+            self._expire_samples(time.monotonic())
+        self._sample_if_due()
 
-        if self.state_machine.should_safety_check():
-            readings = self._read_all_channels()
-            self._last_readings = readings
-            self.state_machine.safety_check(readings)
-
-        if self.state_machine.should_ramp_check():
-            means = self._triple_sample()
-            self.state_machine.ramp_up(means)
-
-        sleep_time = 0.05 + self.state_machine.batch_size * 0.02
+        # Retain duty-cycle pacing, outside both locks. Ramping no longer adds
+        # two ten-second sleeps to an admission. Native sensor calls are separate.
+        paced_size = self.batch_size
+        sleep_time = 0.05 + paced_size * 0.02
         time.sleep(sleep_time)
+        with self._state_lock:
+            metrics = self._build_metrics()
+            # A concurrent backoff applies immediately; a concurrent increase
+            # cannot grant more work than this admission's pacing covered.
+            size = min(paced_size, self.state_machine.batch_size)
+            metrics["batch_size"] = size
+            return size, metrics
 
-        metrics = self._build_metrics()
-        return self.state_machine.batch_size, metrics
+    def _expire_samples(self, now: float) -> None:
+        """Caller holds the state lock; old evidence cannot authorize a ramp."""
+        while self._samples and now - self._samples[0][0] > self.SAMPLE_MAX_AGE:
+            self._samples.popleft()
+        if self._last_sample_time is not None and now - self._last_sample_time > self.SAMPLE_MAX_AGE:
+            self.state_machine.good_streak = 0
+
+    def _sample_due(self, now: float) -> bool:
+        if self.state_machine.should_safety_check():
+            return True
+        if self._last_sample_time is None:
+            return False
+        age = now - self._last_sample_time
+        # Collect fresh evidence before ramp eligibility: eligibility itself
+        # requires three good observations and cannot trigger their collection.
+        return age >= self.SAMPLE_SPACING
+
+    def _sample_if_due(self) -> None:
+        # Only one caller samples. Other admissions keep the current bound;
+        # they never line up behind the sensor subprocess or create a monitor.
+        if not self._sample_lock.acquire(blocking=False):
+            return
+        try:
+            with self._state_lock:
+                if not self._sample_due(time.monotonic()):
+                    return
+                generation = self._fault_generation
+            readings = self._read_all_channels()
+            now = time.monotonic()
+            with self._state_lock:
+                # An OOM during the probe invalidates its pre-fault evidence.
+                if generation != self._fault_generation:
+                    return
+                self._last_readings = readings
+                self._last_sample_time = now
+                self._expire_samples(now)
+                self.state_machine.safety_check(readings)
+                if not self.state_machine.all_required_channels_ok(readings):
+                    self._samples.clear()
+                    return
+                if not self._samples or now - self._samples[-1][0] >= self.SAMPLE_SPACING:
+                    self._samples.append((now, readings))
+                if len(self._samples) == 3 and self.state_machine.should_ramp_check():
+                    self.state_machine.ramp_up(self._compute_means([sample for _, sample in self._samples]))
+                    self._samples.clear()
+        finally:
+            self._sample_lock.release()
 
     def after_batch(self, batch_items: int, batch_time: float):
         """Record batch completion for throughput tracking."""
-        self.items_processed += batch_items
-        self.batch_times.append(batch_time)
-        if len(self.batch_times) > 20:
-            self.batch_times.pop(0)
+        with self._state_lock:
+            self.items_processed += batch_items
+            self.batch_times.append(batch_time)
+            if len(self.batch_times) > 20:
+                self.batch_times.pop(0)
 
     def get_throughput(self) -> float:
         """Items per second since start."""
-        elapsed = time.time() - self.start_time
-        return self.items_processed / elapsed if elapsed > 0 else 0.0
+        with self._state_lock:
+            elapsed = time.monotonic() - self.start_time
+            return self.items_processed / elapsed if elapsed > 0 else 0.0
 
     def get_eta_seconds(self, remaining: int) -> float:
         """Estimated seconds to process remaining items."""
@@ -113,46 +176,49 @@ class DynamicThrottler:
 
     def should_flush_cache(self) -> bool:
         """Return True only on WARNING/BACKOFF — not during normal PROBING."""
-        return self.state_machine.state in (
-            ThrottlerStateMachine.STABLE,
-            ThrottlerStateMachine.BACKOFF,
-        )
+        with self._state_lock:
+            return self.state_machine.state in (
+                ThrottlerStateMachine.STABLE,
+                ThrottlerStateMachine.BACKOFF,
+            )
 
     def on_oom(self):
         """Handle OOM by triggering BACKOFF in the state machine."""
-        self.state_machine._do_backoff("oom", {"status": "critical"})
+        with self._state_lock:
+            self._fault_generation += 1
+            self._samples.clear()
+            self.state_machine._do_backoff("oom", {"status": "critical"})
 
     def _read_all_channels(self) -> dict:
-        """Single quick reading of all 3 channels."""
-        try:
-            mps = read_mps_memory(self.mps_cap_gb)
-        except Exception:
-            mps = {"used_gb": 0.0, "ratio": 0.0, "status": "ok"}
-
-        try:
-            growth = self.growth_tracker.update(mps["used_gb"])
-        except Exception:
-            growth = {"slope_gb_per_20s": 0.0, "slope_pct": 0.0, "status": "ok"}
+        """Observe applicable channels; unavailable data must not authorize ramping."""
+        mps = {"used_gb": None, "ratio": None, "status": "unsupported", "required": False}
+        growth = {"slope_gb_per_20s": None, "slope_pct": None,
+                  "status": "unsupported", "required": False}
+        if self.device == "mps":
+            try:
+                mps = read_mps_memory(self.mps_cap_gb)
+            except Exception:
+                mps = {"used_gb": None, "ratio": None, "status": "unknown"}
+            growth = {"slope_gb_per_20s": None, "slope_pct": None, "status": "unknown"}
+            if mps.get("used_gb") is not None:
+                try:
+                    growth = self.growth_tracker.update(mps["used_gb"])
+                except Exception:
+                    pass
+            else:
+                # Do not calculate a slope across a gap with unknown memory.
+                self.growth_tracker = GrowthRateTracker(cap_gb=self.mps_cap_gb)
 
         try:
             thermal = read_thermal_pressure()
         except Exception:
-            thermal = {"scheduler_limit": 100, "status": "ok"}
+            thermal = {"scheduler_limit": None, "status": "unknown"}
 
         return {
             "mps_level": mps,
             "growth_rate": growth,
             "thermal": thermal,
         }
-
-    def _triple_sample(self) -> dict:
-        """Take 3 readings 10s apart, return mean-based status."""
-        samples = []
-        for i in range(3):
-            if i > 0:
-                time.sleep(10)
-            samples.append(self._read_all_channels())
-        return self._compute_means(samples)
 
     def _compute_means(self, samples: list[dict]) -> dict:
         """Compute mean status across 3 samples.
@@ -161,26 +227,38 @@ class DynamicThrottler:
         """
         result = {}
         for channel in ("mps_level", "growth_rate", "thermal"):
-            statuses = [s[channel]["status"] for s in samples]
+            readings = [sample.get(channel, {}) for sample in samples]
+            statuses = [reading.get("status", "unknown") for reading in readings]
             if "critical" in statuses:
                 result[channel] = {"status": "critical"}
             elif "warning" in statuses:
                 result[channel] = {"status": "warning"}
-            else:
+            elif all(status == "ok" for status in statuses):
                 result[channel] = {"status": "ok"}
+            elif all(reading.get("required") is False and reading.get("status") == "unsupported"
+                     for reading in readings):
+                result[channel] = {"status": "unsupported", "required": False}
+            else:
+                result[channel] = {"status": "unknown"}
         return result
 
     def _build_metrics(self) -> dict:
         """Build metrics dict for status reporting."""
         readings = self._last_readings
+        age = None if self._last_sample_time is None else time.monotonic() - self._last_sample_time
         return {
             "batch_size": self.state_machine.batch_size,
             "state": self.state_machine.state,
-            "mps_used_gb": readings.get("mps_level", {}).get("used_gb", 0.0),
-            "mps_ratio": readings.get("mps_level", {}).get("ratio", 0.0),
-            "growth_slope_pct": readings.get("growth_rate", {}).get("slope_pct", 0.0),
-            "thermal_limit": readings.get("thermal", {}).get("scheduler_limit", 100),
+            "mps_used_gb": readings.get("mps_level", {}).get("used_gb"),
+            "mps_ratio": readings.get("mps_level", {}).get("ratio"),
+            "growth_slope_pct": readings.get("growth_rate", {}).get("slope_pct"),
+            "thermal_limit": readings.get("thermal", {}).get("scheduler_limit"),
             "good_streak": self.state_machine.good_streak,
+            "sensor_status": {channel: readings.get(channel, {}).get("status", "unknown")
+                              for channel in ("mps_level", "growth_rate", "thermal")},
+            "sample_age_seconds": age,
+            "sample_stale": age is None or age > self.SAMPLE_MAX_AGE,
+            "sample_pending": self._sample_lock.locked(),
         }
 
     @staticmethod
