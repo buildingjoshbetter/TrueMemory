@@ -25,12 +25,15 @@ Dependencies:
 from __future__ import annotations
 
 import hashlib
+import heapq
 import logging
+import math
 import sqlite3
 import struct
 from collections import defaultdict
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
+from itertools import islice
 from types import ModuleType
 
 import numpy as np
@@ -338,124 +341,135 @@ def search_clustered(
     model = get_model()
     query_vec = encode_with_model_ownership(model, [query])[0].astype(np.float32)
 
-    # Check if clusters exist
+    # Keep centroids, memberships, vectors and winner content in one snapshot.
+    # Encoding completes before we open an owned read transaction.
+    with _cluster_transaction(conn):
+        return _search_clustered_snapshot(conn, query_vec, limit, top_clusters, include_directives)
+
+
+def _cluster_query_chunk_size(conn: sqlite3.Connection) -> int:
+    getlimit = getattr(conn, "getlimit", None)
+    size = min(500, getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)) if getlimit else 500
+    if size < 1:
+        raise ValueError("Clustered search requires SQL query parameters")
+    return size
+
+
+def _cluster_candidate_ids(
+    conn: sqlite3.Connection, selected_clusters: list[int], include_directives: bool, chunk_size: int,
+) -> Iterator[int]:
+    directive_filter = "" if include_directives else " AND (m.directive = 0 OR m.directive IS NULL)"
+    cursors = []
     try:
-        cluster_count = conn.execute(
-            "SELECT COUNT(*) FROM cluster_centroids"
-        ).fetchone()[0]
+        for start in range(0, len(selected_clusters), chunk_size):
+            chunk = selected_clusters[start:start + chunk_size]
+            placeholders = ",".join("?" * len(chunk))
+            cursors.append(conn.execute(
+                f"SELECT DISTINCT m.id FROM messages m "
+                f"JOIN message_clusters c ON c.message_id = m.id "
+                f"WHERE c.cluster_id IN ({placeholders}){directive_filter} ORDER BY m.id", chunk,
+            ))
+        # The old primary-key IN lookup delivered ascending message IDs. Keep
+        # that tie order across chunks and deduplicate legacy membership rows.
+        previous = None
+        streams = (map(lambda row: row[0], cursor) for cursor in cursors)
+        for message_id in heapq.merge(*streams):
+            if message_id != previous:
+                yield message_id
+            previous = message_id
+    finally:
+        for cursor in cursors:
+            cursor.close()
+
+
+def _search_clustered_snapshot(
+    conn: sqlite3.Connection, query_vec: np.ndarray, limit: int,
+    top_clusters: int, include_directives: bool,
+) -> list[dict]:
+    try:
+        cluster_count = conn.execute("SELECT COUNT(*) FROM cluster_centroids").fetchone()[0]
     except Exception:
         return []
-
     if cluster_count == 0:
         return []
 
-    # Find top clusters by centroid similarity
     centroids = conn.execute(
         "SELECT cluster_id, centroid, message_count FROM cluster_centroids"
     ).fetchall()
-
     cluster_scores = []
     for cid, centroid_blob, msg_count in centroids:
         dim = len(centroid_blob) // 4
         centroid = np.array(struct.unpack(f"{dim}f", centroid_blob), dtype=np.float32)
-        # Cosine similarity
-        sim = np.dot(query_vec, centroid) / (
+        sim = float(np.dot(query_vec, centroid) / (
             np.linalg.norm(query_vec) * np.linalg.norm(centroid) + 1e-9
-        )
-        cluster_scores.append((cid, float(sim), msg_count))
-
-    cluster_scores.sort(key=lambda x: x[1], reverse=True)
-    selected_clusters = [c[0] for c in cluster_scores[:top_clusters]]
-
+        ))
+        if not math.isfinite(sim):
+            raise ValueError("Clustered search similarity is nonfinite")
+        cluster_scores.append((cid, sim, msg_count))
+    cluster_scores.sort(key=lambda item: item[1], reverse=True)
+    selected_clusters = [item[0] for item in cluster_scores[:top_clusters]]
     if not selected_clusters:
         return []
 
-    # Get message IDs from selected clusters
-    placeholders = ",".join("?" * len(selected_clusters))
-    cluster_msg_rows = conn.execute(
-        f"SELECT message_id FROM message_clusters WHERE cluster_id IN ({placeholders})",
-        selected_clusters,
-    ).fetchall()
-
-    cluster_msg_ids = {r[0] for r in cluster_msg_rows}
-    if not cluster_msg_ids:
+    chunk_size = _cluster_query_chunk_size(conn)
+    keep = limit
+    if limit < 0:
+        with closing(_cluster_candidate_ids(conn, selected_clusters, include_directives, chunk_size)) as candidates:
+            keep = max(0, sum(1 for _ in candidates) + limit)
+    if keep == 0:
         return []
 
-    # Get full messages with their embeddings
-    id_placeholders = ",".join("?" * len(cluster_msg_ids))
-    msg_ids_list = list(cluster_msg_ids)
-
-    directive_filter = (
-        "" if include_directives
-        else " AND (m.directive = 0 OR m.directive IS NULL)"
-    )
-    messages = conn.execute(
-        f"""SELECT m.id, m.content, m.sender, m.recipient, m.timestamp,
-                   m.category, m.modality, m.directive
-            FROM messages m
-            WHERE m.id IN ({id_placeholders}){directive_filter}""",
-        msg_ids_list,
-    ).fetchall()
-
-    if not messages:
-        return []
-
-    # Resolve vec table once outside the loop (not per-message)
     from truememory.vector_search import _active_vec_table
-    _vec_tbl = _active_vec_table(conn)
+    vec_table = _active_vec_table(conn)
+    quoted_table = '"' + vec_table.replace('"', '""') + '"'
+    query_norm = np.linalg.norm(query_vec) + 1e-9
+    winners: list[tuple[float, int, int]] = []
+    with closing(_cluster_candidate_ids(conn, selected_clusters, include_directives, chunk_size)) as candidates:
+        while chunk := list(islice(candidates, chunk_size)):
+            placeholders = ",".join("?" * len(chunk))
+            embeddings = {}
+            try:
+                rows = conn.execute(
+                    f"SELECT rowid, embedding FROM {quoted_table} WHERE rowid IN ({placeholders})", chunk,
+                ).fetchall()
+                for message_id, blob in rows:
+                    dim = len(blob) // 4
+                    embeddings[message_id] = np.array(struct.unpack(f"{dim}f", blob), dtype=np.float32)
+            except Exception:
+                logger.debug("Batch embedding fetch failed for chunk", exc_info=True)
+            for message_id in chunk:
+                vector = embeddings.get(message_id)
+                sim = 0.0 if vector is None else float(np.dot(query_vec, vector) / (
+                    query_norm * (np.linalg.norm(vector) + 1e-9)
+                ))
+                if not math.isfinite(sim):
+                    raise ValueError("Clustered search similarity is nonfinite")
+                candidate = (sim, -message_id, message_id)
+                if len(winners) < keep:
+                    heapq.heappush(winners, candidate)
+                elif candidate > winners[0]:
+                    heapq.heapreplace(winners, candidate)
 
-    # Batch-fetch all embeddings in one query (issue #584) instead of
-    # one SELECT per message.  Chunk into groups of 500 to stay within
-    # SQLite's parameter limits.
-    _CHUNK = 500
-    emb_map: dict[int, np.ndarray] = {}
-    all_msg_ids = [msg[0] for msg in messages]
-    for chunk_start in range(0, len(all_msg_ids), _CHUNK):
-        chunk = all_msg_ids[chunk_start : chunk_start + _CHUNK]
-        ph = ",".join("?" * len(chunk))
-        try:
-            rows = conn.execute(
-                f"SELECT rowid, embedding FROM {_vec_tbl} WHERE rowid IN ({ph})",
-                chunk,
-            ).fetchall()
-            for rid, blob in rows:
-                dim = len(blob) // 4
-                emb_map[rid] = np.array(
-                    struct.unpack(f"{dim}f", blob), dtype=np.float32
-                )
-        except Exception:
-            logger.debug("Batch embedding fetch failed for chunk", exc_info=True)
-
-    # Pre-compute query norm once
-    _query_norm = np.linalg.norm(query_vec) + 1e-9
-
-    # Score each message by vector similarity to query
+    winners.sort(reverse=True)
+    messages = {}
+    for start in range(0, len(winners), chunk_size):
+        ids = [item[2] for item in winners[start:start + chunk_size]]
+        placeholders = ",".join("?" * len(ids))
+        rows = conn.execute(
+            f"SELECT id, content, sender, recipient, timestamp, category, modality, directive "
+            f"FROM messages WHERE id IN ({placeholders})", ids,
+        )
+        for row in rows:
+            messages[row[0]] = row
     results = []
-    for msg in messages:
-        msg_id = msg[0]
-        msg_vec = emb_map.get(msg_id)
-        if msg_vec is not None:
-            sim = float(np.dot(query_vec, msg_vec) / (
-                _query_norm * (np.linalg.norm(msg_vec) + 1e-9)
-            ))
-        else:
-            sim = 0.0
-
+    for score, _, message_id in winners:
+        msg = messages[message_id]
         results.append({
-            "id": msg_id,
-            "content": msg[1],
-            "sender": msg[2],
-            "recipient": msg[3],
-            "timestamp": msg[4],
-            "category": msg[5],
-            "modality": msg[6],
-            "directive": bool(msg[7]),
-            "score": sim,
-            "source": "clustered",
+            "id": message_id, "content": msg[1], "sender": msg[2], "recipient": msg[3],
+            "timestamp": msg[4], "category": msg[5], "modality": msg[6],
+            "directive": bool(msg[7]), "score": score, "source": "clustered",
         })
-
-    results.sort(key=lambda r: r["score"], reverse=True)
-    return results[:limit]
+    return results
 
 
 def get_cluster_info(conn: sqlite3.Connection) -> list[dict]:

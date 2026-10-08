@@ -331,3 +331,62 @@ vectors still occupy their existing NumPy arrays. Synthetic SQLite tests establi
 rollback, writer progress during paused computation and atomic reader views.
 Actual HDBSCAN runtime, validation duration, WAL growth, native peak memory and
 retrieval quality on representative corpora remain release measurement gates.
+
+## Clustered retrieval materialization
+
+Clustered search retains the existing centroid selection, default `top_clusters=3`,
+candidate membership, cosine formulas, directive filter and missing-vector score
+of zero. Every eligible candidate is scored. A heap retains the exact best `K`
+scores, with ascending message primary key as the tie order produced by the
+previous SQLite primary-key lookup. Full content and message fields are fetched
+only for those winners. The agentic caller's internal limit of 100, subsequent
+normalization and diversity positions are unchanged.
+
+Candidate IDs are streamed through cluster membership joins. Selected-cluster,
+embedding and winner queries use at most 500 parameters, reduced to the live
+SQLite variable limit when Python exposes `Connection.getlimit`. Sorted ID
+streams are merged and deduplicated, including legacy duplicate membership rows.
+The Python scoring state retains one embedding chunk plus at most `K` heap entries;
+full message materialization contains at most `K` rows. Centroid ranking retains
+its existing per-centroid list. SQLite may use a temporary B-tree to sort and
+deduplicate candidate IDs; this is not a process-wide or native-allocation cap.
+
+Negative limits preserve the previous Python slice behavior: for `N` eligible
+candidates, `limit=-d` requests `max(0, N-d)` results. The retained output state
+scales with that requested count, not an assumed constant of 100. This path counts
+the candidate ID stream before scoring, without loading message text. A zero
+requested count returns no full message rows.
+
+Query encoding completes before an owned read transaction begins. Centroids,
+memberships, vectors and winner fields then share one SQLite snapshot, so a
+concurrent correction, deletion or cluster replacement cannot combine new text
+with old scores within the result. Existing caller transactions remain owned by
+the caller; a local savepoint is released or rolled back without committing
+unrelated writes. The longer read snapshot can retain WAL pages while scoring.
+
+Nonfinite centroid or message similarities raise a categorical `ValueError`
+without including source text or IDs. This explicitly changes invalid-data
+behavior: the existing engine handler omits that supplement instead of returning
+an order influenced by NaN comparisons. Normal finite results preserve the frozen
+reference's IDs, fields, scores and order. Normal index writers already reject
+nonfinite embeddings, but corrupted tables or invalid query vectors can still
+reach this boundary.
+
+Synthetic tests compare the frozen reference with random, tied, negative and zero
+scores, missing vectors and directive cases. They check a 2,107-candidate cluster
+materializes 100 full rows, bounded heap/vector state, a variable limit of 17 where
+supported, and a concurrent WAL writer. Actual NumPy equivalence, latency, peak
+allocations and SQLite temporary/WAL storage on the 3-large-cluster and
+30-cluster workloads remain release measurements; no hardware saving is claimed
+from these control-flow tests alone.
+
+The regression script also exposes `benchmark_clustered_search(variant, clusters)`
+for an isolated Linux process with real NumPy explicitly injected at the test
+boundary. It prepares 10,000 synthetic rows, 256-dimensional vectors, 4 KiB text
+fields, and either 3 or 30 clusters; each variant runs seven repetitions at
+`top_clusters=3` and `limit=100`. Run each reference/current and 3/30-cluster case
+in a fresh process, compare the complete-result SHA-256 values, and report each
+case's wall time, Python allocation peak, full rows read and process high-water
+RSS. The latter includes fixture setup, and Python tracing does not capture all
+native allocation. This benchmark is prepared for release verification and does
+not run during ordinary test collection.
