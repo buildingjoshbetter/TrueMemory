@@ -1286,3 +1286,69 @@ This checkpoint does not activate engine routing, automatic migration,
 incremental coverage, style status or coordinator style-only jobs. Those
 remaining migration steps are required before release. Synthetic transaction
 proofs do not establish native performance or retrieval quality.
+
+### Incremental style coverage checkpoint
+
+Single-memory adds can now advance an explicitly enrolled, current style
+checkpoint. They capture complete successful provenance and the attempt
+baseline before insertion, inside the existing source writer transaction.
+The source epoch, correction count and nonappend revision must stay unchanged;
+revision and insert count must each increase by exactly 1. The inserted ID
+must exceed the preceding high watermark and equal the new high watermark.
+The inserted source row and unchanged style checkpoint are verified before
+the existing raw-sum updater runs. Profile reads use entity-key lookups;
+source verification uses the inserted primary key. No full source or profile
+scan, schema enrollment or fallback rebuild runs on add.
+
+Hash version 2, accumulator schema, exact owned trigger definitions and the
+dependency identity are checked again after source insertion, after the raw
+append and after successful provenance publication. An ordinary profile write
+must produce the exact invalidated projection of the captured checkpoint;
+excluded inputs must leave that checkpoint unchanged. The final successful
+row must match the intended source, output count and both baselines exactly.
+Changed metadata or provenance rolls back style publication instead of
+certifying it. Pending category writes compare every checkpoint field, so
+they cannot overwrite a newer failure, owner or attempt count.
+
+Incremental and tracked style work conservatively defer schemas with any
+extra MAIN trigger on `entity_style_vectors`, any MAIN trigger on
+`maintenance_layers` or `metadata`, or any TEMP trigger on these tables. Only the three
+fixed owned output trigger names with their exact definitions permit append
+coverage; a similar name or a TEMP shadow is insufficient. These checks read
+schema metadata and never scan source rows or profiles. Unsupported schemas
+also skip pending checkpoint writes, since those writes could themselves
+invoke an unsupported trigger. Preparation, running diagnostics, tracked
+output admission and deferred restoration recheck under writer ownership
+before mutating affected rows. The private dependency remains deferred with
+`StyleTriggersUnsupported`; future coordinator/status routing must preserve
+that status rather than certify or retry unsupported work as successful.
+Metadata triggers are included because publishing the hash marker can invoke
+profile mutations after a rebuild has written its output.
+
+The raw sum and both provenance baselines publish in one nested savepoint.
+An existing entity keeps the output count; a new entity adds 1. Directive or
+empty-sender rows advance source coverage without touching profiles. Short
+texts with zero vectors still increment message counts. Identical content in
+two different source rows counts twice; replaying an already consumed append
+proof cannot count the same row again. The public updater, getter and batch
+arithmetic are unchanged. Incremental and batch accumulation orders may have
+different floating-point rounding; this checkpoint introduces no tolerance.
+
+Missing, dirty, legacy, future-format or running coverage skips unsafe profile
+updates while retaining the source add. A newly missed append invalidates only
+its captured successful/running checkpoint and clears its attempt baseline;
+it cannot overwrite a newer invalidation. An existing failed build retains its
+retry baseline. Failed precomputation or publication leaves bounded categorical
+evidence, and unexpected SQL errors are failures rather than writer deferrals.
+If writing that pending evidence also fails, the result reports failure and
+does not claim durable invalidation; source freshness still shows the uncovered
+append. Normal source commit owns the final publication. Caller transactions
+retain their final commit or rollback, and savepoint rollback/release failure
+escapes rather than reporting a successful add.
+
+The synthetic gate starts with one tracked empty bootstrap, performs 75 actual
+engine adds and probes tracked eligibility after every add. The required number
+of additional full builds is 0; successful and attempted insert baselines both
+advance by 75. This checkpoint does not activate startup migration, style-only
+coordinator jobs, consolidation/bulk style routing or bounded public style
+health. Those routing steps remain required before release.

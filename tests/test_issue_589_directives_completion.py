@@ -25,9 +25,28 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from contextlib import ExitStack
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+if TYPE_CHECKING:
+    from truememory import Memory
+
+
+def _close_and_drain_memory(memory: Memory) -> None:
+    coordinator = memory._engine._maintenance_coordinator
+    try:
+        try:
+            if coordinator is not None:
+                coordinator.cancel()
+        finally:
+            memory.close()
+    finally:
+        if coordinator is not None:
+            assert coordinator.wait(10), "Test-owned maintenance did not finish"
+
 
 # ---------------------------------------------------------------------------
 # v0.7.5.0 legacy schema (pre-directive) — extracted from the tagged release
@@ -253,13 +272,14 @@ def test_issue_589_directive_visible_regardless_of_user_scope(tmp_path):
         all_got = _load_directives(m)
         assert len(all_got) == 3
     finally:
-        m.close()
+        _close_and_drain_memory(m)
 
 
 def test_issue_589_directive_injection_cap(tmp_path, caplog):
     """More directives than the cap -> only DIRECTIVE_LIMIT are injected, a
     warning is logged, and the block carries an overflow note pointing at
     truememory_directives."""
+    from truememory import Memory
     from truememory.storage import create_db, insert_message
 
     db = tmp_path / "cap.db"
@@ -273,8 +293,14 @@ def test_issue_589_directive_injection_cap(tmp_path, caplog):
 
     assert DIRECTIVE_LIMIT == 50
 
-    with caplog.at_level(logging.WARNING):
-        ctx = recall_memories({}, db_path=str(db))
+    with patch("truememory.Memory") as factory, ExitStack() as cleanup:
+        def tracked_memory(*args: object, **kwargs: object) -> Memory:
+            memory = Memory(*args, **kwargs)
+            cleanup.callback(_close_and_drain_memory, memory)
+            return memory
+        factory.side_effect = tracked_memory
+        with caplog.at_level(logging.WARNING):
+            ctx = recall_memories({}, db_path=str(db))
 
     assert "<truememory-directives>" in ctx
     block = ctx.split("<truememory-directives>")[1].split("</truememory-directives>")[0]
@@ -312,7 +338,7 @@ def test_issue_589_directive_load_errors_are_logged(tmp_path, caplog, monkeypatc
             f"directive load failure must be logged, got: {warnings}"
         )
     finally:
-        m.close()
+        _close_and_drain_memory(m)
 
 
 # ---------------------------------------------------------------------------
@@ -493,7 +519,7 @@ def test_issue_589_directive_full_lifecycle(tmp_path):
             stats = m._engine.get_stats()
             assert stats.get("directive_count") == 0
         finally:
-            m.close()
+            _close_and_drain_memory(m)
 
 
 # ---------------------------------------------------------------------------
