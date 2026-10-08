@@ -1,7 +1,6 @@
-"""Database maintenance ownership and committed source revision primitives.
+"""Database maintenance ownership, source revisions and durable layer scheduling.
 
-The engine scheduler is not routed here yet. No models, polling loop or automatic
-builder invocation is introduced by importing this module.
+Importing this module loads no models and starts no worker or polling loop.
 """
 
 import hashlib
@@ -104,27 +103,41 @@ _registry_lock = threading.Lock()
 _coordinators: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 _held_fds: set[int] = set()
 _held_paths: dict[Path, int] = {}
+_owner_waiters: dict[Path, tuple[int, int, "MaintenanceCoordinator"]] = {}
 _thread_owners = threading.local()
 
 
-def _acquire_owner(path: Path) -> int | None:
+def _acquire_owner(path: Path, on_busy: Callable[[], None] | None = None) -> int | None:
     with _registry_lock:
         if path in _held_paths:
+            if on_busy is not None:
+                on_busy()
             return None
         fd = try_file_lock(Path(str(path) + ".maintenance.lock"))
         if fd is not None:
             _held_fds.add(fd)
             _held_paths[path] = fd
+        elif on_busy is not None:
+            on_busy()
         return fd
 
 
 def _release_owner(fd: int) -> None:
+    notify = None
     with _registry_lock:
         os.close(fd)
         _held_fds.discard(fd)
         for path, claimed_fd in tuple(_held_paths.items()):
             if claimed_fd == fd:
                 del _held_paths[path]
+                waiter = _owner_waiters.get(path)
+                if waiter is not None and waiter[0] == fd:
+                    del _owner_waiters[path]
+                    notify = waiter[2]
+                else:
+                    notify = _coordinators.get(path)
+    if notify is not None:
+        notify._owner_released()
 
 
 @contextmanager
@@ -169,13 +182,14 @@ def maintenance_owner(db_path: str | os.PathLike[str] | None) -> Iterator[Mainte
 
 
 def _after_fork() -> None:
-    global _registry_lock, _coordinators, _held_fds, _held_paths, _thread_owners
+    global _registry_lock, _coordinators, _held_fds, _held_paths, _owner_waiters, _thread_owners
     # The child must not prolong its parent's ownership by retaining an
     # inherited descriptor. Inherited coordinator objects reject child use.
     for fd in _held_fds:
         os.close(fd)
     _held_fds = set()
     _held_paths = {}
+    _owner_waiters = {}
     _thread_owners = threading.local()
     _coordinators = weakref.WeakValueDictionary()
     _registry_lock = threading.Lock()
@@ -203,6 +217,12 @@ class MaintenanceCoordinator:
         self._done.set()
         self._status = "pending"
         self._error_category: str | None = None
+        self._notification_generation = 0
+        self._pending: tuple[int, int] | None = None
+        self._last_report = None
+        self._capability_epoch = 0
+        self._capability_versions: tuple[tuple[str, str | None], ...] | None = None
+        self._extension_failure: LayerDependency | None = None
 
     def _check_process(self) -> None:
         if self._pid != os.getpid():
@@ -214,6 +234,83 @@ class MaintenanceCoordinator:
         with self._mutex:
             return self._status, self._error_category
 
+    def snapshot(self) -> dict:
+        self._check_process()
+        with self._mutex:
+            return {"status": self._status, "error_category": self._error_category,
+                    "active": self._active, "pending_generations": int(self._pending is not None),
+                    "capability_epoch": self._capability_epoch,
+                    "last_results": self._last_report.results if self._last_report is not None else ()}
+
+    def refresh_capabilities(self, *, reset_extension: bool = True) -> None:
+        """Refresh three package records at open/manual setup, never per add."""
+        self._check_process()
+        versions = tuple((module, _installed_dependency(module, distribution)) for module, distribution in (
+            ("numpy", "numpy"), ("hdbscan", "hdbscan"), ("sqlite_vec", "sqlite-vec"),
+        ))
+        with self._mutex:
+            self._capability_epoch += 1
+            if reset_extension or versions != self._capability_versions:
+                self._extension_failure = None
+            self._capability_versions = versions
+
+    def capability_snapshot(self) -> tuple[int, tuple, "LayerDependency | None"]:
+        self._check_process()
+        with self._mutex:
+            return self._capability_epoch, self._capability_versions or (), self._extension_failure
+
+    def _publish_extension_evidence(self, epoch: int, dependency: "LayerDependency | None") -> None:
+        with self._mutex:
+            if epoch == self._capability_epoch:
+                self._extension_failure = dependency
+
+    def _reserve_locked(self) -> None:
+        self._active = True
+        self._done.clear()
+        self._cancel.clear()
+        self._status = "starting"
+        self._error_category = None
+
+    def request_layers(self, *, threshold: int = 25) -> bool:
+        """Coalesce a real foreground wake; no callback captures its engine."""
+        self._check_process()
+        if type(threshold) is not int or threshold < 1:
+            raise ValueError("Maintenance threshold must be a positive integer")
+        with self._mutex:
+            if self.path is None:
+                self._status = "pending_in_memory"
+                return False
+            if self._active and self._cancel.is_set():
+                return False
+            self._notification_generation += 1
+            self._pending = (self._notification_generation, threshold)
+            pending = self._take_pending_locked()
+        return self._launch_layers(pending) if pending is not None else False
+
+    def _take_pending_locked(self) -> tuple[int, int] | None:
+        if self._active or self._pending is None:
+            return None
+        pending, self._pending = self._pending, None
+        self._reserve_locked()
+        return pending
+
+    def _launch_layers(self, pending: tuple[int, int]) -> bool:
+        def work(conn: sqlite3.Connection, cancel: threading.Event) -> "MaintenanceReport":
+            return run_engine_maintenance(conn, self, threshold=pending[1], cancel=cancel)
+        return self._launch(work, pending)
+
+    def _owner_released(self) -> None:
+        self._check_process()
+        with self._mutex:
+            pending = self._take_pending_locked()
+        if pending is not None:
+            try:
+                self._launch_layers(pending)
+            except Exception:
+                # The launch path records a bounded failure. Notification must
+                # not replace a synchronous owner's unrelated operation error.
+                pass
+
     def request(self, work: Callable[[sqlite3.Connection, threading.Event], None]) -> bool:
         """Start one owned worker, or report busy/in-memory pending without retry."""
         self._check_process()
@@ -223,11 +320,21 @@ class MaintenanceCoordinator:
                 return False
             if self._active:
                 return False
-            self._active = True
-            self._done.clear()
-            self._cancel.clear()
-            self._status = "starting"
-            self._error_category = None
+            self._reserve_locked()
+        return self._launch(work)
+
+    def _launch(self, work: Callable, pending: tuple[int, int] | None = None) -> bool:
+        def busy() -> None:
+            # Registry -> coordinator ordering closes the release/admission
+            # race. No coordinator-mutex holder acquires the registry lock.
+            with self._mutex:
+                self._active = False
+                self._status = "cancelled" if self._cancel.is_set() else "busy"
+                if pending is not None and self._pending is None and not self._cancel.is_set():
+                    self._pending = pending
+                if self._pending is not None and self.path in _held_paths:
+                    _owner_waiters[self.path] = (_held_paths[self.path], self._pending[0], self)
+                self._done.set()
 
         fd = None
         handoff = None
@@ -235,12 +342,8 @@ class MaintenanceCoordinator:
         try:
             # Serializing descriptor acquisition with fork registration makes
             # every inherited owner descriptor visible to the child cleanup.
-            fd = _acquire_owner(self.path)
+            fd = _acquire_owner(self.path, on_busy=busy)
             if fd is None:
-                with self._mutex:
-                    self._active = False
-                    self._status = "busy"
-                    self._done.set()
                 return False
             handoff = {"fd": fd, "started": False}
 
@@ -266,7 +369,10 @@ class MaintenanceCoordinator:
             if started:
                 # start() can be interrupted after launching the target. That
                 # worker owns cleanup until it really finishes, even on error.
-                self._cancel.set()
+                with self._mutex:
+                    if self._active and self._thread is worker:
+                        self._pending = None
+                        self._cancel.set()
                 raise
             if fd is not None:
                 _release_owner(fd)
@@ -275,7 +381,14 @@ class MaintenanceCoordinator:
                 self._thread = None
                 self._status = "failed"
                 self._error_category = "worker_start"
-                self._done.set()
+                successor = self._take_pending_locked()
+                if successor is None:
+                    self._done.set()
+            if successor is not None:
+                try:
+                    self._launch_layers(successor)
+                except Exception:
+                    pass
             raise
 
     def _run(self, fd: int, work: Callable[[sqlite3.Connection, threading.Event], None]) -> None:
@@ -287,11 +400,15 @@ class MaintenanceCoordinator:
                 try:
                     if not self._cancel.is_set():
                         conn = create_db(self.path)
-                        work(conn, self._cancel)
+                        report = work(conn, self._cancel)
                         if conn.in_transaction:
                             conn.rollback()
                             raise RuntimeError("Maintenance work left an unfinished transaction")
                         outcome = "cancelled" if self._cancel.is_set() else "success"
+                        if isinstance(report, MaintenanceReport):
+                            outcome, error_category = maintenance_report_status(report, self._cancel)
+                            with self._mutex:
+                                self._last_report = report
                 finally:
                     try:
                         if conn is not None:
@@ -307,14 +424,29 @@ class MaintenanceCoordinator:
             _release_owner(fd)
             with self._mutex:
                 self._active = False
+                self._thread = None
                 self._status = outcome
                 self._error_category = error_category
-                self._done.set()
+                if self._cancel.is_set():
+                    self._pending = None
+                pending = self._take_pending_locked()
+                if pending is None:
+                    self._done.set()
+            if pending is not None:
+                try:
+                    self._launch_layers(pending)
+                except Exception:
+                    pass  # Launch already recorded the categorical failure.
 
     def cancel(self) -> None:
         """Signal a phase boundary; never release ownership of active work."""
         self._check_process()
-        self._cancel.set()
+        with _registry_lock, self._mutex:
+            self._pending = None
+            self._cancel.set()
+            waiter = _owner_waiters.get(self.path)
+            if waiter is not None and waiter[2] is self:
+                del _owner_waiters[self.path]
 
     def wait(self, timeout: float | None = None) -> bool:
         """Wait for this worker if requested; report whether teardown completed."""
@@ -860,12 +992,15 @@ def _installed_dependency(module: str, distribution: str) -> str | None:
         return None
 
 
-def _cluster_schedule_dependency(conn: sqlite3.Connection) -> LayerDependency:
+def _cluster_schedule_dependency(
+    conn: sqlite3.Connection, *, versions: dict[str, str | None] | None = None,
+) -> LayerDependency:
     parameters = {"min_cluster_size": 10, "min_samples": 5, "metric": "euclidean",
                   "cluster_selection_method": "eom"}
-    versions = {module: _installed_dependency(module, distribution) for module, distribution in (
-        ("numpy", "numpy"), ("hdbscan", "hdbscan"), ("sqlite_vec", "sqlite-vec"),
-    )}
+    if versions is None:
+        versions = {module: _installed_dependency(module, distribution) for module, distribution in (
+            ("numpy", "numpy"), ("hdbscan", "hdbscan"), ("sqlite_vec", "sqlite-vec"),
+        )}
     parameters["versions"] = versions
 
     def unavailable(category: str) -> LayerDependency:
@@ -1042,3 +1177,136 @@ def all_layer_specs(conn: sqlite3.Connection) -> tuple[LayerSpec, ...]:
     return tuple(specs[name] for name in (
         "clusters", "summaries", "contradictions", "structured_facts", "surprise", "episodes", "landmarks", "dunbar",
     ))
+
+
+class MaintenanceReport(NamedTuple):
+    results: tuple[LayerResult, ...]
+    preferences: str
+
+
+def _dependency_parameters(dependency: LayerDependency) -> dict | None:
+    if dependency.deferred:
+        return None
+    return json.loads(dependency.key)["parameters"]
+
+
+def engine_layer_specs(
+    conn: sqlite3.Connection, coordinator: MaintenanceCoordinator, *, evidence: tuple | None = None,
+) -> tuple[LayerSpec, ...]:
+    """Small live probes plus one bounded worker-capability evidence record."""
+    _, versions, failure = evidence if evidence is not None else coordinator.capability_snapshot()
+
+    def resolve() -> LayerDependency:
+        dependency = _cluster_schedule_dependency(conn, versions=dict(versions))
+        if (failure is not None and not dependency.deferred
+                and _dependency_parameters(dependency) == _dependency_parameters(failure)):
+            return failure
+        return dependency
+
+    return tuple(spec._replace(resolve_dependency=resolve) if spec.layer == "clusters" else spec
+                 for spec in all_layer_specs(conn))
+
+
+def _prepare_worker_extensions(conn: sqlite3.Connection, coordinator: MaintenanceCoordinator) -> tuple:
+    coordinator.refresh_capabilities(reset_extension=False)
+    epoch, versions, previous_failure = coordinator.capability_snapshot()
+    failed = False
+    enabled = False
+    try:
+        if dict(versions).get("sqlite_vec") is None:
+            failed = True
+        else:
+            module = importlib.import_module("sqlite_vec")
+            conn.enable_load_extension(True)
+            enabled = True
+            module.load(conn)
+    except Exception:
+        failed = True
+    finally:
+        if enabled:
+            conn.enable_load_extension(False)
+    dependency = _cluster_schedule_dependency(conn, versions=dict(versions))
+    failure = previous_failure if failed else None
+    if failed and not dependency.deferred:
+        parameters = _dependency_parameters(dependency)
+        if parameters is not None and "identity_sha256" in parameters:
+            failure = make_layer_dependency(dependency.builder_version, parameters,
+                                            available=False, error_category="VectorExtensionUnavailable")
+    elif dependency.error_category == "VectorExtensionUnavailable":
+        failure = dependency
+    coordinator._publish_extension_evidence(epoch, failure)
+    return epoch, versions, failure
+
+
+def run_engine_maintenance(
+    conn: sqlite3.Connection, coordinator: MaintenanceCoordinator, *, threshold: int = 25,
+    force: bool = False, cancel: threading.Event | None = None,
+    prepare_extensions: bool = True, allow_caller_transaction: bool = False,
+) -> MaintenanceReport:
+    """Use only the supplied owned worker/original explicitly borrowed handle."""
+    evidence = _prepare_worker_extensions(conn, coordinator) if prepare_extensions else None
+    specs = engine_layer_specs(conn, coordinator, evidence=evidence)
+    results = run_layers(conn, specs, threshold=threshold, force=force, cancel=cancel,
+                         allow_caller_transaction=allow_caller_transaction)
+    preferences = "SKIPPED (no maintenance attempt)"
+    if cancel is not None and cancel.is_set():
+        preferences = "CANCELLED"
+    elif force or any(result.attempted for result in results):
+        started = time.monotonic()
+        try:
+            importlib.import_module("truememory.personality").extract_preferences(conn)
+        except (ImportError, AttributeError):
+            preferences = "UNAVAILABLE (DependencyMissing)"
+        except Exception as error:
+            preferences = "ERROR (" + type(error).__name__[:64] + ")"
+        else:
+            preferences = f"{time.monotonic() - started:.3f}s"
+        if conn.in_transaction and allow_caller_transaction:
+            preferences += " (pending caller commit)"
+    return MaintenanceReport(results, preferences)
+
+
+def maintenance_report_status(report: MaintenanceReport, cancel: threading.Event | None = None) -> tuple[str, str | None]:
+    if cancel is not None and cancel.is_set():
+        return "cancelled", "Cancelled"
+    for outcome in ("failed", "unavailable", "deferred", "abandoned"):
+        for result in report.results:
+            if result.outcome == outcome:
+                return outcome, result.error_category
+    if report.preferences.startswith(("ERROR", "UNAVAILABLE")):
+        return "failed", "PreferencesUnavailable"
+    if any(result.outcome not in {"success", "success_empty", "current"} for result in report.results):
+        return "pending", None
+    if any(result.coverage != "complete" for result in report.results):
+        return "completed_with_limits", None
+    return "success", None
+
+
+_MAINTENANCE_RESULT_KEYS = (
+    "cluster_messages", "build_summaries", "detect_contradictions", "structured_facts",
+    "build_surprise_index", "detect_episodes", "detect_landmarks", "dunbar_hierarchy", "extract_preferences",
+)
+
+
+def maintenance_busy_result() -> dict[str, str]:
+    return dict.fromkeys(_MAINTENANCE_RESULT_KEYS, "BUSY (maintenance owner active)")
+
+
+def format_maintenance_report(report: MaintenanceReport) -> dict[str, str]:
+    counts = {"clusters": "clusters", "structured_facts": "facts", "episodes": "episodes",
+              "landmarks": "events", "dunbar": "relationships"}
+    output = {}
+    for result in report.results:
+        if result.outcome in {"success", "success_empty"}:
+            prefix = f"{result.output_count} {counts[result.layer]} in " if result.layer in counts else ""
+            value = prefix + f"{result.elapsed_seconds:.3f}s"
+            if result.coverage != "complete":
+                value += " (" + result.coverage + ")"
+        else:
+            label = "ERROR" if result.outcome == "failed" else result.outcome.upper()
+            value = label + (" (" + result.error_category + ")" if result.error_category else "")
+        if result.pending_caller_commit:
+            value += " (pending caller commit)"
+        output[result.result_key] = value
+    output["extract_preferences"] = report.preferences
+    return output

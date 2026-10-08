@@ -994,3 +994,114 @@ the current definition checks exposing that interval. Arbitrary direct FTS
 mutations can also defeat synchronization. This checkpoint adds neither a
 schema-cookie fence nor a readiness gate to FTS search, and does not certify
 either kind of external mutation.
+
+### Foreground model admission before writer ownership
+
+Owned foreground add and incremental vector publication now acquire the model
+identity fence before opening the SQLite write transaction. Add first owns its
+engine write lock, so another mutation on that same engine cannot hold the
+engine lock while waiting for a model fence held by the queued add. The model
+fence validates the captured generation and remains held through commit or
+rollback. There is one model acquisition, with no nested acquisition of the
+nonreentrant model lock.
+
+This permits an owned foreground call to wait for a concurrent cluster source
+snapshot without holding SQLite's writer or failing a valid vector publication.
+Model loading and inference finish before owned writer admission. A model
+generation change during loading, encoding or admission still rejects stale
+publication; add and update propagate those typed errors instead of silently
+falling back to a source-only write. Update retains its existing distinction:
+capture failure precedes its source write, while a later vector-publication
+failure can occur after the source update committed.
+
+Caller transactions use nonblocking model capture and publication admission.
+Add and update classify the connection during model capture under their engine
+write lock, so another same-engine mutation's transaction cannot be mistaken
+for borrowed caller work. They release that lock before encoding.
+Capture accepts only a cached model observed together with its identity under
+the model lock. Busy ownership or an unloaded model produces a typed retry
+error before any additional source write; the caller's transaction remains
+intact. Cached-model inference can still run inside a caller-held transaction.
+The publication fence protects the nested savepoint release, not a later outer
+commit controlled by that caller. Streamed rebuilds retain nonblocking model
+fences after writer admission and use the same cached-only borrowed capture.
+
+SQLite and event regressions cover actual clustering snapshot contention,
+same-engine mutation ordering, stale generations, borrowed sentinels, atomic
+add publication, and model release after admission/publication/commit failures.
+This checkpoint changes admission ordering rather than bounding wait duration:
+cluster snapshots may still hold the model lock while scanning the corpus.
+Native integration and latency remain separate acceptance checks.
+
+### Engine maintenance routing
+
+Engine startup, committed mutations and later safe API boundaries now use the
+same durable eight-layer planner. The default append trigger remains
+`insert_count - attempted_insert_count >= 25`; 24 committed appends do not
+qualify and the 25th does, including across engine instances and reopen.
+`TRUEMEMORY_AUTO_CONSOLIDATE_EVERY` retains its positive-integer override.
+Initial historical or empty input attempts once. Corrections, source epochs and
+dependency changes follow their separate eligibility rules. A successful empty
+cluster result no longer starts every layer again on each open. Source edits
+committed through another handle become visible at the next safe API boundary;
+there is no idle polling timer. Uncommitted caller changes do not schedule work.
+
+Foreground scheduling reads eight checkpoint records, source counters and small
+dependency metadata. It does not scan source/vector rows, import native
+frameworks, wait for the model lock or perform consolidation in `add()`. The
+foreground write lock is acquired nonblocking for this probe. Package versions
+are cached in three records and refreshed on connection setup and worker/manual
+setup. One extension-failure record is bound to the probed model/table identity
+and version snapshot. Actual worker extension loading supplies that evidence;
+metadata alone is not proof of availability. Epoch checks prevent a late worker
+from overwriting newer shared capability evidence, while that worker still uses
+its own actual failure for its current attempt. A transient model-busy probe
+cannot erase an existing extension-failure baseline.
+
+Each canonical file has at most one active owner and one pending notification
+generation. A notification stores only a generation and threshold, not an
+engine, caller connection or source content. Multiple foreground notifications
+replace that single pending slot. A same-process owner's release services an
+existing pending notification; it creates no notification of its own. A pending
+coordinator behind a local owner is retained only until that exact owner's
+release or cancellation, so closing the last engine does not lose the wake.
+Cross-process contention reports busy/pending and needs a later API boundary;
+this checkpoint has no automatic cross-process release notification. Deferred
+model ownership and failed attempts do not schedule their own retry loops.
+
+Workers create and close their own file connection. `engine.close()` detaches
+and closes only the foreground connection; it does not cancel or join a shared
+worker. Cancellation clears queued notifications but retains ownership until
+active computation reaches a cooperative boundary and its connection closes.
+Thread-start failure closes an unclaimed owner descriptor; interruption after
+the target started leaves teardown with that exact worker and cannot cancel a
+later successor. Child processes discard inherited owner descriptors, pending
+references and registry state. Daemon threads do not guarantee completion when
+the process exits; durable abandoned-attempt recovery remains necessary.
+
+Explicit `consolidate()` forces one pass with the same eight result keys plus
+the existing nonpersisted preference extraction result. A busy owner produces
+nine explicit `BUSY` entries and does not queue a hidden forced pass. A file
+call without an existing transaction uses a dedicated connection. An existing
+caller transaction uses the original connection's protected savepoints and
+reports `pending caller commit`; its writes and maintenance output remain
+rollbackable together. `:memory:` automatic work reports pending without opening
+an empty replacement database or creating a worker. Explicit manual maintenance
+uses the original in-memory handle. Caller-held writer and later outer-commit
+limitations from the borrowed-runner contract still apply.
+
+Successful manual summary/cluster publication restores the calling engine's
+corresponding capability flags, including successful empty output. Failed or
+unavailable layers never enable those flags or clear a previously usable
+capability. The existing automatic-consolidation opt-out remains until explicit
+manual repair. Cluster retrieval still requires live vector availability.
+`get_stats()` exposes bounded coordinator and per-layer outcome, freshness,
+coverage and categorical error state; it does not expose source text, paths or
+exception messages. Unverified vector-generation and legacy-contact coverage
+remain explicit limitations, rather than complete success claims.
+
+This routing checkpoint preserves builder algorithms and the A17 foreground
+vector-publication guards. Ingest database replacement, profile/style getter
+freshness and custom-schema source tracking remain separate work. Synthetic
+SQLite and event tests establish scheduling and ownership behavior; native
+latency, throughput and memory acceptance still require measurement.
