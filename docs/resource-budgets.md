@@ -677,3 +677,113 @@ The outer guard therefore adds no third raw-vector/source scan. It does not
 replace the builder's raw-input fence, certify arbitrary external vector writes,
 or make a borrowed caller's later COMMIT safe. This checkpoint adds no cluster
 adapter, engine routing or coverage migration.
+
+## Eight-layer adapters and borrowed publication
+
+`all_layer_specs(conn)` assembles clusters, monthly/entity-monthly summaries,
+contradictions, structured facts, surprise, episodes, landmarks and Dunbar in
+the existing consolidation order. Specs belong to that connection; using them
+on another connection is rejected before any builder runs. The original
+`nonvector_layer_specs()` API retains its six adapters and defaults. Preferences
+remain a separate nonpersisted call. Profiles, styles, entity sheets and engine
+scheduling are not enrolled by this checkpoint.
+
+Successful output and its checkpoint now include `successful_coverage` in the
+same transaction. Allowed values are `complete`, `legacy_contacts_unowned`,
+`vector_generation_unverified` and `unverified`. Historical rows migrate to
+`unverified` without changing source epochs, counters, tracking triggers or
+successful provenance. Failed/unavailable attempts retain the previous successful
+coverage, just as they retain its output. Coverage describes that publication,
+not a later arbitrary external edit of a derived table. Source freshness and
+execution outcome remain separate; partial coverage does not disable retrieval
+or cause an automatic repeat of otherwise unchanged work.
+
+Dunbar's primary selection uses the existing sender count/tie query inside the
+runner's source snapshot. Counts describe verified generated relationships;
+unowned contacts are preserved and reported as `legacy_contacts_unowned`.
+`read_dunbar_coverage` remains the coherent live ownership inspection API.
+Cluster counts exclude noise, so successful all-noise clustering has zero
+centroids and `success_empty` while retaining its noise assignments. Missing
+dependencies, missing vector tables and in-progress rebuilds are unavailable,
+never successful empty output. A present rebuild descriptor must decode as an
+object with format `version` exactly integer `1` and `complete` exactly boolean
+`true`; malformed, unsupported or incomplete descriptors are unavailable.
+Its SQLite `schema_version` is not the format version. A missing descriptor
+retains compatibility with `vector_generation_unverified` coverage. This narrow
+envelope check is not a full rebuild/source certificate. Runtime dependency import
+failure also records an unavailable attempt against the captured source/dependency,
+without a retry loop. Explicit force can retry after repair.
+
+Cluster scheduling uses a different identity from its publication fence. Its
+stable key binds runtime model/dimension/tier, active table/schema, relevant
+registry mappings and model fields, embed metadata values, build state and the
+whole rebuild descriptor, plus dependency versions and unchanged HDBSCAN
+parameters. Ordinary metadata timestamps and registry progress/count fields are
+excluded: `insert_count - attempted_insert_count >= 25` must still mean 25
+committed appends, rather than one metadata rewrite. Full identity, including
+those excluded values, is still checked by the publication guard. Initial empty
+or historical input attempts once; corrections, dependency changes and explicit
+force remain independent reasons to run. Failed initial attempts also retain
+their durable 25-insert baseline.
+
+Temporary model-lock contention is a live `deferred` result with `ModelBusy`,
+not a dependency-version change or a persisted unavailable attempt. Even forced
+work cannot bypass that ownership boundary. An initial busy probe performs no
+diagnostic write; planning omits it until another safe boundary can observe the
+runtime. `layer_freshness` reports `dependency_deferred` during that interval.
+If contention occurs after computation starts, the result has `attempted=True`
+to report actual work, but the durable attempt counters and previous successful
+coverage remain unchanged. No timer or automatic retry is added.
+
+An owned runner restores its entire prior checkpoint row, or its prior absence,
+only after confirming output rollback. Restoration requires the same process,
+ownership token, run generation and complete unchanged `running` diagnostic;
+it cannot overwrite a replacement worker's state. Failure to roll back, loss of
+ownership, or failed restoration raises instead of reporting clean deferral.
+A cancellation racing with a busy result restores that baseline and stops the
+remaining layers. Borrowed runs have no precompute diagnostic to restore and
+roll back only their layer savepoint. Missing packages, invalid descriptors and
+other declared dependency loss still produce durable unavailable attempts.
+Only the explicit `ClusterModelBusyError` from the builder/publication boundary
+is translated to deferral; it remains a `RuntimeError` subclass for existing
+direct callers.
+
+The cheap cluster probe reads package metadata, existing runtime state and small
+SQLite metadata records. It does not import native packages, load models, scan
+source/vector rows or wait for the model lock. Execution requires the caller's
+connection to have its vector extension loaded and the existing vector runtime
+initialized. Actual clustering and guard imports occur only when execution is
+attempted. Initial builder acquisition is nonblocking whenever the connection
+already has a transaction, including the interval after a successful probe, so
+a caller retaining SQLite's writer never waits for another model owner there.
+Standalone builder and owned-guard initial capture can still wait for model
+ownership before opening their SQLite transaction; the nonblocking probe does
+not promise that all execution is wait-free. Tuple and `sqlite3.Row` factories produce the
+same scheduling identity and rebuild-state checks. Whole rebuild descriptors
+still do not certify every foreground
+vector writer or arbitrary vector SQL; published cluster coverage therefore
+remains `vector_generation_unverified` even when source freshness is current.
+
+`run_layers` continues to require a clean transaction by default. The explicit
+`allow_caller_transaction=True` option uses protected per-layer savepoints when
+the caller already has a transaction. It never commits unrelated caller writes,
+including success/failure metadata. No `running` diagnostic is written before
+borrowed computation. A caller that already holds a writer, or retains earlier
+layer output, retains that writer until its own terminal transaction. The runner
+does not promise short writer ownership for this caller-controlled mode.
+
+Borrowed results carry `pending_caller_commit=True`; other connections cannot see
+their output/checkpoint until the caller commits, and caller rollback removes
+both. Failed RELEASE rolls back the layer before recording its failed attempt.
+If rollback itself is rejected, execution raises immediately without further
+diagnostic writes or cleanup release; the caller must roll back that transaction.
+Cancellation remains cooperative and preserves caller ownership.
+
+Cluster borrowing has an explicit separate guard: initial model acquisition is
+nonblocking, full identity is rechecked under writer/model ownership, and model
+ownership lasts through the runner's savepoint RELEASE or rollback. The lock is
+released before returning. This does not certify the runtime model at the
+caller's later outer COMMIT. Other adapters with an owned publication guard must
+supply an explicit borrowed guard or report unavailable. This checkpoint does
+not route engines or ingest, change algorithms or establish a measured latency,
+memory or throughput improvement.
