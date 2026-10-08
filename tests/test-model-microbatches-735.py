@@ -757,6 +757,68 @@ class TestQwenGlobalOrder(unittest.TestCase):
                 if missing != "scatter":
                     self.assertNotEqual(model.native_batches, batches)
 
+    def test_cyclic_ties_require_the_inverse_and_place_each_occurrence_once(self) -> None:
+        from unittest.mock import patch
+
+        placements: list[int] = []
+        setitem = OrderArray.__setitem__
+
+        def record_placement(array: OrderArray, key: object, value: OrderArray) -> None:
+            indices = list(key) if isinstance(key, OrderArray) else list(range(len(array)))[key]
+            placements.extend(indices)
+            setitem(array, key, value)
+
+        def cyclic_argsort(numpy: OrderNP, values: object) -> OrderArray:
+            keys = list(values)
+            numpy.sort_sizes.append(len(keys))
+            groups: dict[int, list[int]] = {}
+            for index, key in enumerate(keys):
+                groups.setdefault(key, []).append(index)
+            order: list[int] = []
+            for key in sorted(groups):
+                group = groups[key]
+                # Reversing ties is its own inverse; cycles expose direction errors.
+                order.extend(group[1:] + group[:1])
+            numpy.after_sort()
+            return OrderArray(order)
+
+        with patch.object(OrderNP, "argsort", cyclic_argsort), \
+                patch.object(OrderArray, "__setitem__", record_placement):
+            for count in (31, 33, 63, 64, 65):
+                for limit in (8, 32):
+                    with self.subTest(count=count, limit=limit):
+                        texts = self.texts(count)
+                        expected, batches = self.reference(texts, limit)
+                        _module, server, model = self.runtime()
+                        placements.clear()
+                        response = self.request(server, texts, batch_size=limit)
+                        self.assertTrue(response["ok"])
+                        self.assertEqual(response["vectors"].values, expected.values)
+                        self.assertEqual(model.native_batches, batches)
+                        self.assertEqual(sorted(placements), list(range(count)))
+                        if count <= limit:
+                            continue
+
+                        module, server, model = self.runtime()
+
+                        def wrong_inverse(
+                            model: object, texts: list, order: OrderArray,
+                            offset: int, limit: int, deadline: object,
+                        ) -> OrderArray:
+                            deadline.check()
+                            indices = order[offset:offset + limit]
+                            inner = module["np"].argsort([-model._input_length(texts[index]) for index in indices])
+                            deadline.check()
+                            return indices[inner]
+
+                        server._embed_slice_indices = wrong_inverse
+                        placements.clear()
+                        response = self.request(server, texts, batch_size=limit)
+                        self.assertTrue(response["ok"])
+                        self.assertEqual(sorted(placements), list(range(count)))
+                        self.assertNotEqual(model.native_batches, batches)
+                        self.assertNotEqual(response["vectors"].values, expected.values)
+
     def test_adaptive_limit_is_captured_once_and_cannot_raise_caller_cap(self) -> None:
         for limits, requested, effective in (([2, 1, 16], 8, 2), ([64], 8, 8), ([64], 100, 32)):
             module, server, model = self.runtime()
