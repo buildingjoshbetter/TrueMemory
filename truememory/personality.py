@@ -24,14 +24,19 @@ Python standard library.
 """
 
 import contextlib
+import hashlib
 import json
 import re
 import sqlite3
+import struct
+import uuid
 import warnings
 from collections import defaultdict
+from collections.abc import Iterable, Iterator
 from datetime import datetime, timezone
 
 from truememory.fts_search import _build_safe_fts_query, _fts_search
+from truememory.storage import _dunbar_ownership_ready, _initialize_dunbar_ownership
 
 
 # ---------------------------------------------------------------------------
@@ -1239,42 +1244,107 @@ def resolve_entity(conn, name_query, context=""):
     return name_query  # Return original if no match found
 
 
-def build_dunbar_hierarchy(conn, primary_entity=None):
-    """
-    Classify contacts by interaction frequency/recency into Dunbar layers:
-    - intimate (5): closest, most frequent
-    - close (15): regular interaction
-    - friend (50): moderate interaction
-    - acquaintance (150+): occasional
+_DUNBAR_RELATIONSHIP_COLUMNS = (
+    "id,entity_a,entity_b,relationship_type,strength,dunbar_layer,last_interaction"
+)
 
-    Stores in entity_relationships table.
-    """
-    if primary_entity is None:
-        return {}
 
-    primary_entity = primary_entity.lower()
+@contextlib.contextmanager
+def _dunbar_transaction(conn: sqlite3.Connection, *, write: bool = False) -> Iterator[None]:
+    owned = not conn.in_transaction
+    conn.execute(("BEGIN IMMEDIATE" if write else "BEGIN") if owned else "SAVEPOINT truememory_dunbar")
+    completed = False
+    try:
+        if write and not owned:
+            conn.execute("UPDATE entity_relationships SET id=id WHERE 0")
+        yield
+        conn.execute("COMMIT" if owned else "RELEASE truememory_dunbar")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO truememory_dunbar")
+                conn.execute("RELEASE truememory_dunbar")
 
-    # Count messages per contact
-    rows = conn.execute(
-        """
-        SELECT LOWER(name) as name, COUNT(*) as cnt, MAX(ts) as last_ts FROM (
-            SELECT recipient as name, timestamp as ts FROM messages WHERE LOWER(sender) = ? AND recipient != ''
-            UNION ALL
-            SELECT sender as name, timestamp as ts FROM messages WHERE LOWER(recipient) = ? AND sender != ''
-        ) GROUP BY LOWER(name) ORDER BY cnt DESC
-        """,
-        (primary_entity, primary_entity)
-    ).fetchall()
 
-    if not rows:
-        return {}
+def _dunbar_fingerprint(rows: Iterable[tuple]) -> bytes:
+    digest = hashlib.sha256()
+    for row in rows:
+        digest.update(struct.pack(">Q", len(row)))
+        for value in row:
+            if value is None:
+                tag, data = b"n", b""
+            elif isinstance(value, bytes):
+                tag, data = b"b", value
+            elif isinstance(value, str):
+                tag, data = b"s", value.encode("utf-8")
+            elif isinstance(value, int):
+                tag, data = b"i", str(value).encode("ascii")
+            elif isinstance(value, float):
+                tag, data = b"f", struct.pack(">d", value)
+            else:
+                raise TypeError("Unsupported SQLite value in Dunbar source")
+            digest.update(tag + struct.pack(">Q", len(data)))
+            digest.update(data)
+    return digest.digest()
 
-    # Clear existing relationships for this entity
-    conn.execute(
-        "DELETE FROM entity_relationships WHERE entity_a = ?",
-        (primary_entity,)
+
+def _dunbar_has_ledger(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dunbar_generated_relationships'"
+    ).fetchone() is not None
+
+
+def _dunbar_snapshot(conn: sqlite3.Connection) -> tuple[bytes, ...]:
+    schema = conn.execute(
+        "SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name IN "
+        "('messages','entity_relationships','dunbar_generated_relationships') ORDER BY type,name"
     )
+    schema_hash = _dunbar_fingerprint(schema)
+    source_hash = _dunbar_fingerprint(conn.execute(
+        "SELECT id,sender,recipient,timestamp FROM messages ORDER BY id"
+    ))
+    relationship_hash = _dunbar_fingerprint(conn.execute(
+        f"SELECT {_DUNBAR_RELATIONSHIP_COLUMNS} FROM entity_relationships ORDER BY id"
+    ))
+    ledger_hash = _dunbar_fingerprint(conn.execute(
+        "SELECT relationship_id,generation,row_fingerprint FROM dunbar_generated_relationships "
+        "ORDER BY relationship_id"
+    )) if _dunbar_has_ledger(conn) else b""
+    return schema_hash, source_hash, relationship_hash, ledger_hash
 
+
+def _dunbar_owned_rows(conn: sqlite3.Connection) -> Iterator[tuple[int, bool]]:
+    tracked = _dunbar_ownership_ready(conn)
+    columns = ",".join("r." + name for name in _DUNBAR_RELATIONSHIP_COLUMNS.split(","))
+    for row in conn.execute(
+        f"SELECT g.relationship_id,g.row_fingerprint,{columns} "
+        "FROM dunbar_generated_relationships g LEFT JOIN entity_relationships r "
+        "ON r.id=g.relationship_id ORDER BY g.relationship_id"
+    ):
+        yield row[0], tracked and row[2] is not None and _dunbar_fingerprint((row[2:],)) == row[1]
+
+
+def read_dunbar_coverage(conn: sqlite3.Connection) -> dict[str, int | str]:
+    """Describe row ownership in one snapshot, without claiming source freshness."""
+    with _dunbar_transaction(conn):
+        tracked = _dunbar_ownership_ready(conn)
+        owned = dict(_dunbar_owned_rows(conn)) if _dunbar_has_ledger(conn) else {}
+        managed = sum(owned.values())
+        unowned_contacts = sum(
+            not owned.get(row[0], False) for row in conn.execute(
+                "SELECT id FROM entity_relationships WHERE relationship_type='contact'"
+            )
+        )
+        invalid = len(owned) - managed
+        status = "partial" if unowned_contacts or invalid else ("managed_only" if tracked else "untracked")
+        return {"status": status, "managed_rows": managed,
+                "unowned_contacts": unowned_contacts, "invalid_ownership": invalid}
+
+
+def _compute_dunbar_hierarchy(rows: list[tuple]) -> dict[str, dict]:
     max_count = rows[0][1] if rows else 1
     hierarchy = {}
 
@@ -1299,12 +1369,47 @@ def build_dunbar_hierarchy(conn, primary_entity=None):
             "strength": round(freq_score, 3),
         }
 
-        conn.execute(
-            "INSERT INTO entity_relationships "
-            "(entity_a, entity_b, relationship_type, strength, dunbar_layer, last_interaction) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (primary_entity, name, "contact", round(freq_score, 3), layer, last_ts or "")
-        )
+    return hierarchy
 
-    conn.commit()
+
+def build_dunbar_hierarchy(conn: sqlite3.Connection, primary_entity: str | None = None) -> dict[str, dict]:
+    """Publish one Dunbar generation, preserving unowned and changed relationships.
+
+    Empty input or no primary retires only verified generated rows. A caller's
+    transaction retains its final commit, including an additive ledger migration.
+    """
+    primary = primary_entity.lower() if primary_entity is not None else None
+    with _dunbar_transaction(conn):
+        snapshot = _dunbar_snapshot(conn)
+        rows = conn.execute("""
+            SELECT LOWER(name) as name, COUNT(*) as cnt, MAX(ts) as last_ts FROM (
+                SELECT recipient as name, timestamp as ts FROM messages WHERE LOWER(sender) = ? AND recipient != ''
+                UNION ALL
+                SELECT sender as name, timestamp as ts FROM messages WHERE LOWER(recipient) = ? AND sender != ''
+            ) GROUP BY LOWER(name) ORDER BY cnt DESC
+            """, (primary, primary)).fetchall() if primary is not None else []
+    hierarchy = _compute_dunbar_hierarchy(rows)
+
+    with _dunbar_transaction(conn, write=True):
+        if _dunbar_snapshot(conn) != snapshot:
+            raise sqlite3.OperationalError("Dunbar source or ownership changed during computation")
+        _initialize_dunbar_ownership(conn)
+        # Materialize IDs before deleting from either side of the ledger join.
+        verified_ids = [row_id for row_id, verified in _dunbar_owned_rows(conn) if verified]
+        conn.executemany("DELETE FROM entity_relationships WHERE id=?", ((row_id,) for row_id in verified_ids))
+        conn.execute("DELETE FROM dunbar_generated_relationships")
+        generation = uuid.uuid4().hex
+        for name, data in hierarchy.items():
+            cursor = conn.execute(
+                "INSERT INTO entity_relationships "
+                "(entity_a,entity_b,relationship_type,strength,dunbar_layer,last_interaction) VALUES (?,?,?,?,?,?)",
+                (primary, name, "contact", data["strength"], data["dunbar_layer"], data["last_interaction"]),
+            )
+            persisted = conn.execute(
+                f"SELECT {_DUNBAR_RELATIONSHIP_COLUMNS} FROM entity_relationships WHERE id=?", (cursor.lastrowid,),
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO dunbar_generated_relationships(relationship_id,generation,row_fingerprint) VALUES (?,?,?)",
+                (cursor.lastrowid, generation, _dunbar_fingerprint((persisted,))),
+            )
     return hierarchy
