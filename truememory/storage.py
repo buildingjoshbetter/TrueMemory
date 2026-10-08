@@ -252,7 +252,135 @@ CREATE TABLE IF NOT EXISTS rebuild_status (
 );
 CREATE INDEX IF NOT EXISTS idx_rebuild_status_active
     ON rebuild_status(tier_group, status);
+
+CREATE TABLE IF NOT EXISTS maintenance_source_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    epoch TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (typeof(revision) = 'integer' AND revision >= 0),
+    insert_count INTEGER NOT NULL DEFAULT 0 CHECK (typeof(insert_count) = 'integer' AND insert_count >= 0),
+    correction_count INTEGER NOT NULL DEFAULT 0 CHECK (typeof(correction_count) = 'integer' AND correction_count >= 0),
+    max_seen_message_id INTEGER NOT NULL DEFAULT 0,
+    nonappend_revision INTEGER NOT NULL DEFAULT 0,
+    tracking_ready INTEGER NOT NULL DEFAULT 0 CHECK (tracking_ready IN (0, 1))
+);
+
+CREATE TABLE IF NOT EXISTS maintenance_layers (
+    layer TEXT PRIMARY KEY,
+    builder_version INTEGER NOT NULL DEFAULT 1,
+    outcome TEXT NOT NULL DEFAULT 'pending' CHECK (outcome IN
+        ('pending', 'running', 'success', 'success_empty', 'failed', 'unavailable', 'disabled', 'abandoned')),
+    successful_epoch TEXT,
+    successful_revision INTEGER,
+    successful_dependency TEXT,
+    attempted_epoch TEXT,
+    attempted_revision INTEGER,
+    attempted_dependency TEXT,
+    full_rebuild_required INTEGER NOT NULL DEFAULT 1 CHECK (full_rebuild_required IN (0, 1)),
+    output_count INTEGER,
+    run_generation TEXT,
+    error_category TEXT
+);
 """
+
+_MAINTENANCE_LAYERS = (
+    "clusters", "summaries", "contradictions", "structured_facts",
+    "surprise", "episodes", "landmarks", "dunbar",
+)
+_MAINTENANCE_SOURCE_FIELDS = (
+    "id", "content", "sender", "recipient", "timestamp", "category",
+    "modality", "directive", "metadata",
+)
+
+
+def _maintenance_trigger_definitions() -> dict[str, str]:
+    changed = " OR ".join(f"old.{field} IS NOT new.{field}" for field in _MAINTENANCE_SOURCE_FIELDS)
+    return {
+        "messages_maintenance_ai": """CREATE TRIGGER messages_maintenance_ai AFTER INSERT ON messages BEGIN
+            UPDATE maintenance_source_state SET
+                nonappend_revision = CASE WHEN new.id <= max_seen_message_id THEN revision + 1 ELSE nonappend_revision END,
+                max_seen_message_id = MAX(max_seen_message_id, new.id),
+                revision = revision + 1, insert_count = insert_count + 1
+            WHERE singleton = 1;
+        END""",
+        "messages_maintenance_au": f"""CREATE TRIGGER messages_maintenance_au AFTER UPDATE ON messages
+            WHEN {changed} BEGIN
+            UPDATE maintenance_source_state SET
+                nonappend_revision = revision + 1,
+                max_seen_message_id = MAX(max_seen_message_id, new.id),
+                revision = revision + 1, correction_count = correction_count + 1
+            WHERE singleton = 1;
+        END""",
+        "messages_maintenance_ad": """CREATE TRIGGER messages_maintenance_ad AFTER DELETE ON messages BEGIN
+            UPDATE maintenance_source_state SET
+                nonappend_revision = revision + 1,
+                revision = revision + 1, correction_count = correction_count + 1
+            WHERE singleton = 1;
+        END""",
+    }
+
+
+def _initialize_maintenance_tracking(conn: sqlite3.Connection) -> None:
+    """Install revision tracking atomically; incomplete legacy schemas stay open."""
+    definitions = _maintenance_trigger_definitions()
+
+    def installed() -> dict[str, str]:
+        return {row[0]: " ".join(row[1].strip().rstrip(";").split()) for row in conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
+            "AND name IN ('messages_maintenance_ai', 'messages_maintenance_au', 'messages_maintenance_ad')"
+        )}
+
+    expected = {name: " ".join(sql.split()) for name, sql in definitions.items()}
+    ready = conn.execute("SELECT tracking_ready FROM maintenance_source_state WHERE singleton = 1").fetchone()
+    layers = {row[0] for row in conn.execute("SELECT layer FROM maintenance_layers")}
+    if ready and ready[0] and installed() == expected and set(_MAINTENANCE_LAYERS).issubset(layers):
+        return
+
+    owned = not conn.in_transaction
+    conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT truememory_maintenance_schema")
+    completed = False
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+        available = set(_MAINTENANCE_SOURCE_FIELDS).issubset(columns)
+        conn.execute(
+            "INSERT OR IGNORE INTO maintenance_source_state(singleton, epoch, max_seen_message_id) "
+            "SELECT 1, lower(hex(randomblob(16))), MAX(0, COALESCE(MAX(id), 0)) FROM messages"
+        )
+        conn.executemany("INSERT OR IGNORE INTO maintenance_layers(layer) VALUES (?)",
+                         ((layer,) for layer in _MAINTENANCE_LAYERS))
+        current = installed()
+        if available:
+            # Missing/replaced triggers or an untracked legacy interval cannot
+            # attest the preceding source history. Invalidate old tokens.
+            invalidate = current != expected or not conn.execute(
+                "SELECT tracking_ready FROM maintenance_source_state WHERE singleton = 1"
+            ).fetchone()[0]
+            if invalidate:
+                conn.execute("UPDATE maintenance_source_state SET tracking_ready = 0 WHERE singleton = 1")
+                conn.execute("UPDATE maintenance_layers SET outcome = 'pending', full_rebuild_required = 1")
+            conn.execute(
+                "UPDATE maintenance_source_state SET epoch = lower(hex(randomblob(16))), "
+                "revision = 0, insert_count = 0, correction_count = 0, nonappend_revision = 0, "
+                "max_seen_message_id = (SELECT MAX(0, COALESCE(MAX(id), 0)) FROM messages), tracking_ready = 1 "
+                "WHERE singleton = 1 AND tracking_ready = 0"
+            )
+            for name, definition in definitions.items():
+                if current.get(name) != expected[name]:
+                    conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+                    conn.execute(definition)
+        else:
+            conn.execute("UPDATE maintenance_source_state SET tracking_ready = 0 WHERE singleton = 1 AND tracking_ready != 0")
+            for name in current:
+                conn.execute(f"DROP TRIGGER {name}")
+            log.warning("Source revision tracking unavailable for incomplete messages schema")
+        conn.execute("COMMIT" if owned else "RELEASE truememory_maintenance_schema")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO truememory_maintenance_schema")
+                conn.execute("RELEASE truememory_maintenance_schema")
 
 
 # single source of truth for the sqlite busy_timeout pragma.
@@ -686,6 +814,7 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
     conn.executescript(_SCHEMA_SQL)
     try:
         _migrate_messages_fts_trigger(conn)
+        _initialize_maintenance_tracking(conn)
     except sqlite3.Error:
         conn.close()
         raise

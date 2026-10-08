@@ -446,3 +446,58 @@ same cases against real sqlite-vec tables when the extension is available. These
 checks establish paired-write and retry behavior, not native MPS OOM behavior,
 thermal improvement or model-performance measurements. Whole-rebuild streaming
 and corpus loading remain separate work.
+
+## Maintenance coordination foundation
+
+The storage schema now records transactional source revision primitives and
+initial pending layer states. This foundation does not yet replace engine
+scheduling or run builders automatically. The existing threshold remains 25.
+It does not establish that the current engine already coalesces maintenance.
+
+`read_source_revision(conn)` reads an immutable token from the caller's SQLite
+snapshot without committing: epoch, revision, insert count, correction count,
+historical maximum message ID and last nonappend revision. A caller sees its own
+uncommitted changes; rollback restores every counter. Use committed snapshots
+when issuing a durable freshness claim. Existing rows bootstrap with their
+maximum ID and zero historical event counts, since their mutation history is
+unknown. Missing or replaced tracking triggers start a new epoch.
+
+Insertions increment revision and insert count. Deletions and real updates to ID,
+content, sender, recipient, timestamp, category, modality, directive or metadata
+increment revision and correction count. Comparisons are NULL-safe. Equal-value
+updates and derived episode/emotional/separation fields do not self-dirty. Rowid
+aliases are included. No message text, deleted content or per-event queue is added.
+
+An insertion above the historical maximum advances that maximum. An insertion
+into a lower ID hole, a replacement at an existing ID, a source update or a delete
+advances the nonappend revision. The maximum never decreases within an epoch.
+`new.is_append_only_since(old)` certifies that the earlier ID range is unchanged;
+it does not certify chronological order. A higher ID may have an older or tied
+timestamp. Tokens from different bootstrap epochs cannot certify continuity.
+Degraded legacy schemas remain open with tracking unavailable until their source
+columns can be migrated; they cannot issue a misleading revision token.
+
+`maintenance_owner(path)` provides synchronous ownership, shared with
+`get_coordinator(path).request(work)`. Canonical paths and symlink aliases share
+one in-process claim and one nonblocking process-owned file lock beside the
+database. A nested synchronous operation on the same worker thread reuses its
+outer ownership token. Other threads or processes receive busy. The lock file is
+not deleted to signal completion. Process death releases the real lock; forked
+children close inherited owner descriptors and must obtain their own coordinator.
+Live database replacement through another path and hard-link aliases are not
+supported concurrency mechanisms.
+
+Workers open and close their own connections. Ownership remains held through
+work and connection teardown, including cancellation and interrupted thread
+startup. Cancellation signals a phase boundary; it cannot preempt native work.
+A callback must finish its transaction explicitly; unfinished writes are rolled
+back and reported failed. Error status stores only a bounded exception category,
+not exception text, source content or database paths.
+
+Private `:memory:` databases cannot be reopened by a separate worker.
+Asynchronous requests stay explicitly `pending_in_memory` without creating a
+thread or file. Synchronous callers use the original connection and remain
+responsible for its serialization. The engine's existing manual path is unchanged
+in this foundation checkpoint. Per-layer freshness enforcement, scheduler routing,
+vector dependency generations and measured maintenance performance remain later
+integration work; initially pending rows are not success claims.
