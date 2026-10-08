@@ -594,3 +594,45 @@ vector, Dunbar and profile dependency contracts remain subsequent work.
 Other direct output writers must participate in the same publication contract
 before those checkpoints can certify production freshness; arbitrary external
 SQL against derived tables is not covered by source revision tracking.
+
+## Dunbar generated relationship publication
+
+Dunbar now records the exact relationship IDs it creates in an additive ownership
+ledger. A generation ID and fingerprint bind each ID to its persisted fields,
+including SQL NULL values and types. A refresh deletes only verified generated
+rows. Existing unowned contacts and every unrelated relationship producer remain
+untouched; matching values do not establish ownership. Empty source, an absent
+primary, or a changed primary retires the previous verified generated generation.
+The returned hierarchy, SQL aggregation/tie behavior, case normalization,
+frequency thresholds and three-decimal rounding remain unchanged.
+
+Insert, changed-field update and delete triggers relinquish ownership before an
+external edit or ID reuse can inherit it. The insert trigger also covers SQLite
+`INSERT OR REPLACE` with recursive triggers and foreign keys disabled. Generated
+inserts write their ownership record after the relationship insert. No-op updates
+retain ownership. If a tracking trigger is missing or replaced, repair preserves
+all relationship rows and invalidates the uncertain ledger; fingerprints cannot
+prove continuity through an untracked interval. Repair is transactional and an
+unchanged installation performs no DDL or ledger writes.
+
+For an independent call, the builder captures a coherent source/ownership read
+snapshot, ends that transaction, and computes before taking writer ownership.
+Publication compares streaming fingerprints of the relevant message IDs,
+senders, recipients and timestamps, schema, relationship rows and ownership rows.
+A concurrent change rejects publication without an automatic retry. Source text
+is neither copied into the ledger nor staged for this fence. These checks add
+scans and do not claim constant-time work or a measured throughput improvement.
+
+Output and its ledger publish atomically, including empty cleanup. A borrowed
+transaction uses savepoints and remains rollbackable, including any ledger or
+trigger migration. COMMIT/RELEASE failures roll back unpublished work; a failed
+rollback never proceeds to a cleanup release. A caller that already owns a writer
+retains its own locking and final commit responsibility. A later caller commit
+cannot be certified against changes outside that retained snapshot.
+
+`read_dunbar_coverage` reads ownership and relationship rows in one snapshot. It
+reports managed rows, unowned contacts and invalid ownership, with `partial`,
+`managed_only` or `untracked` coverage. This is an ownership description, not
+source freshness. Ambiguous legacy rows are preserved and remain visible as
+partial coverage. This checkpoint neither adopts those rows nor routes the
+maintenance scheduler or changes profile/style/summary-sheet builders.

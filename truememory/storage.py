@@ -42,6 +42,29 @@ BEGIN
 END;
 """
 
+_DUNBAR_OWNERSHIP_SQL = """
+CREATE TABLE IF NOT EXISTS dunbar_generated_relationships (
+    relationship_id INTEGER PRIMARY KEY,
+    generation TEXT NOT NULL,
+    row_fingerprint BLOB NOT NULL CHECK (length(row_fingerprint) = 32),
+    FOREIGN KEY (relationship_id) REFERENCES entity_relationships(id) ON DELETE CASCADE
+)
+"""
+_DUNBAR_OWNERSHIP_TRIGGERS = {
+    "dunbar_relationships_ai": """CREATE TRIGGER dunbar_relationships_ai AFTER INSERT ON entity_relationships BEGIN
+        DELETE FROM dunbar_generated_relationships WHERE relationship_id=new.id;
+    END""",
+    "dunbar_relationships_au": """CREATE TRIGGER dunbar_relationships_au AFTER UPDATE ON entity_relationships
+    WHEN old.id IS NOT new.id OR old.entity_a IS NOT new.entity_a OR old.entity_b IS NOT new.entity_b
+      OR old.relationship_type IS NOT new.relationship_type OR old.strength IS NOT new.strength
+      OR old.dunbar_layer IS NOT new.dunbar_layer OR old.last_interaction IS NOT new.last_interaction BEGIN
+        DELETE FROM dunbar_generated_relationships WHERE relationship_id=old.id OR relationship_id=new.id;
+    END""",
+    "dunbar_relationships_ad": """CREATE TRIGGER dunbar_relationships_ad AFTER DELETE ON entity_relationships BEGIN
+        DELETE FROM dunbar_generated_relationships WHERE relationship_id=old.id;
+    END""",
+}
+
 _SCHEMA_SQL = """
 -- Core messages table
 CREATE TABLE IF NOT EXISTS messages (
@@ -288,6 +311,50 @@ _MAINTENANCE_LAYERS = (
     "clusters", "summaries", "contradictions", "structured_facts",
     "surprise", "episodes", "landmarks", "dunbar",
 )
+
+_SCHEMA_SQL += _DUNBAR_OWNERSHIP_SQL + ";\n"
+
+
+def _dunbar_ownership_ready(conn: sqlite3.Connection) -> bool:
+    definitions = {name: " ".join(sql.split()) for name, sql in _DUNBAR_OWNERSHIP_TRIGGERS.items()}
+    installed = {row[0]: " ".join(row[1].strip().rstrip(";").split()) for row in conn.execute(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN "
+        "('dunbar_relationships_ai','dunbar_relationships_au','dunbar_relationships_ad')"
+    )}
+    return installed == definitions and conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dunbar_generated_relationships'"
+    ).fetchone() is not None
+
+
+def _initialize_dunbar_ownership(conn: sqlite3.Connection) -> None:
+    """Repair ownership tracking without trusting rows from an untracked interval."""
+    if _dunbar_ownership_ready(conn):
+        return
+    owned = not conn.in_transaction
+    conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT truememory_dunbar_schema")
+    completed = False
+    try:
+        if not owned:
+            conn.execute("UPDATE entity_relationships SET id=id WHERE 0")
+        if not _dunbar_ownership_ready(conn):
+            conn.execute(_DUNBAR_OWNERSHIP_SQL)
+            # Identical ID/value replacements cannot be detected retrospectively.
+            # Preserve those relationships and relinquish all uncertain ownership.
+            conn.execute("DELETE FROM dunbar_generated_relationships")
+            for name, definition in _DUNBAR_OWNERSHIP_TRIGGERS.items():
+                conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+                conn.execute(definition)
+        conn.execute("COMMIT" if owned else "RELEASE truememory_dunbar_schema")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO truememory_dunbar_schema")
+                conn.execute("RELEASE truememory_dunbar_schema")
+
+
 _MAINTENANCE_SOURCE_FIELDS = (
     "id", "content", "sender", "recipient", "timestamp", "category",
     "modality", "directive", "metadata",
@@ -826,6 +893,7 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
     try:
         _migrate_messages_fts_trigger(conn)
         _initialize_maintenance_tracking(conn)
+        _initialize_dunbar_ownership(conn)
     except sqlite3.Error:
         conn.close()
         raise
