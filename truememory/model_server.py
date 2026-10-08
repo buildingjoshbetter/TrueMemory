@@ -895,11 +895,17 @@ class ModelServer:
     def _request_batch_limit(
         self, limit: int, deadline: _RequestDeadline,
     ) -> tuple[int, object | None]:
-        # Preserve once-per-request sensing outside the model state lock: ramp
-        # sampling may block for 20 seconds. Per-slice sensing needs a scheduler.
+        # Preserve once-per-request sensing outside the model state lock.
+        # Per-slice sensing needs a scheduler.
         # Capture the active instance under the lock, preserving #646's race fix.
         with deadline.locked(self._lock):
             throttler = self._throttler if self._throttler_active else None
+        if throttler is not None and not getattr(throttler, "adaptive_applicable", True):
+            # No applicable sensor policy is not healthy ramp evidence. Keep
+            # the existing caller/server hard bound without MPS slow-start or
+            # pacing. Recheck on each request for newly published MPS state.
+            deadline.check()
+            return limit, None
         if throttler is not None:
             deadline.check()
             safe_limit, _ = throttler.before_batch()

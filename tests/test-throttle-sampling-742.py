@@ -208,6 +208,25 @@ class TestThrottleSampling(unittest.TestCase):
             "mps_level": "unsupported", "growth_rate": "unsupported", "thermal": "ok",
         })
 
+    def test_adaptive_applicability_preserves_pending_mps_and_darwin_policy(self) -> None:
+        for platform in ("linux", "win32", "darwin"):
+            for device in ("cpu", "cuda:0", "mps"):
+                with self.subTest(platform=platform, device=device):
+                    throttler = self.throttler_module.DynamicThrottler(device)
+                    throttler._budget_snapshot = Mock(return_value=None)
+                    with patch.object(self.throttler_module, "sys", types.SimpleNamespace(platform=platform)):
+                        self.assertEqual(throttler.adaptive_applicable, platform == "darwin" or device == "mps")
+
+    def test_published_process_budget_reactivates_policy_for_either_non_mps_model(self) -> None:
+        for device in ("cpu", "cuda:0"):
+            with self.subTest(device=device):
+                throttler = self.throttler_module.DynamicThrottler(device)
+                throttler._budget_snapshot = Mock(return_value=None)
+                with patch.object(self.throttler_module, "sys", types.SimpleNamespace(platform="linux")):
+                    self.assertFalse(throttler.adaptive_applicable)
+                    throttler._budget_snapshot.return_value = object()
+                    self.assertTrue(throttler.adaptive_applicable)
+
     def test_sensor_errors_are_unknown_and_do_not_reuse_previous_healthy_value(self) -> None:
         throttler = self.throttler_module.DynamicThrottler("mps")
         self.throttler_module.read_mps_memory = Mock(side_effect=RuntimeError("synthetic sensor failure"))
