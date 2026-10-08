@@ -9,6 +9,8 @@ VectorCacheRegistry for progress tracking.
 import logging
 import sqlite3
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Callable
 
 from truememory.tier_switch.cache import VectorCacheRegistry
@@ -19,6 +21,23 @@ log = logging.getLogger(__name__)
 _HARD_TIMEOUT = 9000  # 2.5 hours
 
 StatusCallback = Callable[[int, int, dict], None]
+
+
+@contextmanager
+def _rebuild_transaction(conn: sqlite3.Connection) -> Iterator[None]:
+    owned = not conn.in_transaction
+    conn.execute("BEGIN" if owned else "SAVEPOINT truememory_rebuild_batch")
+    try:
+        yield
+        conn.execute("COMMIT" if owned else "RELEASE SAVEPOINT truememory_rebuild_batch")
+    except BaseException:
+        if owned:
+            conn.rollback()
+        else:
+            # Do not release if rollback fails: that could publish partial work.
+            conn.execute("ROLLBACK TO SAVEPOINT truememory_rebuild_batch")
+            conn.execute("RELEASE SAVEPOINT truememory_rebuild_batch")
+        raise
 
 
 class RebuildWorker:
@@ -72,6 +91,11 @@ class RebuildWorker:
             log.info("No messages to embed — nothing to do")
             return True, 0
 
+        # Manager workers use dedicated connections. Initialization and status
+        # publication commit independently, so caller-owned work cannot join run().
+        if self.conn.in_transaction:
+            raise RuntimeError("RebuildWorker.run requires a connection with no active transaction")
+
         total = len(messages)
         log.info(
             "RebuildWorker starting: %d messages, group=%s, full=%s",
@@ -87,11 +111,15 @@ class RebuildWorker:
 
         if is_full_rebuild:
             try:
-                self.conn.execute(f"DELETE FROM {vec_table}")
-                self.conn.execute(f"DELETE FROM {sep_table}")
-                self.conn.commit()
-            except sqlite3.OperationalError:
-                pass
+                with _rebuild_transaction(self.conn):
+                    self.conn.execute(f"DELETE FROM {vec_table}")
+                    self.conn.execute(f"DELETE FROM {sep_table}")
+                    VectorCacheRegistry.update_progress(
+                        self.conn, self.target_group, 0, 0, commit=False,
+                    )
+            except Exception as exc:
+                self._update_status("failed", 0, total, str(exc))
+                return False, 0
 
         try:
             import torch
@@ -101,7 +129,6 @@ class RebuildWorker:
             no_grad = nullcontext()
 
         processed = 0
-        last_id = 0
         offset = 0
         start_time = time.time()
 
@@ -132,6 +159,10 @@ class RebuildWorker:
                     success = self._process_batch(
                         batch, model, vec_table, sep_table, serialize_f32,
                         _build_sep_text,
+                        record_progress=lambda: VectorCacheRegistry.update_progress(
+                            self.conn, self.target_group, batch[-1]["id"],
+                            self._count_vectors(vec_table), commit=False,
+                        ),
                     )
                 except Exception as exc:
                     if self._is_oom_error(exc):
@@ -157,16 +188,10 @@ class RebuildWorker:
                 batch_count = len(batch)
                 processed += batch_count
                 offset += batch_count
-                last_id = batch[-1]["id"]
 
                 self.throttler.after_batch(batch_count, batch_time)
                 if self.throttler.should_flush_cache():
                     DynamicThrottler.flush_gpu_cache()
-
-                VectorCacheRegistry.update_progress(
-                    self.conn, self.target_group, last_id,
-                    self._count_vectors(vec_table),
-                )
 
                 self._update_status("running", processed, total)
 
@@ -185,23 +210,19 @@ class RebuildWorker:
         sep_table: str,
         serialize_f32,
         build_sep_text,
+        record_progress: Callable[[], None] | None = None,
     ) -> bool:
-        """Encode and insert a single batch of messages."""
+        """Prepare both embeddings, then publish their pair and checkpoint atomically."""
         from truememory.mps_utils import encode_with_model_ownership
 
         texts = [m["content"] for m in batch]
         ids = [m["id"] for m in batch]
 
         embeddings = encode_with_model_ownership(model, texts, show_progress_bar=False)
-
-        self.conn.executemany(
-            f"INSERT INTO {vec_table}(rowid, embedding) "
-            f"VALUES (?, ?)",
-            [
-                (mid, serialize_f32(emb))
-                for mid, emb in zip(ids, embeddings)
-            ],
-        )
+        if len(embeddings) != len(ids):
+            raise ValueError("Completion embedding count does not match the rebuild batch")
+        completion_rows = [(mid, serialize_f32(emb)) for mid, emb in zip(ids, embeddings)]
+        del embeddings
 
         sep_texts = [
             build_sep_text(
@@ -213,29 +234,26 @@ class RebuildWorker:
             for m in batch
         ]
         sep_embeddings = encode_with_model_ownership(model, sep_texts, show_progress_bar=False)
+        if len(sep_embeddings) != len(ids):
+            raise ValueError("Separation embedding count does not match the rebuild batch")
+        separation_rows = [(mid, serialize_f32(emb)) for mid, emb in zip(ids, sep_embeddings)]
+        del sep_embeddings
 
-        self.conn.executemany(
-            f"INSERT INTO {sep_table}(rowid, embedding) "
-            f"VALUES (?, ?)",
-            [
-                (mid, serialize_f32(emb))
-                for mid, emb in zip(ids, sep_embeddings)
-            ],
-        )
-
-        self.conn.commit()
-        del embeddings, sep_embeddings
+        with _rebuild_transaction(self.conn):
+            self.conn.executemany(
+                f"INSERT INTO {vec_table}(rowid, embedding) VALUES (?, ?)", completion_rows,
+            )
+            self.conn.executemany(
+                f"INSERT INTO {sep_table}(rowid, embedding) VALUES (?, ?)", separation_rows,
+            )
+            if record_progress is not None:
+                record_progress()
         return True
 
     def _count_vectors(self, vec_table: str) -> int:
         """Count rows in the vector table."""
-        try:
-            row = self.conn.execute(
-                f"SELECT COUNT(*) FROM {vec_table}"
-            ).fetchone()
-            return row[0] if row else 0
-        except sqlite3.OperationalError:
-            return 0
+        row = self.conn.execute(f"SELECT COUNT(*) FROM {vec_table}").fetchone()
+        return row[0] if row else 0
 
     def _update_status(
         self,
@@ -261,20 +279,20 @@ class RebuildWorker:
             now = time.time()
             completed_at = now if status in ("complete", "failed", "cancelled") else None
             try:
-                self.conn.execute(
-                    "UPDATE rebuild_status SET "
-                    "status=?, processed_messages=?, progress_pct=?, "
-                    "eta_seconds=?, batch_size=?, throughput_ips=?, "
-                    "ram_pct=?, last_heartbeat=?, completed_at=?, error=? "
-                    "WHERE id=?",
-                    (
-                        status, processed, pct,
-                        eta, self.throttler.batch_size, throughput,
-                        ram_pct, now, completed_at, error,
-                        self.status_id,
-                    ),
-                )
-                self.conn.commit()
+                with _rebuild_transaction(self.conn):
+                    self.conn.execute(
+                        "UPDATE rebuild_status SET "
+                        "status=?, processed_messages=?, progress_pct=?, "
+                        "eta_seconds=?, batch_size=?, throughput_ips=?, "
+                        "ram_pct=?, last_heartbeat=?, completed_at=?, error=? "
+                        "WHERE id=?",
+                        (
+                            status, processed, pct,
+                            eta, self.throttler.batch_size, throughput,
+                            ram_pct, now, completed_at, error,
+                            self.status_id,
+                        ),
+                    )
             except sqlite3.OperationalError:
                 pass
 

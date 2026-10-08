@@ -97,15 +97,18 @@ class VectorCacheRegistry:
         group: str,
         last_embedded_id: int,
         vector_count: int,
+        *,
+        commit: bool = True,
     ) -> None:
-        """Update the progress fields after a batch commit."""
+        """Update progress, optionally inside the caller's paired-vector transaction."""
         conn.execute(
             "UPDATE vector_cache_registry "
             "SET last_embedded_id = ?, vector_count = ?, last_updated = ? "
             "WHERE tier_group = ?",
             (last_embedded_id, vector_count, time.time(), group),
         )
-        conn.commit()
+        if commit:
+            conn.commit()
 
     @staticmethod
     def delete(conn: sqlite3.Connection, group: str) -> None:
