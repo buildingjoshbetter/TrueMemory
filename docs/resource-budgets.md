@@ -411,6 +411,37 @@ rollback, writer progress during paused computation and atomic reader views.
 Actual HDBSCAN runtime, validation duration, WAL growth, native peak memory and
 retrieval quality on representative corpora remain release measurement gates.
 
+## Ingestion recall invalidation
+
+Both transcript and direct-text ingestion run a shared batch finalizer when the
+per-fact processing loop exits. If a store or update returned successfully, the
+finalizer attempts recall-cache invalidation once for that pipeline batch. A
+later gate, deduplication or storage exception does not skip invalidation of
+earlier confirmed writes, and the original exception continues to propagate.
+Wholly rejected, deduplicated, empty or failed batches do not invalidate through
+this finalizer. Store/update counts are still incremented only after the storage
+call returns successfully.
+
+The existing cache API and its global invalidation scope are unchanged. Public
+client mutation methods may also invalidate independently; this is one pipeline
+finalization attempt, not a promise of one cache call across every layer. A raised
+cache error is logged by exception type without fact content and does not turn
+committed writes into retryable storage failures. The underlying cache helper
+retains its existing best-effort handling of filesystem errors.
+
+Synthetic tests exercise the actual two pipeline methods and transcript parser,
+temporary SQLite commits/lock failures, and the real shared cache functions with
+all paths redirected to the fixture. They verify that a subsequent recall-cache
+read misses and can be populated from the committed rows, no-op batches preserve
+the cache, partial success invalidates, and cache errors preserve storage counts
+and the original ingestion exception. Extraction, encoding and deduplication are
+fake boundaries; no model or provider calls run in this suite.
+
+This change does not implement durable ingestion checkpoints or change CLI
+completion and retry claims. Those remain the separate ingestion-recovery issue.
+A storage call that commits and then raises cannot be classified by these
+existing success counters; that ambiguity requires an atomic durable receipt.
+
 ## Tier rebuild batch durability
 
 The tier-switch worker computes and serializes both completion and separation
