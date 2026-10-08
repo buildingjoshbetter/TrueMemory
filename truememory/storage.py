@@ -295,6 +295,8 @@ CREATE TABLE IF NOT EXISTS maintenance_layers (
     successful_epoch TEXT,
     successful_revision INTEGER,
     successful_dependency TEXT,
+    successful_coverage TEXT NOT NULL DEFAULT 'unverified' CHECK (successful_coverage IN
+        ('unverified', 'complete', 'legacy_contacts_unowned', 'vector_generation_unverified')),
     attempted_epoch TEXT,
     attempted_revision INTEGER,
     attempted_dependency TEXT,
@@ -403,7 +405,7 @@ def _initialize_maintenance_tracking(conn: sqlite3.Connection) -> None:
     layers = {row[0] for row in conn.execute("SELECT layer FROM maintenance_layers")}
     layer_columns = {row[1] for row in conn.execute("PRAGMA table_info(maintenance_layers)")}
     if (ready and ready[0] and installed() == expected and set(_MAINTENANCE_LAYERS).issubset(layers)
-            and "attempted_insert_count" in layer_columns):
+            and {"attempted_insert_count", "successful_coverage"}.issubset(layer_columns)):
         return
 
     owned = not conn.in_transaction
@@ -416,6 +418,12 @@ def _initialize_maintenance_tracking(conn: sqlite3.Connection) -> None:
                 "ALTER TABLE maintenance_layers ADD COLUMN attempted_insert_count INTEGER "
                 "CHECK (attempted_insert_count IS NULL OR "
                 "(typeof(attempted_insert_count) = 'integer' AND attempted_insert_count >= 0))"
+            )
+        if "successful_coverage" not in {row[1] for row in conn.execute("PRAGMA table_info(maintenance_layers)")}:
+            conn.execute(
+                "ALTER TABLE maintenance_layers ADD COLUMN successful_coverage TEXT NOT NULL DEFAULT 'unverified' "
+                "CHECK (successful_coverage IN "
+                "('unverified','complete','legacy_contacts_unowned','vector_generation_unverified'))"
             )
         columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
         available = set(_MAINTENANCE_SOURCE_FIELDS).issubset(columns)

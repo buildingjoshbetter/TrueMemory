@@ -38,6 +38,10 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+class ClusterModelBusyError(RuntimeError):
+    """Model ownership is temporarily unavailable; no input version changed."""
+
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
@@ -151,7 +155,7 @@ def cluster_publication_guard(conn: sqlite3.Connection) -> AbstractContextManage
         conn.execute("UPDATE messages SET id=id WHERE 0")
         acquired = vector_search._lock.acquire(blocking=False)
         if not acquired:
-            raise RuntimeError("Embedding model is busy before cluster commit")
+            raise ClusterModelBusyError("Embedding model is busy before cluster commit")
         try:
             yield validate
         finally:
@@ -267,12 +271,16 @@ def cluster_messages(
     import hdbscan
     from truememory import vector_search
 
-    # Model loading may also hold this lock. Wait before opening our read
-    # transaction, and release both before any clustering computation.
-    with vector_search._lock:
+    # Standalone callers can wait before opening a read transaction. A caller
+    # transaction may already own SQLite's writer, so never wait inside it.
+    if not vector_search._lock.acquire(blocking=not conn.in_transaction):
+        raise ClusterModelBusyError("Embedding model is busy before clustering snapshot")
+    try:
         with _cluster_transaction(conn):
             source_state, categories = _cluster_source_state(conn, vector_search, collect_categories=True)
             msg_ids, embeddings = _get_all_embeddings(conn)
+    finally:
+        vector_search._lock.release()
     if any(mid not in categories for mid in msg_ids):
         raise RuntimeError("Clustering found vectors without source messages; rebuild the vector index")
 
@@ -321,7 +329,7 @@ def cluster_messages(
             # load or a tier change. Keep the model stable through commit.
             model_lock_acquired = vector_search._lock.acquire(blocking=False)
             if not model_lock_acquired:
-                raise RuntimeError("Embedding model is busy; retry clustering after model loading or tier switching")
+                raise ClusterModelBusyError("Embedding model is busy; retry clustering after model loading or tier switching")
             current_state, _ = _cluster_source_state(conn, vector_search)
             if current_state != source_state:
                 raise RuntimeError("Clustering source changed during computation; retry consolidation")
