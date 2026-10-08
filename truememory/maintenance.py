@@ -4,9 +4,14 @@ The engine scheduler is not routed here yet. No models, polling loop or automati
 builder invocation is introduced by importing this module.
 """
 
+import importlib
+import json
 import os
+import re
 import sqlite3
+import sys
 import threading
+import time
 import uuid
 import weakref
 from collections.abc import Callable, Iterator
@@ -315,3 +320,353 @@ def get_coordinator(db_path: str | os.PathLike[str]) -> MaintenanceCoordinator:
             coordinator = MaintenanceCoordinator(path)
             _coordinators[path] = coordinator
         return coordinator
+
+
+class LayerDependency(NamedTuple):
+    key: str
+    builder_version: int
+    available: bool
+    error_category: str | None = None
+
+
+def make_layer_dependency(
+    builder_version: int, parameters: dict | None = None, *,
+    available: bool = True, error_category: str | None = None,
+) -> LayerDependency:
+    """Version each provenance key independently; parameters must be nonpersonal."""
+    if type(builder_version) is not int or builder_version < 1:
+        raise ValueError("Builder version must be a positive integer")
+    if error_category is not None and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", error_category) is None:
+        raise ValueError("Dependency errors must be bounded categories")
+    key = json.dumps({
+        "builder_version": builder_version, "parameters": parameters or {},
+        "available": available, "error_category": error_category,
+        "python": list(sys.version_info[:3]),
+    }, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return LayerDependency(key, builder_version, available, error_category)
+
+
+class LayerSpec(NamedTuple):
+    layer: str
+    result_key: str
+    resolve_dependency: Callable[[], LayerDependency]
+    build: Callable[[sqlite3.Connection], object]
+    count_output: Callable[[sqlite3.Connection], int]
+
+
+class LayerState(NamedTuple):
+    layer: str
+    source: SourceRevision
+    dependency: LayerDependency
+    outcome: str
+    successful_epoch: str | None
+    successful_revision: int | None
+    successful_dependency: str | None
+    attempted_epoch: str | None
+    attempted_revision: int | None
+    attempted_dependency: str | None
+    attempted_insert_count: int | None
+    full_rebuild_required: bool
+    output_count: int | None
+    run_generation: str | None
+    error_category: str | None
+
+
+class LayerResult(NamedTuple):
+    layer: str
+    result_key: str
+    outcome: str
+    output_count: int | None
+    elapsed_seconds: float
+    error_category: str | None
+    attempted: bool
+
+
+def _validate_layer(layer: str) -> None:
+    if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", layer) is None:
+        raise ValueError("Invalid maintenance layer name")
+
+
+def layer_freshness(source: SourceRevision, state: LayerState, dependency: LayerDependency) -> str:
+    """Separate a prior valid success from the latest attempt's outcome."""
+    if (state.successful_epoch != source.epoch or state.successful_revision is None
+            or state.full_rebuild_required or state.output_count is None):
+        return "untrusted"
+    if state.successful_dependency != dependency.key or not dependency.available:
+        return "dependency_pending"
+    if state.successful_revision == source.revision:
+        return "current"
+    if state.successful_revision > source.revision or source.nonappend_revision > state.successful_revision:
+        return "correction_pending"
+    return "append_pending"
+
+
+def read_layer_states(conn: sqlite3.Connection, specs: tuple[LayerSpec, ...]) -> dict[str, LayerState]:
+    """Read source and checkpoint rows in one SQLite snapshot; never commit."""
+    if not specs:
+        return {}
+    dependencies = {}
+    for spec in specs:
+        _validate_layer(spec.layer)
+        if spec.layer in dependencies:
+            raise ValueError("Duplicate maintenance layer")
+        dependencies[spec.layer] = spec.resolve_dependency()
+    placeholders = ",".join("?" for _ in dependencies)
+    try:
+        rows = conn.execute(
+            "SELECT s.epoch,s.revision,s.insert_count,s.correction_count,s.max_seen_message_id,"
+            "s.nonappend_revision,s.tracking_ready,l.layer,l.outcome,l.successful_epoch,"
+            "l.successful_revision,l.successful_dependency,l.attempted_epoch,l.attempted_revision,"
+            "l.attempted_dependency,l.attempted_insert_count,l.full_rebuild_required,l.output_count,"
+            "l.run_generation,l.error_category FROM maintenance_source_state s LEFT JOIN maintenance_layers l "
+            f"ON l.layer IN ({placeholders}) WHERE s.singleton=1", tuple(dependencies),
+        ).fetchall()
+    except sqlite3.OperationalError as error:
+        if str(error).startswith(("no such table:", "no such column:")):
+            raise MaintenanceUnavailableError("Maintenance tracking schema is unavailable") from error
+        raise
+    if not rows or not rows[0][6]:
+        raise MaintenanceUnavailableError("Committed source revision tracking is unavailable")
+    source = SourceRevision(*rows[0][:6])
+    stored = {row[7]: row for row in rows if row[7] is not None}
+    states = {}
+    for layer, dependency in dependencies.items():
+        row = stored.get(layer)
+        values = row[8:] if row is not None else ("pending", None, None, None, None, None, None, None, 1, None, None, None)
+        states[layer] = LayerState(layer, source, dependency, *values)
+    return states
+
+
+@contextmanager
+def layer_read_snapshot(
+    conn: sqlite3.Connection, layer: str, dependency: LayerDependency,
+) -> Iterator[LayerState]:
+    """A read-only getter can read its row and provenance in the same snapshot."""
+    owned = not conn.in_transaction
+    if owned:
+        conn.execute("BEGIN")
+    try:
+        spec = LayerSpec(layer, layer, lambda: dependency, lambda _conn: None, lambda _conn: 0)
+        yield read_layer_states(conn, (spec,))[layer]
+    finally:
+        if owned and conn.in_transaction:
+            conn.rollback()
+
+
+def _eligible(state: LayerState, threshold: int, force: bool) -> bool:
+    if state.outcome == "running":
+        return False
+    if force or state.outcome == "abandoned":
+        return True
+    source = state.source
+    if layer_freshness(source, state, state.dependency) == "current":
+        return False
+    if (state.attempted_epoch != source.epoch or state.attempted_revision is None
+            or state.attempted_insert_count is None or state.attempted_dependency != state.dependency.key):
+        return True
+    terminal_failure = state.outcome in {"failed", "unavailable"}
+    if terminal_failure and state.attempted_revision == source.revision:
+        return False
+    # A failed initial build still has a durable scheduling baseline even
+    # though it has never established successful output provenance.
+    if not terminal_failure and layer_freshness(source, state, state.dependency) == "untrusted":
+        return True
+    if source.nonappend_revision > state.attempted_revision:
+        return True
+    return source.insert_count - state.attempted_insert_count >= threshold
+
+
+def plan_layers(
+    conn: sqlite3.Connection, specs: tuple[LayerSpec, ...], *, threshold: int = 25, force: bool = False,
+) -> tuple[LayerSpec, ...]:
+    """Plan from durable attempt counts, including first/empty bootstrap work."""
+    if type(threshold) is not int or threshold < 1:
+        raise ValueError("Maintenance threshold must be a positive integer")
+    states = read_layer_states(conn, specs)
+    # A previous process may have died while recording "running". Let the
+    # real ownership claim distinguish active work from an abandoned record.
+    return tuple(spec for spec in specs if states[spec.layer].outcome == "running"
+                 or _eligible(states[spec.layer], threshold, force))
+
+
+def record_layer_success_in_transaction(
+    conn: sqlite3.Connection, *, layer: str, dependency: LayerDependency,
+    source: SourceRevision, output_count: int, run_generation: str | None = None,
+) -> None:
+    """Publish provenance beside completed output, without owning caller commit."""
+    _validate_layer(layer)
+    if not conn.in_transaction:
+        raise RuntimeError("Layer publication requires an existing transaction")
+    if not dependency.available or type(output_count) is not int or output_count < 0:
+        raise ValueError("Successful layer publication requires available output")
+    if read_source_revision(conn) != source:
+        raise sqlite3.OperationalError("Maintenance source changed before publication")
+    conn.execute(
+        "INSERT INTO maintenance_layers(layer,builder_version,outcome,successful_epoch,successful_revision,"
+        "successful_dependency,attempted_epoch,attempted_revision,attempted_dependency,attempted_insert_count,"
+        "full_rebuild_required,output_count,run_generation,error_category) VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,NULL) "
+        "ON CONFLICT(layer) DO UPDATE SET builder_version=excluded.builder_version,outcome=excluded.outcome,"
+        "successful_epoch=excluded.successful_epoch,successful_revision=excluded.successful_revision,"
+        "successful_dependency=excluded.successful_dependency,attempted_epoch=excluded.attempted_epoch,"
+        "attempted_revision=excluded.attempted_revision,attempted_dependency=excluded.attempted_dependency,"
+        "attempted_insert_count=excluded.attempted_insert_count,full_rebuild_required=0,"
+        "output_count=excluded.output_count,run_generation=excluded.run_generation,error_category=NULL",
+        (layer, dependency.builder_version, "success" if output_count else "success_empty", source.epoch,
+         source.revision, dependency.key, source.epoch, source.revision, dependency.key,
+         source.insert_count, output_count, run_generation),
+    )
+
+
+@contextmanager
+def _owned_transaction(conn: sqlite3.Connection) -> Iterator[None]:
+    if conn.in_transaction:
+        raise RuntimeError("Maintenance runner requires a clean transaction boundary")
+    conn.execute("BEGIN")
+    completed = False
+    try:
+        yield
+        conn.execute("COMMIT")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            conn.rollback()
+
+
+def _record_attempt(
+    conn: sqlite3.Connection, state: LayerState, outcome: str, generation: str, error_category: str | None,
+) -> None:
+    source, dependency = state.source, state.dependency
+    with _owned_transaction(conn):
+        conn.execute(
+            "INSERT INTO maintenance_layers(layer,builder_version,outcome,attempted_epoch,attempted_revision,"
+            "attempted_dependency,attempted_insert_count,run_generation,error_category) VALUES (?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(layer) DO UPDATE SET builder_version=excluded.builder_version,outcome=excluded.outcome,"
+            "attempted_epoch=excluded.attempted_epoch,attempted_revision=excluded.attempted_revision,"
+            "attempted_dependency=excluded.attempted_dependency,attempted_insert_count=excluded.attempted_insert_count,"
+            "run_generation=excluded.run_generation,error_category=excluded.error_category",
+            (state.layer, dependency.builder_version, outcome, source.epoch, source.revision,
+             dependency.key, source.insert_count, generation, error_category),
+        )
+
+
+class _LayerCancelled(Exception):
+    """Internal cooperative cancellation before publication."""
+
+
+def run_layers(
+    conn: sqlite3.Connection, specs: tuple[LayerSpec, ...], *, force: bool = False,
+    threshold: int = 25, cancel: threading.Event | None = None,
+) -> tuple[LayerResult, ...]:
+    """Run each eligible trusted adapter once on a dedicated connection."""
+    if conn.in_transaction:
+        raise RuntimeError("Maintenance runner requires a clean transaction boundary")
+    if type(threshold) is not int or threshold < 1:
+        raise ValueError("Maintenance threshold must be a positive integer")
+    results = []
+    with maintenance_owner(connection_database_path(conn)) as owner:
+        if conn.execute(
+            "SELECT 1 FROM maintenance_layers WHERE outcome='running' AND run_generation IS NOT ? LIMIT 1",
+            (owner.generation,),
+        ).fetchone():
+            with _owned_transaction(conn):
+                conn.execute(
+                    "UPDATE maintenance_layers SET outcome='abandoned',error_category='Interrupted' "
+                    "WHERE outcome='running' AND run_generation IS NOT ?", (owner.generation,),
+                )
+        # Validate uniqueness before any builder is invoked.
+        read_layer_states(conn, specs)
+        for spec in specs:
+            if cancel is not None and cancel.is_set():
+                break
+            state = read_layer_states(conn, (spec,))[spec.layer]
+            if not _eligible(state, threshold, force):
+                results.append(LayerResult(spec.layer, spec.result_key,
+                    layer_freshness(state.source, state, state.dependency), state.output_count, 0.0,
+                    state.error_category, False))
+                continue
+            started = time.monotonic()
+            if not state.dependency.available:
+                _record_attempt(conn, state, "unavailable", owner.generation, state.dependency.error_category)
+                results.append(LayerResult(spec.layer, spec.result_key, "unavailable", state.output_count,
+                    time.monotonic() - started, state.dependency.error_category, True))
+                continue
+            # This diagnostic commits before the read/compute snapshot starts.
+            with _owned_transaction(conn):
+                conn.execute(
+                    "INSERT INTO maintenance_layers(layer,builder_version,outcome,run_generation,error_category) "
+                    "VALUES (?,?,'running',?,NULL) ON CONFLICT(layer) DO UPDATE SET "
+                    "builder_version=excluded.builder_version,outcome='running',"
+                    "run_generation=excluded.run_generation,error_category=NULL",
+                    (spec.layer, state.dependency.builder_version, owner.generation),
+                )
+            count = None
+            try:
+                with _owned_transaction(conn):
+                    state = read_layer_states(conn, (spec,))[spec.layer]
+                    if not state.dependency.available:
+                        raise MaintenanceUnavailableError("Layer dependency became unavailable")
+                    spec.build(conn)
+                    if not conn.in_transaction:
+                        raise RuntimeError("Layer builder committed the runner transaction")
+                    count = spec.count_output(conn)
+                    if cancel is not None and cancel.is_set():
+                        raise _LayerCancelled()
+                    if spec.resolve_dependency() != state.dependency:
+                        raise MaintenanceUnavailableError("Layer dependency changed before publication")
+                    record_layer_success_in_transaction(conn, layer=spec.layer, dependency=state.dependency,
+                        source=state.source, output_count=count, run_generation=owner.generation)
+                    if spec.resolve_dependency() != state.dependency:
+                        raise MaintenanceUnavailableError("Layer dependency changed before commit")
+            except BaseException as error:
+                interrupted = not isinstance(error, Exception) or isinstance(error, _LayerCancelled)
+                outcome = "abandoned" if interrupted else ("failed" if state.dependency.available else "unavailable")
+                category = "Cancelled" if interrupted else type(error).__name__[:64]
+                if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", category) is None:
+                    category = "Error"
+                _record_attempt(conn, state, outcome, owner.generation, category)
+                results.append(LayerResult(spec.layer, spec.result_key, outcome, state.output_count,
+                    time.monotonic() - started, category, True))
+                if not isinstance(error, Exception):
+                    raise
+                if interrupted:
+                    break
+            else:
+                results.append(LayerResult(spec.layer, spec.result_key, "success" if count else "success_empty",
+                    count, time.monotonic() - started, None, True))
+    return tuple(results)
+
+
+def nonvector_layer_specs() -> tuple[LayerSpec, ...]:
+    """Lazy standard-library adapters; no vector or Dunbar enrollment yet."""
+    definitions = (
+        ("summaries", "build_summaries", "consolidation", "build_summaries",
+         "SELECT count(*) FROM summaries WHERE period IN ('monthly','entity_monthly')", {}),
+        ("structured_facts", "structured_facts", "consolidation", "build_structured_facts",
+         "SELECT count(*) FROM summaries WHERE period='structured_fact'", {}),
+        ("contradictions", "detect_contradictions", "consolidation", "detect_contradictions",
+         "SELECT count(*) FROM fact_timeline", {}),
+        ("surprise", "build_surprise_index", "predictive", "build_surprise_index",
+         "SELECT count(*) FROM surprise_scores", {}),
+        ("episodes", "detect_episodes", "temporal", "detect_episodes", "SELECT count(*) FROM episodes", {"gap_hours": 6}),
+        ("landmarks", "detect_landmarks", "temporal", "detect_landmark_events",
+         "SELECT count(*) FROM landmark_events", {}),
+    )
+    specs = []
+    for layer, result_key, module_name, function_name, count_sql, parameters in definitions:
+        def resolve(module_name: str = module_name, function_name: str = function_name,
+                    parameters: dict = parameters) -> LayerDependency:
+            try:
+                getattr(importlib.import_module("truememory." + module_name), function_name)
+            except (ImportError, AttributeError) as error:
+                return make_layer_dependency(1, parameters, available=False, error_category=type(error).__name__)
+            return make_layer_dependency(1, parameters)
+
+        def build(conn: sqlite3.Connection, module_name: str = module_name,
+                  function_name: str = function_name, parameters: dict = parameters) -> object:
+            return getattr(importlib.import_module("truememory." + module_name), function_name)(conn, **parameters)
+
+        def count(conn: sqlite3.Connection, sql: str = count_sql) -> int:
+            return conn.execute(sql).fetchone()[0]
+
+        specs.append(LayerSpec(layer, result_key, resolve, build, count))
+    return tuple(specs)
