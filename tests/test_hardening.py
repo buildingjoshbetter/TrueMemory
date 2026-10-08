@@ -188,15 +188,19 @@ class TestAutoConsolidation:
 
     def test_auto_consolidation_doesnt_fire_below_threshold(self):
         eng, td = _make_engine(n_messages=0)
+        # Establish the initial successful/empty or unavailable attempt. The
+        # threshold applies after that durable baseline, including on reopen.
+        eng.consolidate()
         eng._has_consolidation = True
         eng._auto_consolidate_threshold = 25
+        eng.conn.executemany("INSERT INTO messages(content) VALUES (?)", [("synthetic append",)] * 24)
+        eng.conn.commit()
 
-        import truememory.engine as _eng_mod
-        with patch.object(_eng_mod.threading, "Thread") as mock_thread_cls:
-            for i in range(24):
+        with patch.object(eng._maintenance_coordinator, "request_layers") as request:
+            for _ in range(3):
                 eng._maybe_auto_consolidate()
 
-        mock_thread_cls.assert_not_called()
+        request.assert_not_called()
         eng.close()
 
     def test_startup_consolidation_no_crash_on_closed_conn(self):

@@ -1,37 +1,49 @@
-"""Regression test for M1 #498: auto-consolidation trigger.
+"""Durable automatic maintenance thresholds across engine instances."""
 
-Consolidation should run automatically after a configurable number of
-add() calls, not require manual truememory_consolidate invocation.
-"""
-
-import inspect
-import unittest
+import runpy
+from pathlib import Path
+from unittest.mock import patch
 
 
-class TestAutoConsolidation(unittest.TestCase):
-
-    def test_auto_consolidate_threshold_exists(self):
-        from truememory.engine import TrueMemoryEngine
-        source = inspect.getsource(TrueMemoryEngine.__init__)
-        self.assertIn("_auto_consolidate_threshold", source)
-        self.assertIn("TRUEMEMORY_AUTO_CONSOLIDATE_EVERY", source)
-
-    def test_add_calls_maybe_auto_consolidate(self):
-        from truememory.engine import TrueMemoryEngine
-        source = inspect.getsource(TrueMemoryEngine.add)
-        self.assertIn("_maybe_auto_consolidate", source,
-                       "add() should call _maybe_auto_consolidate()")
-
-    def test_maybe_auto_consolidate_checks_threshold(self):
-        from truememory.engine import TrueMemoryEngine
-        source = inspect.getsource(TrueMemoryEngine._maybe_auto_consolidate)
-        self.assertIn("_auto_consolidate_threshold", source)
-        self.assertIn("_has_consolidation", source)
-
-    def test_bg_consolidate_exists(self):
-        from truememory.engine import TrueMemoryEngine
-        self.assertTrue(hasattr(TrueMemoryEngine, "_bg_consolidate"))
+_ROUTING = runpy.run_path(str(Path(__file__).with_name("test-maintenance-engine-routing-753.py")))
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestAutoConsolidation(_ROUTING["RoutingFixture"]):
+    def assert_empty_bootstrap(self) -> None:
+        maintenance = _ROUTING["MAINTENANCE"]
+        states = maintenance.read_layer_states(
+            self.conn, maintenance.engine_layer_specs(self.conn, self.coordinator))
+        self.assertEqual(len(states), 8)
+        self.assertTrue(all(state.outcome == "success_empty" for state in states.values()), states)
+        self.assertTrue(all(state.attempted_insert_count == 0 for state in states.values()), states)
+
+    def test_default_threshold_is_twenty_five(self):
+        self.assertEqual(self.engine._auto_consolidate_threshold, 25)
+
+    def test_configured_threshold_uses_committed_source_inserts(self):
+        self.engine.consolidate()
+        self.assert_empty_bootstrap()
+        self.engine._auto_consolidate_threshold = 3
+        self.engine._has_consolidation = True
+        with patch.object(self.coordinator, "request_layers", wraps=self.coordinator.request_layers) as request:
+            for _ in range(2):
+                self.engine.add("synthetic committed append")
+            request.assert_not_called()
+            self.engine.add("synthetic threshold append")
+            self.completed()
+            self.assertTrue(request.called)
+            self.assertTrue(all(call.kwargs["threshold"] == 3 for call in request.call_args_list))
+
+    def test_close_and_reopen_does_not_reset_threshold_progress(self):
+        self.engine.consolidate()
+        self.assert_empty_bootstrap()
+        self.add(24)
+        self.engine.close()
+        reopened = self.new_engine()
+        reopened._has_consolidation = True
+        with patch.object(self.coordinator, "request_layers", wraps=self.coordinator.request_layers) as request:
+            reopened._maybe_auto_consolidate()
+            request.assert_not_called()
+            reopened.add("synthetic twenty fifth")
+            self.completed()
+            self.assertTrue(request.called)

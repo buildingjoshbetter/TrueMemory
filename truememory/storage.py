@@ -18,6 +18,7 @@ import logging
 import os
 import sqlite3
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -373,6 +374,80 @@ _MAINTENANCE_LAYERS = (
     "clusters", "summaries", "contradictions", "structured_facts",
     "surprise", "episodes", "landmarks", "dunbar",
 )
+
+_STYLE_OUTPUT_INVALIDATE_SQL = """UPDATE maintenance_layers SET
+    outcome='pending',full_rebuild_required=1,successful_coverage='unverified',
+    attempted_epoch=NULL,attempted_revision=NULL,attempted_dependency=NULL,
+    attempted_insert_count=NULL,run_generation=NULL,error_category=NULL
+    WHERE layer='style_vectors'"""
+_STYLE_OUTPUT_TRIGGERS = {
+    "truememory_style_output_" + operation.lower():
+        "CREATE TRIGGER truememory_style_output_" + operation.lower()
+        + " AFTER " + operation + " ON entity_style_vectors BEGIN "
+        + _STYLE_OUTPUT_INVALIDATE_SQL + "; END"
+    for operation in ("INSERT", "UPDATE", "DELETE")
+}
+
+
+def _style_output_tracking_ready(conn: sqlite3.Connection) -> bool:
+    expected = {name: " ".join(sql.split()) for name, sql in _STYLE_OUTPUT_TRIGGERS.items()}
+    installed = {name: " ".join(sql.strip().rstrip(";").split()) for name, sql in conn.execute(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN (?,?,?)", tuple(expected),
+    )}
+    return installed == expected and conn.execute(
+        "SELECT 1 FROM maintenance_layers WHERE layer='style_vectors'").fetchone() is not None
+
+
+def _prepare_style_maintenance(
+    conn: sqlite3.Connection, *, _on_safe_failure: Callable[[sqlite3.OperationalError], None] | None = None,
+) -> None:
+    """Explicitly enroll style output; ordinary schema initialization stays lazy."""
+    expected = {name: " ".join(sql.split()) for name, sql in _STYLE_OUTPUT_TRIGGERS.items()}
+
+    def installed() -> dict[str, str]:
+        return {name: " ".join(sql.strip().rstrip(";").split()) for name, sql in conn.execute(
+            "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN (?,?,?)",
+            tuple(expected),
+        )}
+
+    owned = not conn.in_transaction
+    try:
+        if _style_output_tracking_ready(conn):
+            return
+        conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT truememory_style_tracking")
+    except sqlite3.OperationalError as error:
+        # No preparation writes precede admission. A failed admission is safe
+        # only while the original transaction boundary remains unchanged.
+        if _on_safe_failure is not None and conn.in_transaction == (not owned):
+            _on_safe_failure(error)
+        raise
+    try:
+        conn.execute("UPDATE maintenance_layers SET layer=layer WHERE 0")
+        conn.execute("INSERT OR IGNORE INTO maintenance_layers(layer) VALUES ('style_vectors')")
+        current = installed()
+        if current != expected:
+            for name, sql in _STYLE_OUTPUT_TRIGGERS.items():
+                if current.get(name) != expected[name]:
+                    conn.execute("DROP TRIGGER IF EXISTS " + name)
+                    conn.execute(sql)
+            # Missing/replaced triggers make even v1 output unverified. This
+            # metadata-only invalidation also supersedes a failed attempt.
+            conn.execute(_STYLE_OUTPUT_INVALIDATE_SQL)
+        conn.execute("COMMIT" if owned else "RELEASE SAVEPOINT truememory_style_tracking")
+    except BaseException as error:
+        if conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO SAVEPOINT truememory_style_tracking")
+                conn.execute("RELEASE SAVEPOINT truememory_style_tracking")
+            if (_on_safe_failure is not None and isinstance(error, sqlite3.OperationalError)
+                    and conn.in_transaction == (not owned)):
+                _on_safe_failure(error)
+        # An ended transaction, failed rollback or failed savepoint release
+        # cannot attest that preparation left the previous generation intact.
+        raise
+
 
 _SCHEMA_SQL += _DUNBAR_OWNERSHIP_SQL + ";\n"
 

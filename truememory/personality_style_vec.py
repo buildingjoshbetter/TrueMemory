@@ -26,7 +26,7 @@ import math
 import re
 import sqlite3
 import struct
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -47,6 +47,10 @@ class StyleVectorRebuildRequired(RuntimeError):
     def __init__(self, reason: str) -> None:
         self.reason = reason
         super().__init__(f"Style accumulator rebuild required: {reason}")
+
+
+class _StyleSourceChanged(sqlite3.OperationalError):
+    """A verified source mismatch, distinct from unexpected SQLite failures."""
 
 
 def compute_style_vector(text: str) -> list[float]:
@@ -165,30 +169,36 @@ def _l0_validate_source(
     schema: tuple[tuple, ...],
     query: str,
     source_rows: list[tuple],
+    check_cancel: Callable[[], None] | None = None,
 ) -> None:
     """Compare exact relevant source values while holding writer ownership."""
     error = "L0 source changed during computation; retry the rebuild"
     if _l0_source_schema(conn) != schema:
-        raise sqlite3.OperationalError(error)
+        raise _StyleSourceChanged(error)
     current = conn.execute(query)
     try:
         for expected in source_rows:
+            if check_cancel is not None:
+                check_cancel()
             row = current.fetchone()
             if row is None or tuple(row) != expected:
-                raise sqlite3.OperationalError(error)
+                raise _StyleSourceChanged(error)
         if current.fetchone() is not None:
-            raise sqlite3.OperationalError(error)
+            raise _StyleSourceChanged(error)
     finally:
         current.close()
 
 
 def _compute_entity_style_vectors(
     rows: list[tuple],
+    *, check_cancel: Callable[[], None] | None = None,
 ) -> tuple[dict[str, list[float]], list[tuple]]:
     from collections import defaultdict
 
     by_sender: dict[str, list[str]] = defaultdict(list)
     for sender, content, _timestamp, ordinary in rows:
+        if check_cancel is not None:
+            check_cancel()
         if ordinary:
             by_sender[sender.lower()].append(content)
 
@@ -198,6 +208,8 @@ def _compute_entity_style_vectors(
     for sender, contents in by_sender.items():
         total = [0.0] * DIM
         for content in contents:
+            if check_cancel is not None:
+                check_cancel()
             vec = _validated_style_vector(compute_style_vector(content))
             for index in range(DIM):
                 total[index] += vec[index]
@@ -293,6 +305,48 @@ def _style_append_transaction(conn: sqlite3.Connection) -> Iterator[None]:
                 conn.execute("RELEASE SAVEPOINT truememory_style_append")
 
 
+def _capture_style_source(
+    conn: sqlite3.Connection, check_cancel: Callable[[], None] | None = None,
+) -> tuple[tuple[tuple, ...], str, list[tuple]]:
+    schema = _l0_source_schema(conn)
+    query = (
+        f"SELECT sender, content, timestamp, {_l0_directive_filter(schema)} AS ordinary "
+        "FROM messages WHERE sender != '' ORDER BY sender, timestamp"
+    )
+    rows = []
+    cursor = conn.execute(query)
+    try:
+        for row in cursor:
+            if check_cancel is not None:
+                check_cancel()
+            rows.append(tuple(row))
+    finally:
+        cursor.close()
+    return schema, query, rows
+
+
+def _publish_style_vectors(
+    conn: sqlite3.Connection, schema: tuple[tuple, ...], query: str,
+    rows: list[tuple], stored_rows: list[tuple], *,
+    check_cancel: Callable[[], None] | None = None,
+    before_replace: Callable[[sqlite3.Connection], None] | None = None,
+) -> None:
+    """Publish only inside the transaction owned by the selected entry point."""
+    _l0_validate_source(conn, schema, query, rows, check_cancel)
+    _ensure_style_accumulator_schema(conn)
+    if before_replace is not None:
+        before_replace(conn)
+    if check_cancel is not None:
+        check_cancel()
+    conn.execute("DELETE FROM entity_style_vectors")
+    conn.executemany(
+        """INSERT INTO entity_style_vectors
+           (entity, vector, message_count, updated_at, vector_sum, accumulator_version)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        stored_rows,
+    )
+
+
 def build_entity_style_vectors(conn: sqlite3.Connection) -> dict[str, list[float]]:
     """Batch-build style vectors for every entity (sender) in the database.
 
@@ -313,25 +367,11 @@ def build_entity_style_vectors(conn: sqlite3.Connection) -> dict[str, list[float
     A changed source raises ``sqlite3.OperationalError`` without retrying.
     """
     with _l0_transaction(conn):
-        schema = _l0_source_schema(conn)
-        query = (
-            f"SELECT sender, content, timestamp, {_l0_directive_filter(schema)} AS ordinary "
-            "FROM messages WHERE sender != '' "
-            "ORDER BY sender, timestamp"
-        )
-        rows = [tuple(row) for row in conn.execute(query)]
+        schema, query, rows = _capture_style_source(conn)
     result, stored_rows = _compute_entity_style_vectors(rows)
 
     with _l0_transaction(conn, write=True):
-        _l0_validate_source(conn, schema, query, rows)
-        _ensure_style_accumulator_schema(conn)
-        conn.execute("DELETE FROM entity_style_vectors")
-        conn.executemany(
-            """INSERT INTO entity_style_vectors
-               (entity, vector, message_count, updated_at, vector_sum, accumulator_version)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            stored_rows,
-        )
+        _publish_style_vectors(conn, schema, query, rows, stored_rows)
     return result
 
 
