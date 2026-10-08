@@ -228,7 +228,8 @@ class TestFtsUpdateWrites(EpisodeFixture):
                     with self.assertRaises(sqlite3.DatabaseError):
                         STORAGE._migrate_messages_fts_trigger(self.conn)
                 finally:
-                    self.conn.set_authorizer(None)
+                    # Disabling with None is supported only on Python 3.11+.
+                    self.conn.set_authorizer(lambda *_args: sqlite3.SQLITE_OK)
                 self.assertEqual(self.conn.in_transaction, caller_owned)
                 self.assertEqual(self.snapshot(), before)
                 self.assertEqual(self.conn.execute(
