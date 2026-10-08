@@ -1,0 +1,38 @@
+{
+  "source_sha": "063e5b8844af735a52fde886217a5d26a0f13064",
+  "all_assertions_passed": true,
+  "limitations": "AST/contract fixtures; no host dispatch, model inference, live user data, or network.",
+  "results": {
+    "C06_parser": {
+      "codex_messages": 0,
+      "claude_control_messages": 1
+    },
+    "C05_transcript_admission": {
+      "claude": true,
+      "codex": false,
+      "gemini": false
+    },
+    "C02_provider_autodetect": "openrouter",
+    "C02_extraction_prompt_contains_transcript": true,
+    "C04_telemetry": [
+      {
+        "event": "session_start",
+        "props": {
+          "tier": "edge",
+          "version": "fixture",
+          "platform": "fixture",
+          "arch": "fixture",
+          "python": "fixture",
+          "device_id": "SYNTHETIC_HASH",
+          "email": "fixture@example.invalid"
+        }
+      }
+    ],
+    "C08_openclaw_prompt_seen_by_shared_hook": "",
+    "C07_documented_output_contract": {
+      "cursor": null,
+      "gemini": null,
+      "codex": null
+    }
+  }
+}
