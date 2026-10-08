@@ -85,6 +85,7 @@ def _tmp_config_dir(tmp_path, monkeypatch, ms):
     (home / ".truememory").mkdir()
     monkeypatch.setattr(ms, "_TRUEMEMORY_DIR", home / ".truememory")
     monkeypatch.setattr(ms, "_CONFIG_PATH", home / ".truememory" / "config.json")
+    monkeypatch.setattr(ms, "_CONFIG_LOCK_PATH", home / ".truememory" / "config.json.lock")
     return home
 
 
@@ -158,24 +159,36 @@ def test_ingest_cli_save_warns_on_windows_when_api_key_present(
     tmp_path, monkeypatch, capsys
 ):
     from truememory.ingest import cli as ic
-    cfg_path = tmp_path / ".truememory" / "config.json"
+    import truememory.mcp_server as ms
+    home = _tmp_config_dir(tmp_path, monkeypatch, ms)
+    cfg_path = home / ".truememory" / "config.json"
     monkeypatch.setattr(ic, "_TRUEMEMORY_CONFIG_PATH", cfg_path)
     monkeypatch.setattr(ic.sys, "platform", "win32")
+    assert ic._TRUEMEMORY_CONFIG_PATH == ms._CONFIG_PATH == cfg_path
+    assert ms._TRUEMEMORY_DIR == cfg_path.parent
+    assert ms._CONFIG_LOCK_PATH == cfg_path.parent / "config.json.lock"
 
     ic._save_truememory_config({"tier": "pro", "openrouter_api_key": "sk-or-fake"})
 
     captured = capsys.readouterr()
     assert "windows" in captured.err.lower()
     assert "environment variable" in captured.err.lower()
+    assert json.loads(cfg_path.read_text(encoding="utf-8")) == {"tier": "pro", "openrouter_api_key": "sk-or-fake"}
 
 
 def test_ingest_cli_save_silent_on_posix(tmp_path, monkeypatch, capsys):
     from truememory.ingest import cli as ic
-    cfg_path = tmp_path / ".truememory" / "config.json"
+    import truememory.mcp_server as ms
+    home = _tmp_config_dir(tmp_path, monkeypatch, ms)
+    cfg_path = home / ".truememory" / "config.json"
     monkeypatch.setattr(ic, "_TRUEMEMORY_CONFIG_PATH", cfg_path)
     monkeypatch.setattr(ic.sys, "platform", "linux")
+    assert ic._TRUEMEMORY_CONFIG_PATH == ms._CONFIG_PATH == cfg_path
+    assert ms._TRUEMEMORY_DIR == cfg_path.parent
+    assert ms._CONFIG_LOCK_PATH == cfg_path.parent / "config.json.lock"
 
     ic._save_truememory_config({"tier": "pro", "openrouter_api_key": "sk-or-fake"})
 
     captured = capsys.readouterr()
     assert captured.err == ""
+    assert json.loads(cfg_path.read_text(encoding="utf-8")) == {"tier": "pro", "openrouter_api_key": "sk-or-fake"}
