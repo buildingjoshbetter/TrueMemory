@@ -35,6 +35,7 @@ class InlineBoundaryTests(unittest.TestCase):
         self.assertEqual(len(captured.records), 1)
         record = captured.records[0]
         self.assertEqual(getattr(record, "error_category", None), "source_unreadable")
+        self.assertIn("cannot read transcript", record.getMessage().lower())
         self.assertEqual(record.args, ())
         self.assertIsNone(record.exc_info)
         self.assertNotIn(SENTINEL, str(record.__dict__))

@@ -290,7 +290,7 @@ def parse_transcript(source: str | Path) -> list[Message]:
     try:
         path = _transcript_path(source)
     except OSError:
-        log.error("Transcript source unreadable", extra={"error_category": "source_unreadable"})
+        log.error("Cannot read transcript", extra={"error_category": "source_unreadable"})
         return []
 
     if path is not None:
@@ -299,7 +299,7 @@ def parse_transcript(source: str | Path) -> list[Message]:
         except FileNotFoundError:
             return []
         except (OSError, ValueError):
-            log.error("Transcript source unreadable", extra={"error_category": "source_unreadable"})
+            log.error("Cannot read transcript", extra={"error_category": "source_unreadable"})
             return []
     else:
         text = source
