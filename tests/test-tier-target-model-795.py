@@ -199,18 +199,23 @@ class TestTierTargetIdentity(unittest.TestCase):
         self.assertEqual(self.server._embed_state.model_id, "qwen3_256")
         self.vector.set_embedding_model.assert_called_once_with("pro")
 
-    def test_failed_distinct_load_preserves_old_snapshot_and_global_state(self) -> None:
+    def test_failed_distinct_load_empties_cache_preserves_globals_and_allows_reload(self) -> None:
         self.request("edge")
-        old = self.server._embed_state
+        old = weakref.ref(self.server._embed_state.model)
         before = self.globals()
         self.server._build_embed_model = Mock(side_effect=RuntimeError("synthetic load failure"))
         with self.assertRaisesRegex(RuntimeError, "synthetic load failure"):
             self.request("pro")
-        self.assertIs(self.server._embed_state, old)
+        self.assertIsNone(self.server._embed_state)
+        self.assertIsNone(old())
         self.assertEqual(self.globals(), before)
         self.assertEqual(self.server._inflight, 0)
         self.assertFalse(self.server._lock.locked())
         self.assertFalse(self.server._inference_lock.locked())
+        self.server._build_embed_model = self.build
+        self.assertTrue(self.request("edge")["ok"])
+        self.assertEqual(self.server._embed_state.model_id, "model2vec")
+        self.assertEqual(len(self.builds), 2)
 
     def test_removed_model_rejection_matches_real_resolver_without_mutation(self) -> None:
         self.request("base")
@@ -421,6 +426,7 @@ class TestTierTargetIdentity(unittest.TestCase):
         with self.server._lock:
             self.server._fast_encoder = FakeModel("qwen3_256", "cpu")
             self.server._fast_model_id = "qwen3_256"
+            self.server._fast_generation = self.server._embed_state.generation
             self.assertTrue(self.server._handle_fast_embed(["synthetic"], "pro")["ok"])
         self.assertEqual(snapshot.tier, "base")
         self.assertIs(snapshot.model, self.server._embed_state.model)
@@ -501,7 +507,7 @@ class TestTierTargetIdentity(unittest.TestCase):
         self.assertEqual(self.server._embed_state.model_id, "model2vec")
         self.assertEqual(self.server._embed_state.model.device, "cpu")
 
-    def test_old_instance_can_still_be_retained_during_distinct_load(self) -> None:
+    def test_old_instance_is_released_before_distinct_load(self) -> None:
         self.request("edge")
         old = weakref.ref(self.server._embed_state.model)
         observed: list[bool] = []
@@ -512,7 +518,7 @@ class TestTierTargetIdentity(unittest.TestCase):
 
         self.server._build_embed_model = build
         self.request("base")
-        self.assertEqual(observed, [True])
+        self.assertEqual(observed, [False])
         self.assertIsNone(old())
 
 
