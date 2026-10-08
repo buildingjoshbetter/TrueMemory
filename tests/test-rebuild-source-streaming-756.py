@@ -607,10 +607,10 @@ class TestStreamingSQLiteVec(TestStreamingBuilders):
 class TestLegacyRebuildBridge(unittest.TestCase):
     setUp = TestStreamingBuilders.setUp
 
-    def legacy(self, *, minimal=False, unique_content=False, ids=(-3, 0, 2, 5)):
+    def legacy(self, *, minimal=False, unique_content=False, ids=(-3, 0, 2, 5), cached_statements=0):
         path = Path(self.temp.name) / f"synthetic-legacy-{len(getattr(self, 'legacy_paths', []))}.sqlite"
         self.legacy_paths = [*getattr(self, "legacy_paths", []), path]
-        conn = sqlite3.connect(path, cached_statements=0)
+        conn = sqlite3.connect(path, cached_statements=cached_statements)
         self.addCleanup(conn.close)
         fields = "id INTEGER PRIMARY KEY,content TEXT"
         if unique_content:
@@ -767,9 +767,10 @@ class TestLegacyRebuildBridge(unittest.TestCase):
         self.assertEqual(before, self.source.capture_source(conn))
 
     def test_denied_setup_or_release_preserves_target_and_caller_data_before_model(self):
-        for fault in ("ddl", "release"):
-            with self.subTest(fault=fault):
-                conn, _ = self.legacy()
+        # Python 3.10 keeps at least five cached statements even when given zero.
+        for fault, cached_statements in ((fault, size) for fault in ("ddl", "release") for size in (0, 5, 100)):
+            with self.subTest(fault=fault, cached_statements=cached_statements):
+                conn, _ = self.legacy(cached_statements=cached_statements)
                 conn.execute("INSERT INTO vec_messages(rowid,embedding) VALUES (99,?)", (struct.pack("2f", 1., 0.),))
                 conn.execute("CREATE TABLE synthetic_caller(value TEXT)")
                 conn.commit()
@@ -778,20 +779,40 @@ class TestLegacyRebuildBridge(unittest.TestCase):
                 def authorize(action, first, second, _database, _source):
                     is_target = ((fault == "ddl" and action == sqlite3.SQLITE_CREATE_TRIGGER)
                                  or (fault == "release" and action == sqlite3.SQLITE_SAVEPOINT and first == "RELEASE"
-                                     and second == "rebuild_source" and conn.execute(
-                                         "SELECT 1 FROM sqlite_master WHERE name=?", (self.source._BRIDGE_TABLE,),
-                                     ).fetchone() is not None))
+                                     and second == "rebuild_source"))
                     if is_target and not denied:
                         denied.append(True)
                         return sqlite3.SQLITE_DENY
                     return sqlite3.SQLITE_OK
-                conn.set_authorizer(authorize)
+                bridge_table = self.source._BRIDGE_TABLE
+                armed = []
+
+                class Probe:
+                    def __getattr__(self, name: str) -> object:
+                        return getattr(conn, name)
+
+                    def execute(self, sql: str, *args: object) -> sqlite3.Cursor:
+                        if fault == "release" and sql == "RELEASE SAVEPOINT rebuild_source" and not armed:
+                            installed = conn.execute(
+                                "SELECT 1 FROM sqlite_master WHERE name=?", (bridge_table,),
+                            ).fetchone() is not None
+                            if installed:
+                                # Authorizers run at prepare time. Re-arm outside
+                                # the callback so cached RELEASE is reauthorized.
+                                conn.set_authorizer(authorize)
+                                armed.append(True)
+                        return conn.execute(sql, *args)
+
+                if fault == "ddl":
+                    conn.set_authorizer(authorize)
                 before_calls = len(self.calls)
                 try:
                     with self.assertRaises(sqlite3.DatabaseError):
-                        self.vector.build_vectors(conn, txn_batch=1)
+                        self.vector.build_vectors(Probe(), txn_batch=1)
                 finally:
                     conn.set_authorizer(lambda *_args: sqlite3.SQLITE_OK)
+                self.assertEqual(denied, [True])
+                self.assertEqual(armed, [True] if fault == "release" else [])
                 self.assertTrue(conn.in_transaction)
                 self.assertEqual(len(self.calls), before_calls)
                 conn.commit()
