@@ -492,12 +492,13 @@ def _save_truememory_config(config: dict) -> None:
     _save_config(config)
 
 
-def _setup_cli_integrations(args, config):
-    """Step 3 of setup: detect installed CLIs and configure TrueMemory."""
+def _setup_cli_integrations(args: argparse.Namespace, config: dict) -> list[str]:
+    """Configure selected CLIs and return IDs whose setup failed."""
     from truememory.hooks.registry import detect_installed, get_adapter
     from truememory.hooks.cli import install_cli
 
     cli_arg = getattr(args, "cli", "")
+    failures: list[str] = []
 
     if cli_arg:
         requested_ids = [c.strip() for c in cli_arg.split(",") if c.strip()]
@@ -505,20 +506,22 @@ def _setup_cli_integrations(args, config):
             adapter = get_adapter(cli_id)
             if adapter is None:
                 print(f"  \033[33m⚠ Unknown CLI: {cli_id}\033[0m")
+                failures.append(cli_id)
                 continue
             print(f"  Setting up {adapter.name}...")
             if install_cli(cli_id, user_id=config.get("user_id", "")):
                 print(f"  \033[32m✓ {adapter.name} — configured\033[0m")
             else:
                 print(f"  \033[31m✗ {adapter.name} — failed\033[0m")
-        return
+                failures.append(cli_id)
+        return failures
 
     installed = detect_installed()
 
     if not installed:
         print("  No supported CLIs detected. Install hooks manually later with:")
         print("    truememory-ingest setup --cli <name>")
-        return
+        return failures
 
     print("  \033[1mCLI Integration\033[0m")
     print("  ──────────────")
@@ -553,10 +556,12 @@ def _setup_cli_integrations(args, config):
             print(f"  \033[32m✓ {adapter.name} — MCP server configured, hooks installed\033[0m")
         else:
             print(f"  \033[31m✗ {adapter.name} — setup failed\033[0m")
+            failures.append(adapter.cli_id)
 
     if len(selected) > 1:
         names = ", ".join(a.name for a in selected)
-        print(f"\n  TrueMemory is ready. Your memories sync across {names}.")
+        print(f"\n  CLI setup attempted for {names}. Check each result above.")
+    return failures
 
 
 def _run_setup(args):
@@ -586,30 +591,39 @@ def _run_setup(args):
             print(f"  \033[33m⚠ Invalid choice '{choice}', defaulting to Edge tier.\033[0m")
             tier = "edge"
 
-    # Pre-load the embedding model so first search isn't slow
+    # Exercise one synthetic input so a lazy model-server proxy is not mistaken
+    # for a successful download/load. No user memories are read by this check.
+    model_failures: list[str] = []
     print()
     print("  \033[1mDownloading embedding model...\033[0m")
     try:
         os.environ["TRUEMEMORY_EMBED_MODEL"] = tier
-        from truememory.vector_search import set_embedding_model, get_model
+        from truememory.vector_search import _encode_with_mps_fallback, set_embedding_model, get_model
         set_embedding_model(tier)
-        get_model()  # triggers download if not cached
+        _encode_with_mps_fallback(
+            get_model(), ["TrueMemory setup readiness check."], show_progress_bar=False,
+        )
         if tier in ("base", "pro"):
             print("  \033[32m✓ Qwen3-Embedding-0.6B @ 256d Matryoshka ready\033[0m")
         else:
             print("  \033[32m✓ potion-base-8M (256-dim) ready\033[0m")
     except Exception as e:
-        print(f"  \033[33m⚠ Model download failed: {e}\033[0m")
-        print("  The model will download on first use instead.")
+        model_failures.append("embedding model")
+        print(f"  Embedding model readiness check failed: {e}", file=sys.stderr)
 
-    # Also pre-download the cross-encoder reranker if available
+    # Verify the selected tier's reranker, including the model-server path.
     try:
-        from truememory.reranker import get_reranker
+        from truememory.reranker import get_reranker, set_active_tier
+        set_active_tier(tier)
         print("  Downloading reranker model...")
-        get_reranker()
+        get_reranker().predict(
+            [("TrueMemory setup readiness check.", "TrueMemory setup readiness check.")],
+            show_progress_bar=False,
+        )
         print("  \033[32m✓ Cross-encoder reranker ready\033[0m")
-    except Exception:
-        pass  # Optional component, don't fail setup
+    except Exception as e:
+        model_failures.append("reranker")
+        print(f"  Reranker readiness check failed: {e}", file=sys.stderr)
 
     # ── Step 2: API key for HyDE / deep search ───────────────────────
     print()
@@ -693,12 +707,25 @@ def _run_setup(args):
 
     # ── Step 3: CLI integration ─────────────────────────────────────────
     print()
-    _setup_cli_integrations(args, config)
+    integration_failures = _setup_cli_integrations(args, config)
 
     # ���─ Done ──────────────────────────────────────────────────────────
     print()
     print("  \033[1;33m══════════════════════════════════════════════\033[0m")
-    print("  \033[1mSetup complete!\033[0m")
+    if model_failures or integration_failures:
+        print("  Setup saved; readiness is incomplete.")
+        if model_failures:
+            print("  Selected-tier model readiness is incomplete.")
+            print(f"  Failed model checks: {', '.join(model_failures)}")
+            print("  Restore model-download access or fix the model error above, then retry:")
+            print("    truememory-ingest setup --non-interactive")
+        if integration_failures:
+            print(f"  Failed CLI integrations: {', '.join(integration_failures)}")
+            print("  Resolve the CLI setup errors above, then retry using a supported CLI name:")
+            print("    truememory-ingest setup --non-interactive --cli <name>")
+        print("  Existing installation and saved configuration were retained.")
+    else:
+        print("  \033[1mSetup complete!\033[0m")
     print(f"  Tier:     {tier}")
     print(f"  Provider: {llm_provider or 'none (basic search only)'}")
     print()
@@ -706,6 +733,8 @@ def _run_setup(args):
     print()
     print("  \033[2mThanks for using TrueMemory, a Sauron company.\033[0m")
     print()
+    if model_failures or integration_failures:
+        raise SystemExit(1)
 
 
 def _run_upgrade_tier(args):
