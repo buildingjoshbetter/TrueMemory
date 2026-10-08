@@ -174,7 +174,7 @@ class TestM43ThrottlerToctou:
 
         class FakeThrottler:
             def before_batch(self):
-                pass
+                return 2, {}
 
             def after_batch(self, n, t):
                 pass
