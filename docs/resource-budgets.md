@@ -429,3 +429,8 @@ tie compensation or scatter fail the output and membership checks. These
 tests do not establish native numeric or performance acceptance. The 64-row
 reference still requires ordered token-feature, raw-score and timing checks
 on the pinned runtime; lower-limit numeric failures are not waived.
+
+Unplanned reranker calls retain the positional result-writer interface on
+success and OOM retry. Only planned slices supply occurrence indices. The
+regression checks both explicit-eight and default single-batch calls with a
+positional-only writer wrapper, including a later failed slice and its retry.
