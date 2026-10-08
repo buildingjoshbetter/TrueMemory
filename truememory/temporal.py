@@ -891,12 +891,11 @@ def detect_landmark_events(conn):
     """
     import json
 
-    conn.execute("DELETE FROM landmark_events")
-
-    rows = conn.execute(
+    source_sql = (
         "SELECT id, content, sender, recipient, timestamp FROM messages "
         "WHERE timestamp != '' ORDER BY timestamp"
-    ).fetchall()
+    )
+    rows = conn.execute(source_sql).fetchall()
 
     # Landmark event patterns
     event_patterns = {
@@ -930,7 +929,7 @@ def detect_landmark_events(conn):
         ),
     }
 
-    count = 0
+    events = []
     for msg_id, content, sender, recipient, timestamp in rows:
         for event_type, pattern in event_patterns.items():
             match = pattern.search(content)
@@ -957,14 +956,29 @@ def detect_landmark_events(conn):
                     if noun not in common and noun.lower() not in [r.lower() for r in related]:
                         related.append(noun)
 
-                conn.execute(
-                    "INSERT INTO landmark_events "
-                    "(event_name, timestamp, event_type, related_entities, source_message_id) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                events.append(
                     (event_context, timestamp, event_type, json.dumps(related[:10]), msg_id)
                 )
-                count += 1
                 break  # One event per message is enough
 
-    conn.commit()
-    return count
+    conn.execute("SAVEPOINT truememory_landmarks")
+    completed = False
+    try:
+        # Own the writer before validating the source used for computation.
+        conn.execute("DELETE FROM landmark_events WHERE 0")
+        if conn.execute(source_sql).fetchall() != rows:
+            raise sqlite3.OperationalError("Landmark source changed during computation; retry the operation")
+        conn.execute("DELETE FROM landmark_events")
+        conn.executemany(
+            "INSERT INTO landmark_events "
+            "(event_name, timestamp, event_type, related_entities, source_message_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            events,
+        )
+        conn.execute("RELEASE truememory_landmarks")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            conn.execute("ROLLBACK TO truememory_landmarks")
+            conn.execute("RELEASE truememory_landmarks")
+    return len(events)

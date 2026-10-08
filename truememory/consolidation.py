@@ -80,22 +80,17 @@ def _consolidation_write(conn: sqlite3.Connection, name: str):
     """
     sp = f"consolidation_{name}"
     conn.execute(f"SAVEPOINT {sp}")
+    completed = False
     try:
         yield
-    except BaseException:
-        try:
-            conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
-        except Exception:
-            pass
-        # Always release so we don't leave a dangling savepoint on the
-        # caller's transaction.
-        try:
-            conn.execute(f"RELEASE SAVEPOINT {sp}")
-        except Exception:
-            pass
-        raise
-    else:
         conn.execute(f"RELEASE SAVEPOINT {sp}")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            # RELEASE can fail while committing the outermost savepoint.
+            # Never release failed writes unless their rollback succeeded.
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+            conn.execute(f"RELEASE SAVEPOINT {sp}")
 
 
 def _get_all_messages_chrono(conn: sqlite3.Connection) -> list[dict]:
@@ -893,8 +888,6 @@ def build_summaries(conn: sqlite3.Connection) -> int:
         Number of summaries built.
     """
     all_msgs = _get_all_messages_chrono(conn)
-    if not all_msgs:
-        return 0
 
     now = datetime.now(timezone.utc).isoformat()
     # Collect all summary rows first WITHOUT opening a write transaction, so the
@@ -1056,7 +1049,7 @@ def build_summaries(conn: sqlite3.Connection) -> int:
     # table is never left emptied without its replacement), and never touches
     # isolation_level.
     with _consolidation_write(conn, "summaries"):
-        conn.execute("DELETE FROM summaries")
+        conn.execute("DELETE FROM summaries WHERE period IN ('monthly', 'entity_monthly')")
         if rows:
             conn.executemany(
                 "INSERT INTO summaries "
