@@ -10,6 +10,48 @@ models once and serves all MCP sessions via a Unix domain socket. Each MCP
 session is a lightweight proxy (~80 MB) that delegates model inference to the
 shared server.
 
+Sharing is the default policy even when the endpoint is missing after cold
+start, idle exit or a crash. Embedding and reranker getters return lightweight
+proxies; endpoint absence or proxy failure never silently constructs local model
+copies. Set `TRUEMEMORY_NO_MODEL_SERVER=1` before loading models for explicit local
+mode. Existing model/device selection and cached-model lifetime are unchanged;
+changing the environment is not a live mode switch.
+
+### Startup and ownership
+
+Clients coordinate startup with `model_server.start.lock` and an atomic
+`model_server.start.json` generation record. Only one launch is started while
+that process identity remains live. A caller timing out leaves the pending
+child available to later callers. Child identity includes process creation time,
+so a reused PID cannot keep a dead launch alive. A crashed launcher can be
+replaced; a superseded managed child cannot publish an endpoint. These records
+contain process coordination metadata, not memory contents.
+
+The daemon's separate lifetime `model_server.lock` is the authority for binding
+and reclaiming endpoint files. Clients do not remove socket, PID, port or token
+files. A starter that never acquired bind ownership cannot remove a winner's
+files. A PID file alone does not prove readiness. Readiness requires a bounded
+protocol response, including the existing Windows loopback token exchange.
+An authenticated busy response proves presence; a foreign protocol is surfaced
+without restarting it or loading local models.
+
+Startup lock waits, optional macOS app registration and readiness probes share
+one monotonic budget: at most 30 seconds, further capped by an explicit caller's
+remaining request time. Cosmetic app construction is skipped for short budgets.
+Expired callers do not start new children. Existing legacy 120-second request
+timeouts and the single autostart/retry contract remain unchanged. Startup or
+inference unavailability is reported to the caller; inspect
+`~/.truememory/model_server.stderr` and retry. A live but stalled launch is not
+repeatedly replaced or signaled automatically.
+
+Shutdown closes admission without claiming to preempt native inference. If
+admitted or in-flight work still retains models, cleanup keeps its bind lock,
+endpoint artifacts and model references until process exit. It does not wait
+indefinitely inside cleanup, and that server instance cannot be restarted.
+The next bind owner reclaims stale files after the old process exits. This
+prevents a replacement daemon from loading models while the old daemon's native
+work is still draining.
+
 ## Per-Tier Budgets
 
 | Tier | Model Server | Each MCP Session | 5 Sessions Total |

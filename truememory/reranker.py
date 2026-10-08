@@ -184,7 +184,8 @@ def get_reranker(model_name: str | None = None, device: str | None = None):
     Lazy-load the cross-encoder reranker (singleton).
 
     When the shared model server is enabled (default), returns a proxy
-    that routes inference to the server. Falls back to local loading.
+    that routes inference to the server even when its endpoint is absent.
+    Local loading requires explicit TRUEMEMORY_NO_MODEL_SERVER=1.
 
     Args:
         model_name: HuggingFace model ID.  If None (the default), resolves via
@@ -211,17 +212,10 @@ def get_reranker(model_name: str | None = None, device: str | None = None):
 
         from truememory.model_client import use_model_server, get_reranker_proxy
         if use_model_server():
-            try:
-                proxy = get_reranker_proxy(model_name=name)
-                _model = proxy
-                _model_name = name
-                return proxy
-            except Exception:
-                log.warning(
-                    "Model server available but reranker proxy failed — "
-                    "falling back to local model loading (high memory cost). "
-                    "Check ~/.truememory/model_server.stderr for details."
-                )
+            proxy = get_reranker_proxy(model_name=name)
+            _model = proxy
+            _model_name = name
+            return proxy
 
         from sentence_transformers import CrossEncoder
 
