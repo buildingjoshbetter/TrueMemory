@@ -246,6 +246,10 @@ class ModelServer:
         self._reranker = None
         self._reranker_name: str | None = None
         self._lock = threading.Lock()
+        # Main models stay exclusively owned through loading, recovery and
+        # CPU retries, even while the state lock is released (issue #738).
+        # Lock order: inference -> state; the fast lane owns only _fast_lock.
+        self._inference_lock = threading.Lock()
         # Issue #577: idle-tracking gets its own lock so the single-text
         # fast lane (and the idle checker) never block on the global
         # request lock while a batch encode is in flight.
@@ -324,9 +328,9 @@ class ModelServer:
 
         Caller MUST hold ``self._lock``. Marks the embed path sticky-CPU
         (loud log once), flushes the MPS cache, and moves the model to CPU —
-        all atomically in the caller's lock hold. Retry placement belongs to
-        the caller: single texts re-encode inside the lock (ms-scale);
-        batches re-encode after releasing it so other clients don't starve.
+        all atomically in the caller's lock hold. The caller retains main
+        inference ownership throughout recovery and retry. Batch retries
+        release the state lock so bookkeeping and the fast lane stay responsive.
         """
         from truememory.mps_utils import flush_mps_cache
         self._mark_sticky_cpu("embed")
@@ -514,7 +518,7 @@ class ModelServer:
     ) -> dict | None:
         """Single-text fast lane (issue #577).
 
-        Tries the main path without blocking; when the global lock is busy
+        Tries the main path without blocking; when its inference owner is busy
         (a batch encode or OOM recovery is in progress) the text is encoded
         on a dedicated CPU encoder OUTSIDE the global lock, so hook recall
         queries never wait on ingestion work. Fast-lane requests skip the
@@ -526,27 +530,30 @@ class ModelServer:
         """
         deadline = deadline or _RequestDeadline()
         deadline.check()
-        if self._lock.acquire(blocking=False):
+        if self._inference_lock.acquire(blocking=False):
             try:
-                deadline.check()
-                model = self._get_embed_model(tier)
-                deadline.check()
-                try:
-                    vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
-                except RuntimeError as exc:
-                    from truememory.mps_utils import is_mps_oom
-                    if not is_mps_oom(exc):
-                        raise
-                    # Same recovery path as the batch handler, atomic in
-                    # this lock hold; a single text on CPU is ms-scale, so
-                    # the retry stays under the lock too.
-                    self._check_embed_recovery_deadline_locked(model, deadline)
-                    self._recover_embed_oom_locked(model, deadline)
-                    deadline.check()
-                    vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
-                return {"ok": True, "vectors": np.asarray(vectors, dtype=np.float32)}
+                if self._lock.acquire(blocking=False):
+                    model = None
+                    try:
+                        deadline.check()
+                        model = self._get_embed_model(tier)
+                        deadline.check()
+                        try:
+                            vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
+                        except RuntimeError as exc:
+                            from truememory.mps_utils import is_mps_oom
+                            if not is_mps_oom(exc):
+                                raise
+                            self._check_embed_recovery_deadline_locked(model, deadline)
+                            self._recover_embed_oom_locked(model, deadline)
+                            deadline.check()
+                            vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
+                        return {"ok": True, "vectors": np.asarray(vectors, dtype=np.float32)}
+                    finally:
+                        model = None
+                        self._lock.release()
             finally:
-                self._lock.release()
+                self._inference_lock.release()
 
         try:
             with deadline.locked(self._fast_lock):
@@ -629,47 +636,50 @@ class ModelServer:
                     self._activate_throttler()
 
             limit, throttler = self._request_batch_limit(batch_limit, deadline)
-            encode_start = time.monotonic()
-            vectors = None
-            model = None
-            offset = 0
-            while offset < len(texts) or vectors is None:
-                retry = None
-                with deadline.locked(self._lock):
-                    if model is None:
-                        model = self._get_embed_model(tier)
-                    # Keep the existing model ownership across successful slices.
-                    # Releasing here would let other tiers load additional models.
+            with deadline.locked(self._inference_lock):
+                model = None
+                try:
+                    encode_start = time.monotonic()
+                    vectors = None
+                    offset = 0
                     while offset < len(texts) or vectors is None:
-                        deadline.check()
-                        batch = texts[offset:offset + limit]
-                        try:
-                            values = model.encode(batch, batch_size=limit, show_progress_bar=False)
-                        except RuntimeError as exc:
-                            from truememory.mps_utils import is_mps_oom
-                            if not is_mps_oom(exc):
-                                raise
-                            self._check_embed_recovery_deadline_locked(model, deadline)
-                            self._recover_embed_oom_locked(model, deadline)
-                            retry = batch
-                            break
-                        vectors = _store_batch_result(vectors, values, offset, len(batch), len(texts))
-                        offset += len(batch)
-                if retry is not None:
-                    # Preserve #577's unlocked CPU retry; never repeat completed slices.
-                    deadline.check()
-                    log.warning("MPS OOM during encoding; retrying microbatch on CPU")
-                    values = model.encode(retry, batch_size=limit, show_progress_bar=False)
-                    vectors = _store_batch_result(vectors, values, offset, len(retry), len(texts))
-                    offset += len(retry)
-            self._after_request_batches(throttler, len(texts), encode_start, deadline)
+                        retry = None
+                        with deadline.locked(self._lock):
+                            if model is None:
+                                model = self._get_embed_model(tier)
+                            while offset < len(texts) or vectors is None:
+                                deadline.check()
+                                batch = texts[offset:offset + limit]
+                                try:
+                                    values = model.encode(batch, batch_size=limit, show_progress_bar=False)
+                                except RuntimeError as exc:
+                                    from truememory.mps_utils import is_mps_oom
+                                    if not is_mps_oom(exc):
+                                        raise
+                                    self._check_embed_recovery_deadline_locked(model, deadline)
+                                    self._recover_embed_oom_locked(model, deadline)
+                                    retry = batch
+                                    break
+                                vectors = _store_batch_result(vectors, values, offset, len(batch), len(texts))
+                                offset += len(batch)
+                        if retry is not None:
+                            # Release only the state lock; inference ownership
+                            # still covers the retry and remaining slices.
+                            deadline.check()
+                            log.warning("MPS OOM during encoding; retrying microbatch on CPU")
+                            values = model.encode(retry, batch_size=limit, show_progress_bar=False)
+                            vectors = _store_batch_result(vectors, values, offset, len(retry), len(texts))
+                            offset += len(retry)
+                    self._after_request_batches(throttler, len(texts), encode_start, deadline)
 
-            with deadline.locked(self._lock):
-                should_deactivate = self._throttler_active and len(self._embed_timestamps) < 3
-                if should_deactivate:
-                    self._deactivate_throttler()
+                    with deadline.locked(self._lock):
+                        should_deactivate = self._throttler_active and len(self._embed_timestamps) < 3
+                        if should_deactivate:
+                            self._deactivate_throttler()
 
-            return {"ok": True, "vectors": vectors}
+                    return {"ok": True, "vectors": vectors}
+                finally:
+                    model = None
 
         if op in ("rerank", "rerank_batched"):
             pairs = request["pairs"]
@@ -680,42 +690,46 @@ class ModelServer:
             except ValueError as exc:
                 return {"ok": False, "error": str(exc)}
             limit, throttler = self._request_batch_limit(batch_limit, deadline)
-            predict_start = time.monotonic()
-            scores = None
-            reranker = None
-            offset = 0
-            while offset < len(pairs) or scores is None:
-                retry = None
-                with deadline.locked(self._lock):
-                    if reranker is None:
-                        reranker = self._get_reranker(model_name)
+            with deadline.locked(self._inference_lock):
+                reranker = None
+                try:
+                    predict_start = time.monotonic()
+                    scores = None
+                    offset = 0
                     while offset < len(pairs) or scores is None:
-                        deadline.check()
-                        batch = pairs[offset:offset + limit]
-                        try:
-                            values = reranker.predict(batch, batch_size=limit, show_progress_bar=False)
-                        except RuntimeError as exc:
-                            from truememory.mps_utils import is_mps_oom, flush_mps_cache
-                            if not is_mps_oom(exc):
-                                raise
-                            self._mark_sticky_cpu("rerank")
-                            self._reranker = None
-                            self._reranker_name = None
+                        retry = None
+                        with deadline.locked(self._lock):
+                            if reranker is None:
+                                reranker = self._get_reranker(model_name)
+                            while offset < len(pairs) or scores is None:
+                                deadline.check()
+                                batch = pairs[offset:offset + limit]
+                                try:
+                                    values = reranker.predict(batch, batch_size=limit, show_progress_bar=False)
+                                except RuntimeError as exc:
+                                    from truememory.mps_utils import is_mps_oom, flush_mps_cache
+                                    if not is_mps_oom(exc):
+                                        raise
+                                    self._mark_sticky_cpu("rerank")
+                                    self._reranker = None
+                                    self._reranker_name = None
+                                    deadline.check()
+                                    flush_mps_cache()
+                                    deadline.check()
+                                    reranker = self._get_reranker(model_name)
+                                    retry = batch
+                                    break
+                                scores = _store_batch_result(scores, values, offset, len(batch), len(pairs))
+                                offset += len(batch)
+                        if retry is not None:
                             deadline.check()
-                            flush_mps_cache()
-                            deadline.check()
-                            reranker = self._get_reranker(model_name)
-                            retry = batch
-                            break
-                        scores = _store_batch_result(scores, values, offset, len(batch), len(pairs))
-                        offset += len(batch)
-                if retry is not None:
-                    deadline.check()
-                    values = reranker.predict(retry, batch_size=limit, show_progress_bar=False)
-                    scores = _store_batch_result(scores, values, offset, len(retry), len(pairs))
-                    offset += len(retry)
-            self._after_request_batches(throttler, len(pairs), predict_start, deadline)
-            return {"ok": True, "scores": scores}
+                            values = reranker.predict(retry, batch_size=limit, show_progress_bar=False)
+                            scores = _store_batch_result(scores, values, offset, len(retry), len(pairs))
+                            offset += len(retry)
+                    self._after_request_batches(throttler, len(pairs), predict_start, deadline)
+                    return {"ok": True, "scores": scores}
+                finally:
+                    reranker = None
 
         return {"ok": False, "error": f"Unknown op: {op}"}
 
