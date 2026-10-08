@@ -131,3 +131,61 @@ Linux or CUDA tests cannot establish MPS behavior or Mac thermal performance.
 The public contracts were checked against PyTorch 2.12 documentation and the
 installed 2.14.1 Python API source used for isolated validation. Native MPS
 initialization and model-fit measurements remain a separate validation gate.
+
+## Model-server request admission
+
+The server bounds accepted work before reading a request body or decoding its
+JSON. These are transport and backlog limits, not a process RSS limit. Decoded
+Python objects, response serialization, model weights and native workspaces are
+outside the byte accounting below.
+
+| Variable | Default | Valid range | Meaning |
+|----------|---------|-------------|---------|
+| `TRUEMEMORY_MODEL_SERVER_MAX_HANDLERS` | 16 | 1..128 | Maximum admitted requests and worker threads |
+| `TRUEMEMORY_MODEL_SERVER_MAX_REQUEST_BYTES` | 33554432 | 10485760..1073741824 | Aggregate advertised frame bytes reserved by admitted requests |
+| `TRUEMEMORY_MODEL_SERVER_HEADER_TIMEOUT_MS` | 1000 | 100..30000 | Total time for authentication and frame header |
+| `TRUEMEMORY_MODEL_SERVER_FRAME_TIMEOUT_MS` | 30000 | 100..120000 | Total authentication, header and body receive time from connection acceptance |
+
+Values must be ASCII decimal integers in the stated ranges. Invalid values stop
+server startup with an explicit configuration error; zero does not mean unlimited.
+The existing per-frame limit remains 10485760 bytes (10 MiB).
+
+With defaults, the server has at most 16 admitted requests and one accept-loop
+staging socket: `16 + 1 = 17` accepted sockets. The operating system's listen
+backlog is separate. Reserved request lengths satisfy
+`sum(frame_bytes) <= 33554432`. Three maximum frames reserve
+`3 * 10485760 = 31457280` bytes; a fourth would require
+`4 * 10485760 = 41943040 > 33554432` and is rejected. Credits remain reserved
+through receiving, decoding, queued inference, computation and response sending.
+They return only after that work ends and its payload references are dropped.
+
+Authentication and protocol version 1 are unchanged. After authentication, an
+exhausted slot or byte budget returns an error with `error_code: server_busy`
+and a fixed `retry_after_ms: 250` hint. The hint does not schedule a retry.
+New clients raise `ModelServerBusyError` without retrying, restarting the daemon,
+or loading a local model copy. Legacy clients can read the usual framed error;
+a stalled sender may instead encounter a bounded transport failure. A rejected
+body is briefly drained using a 4096-byte scratch buffer, with a 250 ms total limit.
+Receive deadlines apply to the whole phase, so sending occasional bytes cannot
+keep a slot indefinitely. Header and frame deadlines both start at connection
+acceptance: a header that consumes 1 second leaves 29 seconds of the default
+30-second frame budget. The client exception also exposes the fixed retry hint.
+
+The legacy frame header contains neither operation nor deadline. Caller deadlines
+are therefore checked immediately after bounded JSON decoding, before waiting for
+inference or loading a model. Requests with no effective caller deadline have a
+separate 120-second queue ceiling measured from transport acceptance. Once model
+work starts, that queue ceiling does not impose a computation timeout. Caller
+deadlines still apply while queued and between batches; a present, valid caller
+deadline replaces the legacy queue ceiling, including when it is longer than
+120 seconds. Slot and byte credits remain bounded in either case. Internal
+admission state never comes from the request JSON.
+
+Admitted single-text embedding requests retain the existing CPU fast path during
+main-model contention. There is no reserved query capacity: at saturation even a
+query or ping can receive busy. Shutdown closes transport sockets and wakes queued
+lock waits. Active native inference cannot be preempted and retains its credits
+until it returns; graceful interpreter exit also waits for active pool workers.
+A valid client may half-close its write side while awaiting a response, so EOF
+after a complete frame alone does not cancel queued work. Its caller deadline or
+the legacy queue ceiling still bounds the wait.
