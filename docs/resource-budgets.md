@@ -434,3 +434,37 @@ Unplanned reranker calls retain the positional result-writer interface on
 success and OOM retry. Only planned slices supply occurrence indices. The
 regression checks both explicit-eight and default single-batch calls with a
 positional-only writer wrapper, including a later failed slice and its retry.
+
+### Resident model replacement and stale CPU clones (R13 / #297)
+
+Distinct embedding and reranker replacements release the obsolete cached
+instance before starting the new constructor. This is a memory-first policy:
+if construction fails, the old warm cache is gone and a later request for its
+identity must reload it. Compatible aliases still reuse the same instance.
+Main inference ownership continues to cover loading, inference and recovery.
+
+Each main embedding residency has an opaque generation. Alias retags preserve
+it; unloading and reloading the same identity creates a new generation. Fast
+CPU construction captures only the resolved identity and generation, without
+retaining the main model snapshot. It drops any obsolete CPU cache before
+construction. A clone built across a generation change cannot publish into the
+current cache, including A -> B -> A changes. Its already-captured request may
+finish on that identity, after which the uncached clone is released.
+
+Main publication tries to retire an idle stale fast cache without waiting for
+the fast owner. Active fast inference keeps its instance until completion or
+failure; the owner retries retirement after releasing its slot. A short
+residency metadata lock closes publication and retirement races. Its order is
+main state -> residency or fast -> residency, never the reverse. Constructors,
+inference and model destruction run outside that metadata lock. Fast cache
+publication uses a nonblocking attempt; metadata contention leaves a transient
+clone for the captured request. Models are never moved as part of retirement.
+
+This checkpoint limits obsolete Python cache references. It does not establish
+a whole-process byte budget, bound native allocator caches, eliminate active
+main/CPU overlap, change OOM recovery, or calibrate peak memory or heat. Model
+identities, dtypes, dimensions, batch limits, queue limits and result caps are
+unchanged. Stdlib tests exercise the actual loaders and handlers with weakrefs,
+constructor and inference barriers, failed replacement, deadlines and identity
+generation changes. Native memory and whole-process admission remain separate
+validation work.
