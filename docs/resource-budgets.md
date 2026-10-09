@@ -1467,3 +1467,42 @@ if old complete coverage loses its metadata proof, only the returned coverage
 is downgraded. Its 25-insert retry and explicit force behavior are preserved.
 That downgrade survives the output-state reload if a retry fails. Successful
 rebuilds publish their newly verified coverage.
+
+### Bounded tier rebuild OOM recovery checkpoint
+
+The rebuild worker leaves the failed batch's exception scope before backoff and
+cache cleanup, retaining only an OOM classification flag. Failed forward and
+write tracebacks no longer remain actively referenced by that handler during
+cleanup. Existing OOM classification is unchanged, including the terminal
+handling of a bare `MemoryError()` without a recognized message.
+
+Recovery tracks the actual source-batch length at the unchanged offset, rather
+than the throttler's configured size. A local effective ceiling never increases
+until a completion/separation pair and its checkpoint commit. Each halving phase
+allows at most two failed attempts, including one cleanup retry at singleton
+size. Two failures then halve the phase ceiling, or terminate at one. A naturally
+smaller batch can skip a phase only when its size is at most half that phase's
+ceiling; smaller sensor decrements do not renew retry credits. For initial failed
+length N, at most `2 * (floor(log2(N)) + 1)` attempts can fail at that offset:
+N=1 permits 2, N=8 permits 8, and N=16 permits 10. These count paired batch
+attempts; an attempt can run both completion and separation inference.
+
+A configured size of 32 with only 8 remaining rows therefore retries at most
+8 rows before forcing 4, even if later configured sizes are 16 or 8. Singleton
+exhaustion reports failure with an instruction to free memory before retrying.
+Previously committed pairs and progress survive. Recovery state resets after
+committed progress; successful normal batching and ordering are unchanged.
+Cancellation and the existing 9000-second timeout are rechecked after recovery
+hooks and recovery admission before another native batch begins.
+
+If a failed batch or full-table clear leaves the worker's owned connection in
+a transaction, the failure propagates before OOM classification, cleanup, retry
+or status writes. An owned status-write rollback that leaves a transaction open
+also propagates. The manager must abort and close that connection; failure status
+cannot safely be published through it and may retain the previous running state.
+Ordinary clean status rollback remains best-effort, and borrowed status calls
+retain their existing savepoint and caller-transaction semantics.
+
+This bounds repeated nonprogress, not one native call's duration, allocator bytes,
+the complete source list retained by the worker, or whole-process memory. Native
+Mac/MPS calibration and the original memory incident remain unresolved.

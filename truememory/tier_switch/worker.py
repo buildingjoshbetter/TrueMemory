@@ -118,6 +118,8 @@ class RebuildWorker:
                         self.conn, self.target_group, 0, 0, commit=False,
                     )
             except Exception as exc:
+                if self.conn.in_transaction:
+                    raise
                 self._update_status("failed", 0, total, str(exc))
                 return False, 0
 
@@ -131,6 +133,9 @@ class RebuildWorker:
         processed = 0
         offset = 0
         start_time = time.time()
+        phase_ceiling: int | None = None
+        effective_ceiling: int | None = None
+        phase_failures = 0
 
         with no_grad:
             while offset < total:
@@ -149,12 +154,18 @@ class RebuildWorker:
                     return False, processed
 
                 batch_size, metrics = self.throttler.before_batch()
+                if effective_ceiling is not None:
+                    # Admission itself can consume the remaining recovery time.
+                    if self._cancelled or time.time() - start_time > _HARD_TIMEOUT:
+                        continue
+                    batch_size = min(batch_size, effective_ceiling)
                 batch = messages[offset : offset + batch_size]
                 if not batch:
                     break
 
                 batch_start = time.time()
 
+                oom = False
                 try:
                     success = self._process_batch(
                         batch, model, vec_table, sep_table, serialize_f32,
@@ -165,20 +176,51 @@ class RebuildWorker:
                         ),
                     )
                 except Exception as exc:
+                    # run() owns a clean connection. An active transaction here
+                    # means rollback did not restore that boundary.
+                    if self.conn.in_transaction:
+                        raise
                     if self._is_oom_error(exc):
-                        log.warning(
-                            "OOM at batch_size=%d, triggering BACKOFF",
-                            batch_size,
+                        oom = True
+                    else:
+                        log.error(
+                            "RebuildWorker error at %d/%d: %s",
+                            processed, total, exc,
                         )
-                        self.throttler.on_oom()
-                        DynamicThrottler.flush_gpu_cache()
+                        self._update_status("failed", processed, total, str(exc))
+                        return False, processed
+
+                if oom:
+                    # Leave the exception scope before cleanup releases native
+                    # workspace retained by the failed forward's traceback.
+                    failed_count = len(batch)
+                    if phase_ceiling is None:
+                        phase_ceiling = effective_ceiling = failed_count
+                        phase_failures = 1
+                    else:
+                        effective_ceiling = min(effective_ceiling, failed_count)
+                        if failed_count <= phase_ceiling // 2:
+                            phase_ceiling = failed_count
+                            phase_failures = 1
+                        else:
+                            phase_failures += 1
+                    exhausted = phase_ceiling == 1 and phase_failures == 2
+                    if phase_failures == 2 and not exhausted:
+                        phase_ceiling //= 2
+                        effective_ceiling = min(effective_ceiling, phase_ceiling)
+                        phase_failures = 0
+                    log.warning("OOM at effective batch_size=%d, triggering BACKOFF", failed_count)
+                    self.throttler.on_oom()
+                    DynamicThrottler.flush_gpu_cache()
+                    if self._cancelled or time.time() - start_time > _HARD_TIMEOUT:
                         continue
-                    log.error(
-                        "RebuildWorker error at %d/%d: %s",
-                        processed, total, exc,
-                    )
-                    self._update_status("failed", processed, total, str(exc))
-                    return False, processed
+                    if exhausted:
+                        self._update_status(
+                            "failed", processed, total,
+                            "Rebuild ran out of memory twice at batch size 1; retry after freeing memory.",
+                        )
+                        return False, processed
+                    continue
 
                 if not success:
                     self._update_status("failed", processed, total)
@@ -188,6 +230,8 @@ class RebuildWorker:
                 batch_count = len(batch)
                 processed += batch_count
                 offset += batch_count
+                phase_ceiling = effective_ceiling = None
+                phase_failures = 0
 
                 self.throttler.after_batch(batch_count, batch_time)
                 if self.throttler.should_flush_cache():
@@ -278,6 +322,7 @@ class RebuildWorker:
         if self.status_id:
             now = time.time()
             completed_at = now if status in ("complete", "failed", "cancelled") else None
+            owned_status = not self.conn.in_transaction
             try:
                 with _rebuild_transaction(self.conn):
                     self.conn.execute(
@@ -294,6 +339,8 @@ class RebuildWorker:
                         ),
                     )
             except sqlite3.OperationalError:
+                if owned_status and self.conn.in_transaction:
+                    raise
                 pass
 
         if self.status_callback:
