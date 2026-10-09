@@ -274,13 +274,18 @@ class TestFactoryCoverage(BudgetTestCase):
     def server(self):
         tree = ast.parse((SOURCE / "model_server.py").read_text(encoding="utf-8"))
         server = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "ModelServer")
-        names = {"_build_embed_model", "_get_reranker", "_mark_sticky_cpu", "_flush_mps_cache"}
+        names = {"_build_embed_model", "_get_reranker", "_mark_sticky_cpu", "_flush_mps_cache",
+                 "_check_process_memory"}
         server.body = [node for node in server.body if isinstance(node, ast.FunctionDef) and node.name in names]
+        refusal = next(node for node in tree.body if isinstance(node, ast.ClassDef)
+                       and node.name == "_ProcessMemoryRefused")
         namespace = {"sys": sys, "os": types.SimpleNamespace(environ=self.env),
                      "log": logging.getLogger("synthetic743"), "gc": types.SimpleNamespace(collect=Mock())}
-        exec(compile(ast.fix_missing_locations(ast.Module(body=[server], type_ignores=[])),
+        future = ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[future, refusal, server], type_ignores=[])),
                      "model_server.py", "exec"), namespace)
         instance = namespace["ModelServer"]()
+        instance._max_rss_bytes = 0
         instance._reranker = None
         instance._reranker_name = None
         instance._sticky_cpu = set()

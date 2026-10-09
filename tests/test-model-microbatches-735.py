@@ -83,9 +83,9 @@ def runtime(monkeypatch: pytest.MonkeyPatch) -> tuple[ms.ModelServer, RecordingM
 
     server = ms.ModelServer()
     model = RecordingModel()
-    monkeypatch.setattr(server, "_get_embed_model", lambda _tier: model)
-    monkeypatch.setattr(server, "_get_fast_encoder", lambda _tier: model)
-    monkeypatch.setattr(server, "_get_reranker", lambda _name: model)
+    monkeypatch.setattr(server, "_get_embed_model", lambda _tier, deadline=None: model)
+    monkeypatch.setattr(server, "_get_fast_encoder", lambda _tier, deadline=None: model)
+    monkeypatch.setattr(server, "_get_reranker", lambda _name, deadline=None: model)
     monkeypatch.setattr(server, "_write_status_file", lambda: None)
     monkeypatch.setattr(server, "_flush_mps_cache", lambda: None)
     monkeypatch.setattr(mps_utils, "flush_mps_cache", lambda: None)
@@ -331,7 +331,7 @@ def test_different_model_request_cannot_interleave_successful_microbatches(
 
     server._lock = ObservingLock()
 
-    def load(identity: str) -> RecordingModel:
+    def load(identity: str, deadline: object = None) -> RecordingModel:
         loads.append(identity)
         return model if identity == "primary" else alternate
 
@@ -598,12 +598,14 @@ def load_order_runtime() -> dict:
     path = Path(__file__).resolve().parents[1] / "truememory/model_server.py"
     functions = {"_array_metadata", "_array_base64_size", "_result_wire_size", "_check_result_size",
                  "_batch_limit", "_checked_batch", "_store_batch_result"}
-    classes = {"_EmbedState", "_RequestDeadline", "_RequestDeadlineExceeded", "_ResultTooLarge"}
+    classes = {"_EmbedState", "_RequestDeadline", "_RequestDeadlineExceeded", "_ResultTooLarge",
+               "_ProcessMemoryRefused"}
     methods = {"handle_request", "_handle_request_inner", "_handle_fast_embed", "_embed_global_order",
                "_embed_slice_indices", "_preflight_embed_result", "_resolve_embed_cache",
                "_request_batch_limit", "_after_request_batches", "_recover_embed_oom_locked",
                "_check_embed_recovery_deadline_locked", "_rerank_global_order", "_rerank_slice_indices",
-               "_preflight_rerank_result", "_publish_embed_state", "_retire_stale_fast_encoder"}
+               "_preflight_rerank_result", "_publish_embed_state", "_retire_stale_fast_encoder",
+               "_check_process_memory"}
     body = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
     for node in ast.parse(path.read_text(encoding="utf-8")).body:
         if isinstance(node, ast.FunctionDef) and node.name in functions:
@@ -641,6 +643,7 @@ class TestQwenGlobalOrder(unittest.TestCase):
     def runtime(self) -> tuple[dict, object, OrderModel]:
         module = load_order_runtime()
         server = object.__new__(module["ModelServer"])
+        server._max_rss_bytes = 0
         model = OrderModel(module["np"])
         server._embed_state = module["_EmbedState"](model, "base", "qwen3_256")
         server._lock = threading.Lock()
@@ -659,7 +662,7 @@ class TestQwenGlobalOrder(unittest.TestCase):
         server._sticky_cpu = set()
         server.loads = 0
 
-        def load(_tier: str) -> OrderModel:
+        def load(_tier: str, deadline: object = None) -> OrderModel:
             server.loads += 1
             return model
 
@@ -943,7 +946,7 @@ class TestQwenGlobalOrder(unittest.TestCase):
                 if phase == "entry":
                     expires = clock.now
                 elif phase == "model-load":
-                    server._get_embed_model = lambda _tier: (expire(), model)[1]
+                    server._get_embed_model = lambda _tier, deadline=None: (expire(), model)[1]
                 elif phase == "flatten-probe":
                     model._can_flatten_inputs = lambda: (expire(), False)[1]
                 elif phase == "lengths":
@@ -1089,6 +1092,7 @@ class TestModernBertGlobalOrder(unittest.TestCase):
         module = load_order_runtime()
         module["np"] = PairOrderNP()
         server = object.__new__(module["ModelServer"])
+        server._max_rss_bytes = 0
         model = PairOrderModel(module["np"])
         server._lock = threading.Lock()
         server._inference_lock = threading.Lock()
@@ -1103,7 +1107,7 @@ class TestModernBertGlobalOrder(unittest.TestCase):
         server.loads, server.models = [], []
         server.after_load = lambda _model: None
 
-        def load(name: str | None) -> PairOrderModel:
+        def load(name: str | None, deadline: object = None) -> PairOrderModel:
             server.loads.append(name)
             loaded = model if not server.models else PairOrderModel(module["np"])
             loaded.default_prompt = model.default_prompt

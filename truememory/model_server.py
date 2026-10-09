@@ -49,6 +49,11 @@ from pathlib import Path  # noqa: E402
 
 import numpy as np  # noqa: E402
 
+try:
+    import psutil  # noqa: E402
+except ImportError:
+    psutil = None
+
 from truememory._platform import (  # noqa: E402
     _LOOPBACK_HOST, _MODEL_SERVER_GENERATION_ENV, _USE_UNIX, _env_int,
     pid_is_alive, read_start_claim, try_file_lock,
@@ -82,6 +87,10 @@ _RERANK_BATCH_LIMIT = 64
 
 class _ResultTooLarge(ValueError):
     """The complete float32 result cannot fit the existing response frame."""
+
+
+class _ProcessMemoryRefused(RuntimeError):
+    """Current process memory cannot admit another model stage."""
 
 
 def _array_metadata(shape: tuple, encoded: str = "") -> dict:
@@ -316,6 +325,9 @@ class ModelServer:
     _FAST_LANE_MAX_TEXTS = 1
 
     def __init__(self):
+        self._max_rss_bytes = _admission_setting(
+            "TRUEMEMORY_MODEL_SERVER_MAX_RSS_MB", 0, 0, 2**31 - 1,
+        ) * 1048576
         self._max_handlers = _admission_setting("TRUEMEMORY_MODEL_SERVER_MAX_HANDLERS", 16, 1, 128)
         self._max_request_bytes = _admission_setting(
             "TRUEMEMORY_MODEL_SERVER_MAX_REQUEST_BYTES", 32 * 1024**2, _MAX_MESSAGE_SIZE, 1024**3,
@@ -382,6 +394,32 @@ class ModelServer:
         # kills a request mid-encode. Guarded by _activity_lock.
         self._inflight = 0
 
+    def _check_process_memory(
+        self, stage: str, deadline: _RequestDeadline | None = None,
+    ) -> None:
+        """Sample current RSS under the caller's model owner, never peak RSS."""
+        if deadline is not None:
+            deadline.check()
+        budget = self._max_rss_bytes
+        if budget == 0:
+            return
+        try:
+            usage = psutil.Process().memory_info().rss if psutil is not None else None
+        except Exception:
+            usage = None
+        # Sensor work consumes the same request budget. Expiry takes precedence
+        # over a memory refusal and cannot admit another native stage.
+        if deadline is not None:
+            deadline.check()
+        if isinstance(usage, bool) or not isinstance(usage, int) or usage <= 0:
+            raise _ProcessMemoryRefused(
+                f"Model server busy: current process RSS unavailable before {stage}"
+            )
+        if usage >= budget:
+            raise _ProcessMemoryRefused(
+                f"Model server busy: process RSS budget exhausted before {stage}"
+            )
+
     def _mark_sticky_cpu(self, kind: str) -> bool:
         """Permanently degrade *kind* ("embed"/"rerank") to CPU after an
         MPS OOM (issue #577). Re-promoting to MPS after recovery guaranteed
@@ -438,6 +476,17 @@ class ModelServer:
         from truememory.mps_utils import flush_mps_cache
         self._mark_sticky_cpu("embed")
         flush_mps_cache()
+        if deadline is not None:
+            self._check_embed_recovery_deadline_locked(model, deadline)
+        try:
+            self._check_process_memory("embed CPU transfer", deadline)
+        except (_ProcessMemoryRefused, _RequestDeadlineExceeded):
+            # A refused transfer leaves the failed accelerator instance behind.
+            # Invalidate it so a cache hit cannot bypass sticky CPU selection.
+            state = self._embed_state
+            if state is not None and state.model is model:
+                self._publish_embed_state(None)
+            raise
         if deadline is not None:
             self._check_embed_recovery_deadline_locked(model, deadline)
         if hasattr(model, "to"):
@@ -704,7 +753,7 @@ class ModelServer:
         del retired
         self._retire_stale_fast_encoder()
 
-    def _get_embed_model(self, tier: str):
+    def _get_embed_model(self, tier: str, deadline: _RequestDeadline | None = None):
         model_id, state = self._resolve_embed_cache(tier)
         if state is not None:
             if state.tier != tier:
@@ -715,14 +764,19 @@ class ModelServer:
 
         # Memory-first replacement: failed construction leaves the cache empty.
         self._publish_embed_state(None)
-        model = self._build_embed_model(model_id, self._embed_device())
+        self._check_process_memory("embed construction", deadline)
+        device = self._embed_device()
+        if deadline is not None:
+            deadline.check()
+        model = self._build_embed_model(model_id, device)
+        self._check_process_memory("embed construction completion", deadline)
         # ONE atomic reference assignment of an immutable snapshot — the
         # fast lane can never observe a torn (model, tier, model_id) triple.
         self._publish_embed_state(_EmbedState(model=model, tier=tier, model_id=model_id))
         log.info("Loaded embedding model for tier=%s (model=%s)", tier, model_id)
         return model
 
-    def _get_fast_encoder(self, tier: str):
+    def _get_fast_encoder(self, tier: str, deadline: _RequestDeadline | None = None):
         """CPU-resident encoder for the single-text fast lane (issue #577).
 
         Loaded lazily on the first single-text request that finds the global
@@ -756,7 +810,9 @@ class ModelServer:
         self._fast_encoder = None
         self._fast_model_id = None
         self._fast_generation = None
+        self._check_process_memory("fast embed construction", deadline)
         model = self._build_embed_model(model_id, "cpu")
+        self._check_process_memory("fast embed construction completion", deadline)
         # A changed generation, including A -> B -> A, must not publish this
         # construction. Its already-captured request may still finish on it.
         if self._residency_lock.acquire(blocking=False):
@@ -775,7 +831,9 @@ class ModelServer:
         )
         return model
 
-    def _get_reranker(self, model_name: str | None = None):
+    def _get_reranker(
+        self, model_name: str | None = None, deadline: _RequestDeadline | None = None,
+    ):
         from truememory.reranker import get_current_reranker_name
         name = model_name or get_current_reranker_name()
 
@@ -784,6 +842,7 @@ class ModelServer:
 
         self._reranker = None
         self._reranker_name = None
+        self._check_process_memory("reranker construction", deadline)
         from truememory.mps_utils import auto_detect_device, ensure_mps_memory_budget, resolve_device
         if "rerank" in self._sticky_cpu:
             device = "cpu"
@@ -792,7 +851,11 @@ class ModelServer:
 
         ensure_mps_memory_budget(device)
         from sentence_transformers import CrossEncoder
-        self._reranker = CrossEncoder(name, device=device)
+        if deadline is not None:
+            deadline.check()
+        model = CrossEncoder(name, device=device)
+        self._check_process_memory("reranker construction completion", deadline)
+        self._reranker = model
         self._reranker_name = name
         log.info("Loaded reranker model=%s device=%s", name, device)
         return self._reranker
@@ -823,7 +886,8 @@ class ModelServer:
                         deadline.start_inference()
                         self._preflight_embed_result(tier, len(texts))
                         deadline.check()
-                        model = self._get_embed_model(tier)
+                        model = self._get_embed_model(tier, deadline=deadline)
+                        self._check_process_memory("embed slice", deadline)
                         deadline.check()
                         recover = False
                         try:
@@ -838,6 +902,7 @@ class ModelServer:
                             # failed forward's traceback no longer owns tensors.
                             self._check_embed_recovery_deadline_locked(model, deadline)
                             self._recover_embed_oom_locked(model, deadline)
+                            self._check_process_memory("embed CPU retry", deadline)
                             deadline.check()
                             vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
                         return {"ok": True, "vectors": _checked_batch(vectors, len(texts), len(texts), "vectors")}
@@ -856,13 +921,15 @@ class ModelServer:
                     model = None
                     try:
                         deadline.start_inference()
-                        model = self._get_fast_encoder(tier)
+                        model = self._get_fast_encoder(tier, deadline=deadline)
                         deadline.check()
                         if model is None:
                             if deadline.transport is not None:
                                 deadline.transport.started = was_started
                             # Custom identities decline rather than drift.
                             return None
+                        self._check_process_memory("fast embed slice", deadline)
+                        deadline.check()
                         vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
                     finally:
                         model = None
@@ -870,7 +937,7 @@ class ModelServer:
                 if fast_owned:
                     self._retire_stale_fast_encoder()
             return {"ok": True, "vectors": _checked_batch(vectors, len(texts), len(texts), "vectors")}
-        except (_RequestDeadlineExceeded, _ResultTooLarge):
+        except (_RequestDeadlineExceeded, _ResultTooLarge, _ProcessMemoryRefused):
             raise
         except Exception:
             if deadline.transport is not None:
@@ -896,6 +963,8 @@ class ModelServer:
             return {"ok": False, "error": str(exc)}
         except _ResultTooLarge as exc:
             return {"ok": False, "error": str(exc), "error_code": "result_too_large"}
+        except _ProcessMemoryRefused as exc:
+            return {"ok": False, "error": str(exc), "error_code": "server_busy", "retry_after_ms": 250}
         finally:
             with self._activity_lock:
                 self._inflight -= 1
@@ -960,7 +1029,7 @@ class ModelServer:
                                 deadline.start_inference()
                                 self._preflight_embed_result(tier, len(texts))
                                 deadline.check()
-                                model = self._get_embed_model(tier)
+                                model = self._get_embed_model(tier, deadline=deadline)
                                 order = self._embed_global_order(model, texts, limit, deadline)
                             while offset < len(texts) or vectors is None:
                                 deadline.check()
@@ -969,6 +1038,7 @@ class ModelServer:
                                 )
                                 batch = (texts[offset:offset + limit] if indices is None else
                                          [texts[index] for index in indices])
+                                self._check_process_memory("embed slice", deadline)
                                 deadline.check()
                                 recover = False
                                 try:
@@ -990,6 +1060,7 @@ class ModelServer:
                         if retry is not None:
                             # Release only the state lock; inference ownership
                             # still covers the retry and remaining slices.
+                            self._check_process_memory("embed CPU retry", deadline)
                             deadline.check()
                             log.warning("MPS OOM during encoding; retrying microbatch on CPU")
                             values = model.encode(retry, batch_size=limit, show_progress_bar=False)
@@ -1032,7 +1103,7 @@ class ModelServer:
                                 deadline.start_inference()
                                 self._preflight_rerank_result(model_name, len(pairs))
                                 deadline.check()
-                                reranker = self._get_reranker(model_name)
+                                reranker = self._get_reranker(model_name, deadline=deadline)
                                 order = self._rerank_global_order(reranker, pairs, limit, deadline)
                                 if order is not None:
                                     recovery_name = self._reranker_name
@@ -1043,6 +1114,7 @@ class ModelServer:
                                 )
                                 batch = (pairs[offset:offset + limit] if indices is None else
                                          [pairs[index] for index in indices])
+                                self._check_process_memory("reranker slice", deadline)
                                 deadline.check()
                                 recover = False
                                 try:
@@ -1063,7 +1135,7 @@ class ModelServer:
                                     deadline.check()
                                     flush_mps_cache()
                                     deadline.check()
-                                    reranker = self._get_reranker(recovery_name)
+                                    reranker = self._get_reranker(recovery_name, deadline=deadline)
                                     retry = batch
                                     break
                                 if indices is None:
@@ -1074,6 +1146,7 @@ class ModelServer:
                                     )
                                 offset += len(batch)
                         if retry is not None:
+                            self._check_process_memory("reranker CPU retry", deadline)
                             deadline.check()
                             values = reranker.predict(retry, batch_size=limit, show_progress_bar=False)
                             if indices is None:

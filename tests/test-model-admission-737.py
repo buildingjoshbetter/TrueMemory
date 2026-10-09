@@ -330,7 +330,7 @@ class TestModelAdmission(unittest.TestCase):
             self.assertTrue(release.wait(2))
             return [0.5] * len(pairs)
 
-        self.server._get_reranker = lambda name: types.SimpleNamespace(predict=predict)
+        self.server._get_reranker = lambda name, deadline=None: types.SimpleNamespace(predict=predict)
         self.server_module._store_batch_result = lambda result, values, *args: values
         self.server._queue_timeout = 0.05
         payload = b'{"op":"rerank","pairs":[["synthetic","document"]]}'
@@ -480,7 +480,7 @@ class TestModelAdmission(unittest.TestCase):
 
     def test_admitted_fast_query_still_runs_while_main_ownership_is_busy(self) -> None:
         self.server._inference_lock.acquire()
-        self.server._get_fast_encoder = lambda tier: types.SimpleNamespace(encode=lambda texts, **kwargs: [[0.25]])
+        self.server._get_fast_encoder = lambda tier, deadline=None: types.SimpleNamespace(encode=lambda texts, **kwargs: [[0.25]])
         try:
             client, future = self.send(b'{"op":"embed","texts":["synthetic"]}')
             self.assertEqual(self.response(client)["vectors"], [[0.25]])
