@@ -246,7 +246,7 @@ class TestAllocationPreflight(unittest.TestCase):
 
             model = types.SimpleNamespace(**{method: forward})
             setattr(self.server, "_get_embed_model" if op == "embed" else "_get_reranker",
-                    lambda _name: model)
+                    lambda _name, deadline=None: model)
             response = self.server.handle_request(self.request(op))
             self.assertTrue(response["ok"])
             self.assertEqual(calls, [[0, 1], [2, 3], [4]])
@@ -265,8 +265,8 @@ class TestAllocationPreflight(unittest.TestCase):
     def test_empty_native_results_keep_their_existing_rank(self) -> None:
         model = types.SimpleNamespace(encode=lambda *args, **kwargs: Array((0,), []),
                                       predict=lambda *args, **kwargs: Array((0,), []))
-        self.server._get_embed_model = lambda tier: model
-        self.server._get_reranker = lambda name: model
+        self.server._get_embed_model = lambda tier, deadline=None: model
+        self.server._get_reranker = lambda name, deadline=None: model
         for op, field in (("embed", "vectors"), ("rerank", "scores")):
             response = self.server.handle_request(self.request(op, count=0))
             self.assertEqual(response[field].shape, (0,))
@@ -330,7 +330,7 @@ class TestAllocationPreflight(unittest.TestCase):
                         moves.append(device)
                         recovered.set()
 
-                self.server._get_embed_model = lambda tier: Model()
+                self.server._get_embed_model = lambda tier, deadline=None: Model()
                 self.mps.flush_mps_cache.side_effect = lambda: self.assertIsNone(refs[-1]())
                 response = self.server.handle_request(self.request("embed", count=count))
                 self.assertTrue(response["ok"])
@@ -357,7 +357,7 @@ class TestAllocationPreflight(unittest.TestCase):
                     raise RuntimeError("MPS backend out of memory")
                 return [float(value) for value in ids]
 
-        def get_model(name: str) -> Model:
+        def get_model(name: str, deadline: object = None) -> Model:
             if self.server._reranker is None:
                 replacing = "rerank" in self.server._sticky_cpu
                 if replacing:
@@ -421,7 +421,7 @@ class TestAllocationPreflight(unittest.TestCase):
             except Exception as error:
                 outcomes.append(error)
 
-        def load_embed(tier: str) -> object:
+        def load_embed(tier: str, deadline: object = None) -> object:
             loaded.set()
             return types.SimpleNamespace(encode=lambda texts, **kwargs: [[0.5] for _ in texts])
 
@@ -460,7 +460,7 @@ class TestAllocationPreflight(unittest.TestCase):
                     predict = staticmethod(fail)
                     to = Mock(side_effect=AssertionError("Expired CPU transfer"))
 
-                def load(name: str) -> Model:
+                def load(name: str, deadline: object = None) -> Model:
                     model = Model()
                     models.append(weakref.ref(model))
                     if op == "embed":

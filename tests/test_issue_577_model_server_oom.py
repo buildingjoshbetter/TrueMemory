@@ -332,7 +332,7 @@ class TestIssue577RerankOom:
                     raise _make_mps_oom_error()
                 return np.full(len(pairs), 0.5, dtype=np.float32)
 
-        def fake_get_reranker(self, model_name=None):
+        def fake_get_reranker(self, model_name=None, deadline=None):
             # Before sticky degradation the loaded model is on MPS and OOMs;
             # after, the reload is CPU-resident and succeeds.
             return FakeReranker(fail="rerank" not in self._sticky_cpu)
@@ -371,7 +371,7 @@ class TestIssue577RerankOom:
         broken = MagicMock()
         broken.predict = MagicMock(side_effect=RuntimeError("tokenizer exploded"))
         monkeypatch.setattr(
-            ModelServer, "_get_reranker", lambda self, model_name=None: broken
+            ModelServer, "_get_reranker", lambda self, model_name=None, deadline=None: broken
         )
         server = ModelServer()
         with pytest.raises(RuntimeError, match="tokenizer"):
@@ -408,7 +408,7 @@ class TestIssue577FastLane:
                 return np.zeros((len(texts), 4), dtype=np.float32)
 
         monkeypatch.setattr(
-            ModelServer, "_get_fast_encoder", lambda self, tier: FakeFastEncoder()
+            ModelServer, "_get_fast_encoder", lambda self, tier, deadline=None: FakeFastEncoder()
         )
 
         # Simulate an in-flight ingestion batch occupying the heavy path.

@@ -1732,3 +1732,53 @@ unchanged. Stdlib tests exercise the actual loaders and handlers with weakrefs,
 constructor and inference barriers, failed replacement, deadlines and identity
 generation changes. Native memory and whole-process admission remain separate
 validation work.
+
+### Cooperative process RSS admission checkpoint
+
+The shared model daemon accepts `TRUEMEMORY_MODEL_SERVER_MAX_RSS_MB` as an
+integer MiB setting, from 0 through 2,147,483,647. Its default is 0, which
+disables this admission policy and performs no RSS measurements. This separate
+setting does not change MCP's historical `ru_maxrss` reporting or the existing
+`TRUEMEMORY_MAX_RSS_MB` setting. A finite deployment default remains uncalibrated.
+
+For a nonzero setting, the byte budget is B = configured MiB * 1,048,576.
+Each admission reads current process RSS U from `psutil.Process().memory_info()`.
+U < B admits the stage; U >= B refuses it. For example, a synthetic 1 MiB budget
+admits 1,048,575 bytes and refuses both 1,048,576 and 1,048,577 bytes. An unavailable
+sensor, sensor exception, missing value, boolean, noninteger or nonpositive RSS
+also refuses when enabled. A later current reading below B can admit work even
+after a higher historical peak. RSS is not added to GPU allocator or physical
+footprint measurements, which can overlap it.
+
+Checks occur under the existing main inference/state or fast encoder owner:
+after obsolete cache references are released and before model construction,
+after construction before cache publication, before each encode/predict slice,
+before embedding CPU transfer and before CPU retries. Recovery records sticky
+CPU selection before possible refusal. A refused embedding transfer invalidates
+the failed accelerator cache, so the next request cannot bypass CPU selection
+through a cache hit. Reranker recovery retains its release-before-replacement
+behavior. Refused requests return `server_busy` with the existing 250 ms retry
+hint, without partial vectors or scores. Fast-lane refusal propagates directly
+instead of falling through to main inference. Ownership release, deadlines,
+fast generation fencing, models, dtypes, dimensions, result ordering and
+existing request/batch/result limits are preserved.
+
+RSS sensor work consumes the request's existing monotonic deadline. The daemon
+checks that deadline before and after sampling, and again after device setup
+before main constructors. If sensing both expires the request and returns an
+unavailable or overbudget value, deadline expiry takes precedence. No constructor,
+transfer or inference retry starts for that expired request. Expiry while
+admitting an embedding CPU transfer still invalidates its failed MPS cache and
+retains sticky CPU selection. Disabled admission performs no sensor reads and
+retains the constructor deadline checks.
+
+This is opt-in sampled admission, not a hard memory ceiling or a reservation.
+Concurrent main and fast lanes can each pass a sample, and one constructor,
+transfer, native call or result allocation can grow beyond B before the next
+sample. Native allocator caches and unified-memory accounting remain outside
+this policy. Synthetic tests cover thresholds, invalid sensors, constructor and
+slice crossings, both CPU recovery routes, refusal without fallback, and zero
+sensor reads when disabled. Finite-default calibration, workspace reservations,
+system headroom, bounded recovery and actual Mac/MPS memory and thermal gates
+remain pending. This checkpoint does not establish that the original 26.24 GB
+Mac symptom is fixed.
