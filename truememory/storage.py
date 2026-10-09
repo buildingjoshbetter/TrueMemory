@@ -1597,7 +1597,8 @@ def delete_message(conn: sqlite3.Connection, msg_id: int) -> bool:
     for _ent in _entities:
         for _tbl in ("summaries", "entity_profiles", "entity_style_vectors"):
             try:
-                conn.execute(f"DELETE FROM {_tbl} WHERE entity = ?", (_ent,))
+                conn.execute(f"DELETE FROM {_tbl} WHERE entity = ?",
+                             (_ent.lower() if _tbl == "entity_style_vectors" else _ent,))
             except sqlite3.OperationalError:
                 pass
         try:

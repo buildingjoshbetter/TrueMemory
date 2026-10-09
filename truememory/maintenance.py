@@ -25,7 +25,9 @@ from typing import NamedTuple
 
 from truememory._platform import try_file_lock
 from truememory.storage import (
+    DEFAULT_BUSY_TIMEOUT_MS, DatabaseOpenError, _MAINTENANCE_SOURCE_FIELDS,
     _STYLE_OUTPUT_INVALIDATE_SQL, _STYLE_OUTPUT_TRIGGERS,
+    _maintenance_trigger_definitions, _messages_have_rowid_id,
     _prepare_style_maintenance, _style_output_tracking_ready, create_db,
 )
 
@@ -248,6 +250,20 @@ if hasattr(os, "register_at_fork"):
     )
 
 
+class MaintenanceRequest(NamedTuple):
+    generation: int
+    threshold: int
+    include_layers: bool = True
+    include_style: bool = False
+
+    def merge(self, older: "MaintenanceRequest | None") -> "MaintenanceRequest":
+        if older is None:
+            return self
+        latest = self if self.generation >= older.generation else older
+        return latest._replace(include_layers=self.include_layers or older.include_layers,
+                               include_style=self.include_style or older.include_style)
+
+
 class MaintenanceCoordinator:
     """One worker per canonical file, with ownership lasting through teardown."""
 
@@ -263,8 +279,9 @@ class MaintenanceCoordinator:
         self._status = "pending"
         self._error_category: str | None = None
         self._notification_generation = 0
-        self._pending: tuple[int, int] | None = None
+        self._pending: MaintenanceRequest | None = None
         self._last_report = None
+        self._observation_generation = 0
         self._capability_epoch = 0
         self._capability_versions: tuple[tuple[str, str | None], ...] | None = None
         self._extension_failure: LayerDependency | None = None
@@ -287,6 +304,29 @@ class MaintenanceCoordinator:
                     "active": self._active, "pending_generations": int(self._pending is not None),
                     "capability_epoch": self._capability_epoch,
                     "last_results": self._last_report.results if self._last_report is not None else ()}
+
+    def _begin_observation(self) -> int:
+        self._check_process()
+        with self._mutex:
+            self._observation_generation += 1
+            return self._observation_generation
+
+    def _finish_observation(self, token: int, report: "MaintenanceReport | None", outcome: str,
+                            error_category: str | None, *, borrowed: bool = False) -> None:
+        self._check_process()
+        with self._mutex:
+            if token != self._observation_generation or borrowed:
+                return
+            self._status = outcome
+            self._error_category = _style_error_category(error_category)
+            if report is not None:
+                self._last_report = report
+
+    def style_observation(self) -> tuple["LayerResult | None", str | None]:
+        self._check_process()
+        with self._mutex:
+            return (self._last_report.style_result if self._last_report is not None else None,
+                    self._error_category)
 
     def refresh_capabilities(self, *, reset_extension: bool = True) -> None:
         """Refresh three package records at open/manual setup, never per add."""
@@ -343,11 +383,14 @@ class MaintenanceCoordinator:
         self._status = "starting"
         self._error_category = None
 
-    def request_layers(self, *, threshold: int = 25) -> bool:
+    def request_layers(self, *, threshold: int = 25, include_layers: bool = True,
+                       include_style: bool = False) -> bool:
         """Coalesce a real foreground wake; no callback captures its engine."""
         self._check_process()
         if type(threshold) is not int or threshold < 1:
             raise ValueError("Maintenance threshold must be a positive integer")
+        if type(include_layers) is not bool or type(include_style) is not bool or not (include_layers or include_style):
+            raise ValueError("Maintenance request requires explicit work kinds")
         with self._mutex:
             if self.path is None:
                 self._status = "pending_in_memory"
@@ -355,20 +398,24 @@ class MaintenanceCoordinator:
             if self._active and self._cancel.is_set():
                 return False
             self._notification_generation += 1
-            self._pending = (self._notification_generation, threshold)
+            self._pending = MaintenanceRequest(self._notification_generation, threshold,
+                                               include_layers, include_style).merge(self._pending)
             pending = self._take_pending_locked()
         return self._launch_layers(pending) if pending is not None else False
 
-    def _take_pending_locked(self) -> tuple[int, int] | None:
+    def _take_pending_locked(self) -> MaintenanceRequest | None:
         if self._active or self._pending is None:
             return None
         pending, self._pending = self._pending, None
         self._reserve_locked()
         return pending
 
-    def _launch_layers(self, pending: tuple[int, int]) -> bool:
+    def _launch_layers(self, pending: MaintenanceRequest) -> bool:
         def work(conn: sqlite3.Connection, cancel: threading.Event) -> "MaintenanceReport":
-            return run_engine_maintenance(conn, self, threshold=pending[1], cancel=cancel)
+            return run_engine_maintenance(conn, self, threshold=pending.threshold, cancel=cancel,
+                include_layers=pending.include_layers, include_style=pending.include_style, connection_owned=True)
+        if not pending.include_layers:
+            return self._launch(work, pending, style_only=True)
         return self._launch(work, pending)
 
     def _owner_released(self) -> None:
@@ -395,15 +442,15 @@ class MaintenanceCoordinator:
             self._reserve_locked()
         return self._launch(work)
 
-    def _launch(self, work: Callable, pending: tuple[int, int] | None = None) -> bool:
+    def _launch(self, work: Callable, pending: MaintenanceRequest | None = None, *, style_only: bool = False) -> bool:
         def busy() -> None:
             # Registry -> coordinator ordering closes the release/admission
             # race. No coordinator-mutex holder acquires the registry lock.
             with self._mutex:
                 self._active = False
                 self._status = "cancelled" if self._cancel.is_set() else "busy"
-                if pending is not None and self._pending is None and not self._cancel.is_set():
-                    self._pending = pending
+                if pending is not None and not self._cancel.is_set():
+                    self._pending = pending.merge(self._pending)
                 if self._pending is not None and self.path in _held_paths:
                     _owner_waiters[self.path] = (_held_paths[self.path], self._pending[0], self)
                 self._done.set()
@@ -411,12 +458,15 @@ class MaintenanceCoordinator:
         fd = None
         handoff = None
         handoff_lock = threading.Lock()
+        with self._mutex:
+            launch_token = self._observation_generation
         try:
             # Serializing descriptor acquisition with fork registration makes
             # every inherited owner descriptor visible to the child cleanup.
             fd = _acquire_owner(self.path, on_busy=busy)
             if fd is None:
                 return False
+            launch_token = self._begin_observation()
             handoff = {"fd": fd, "started": False}
 
             def run() -> None:
@@ -424,7 +474,10 @@ class MaintenanceCoordinator:
                     handoff["started"] = True
                     worker_fd = handoff.pop("fd", None)
                 if worker_fd is not None:
-                    self._run(worker_fd, work)
+                    if style_only:
+                        self._run(worker_fd, work, style_only=True)
+                    else:
+                        self._run(worker_fd, work)
 
             worker = threading.Thread(target=run, daemon=True, name="truememory-maintenance")
             with self._mutex:
@@ -446,13 +499,14 @@ class MaintenanceCoordinator:
                         self._pending = None
                         self._cancel.set()
                 raise
+            self._finish_observation(launch_token, None, "failed", "worker_start")
             if fd is not None:
                 _release_owner(fd)
             with self._mutex:
                 self._active = False
                 self._thread = None
-                self._status = "failed"
-                self._error_category = "worker_start"
+                if self._pending is not None and pending is not None:
+                    self._pending = self._pending.merge(pending)
                 successor = self._take_pending_locked()
                 if successor is None:
                     self._done.set()
@@ -463,15 +517,18 @@ class MaintenanceCoordinator:
                     pass
             raise
 
-    def _run(self, fd: int, work: Callable[[sqlite3.Connection, threading.Event], None]) -> None:
+    def _run(self, fd: int, work: Callable[[sqlite3.Connection, threading.Event], None], *, style_only: bool = False) -> None:
         conn = None
         outcome = "cancelled"
         error_category = None
+        report = None
+        token = None
         try:
+            token = self._begin_observation()
             with _bind_owner(self.path):
                 try:
                     if not self._cancel.is_set():
-                        conn = create_db(self.path)
+                        conn = _open_style_database(self.path, self._cancel) if style_only else create_db(self.path)
                         report = work(conn, self._cancel)
                         if conn.in_transaction:
                             conn.rollback()
@@ -479,8 +536,6 @@ class MaintenanceCoordinator:
                         outcome = "cancelled" if self._cancel.is_set() else "success"
                         if isinstance(report, MaintenanceReport):
                             outcome, error_category = maintenance_report_status(report, self._cancel)
-                            with self._mutex:
-                                self._last_report = report
                 finally:
                     try:
                         if conn is not None:
@@ -490,15 +545,21 @@ class MaintenanceCoordinator:
         except BaseException as error:
             # Thread boundary: expose only a category, never source-bearing
             # exception text or a traceback through threading.excepthook.
-            outcome = "cancelled" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "failed"
-            error_category = type(error).__name__[:64]
+            if isinstance(error, _StyleOpenRejected):
+                report = MaintenanceReport((), "SKIPPED (style-only)", error.result)
+                outcome, error_category = maintenance_report_status(report, self._cancel)
+            else:
+                outcome = "cancelled" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "failed"
+                error_category = type(error).__name__[:64]
+                report = None
         finally:
+            if token is not None:
+                self._finish_observation(token, report if isinstance(report, MaintenanceReport) else None,
+                                         outcome, error_category)
             _release_owner(fd)
             with self._mutex:
                 self._active = False
                 self._thread = None
-                self._status = outcome
-                self._error_category = error_category
                 if self._cancel.is_set():
                     self._pending = None
                 pending = self._take_pending_locked()
@@ -536,6 +597,23 @@ def get_coordinator(db_path: str | os.PathLike[str]) -> MaintenanceCoordinator:
             coordinator = MaintenanceCoordinator(path)
             _coordinators[path] = coordinator
         return coordinator
+
+
+@contextmanager
+def maintenance_observation(coordinator: MaintenanceCoordinator, *, borrowed: bool = False) -> Iterator[list]:
+    """Publish explicit work after caller cleanup and before releasing ownership."""
+    with maintenance_owner(coordinator.path):
+        token = coordinator._begin_observation()
+        reports = []
+        try:
+            yield reports
+        except BaseException as error:
+            coordinator._finish_observation(token, None, "failed", type(error).__name__, borrowed=borrowed)
+            raise
+        else:
+            report = reports[-1] if reports else None
+            outcome, category = maintenance_report_status(report) if report is not None else ("failed", "MissingReport")
+            coordinator._finish_observation(token, report, outcome, category, borrowed=borrowed)
 
 
 class LayerDependency(NamedTuple):
@@ -674,16 +752,53 @@ def read_layer_states(conn: sqlite3.Connection, specs: tuple[LayerSpec, ...]) ->
 
 
 def _read_layer_run_baseline(
-    conn: sqlite3.Connection, specs: tuple[LayerSpec, ...],
+    conn: sqlite3.Connection, specs: tuple[LayerSpec, ...], *, _canonical_source: bool = False,
 ) -> dict[str, LayerState] | None:
     """Return no style observation only for a read lock with unchanged ownership.
 
     This boundary is used before running diagnostics and for cancelled reads,
     never around builders or publication transactions.
+    Canonical style readiness and checkpoint values share one read snapshot.
     """
     borrowed = conn.in_transaction
     try:
-        return read_layer_states(conn, specs)
+        if not _canonical_source:
+            return read_layer_states(conn, specs)
+        if not borrowed:
+            conn.execute("BEGIN")
+        try:
+            _validate_routed_style_source(conn)
+            states = read_layer_states(conn, specs)
+            state = states.get("style_vectors")
+            if state is not None:
+                # Canonical preparation already established enrollment. A lost
+                # proof here is repairable, not a completed unavailable attempt.
+                if state.dependency.deferred or not state.dependency.available:
+                    raise _StyleAppendChanged(state.dependency.error_category or "StyleMetadataChanged")
+                if state.successful_coverage == "complete":
+                    try:
+                        dependency, _schema, _marker = _style_append_metadata(conn)
+                        if dependency != state.dependency:
+                            raise _StyleAppendChanged("StyleMetadataChanged")
+                    except _StyleAppendChanged:
+                        if state.outcome not in {"failed", "unavailable"}:
+                            raise
+                        # Keep a real builder's durable retry baseline. Its old
+                        # coverage no longer certifies this read's metadata.
+                        states[state.layer] = state._replace(successful_coverage="unverified")
+            if not conn.in_transaction:
+                raise _LayerRollbackFailed("Canonical style read lost its transaction")
+            return states
+        finally:
+            if not borrowed:
+                if not conn.in_transaction:
+                    raise _LayerRollbackFailed("Canonical style read ended without rollback")
+                try:
+                    conn.rollback()
+                except sqlite3.Error as error:
+                    raise _LayerRollbackFailed("Canonical style read rollback failed") from error
+                if conn.in_transaction:
+                    raise _LayerRollbackFailed("Canonical style read rollback left a transaction")
     except sqlite3.OperationalError as error:
         if (len(specs) == 1 and specs[0].layer == "style_vectors" and conn.in_transaction == borrowed
                 and _style_sqlite_deferral(error) == "StyleWriterBusy"):
@@ -784,11 +899,11 @@ def record_layer_success_in_transaction(
 
 @contextmanager
 def _owned_transaction(
-    conn: sqlite3.Connection, *, on_rollback: Callable[[], None] | None = None,
+    conn: sqlite3.Connection, *, on_rollback: Callable[[], None] | None = None, immediate: bool = False,
 ) -> Iterator[None]:
     if conn.in_transaction:
         raise RuntimeError("Maintenance runner requires a clean transaction boundary")
-    conn.execute("BEGIN")
+    conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
     completed = False
     automatic_rollback = False
     try:
@@ -844,14 +959,17 @@ def _borrowed_transaction(
 
 def _record_attempt(
     conn: sqlite3.Connection, state: LayerState, outcome: str, generation: str, error_category: str | None,
-    *, borrowed: bool = False,
+    *, borrowed: bool = False, canonical_source: bool = False,
 ) -> bool | None:
     source, dependency = state.source, state.dependency
     if dependency.deferred:
         raise ValueError("Transient deferral cannot be recorded as a durable attempt")
-    with (_borrowed_transaction(conn) if borrowed else _owned_transaction(conn)):
+    transaction = _borrowed_transaction if borrowed else _owned_transaction
+    with (transaction(conn, on_rollback=lambda: None) if canonical_source else transaction(conn)):
         if state.layer == "style_vectors":
             conn.execute("UPDATE maintenance_layers SET layer=layer WHERE 0")
+            if canonical_source:
+                _validate_routed_style_source(conn)
             if _style_extra_triggers(conn):
                 return False
         conn.execute(
@@ -884,7 +1002,7 @@ def _read_layer_row(conn: sqlite3.Connection, layer: str) -> tuple | None:
 
 def _restore_deferred_attempt(
     conn: sqlite3.Connection, layer: str, previous: tuple | None, running: tuple,
-    owner: MaintenanceOwnership, *, protect_rollback: bool = False,
+    owner: MaintenanceOwnership, *, protect_rollback: bool = False, canonical_source: bool = False,
 ) -> None:
     """Restore only this owner's unchanged diagnostic, after output rollback."""
     if conn.in_transaction:
@@ -894,6 +1012,8 @@ def _restore_deferred_attempt(
         raise MaintenanceBusyError("Maintenance ownership changed before diagnostic restoration")
     with _owned_transaction(conn, on_rollback=(lambda: None) if protect_rollback else None):
         conn.execute("UPDATE maintenance_layers SET layer=layer WHERE 0")
+        if canonical_source:
+            _validate_routed_style_source(conn)
         if layer == "style_vectors" and _style_extra_triggers(conn):
             raise _StyleAppendChanged("StyleTriggersUnsupported")
         current = _read_layer_row(conn, layer)
@@ -922,7 +1042,7 @@ def _check_layer_dependency(current: LayerDependency, expected: LayerDependency)
 def run_layers(
     conn: sqlite3.Connection, specs: tuple[LayerSpec, ...], *, force: bool = False,
     threshold: int = 25, cancel: threading.Event | None = None,
-    allow_caller_transaction: bool = False,
+    allow_caller_transaction: bool = False, _canonical_source: bool = False,
 ) -> tuple[LayerResult, ...]:
     """Run eligible adapters once; borrowing requires explicit caller opt-in."""
     if type(allow_caller_transaction) is not bool:
@@ -937,17 +1057,21 @@ def run_layers(
     results = []
     with maintenance_owner(connection_database_path(conn)) as owner:
         def record_attempt(state: LayerState, outcome: str, category: str | None) -> bool:
+            if _canonical_source:
+                return _record_attempt(conn, state, outcome, owner.generation, category,
+                                       borrowed=borrowed, canonical_source=True) is not False
             if borrowed:
                 return _record_attempt(conn, state, outcome, owner.generation, category, borrowed=True) is not False
             return _record_attempt(conn, state, outcome, owner.generation, category) is not False
 
         # Validate uniqueness before any builder is invoked.
-        if _read_layer_run_baseline(conn, specs) is None:
+        baseline_options = {"_canonical_source": True} if _canonical_source else {}
+        if _read_layer_run_baseline(conn, specs, **baseline_options) is None:
             return (_style_baseline_busy_result(specs[0], borrowed),)
         for spec in specs:
             if cancel is not None and cancel.is_set():
                 break
-            observed = _read_layer_run_baseline(conn, (spec,))
+            observed = _read_layer_run_baseline(conn, (spec,), **baseline_options)
             if observed is None:
                 results.append(_style_baseline_busy_result(spec, borrowed))
                 continue
@@ -989,6 +1113,8 @@ def run_layers(
                     )):
                         if spec.layer == "style_vectors":
                             conn.execute("UPDATE maintenance_layers SET layer=layer WHERE 0")
+                            if _canonical_source:
+                                _validate_routed_style_source(conn)
                             if _style_extra_triggers(conn):
                                 raise _StyleAppendChanged("StyleTriggersUnsupported")
                         previous_row = _read_layer_row(conn, spec.layer)
@@ -1003,7 +1129,7 @@ def run_layers(
                 except (sqlite3.OperationalError, _StyleAppendChanged) as error:
                     category = error.category if isinstance(error, _StyleAppendChanged) else _style_sqlite_deferral(error)
                     if (spec.layer != "style_vectors" or not diagnostic_rolled_back
-                            or category not in {"StyleWriterBusy", "StyleTriggersUnsupported"}):
+                            or category not in {"StyleWriterBusy", "StyleTriggersUnsupported", "StyleSourceChanged"}):
                         raise
                     results.append(LayerResult(spec.layer, spec.result_key, "deferred", state.output_count,
                         time.monotonic() - started, category, False, state.successful_coverage))
@@ -1031,6 +1157,9 @@ def run_layers(
                     ):
                         output_started = True
                         state = read_layer_states(conn, (spec,))[spec.layer]
+                        if (_canonical_source and spec.layer == "style_vectors"
+                                and baseline_state.successful_coverage == "unverified"):
+                            state = state._replace(successful_coverage="unverified")
                         if state.dependency.deferred:
                             _check_layer_dependency(state.dependency, state.dependency)
                         if not state.dependency.available:
@@ -1062,7 +1191,10 @@ def run_layers(
                         raise _LayerRollbackFailed("Deferred output has no confirmed rollback") from error
                     if not borrowed:
                         try:
-                            if spec.layer == "style_vectors":
+                            if _canonical_source:
+                                _restore_deferred_attempt(conn, spec.layer, previous_row, running_row, owner,
+                                                          protect_rollback=True, canonical_source=True)
+                            elif spec.layer == "style_vectors":
                                 _restore_deferred_attempt(conn, spec.layer, previous_row, running_row, owner,
                                                           protect_rollback=True)
                             else:
@@ -1153,6 +1285,305 @@ def _style_extra_triggers(conn: sqlite3.Connection) -> bool:
         "AND lower(tbl_name) IN ('entity_style_vectors','maintenance_layers','metadata') LIMIT 1",
     ).fetchone()
     return main is not None or temporary is not None
+
+
+def _style_error_category(category: str | None) -> str | None:
+    if category is None:
+        return None
+    return category if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", category) else "Error"
+
+
+def _style_source_ready(conn: sqlite3.Connection) -> None:
+    """Observe current canonical tracking, never repair or infer its history."""
+    required = {
+        "messages": set(_MAINTENANCE_SOURCE_FIELDS),
+        "maintenance_source_state": {"singleton", "epoch", "revision", "insert_count", "correction_count",
+                                     "max_seen_message_id", "nonappend_revision", "tracking_ready"},
+        "maintenance_layers": set(_LAYER_ROW_COLUMNS),
+        "metadata": {"key", "value"},
+    }
+    shadows = (*required, "entity_style_vectors")
+    placeholders = ",".join("?" for _ in shadows)
+    if conn.execute("SELECT 1 FROM temp.sqlite_master WHERE type IN ('table','view') "
+                    f"AND lower(name) IN ({placeholders}) LIMIT 1", shadows).fetchone() is not None:
+        raise MaintenanceUnavailableError("Canonical style tables are shadowed")
+    for table, columns in required.items():
+        actual = {row[1].lower() for row in conn.execute(f"PRAGMA main.table_xinfo({table})")}
+        if not columns.issubset(actual):
+            raise MaintenanceUnavailableError("Canonical source schema is unavailable")
+    if not _messages_have_rowid_id(conn) or not _valid_style_source(read_source_revision(conn)):
+        raise MaintenanceUnavailableError("Canonical source identity is unavailable")
+    definitions = _maintenance_trigger_definitions(conn)
+    placeholders = ",".join("?" for _ in definitions)
+    current = {row[0]: " ".join(row[1].strip().rstrip(";").split()) for row in conn.execute(
+        "SELECT name,sql FROM main.sqlite_master WHERE type='trigger' "
+        f"AND name IN ({placeholders})", tuple(definitions),
+    )}
+    expected = {name: " ".join(sql.split()) for name, sql in definitions.items()}
+    shadow = conn.execute("SELECT 1 FROM temp.sqlite_master WHERE type='trigger' "
+                          f"AND lower(name) IN ({placeholders}) LIMIT 1", tuple(definitions)).fetchone()
+    if current != expected or shadow is not None:
+        raise MaintenanceUnavailableError("Canonical source triggers are unavailable")
+
+
+class StyleObservation(NamedTuple):
+    state: LayerState | None
+    checkpoint: tuple | None
+    eligible: bool
+    health: dict
+
+
+def observe_style(conn: sqlite3.Connection | None = None, *, threshold: int = 25,
+                  pending_reason: str | None = None) -> StyleObservation:
+    """Bounded native-free readiness; no profile/source scans or schema writes."""
+    if type(threshold) is not int or threshold < 1:
+        raise ValueError("Maintenance threshold must be a positive integer")
+    health = {"available": False, "outcome": "pending", "freshness": "unknown", "coverage": "unverified",
+              "error_category": None, "output_count": None, "pending_reason": pending_reason or "not_connected",
+              "pending_caller_commit": False, "hash_ready": False, "format_ready": False}
+    if conn is None:
+        return StyleObservation(None, None, False, health)
+    borrowed = conn.in_transaction
+    health["pending_caller_commit"] = borrowed
+    owned = False
+    state = checkpoint = None
+    eligible = False
+    try:
+        if not borrowed:
+            conn.execute("BEGIN")
+            owned = True
+        if _style_extra_triggers(conn):
+            health.update(outcome="deferred", error_category="StyleTriggersUnsupported", pending_reason="unsupported_triggers")
+            return StyleObservation(None, None, False, health)
+        _style_source_ready(conn)
+        spec = style_layer_spec(conn)
+        state = read_layer_states(conn, (spec,))[spec.layer]
+        checkpoint = _read_layer_row(conn, spec.layer)
+        marker = conn.execute("SELECT value FROM metadata WHERE key='style_vec_hash_version'").fetchone()
+        hash_ready = marker == ("2",)
+        health["hash_ready"] = hash_ready
+        default = next((row[4] for row in conn.execute("PRAGMA main.table_info(entity_style_vectors)")
+                        if row[1] == "accumulator_version"), "unsupported")
+        format_ready = default is None or default.strip(" ()'\"") in {"0", "1", "NULL", "null"}
+        health["format_ready"] = format_ready
+        ready = state.dependency.available
+        freshness = layer_freshness(state.source, state, state.dependency)
+        same_failure = (state.outcome in {"failed", "unavailable"}
+            and state.attempted_epoch == state.source.epoch and state.attempted_revision == state.source.revision
+            and state.attempted_dependency == state.dependency.key)
+        scheduled = _eligible(state, threshold, False)
+        # A terminal attempt owns its retry budget even without successful
+        # coverage or hash2. Readiness shortcuts cannot bypass that baseline.
+        eligible = scheduled if state.outcome in {"failed", "unavailable"} else (
+            not ready or not hash_ready or not format_ready or state.successful_coverage != "complete"
+            or state.outcome == "running" or scheduled)
+        reason = (("tracking_repair" if not ready else "hash_migration" if not hash_ready else
+                   "accumulator_pending" if not format_ready else "eligible") if eligible else
+                  "attempt_unchanged" if same_failure else "current" if freshness == "current" else "awaiting_threshold")
+        health.update(available=ready and format_ready, outcome=state.outcome,
+                      freshness=freshness if hash_ready and format_ready else "dependency_pending",
+                      coverage=state.successful_coverage if ready and hash_ready and format_ready else "unverified",
+                      error_category=_style_error_category(state.error_category or state.dependency.error_category
+                                                          or (None if format_ready else "StyleAccumulatorUnsupported")),
+                      output_count=state.output_count, pending_reason=reason)
+        if borrowed:
+            eligible = False
+            health.update(outcome="pending", pending_reason="pending_caller_commit")
+    except MaintenanceUnavailableError:
+        state = checkpoint = None
+        eligible = False
+        health.update(outcome="unavailable", error_category="StyleSourceUnavailable", pending_reason="source_unavailable")
+    except sqlite3.Error as error:
+        state = checkpoint = None
+        eligible = False
+        category = _style_sqlite_deferral(error) if isinstance(error, sqlite3.OperationalError) else None
+        health.update(outcome="deferred" if category else "failed", error_category=category or type(error).__name__,
+                      pending_reason="inspection_failed")
+    finally:
+        if owned:
+            try:
+                conn.rollback()
+            except sqlite3.Error as error:
+                state = checkpoint = None
+                eligible = False
+                health.update(available=False, outcome="failed", freshness="unknown", coverage="unverified",
+                              error_category=type(error).__name__, pending_reason="inspection_rollback_failed")
+    return StyleObservation(state, checkpoint, eligible, health)
+
+
+def style_health(conn: sqlite3.Connection | None = None, coordinator: MaintenanceCoordinator | None = None,
+                 *, pending_reason: str | None = None) -> dict:
+    health = observe_style(conn, pending_reason=pending_reason).health
+    if coordinator is not None:
+        previous, category = coordinator.style_observation()
+        current = (not health["pending_caller_commit"] and health["freshness"] == "current"
+                   and health["coverage"] == "complete" and health["outcome"] in {"success", "success_empty"})
+        if not current:
+            health["last_error"] = category or (previous.error_category if previous is not None else None)
+    return health
+
+
+class _StyleOpenRejected(RuntimeError):
+    def __init__(self, result: LayerResult) -> None:
+        self.result = result
+        super().__init__(result.error_category)
+
+
+def _style_unready_result(health: dict) -> LayerResult:
+    return LayerResult("style_vectors", "style_vectors", health["outcome"], health["output_count"], 0.0,
+                       health["error_category"], False, health["coverage"], health["pending_caller_commit"])
+
+
+def _open_style_database(path: Path, cancel: threading.Event | None = None) -> sqlite3.Connection:
+    """Open an existing canonical file without general initialization or migrations."""
+    def cancelled() -> bool:
+        return cancel is not None and cancel.is_set()
+
+    def deferred(category: str) -> _StyleOpenRejected:
+        return _StyleOpenRejected(LayerResult("style_vectors", "style_vectors", "deferred", None, 0.0,
+                                             category, False, "unverified"))
+
+    if cancelled():
+        raise deferred("StyleCancelled")
+    if not isinstance(path, Path) or not path.is_absolute():
+        raise ValueError("Style worker requires a canonical file path")
+    conn = None
+    progress = False
+    try:
+        conn = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True)
+        conn.row_factory = None
+        for sql in (f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}", "PRAGMA foreign_keys=ON",
+                    "PRAGMA synchronous=NORMAL", "PRAGMA cache_size=-64000", "PRAGMA mmap_size=268435456"):
+            conn.execute(sql)
+        if _style_extra_triggers(conn):
+            raise deferred("StyleTriggersUnsupported")
+        try:
+            _style_source_ready(conn)
+        except MaintenanceUnavailableError as error:
+            raise _StyleOpenRejected(LayerResult("style_vectors", "style_vectors", "unavailable", None, 0.0,
+                                                 "StyleSourceUnavailable", False, "unverified")) from error
+        observation = observe_style(conn)
+        if observation.state is None:
+            raise _StyleOpenRejected(_style_unready_result(observation.health))
+        if cancelled():
+            raise deferred("StyleCancelled")
+        if cancel is not None:
+            conn.set_progress_handler(lambda: int(cancelled()), 1000)
+            progress = True
+        try:
+            checked = conn.execute("PRAGMA quick_check(1)").fetchone()
+        finally:
+            if progress:
+                conn.set_progress_handler(None, 0)
+                progress = False
+        if cancelled():
+            raise deferred("StyleCancelled")
+        if checked != ("ok",):
+            raise DatabaseOpenError("Database integrity check failed; restore a known-good backup before retrying")
+        return conn
+    except BaseException as error:
+        if conn is not None:
+            try:
+                if progress:
+                    conn.set_progress_handler(None, 0)
+                if conn.in_transaction:
+                    conn.rollback()
+            finally:
+                conn.close()
+        if isinstance(error, sqlite3.OperationalError):
+            category = _style_sqlite_deferral(error, cancelled=cancelled())
+            if category:
+                raise deferred(category) from error
+        if isinstance(error, sqlite3.DatabaseError) and not isinstance(error, DatabaseOpenError):
+            message = str(error).lower()
+            if "i/o error" in message:
+                raise DatabaseOpenError("Database I/O failed; close all TrueMemory processes and retry") from error
+            raise DatabaseOpenError("Database could not be validated; check access or restore a known-good backup") from error
+        raise
+
+
+def _validate_routed_style_source(conn: sqlite3.Connection) -> None:
+    try:
+        _style_source_ready(conn)
+    except MaintenanceUnavailableError as error:
+        raise _StyleAppendChanged("StyleSourceChanged") from error
+
+
+def _prepare_routed_style_maintenance(conn: sqlite3.Connection) -> None:
+    """Validate canonical tracking under writer ownership before enrollment."""
+    borrowed = conn.in_transaction
+    entered = rolled_back = False
+
+    def confirmed_rollback() -> None:
+        nonlocal rolled_back
+        rolled_back = True
+
+    transaction = (_borrowed_transaction(conn, on_rollback=confirmed_rollback) if borrowed else
+                   _owned_transaction(conn, on_rollback=confirmed_rollback, immediate=True))
+    try:
+        if _style_output_tracking_ready(conn):
+            return
+        with transaction:
+            entered = True
+            if borrowed:
+                conn.execute("UPDATE maintenance_layers SET layer=layer WHERE 0")
+            _validate_routed_style_source(conn)
+            prepare_style_maintenance(conn)
+    except sqlite3.OperationalError as error:
+        if (conn.in_transaction == borrowed and (not entered or rolled_back)
+                and _style_sqlite_deferral(error) == "StyleWriterBusy"):
+            raise LayerDeferredError("Style preparation writer busy", category="StyleWriterBusy") from error
+        raise
+
+
+def run_routed_style(conn: sqlite3.Connection, *, force: bool = False, threshold: int = 25,
+                     cancel: threading.Event | None = None, allow_caller_transaction: bool = False,
+                     connection_owned: bool = False) -> LayerResult:
+    """Canonical engine route; explicit low-level style APIs retain their contract."""
+    if cancel is not None and cancel.is_set():
+        return LayerResult("style_vectors", "style_vectors", "deferred", None, 0.0, "StyleCancelled", False,
+                           "unverified", conn.in_transaction)
+    with maintenance_owner(connection_database_path(conn)):
+        observation = observe_style(conn, threshold=threshold)
+        if observation.state is None:
+            return _style_unready_result(observation.health)
+        if conn.in_transaction and not allow_caller_transaction:
+            return _style_unready_result(observation.health)
+        # A wrong marker cannot leave a previously certified checkpoint current.
+        # Compare the complete old row under writer ownership; preserve failures.
+        old = observation.checkpoint
+        if (old is not None and old[2] in {"success", "success_empty"}
+                and (not observation.health["hash_ready"] or not observation.health["format_ready"]
+                     or observation.state.successful_coverage != "complete")):
+            borrowed = conn.in_transaction
+            transaction = _borrowed_transaction if borrowed else _owned_transaction
+            rolled_back = False
+
+            def confirmed_rollback() -> None:
+                nonlocal rolled_back
+                rolled_back = True
+
+            try:
+                with transaction(conn, on_rollback=confirmed_rollback):
+                    conn.execute("UPDATE maintenance_layers SET layer=layer WHERE 0")
+                    if _style_extra_triggers(conn):
+                        raise LayerDeferredError("Style triggers changed", category="StyleTriggersUnsupported")
+                    try:
+                        _style_source_ready(conn)
+                    except MaintenanceUnavailableError as error:
+                        raise LayerDeferredError("Canonical source readiness changed", category="StyleSourceChanged") from error
+                    if _read_layer_row(conn, "style_vectors") != old:
+                        raise LayerDeferredError("Style checkpoint changed", category="StyleSourceChanged")
+                    conn.execute(_STYLE_OUTPUT_INVALIDATE_SQL)
+            except (sqlite3.OperationalError, LayerDeferredError) as error:
+                category = error.category if isinstance(error, LayerDeferredError) else _style_sqlite_deferral(error)
+                if not rolled_back or conn.in_transaction != borrowed or category is None:
+                    raise
+                return LayerResult("style_vectors", "style_vectors", "deferred", None, 0.0,
+                                   category, False, "unverified", borrowed)
+        return run_style_maintenance(conn, force=force, threshold=threshold, cancel=cancel,
+            allow_caller_transaction=allow_caller_transaction, connection_owned=connection_owned,
+            _canonical_source=True)
 
 
 def _style_append_metadata(conn: sqlite3.Connection) -> tuple:
@@ -1359,6 +1790,7 @@ def _publish_style_append(
 
 def style_layer_spec(
     conn: sqlite3.Connection, *, cancel: threading.Event | None = None, connection_owned: bool = False,
+    _canonical_source: bool = False,
 ) -> LayerSpec:
     """Describe private style work without installing schema or reading profiles."""
     if type(connection_owned) is not bool:
@@ -1444,6 +1876,11 @@ def style_layer_spec(
         # The runner owns final commit. Upgrade before both format and source
         # validation; a stale reader cannot replace a newer generation.
         connection.execute("UPDATE messages SET sender=sender WHERE 0")
+        if _canonical_source:
+            try:
+                _validate_routed_style_source(connection)
+            except _StyleAppendChanged as error:
+                raise LayerDeferredError("Canonical source readiness changed", category=error.category) from error
         if _style_extra_triggers(connection):
             raise LayerDeferredError("Style triggers prevent tracked publication", category="StyleTriggersUnsupported")
         style._publish_style_vectors(connection, schema, query, rows, stored_rows,
@@ -1462,7 +1899,7 @@ def style_layer_spec(
 def run_style_maintenance(
     conn: sqlite3.Connection, *, force: bool = False, threshold: int = 25,
     cancel: threading.Event | None = None, allow_caller_transaction: bool = False,
-    connection_owned: bool = False,
+    connection_owned: bool = False, _canonical_source: bool = False,
 ) -> LayerResult:
     """Explicit tracked style rebuild, separate from all eight public adapters."""
     if type(allow_caller_transaction) is not bool:
@@ -1482,19 +1919,34 @@ def run_style_maintenance(
                 raise LayerDeferredError("Style preparation writer busy", category="StyleWriterBusy") from error
 
         try:
-            prepare_style_maintenance(conn, _on_safe_failure=preparation_failure)
+            if _canonical_source:
+                _prepare_routed_style_maintenance(conn)
+            else:
+                prepare_style_maintenance(conn, _on_safe_failure=preparation_failure)
         except _StyleAppendChanged as error:
             return LayerResult("style_vectors", "style_vectors", "deferred", None,
                 time.monotonic() - started, error.category, False, "unverified", borrowed)
         except LayerDeferredError as error:
             return LayerResult("style_vectors", "style_vectors", "deferred", None,
                 time.monotonic() - started, error.category, False, "unverified", borrowed)
-        spec = style_layer_spec(conn, cancel=cancel, connection_owned=connection_owned)
-        results = run_layers(conn, (spec,), force=force, threshold=threshold, cancel=cancel,
-                             allow_caller_transaction=allow_caller_transaction)
-        if results:
-            return results[0]
-        observed = _read_layer_run_baseline(conn, (spec,))
+        routed = {"_canonical_source": True} if _canonical_source else {}
+        spec = style_layer_spec(conn, cancel=cancel, connection_owned=connection_owned, **routed)
+        try:
+            results = run_layers(conn, (spec,), force=force, threshold=threshold, cancel=cancel,
+                                 allow_caller_transaction=allow_caller_transaction, **routed)
+            if results:
+                return results[0]
+            observed = _read_layer_run_baseline(conn, (spec,), **routed)
+        except _StyleAppendChanged as error:
+            if not _canonical_source or error.category not in {
+                "StyleSourceChanged", "StyleTrackingUnprepared", "StyleTriggersUnsupported",
+                "StyleMetadataChanged", "StyleAccumulatorUnsupported", "StyleHashPending",
+            }:
+                raise
+            if conn.in_transaction != borrowed:
+                raise _LayerRollbackFailed("Canonical readiness rejection changed transaction ownership") from error
+            return LayerResult("style_vectors", "style_vectors", "deferred", None,
+                               time.monotonic() - started, error.category, False, "unverified", borrowed)
         if observed is None:
             return _style_baseline_busy_result(spec, borrowed)
         state = observed[spec.layer]
@@ -1738,6 +2190,7 @@ def all_layer_specs(conn: sqlite3.Connection) -> tuple[LayerSpec, ...]:
 class MaintenanceReport(NamedTuple):
     results: tuple[LayerResult, ...]
     preferences: str
+    style_result: LayerResult | None = None
 
 
 def _dependency_parameters(dependency: LayerDependency) -> dict | None:
@@ -1908,8 +2361,16 @@ def run_engine_maintenance(
     conn: sqlite3.Connection, coordinator: MaintenanceCoordinator, *, threshold: int = 25,
     force: bool = False, cancel: threading.Event | None = None,
     prepare_extensions: bool = True, allow_caller_transaction: bool = False,
+    include_layers: bool = True, include_style: bool = False, connection_owned: bool = False,
 ) -> MaintenanceReport:
     """Use only the supplied owned worker/original explicitly borrowed handle."""
+    style_result = None
+    if include_style:
+        style_result = run_routed_style(conn, force=force, threshold=threshold, cancel=cancel,
+            allow_caller_transaction=allow_caller_transaction, connection_owned=connection_owned)
+    if not include_layers or (cancel is not None and cancel.is_set()):
+        return MaintenanceReport((), "CANCELLED" if cancel is not None and cancel.is_set() else
+                                 "SKIPPED (style-only)", style_result)
     evidence = _prepare_worker_extensions(conn, coordinator) if prepare_extensions else None
     specs = engine_layer_specs(conn, coordinator, evidence=evidence)
     results = run_layers(conn, specs, threshold=threshold, force=force, cancel=cancel,
@@ -1935,21 +2396,22 @@ def run_engine_maintenance(
             preferences = f"{time.monotonic() - started:.3f}s"
         if conn.in_transaction and allow_caller_transaction:
             preferences += " (pending caller commit)"
-    return MaintenanceReport(results, preferences)
+    return MaintenanceReport(results, preferences, style_result)
 
 
 def maintenance_report_status(report: MaintenanceReport, cancel: threading.Event | None = None) -> tuple[str, str | None]:
     if cancel is not None and cancel.is_set():
         return "cancelled", "Cancelled"
+    results = report.results + ((report.style_result,) if report.style_result is not None else ())
     for outcome in ("failed", "unavailable", "deferred", "abandoned"):
-        for result in report.results:
+        for result in results:
             if result.outcome == outcome:
                 return outcome, result.error_category
     if report.preferences.startswith(("ERROR", "UNAVAILABLE")):
         return "failed", "PreferencesUnavailable"
-    if any(result.outcome not in {"success", "success_empty", "current"} for result in report.results):
+    if any(result.pending_caller_commit or result.outcome not in {"success", "success_empty", "current"} for result in results):
         return "pending", None
-    if any(result.coverage != "complete" for result in report.results):
+    if any(result.coverage != "complete" for result in results):
         return "completed_with_limits", None
     return "success", None
 

@@ -928,7 +928,9 @@ class TestLegacyRebuildBridge(unittest.TestCase):
         tree = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
         original = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
         method = next(node for node in original.body if isinstance(node, ast.FunctionDef) and node.name == "open")
-        cls = ast.ClassDef(name="LegacyEngine", bases=[], keywords=[], body=[method], decorator_list=[])
+        schedule = next(node for node in original.body
+                        if isinstance(node, ast.FunctionDef) and node.name == "_maybe_auto_consolidate")
+        cls = ast.ClassDef(name="LegacyEngine", bases=[], keywords=[], body=[method, schedule], decorator_list=[])
         self.vector._check_embedder_compatibility = lambda _conn: None
         self.vector.vectors_are_built = lambda _conn, _table: False
         namespace = dict(__builtins__=self.vector.__dict__["__builtins__"],
@@ -941,6 +943,7 @@ class TestLegacyRebuildBridge(unittest.TestCase):
         exec(compile(ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[])), "actual-legacy-open", "exec"), namespace)
         engine = namespace["LegacyEngine"]()
         engine.db_path, engine.stats = path, {}
+        engine._has_consolidation = engine._has_style_vec = False
         engine._purge_legacy_entity_profile_summaries = lambda: None
         fake_vec = types.ModuleType("sqlite_vec")
         fake_vec.load = lambda _conn: None

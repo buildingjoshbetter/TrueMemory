@@ -1352,3 +1352,118 @@ of additional full builds is 0; successful and attempted insert baselines both
 advance by 75. This checkpoint does not activate startup migration, style-only
 coordinator jobs, consolidation/bulk style routing or bounded public style
 health. Those routing steps remain required before release.
+
+### Style routing checkpoint
+
+Startup, cached-connection and committed-add notifications now plan private
+style work independently of optional clustering. Style readiness reads only
+fixed source/checkpoint metadata, schema declarations and trigger definitions.
+It never reads source contents or profile values, loads a model, enrolls schema
+or waits for the foreground engine lock. A compatible complete/current hash2
+checkpoint needs no work; an uncovered append uses the existing threshold of
+25 committed inserts. Thus 24 uncovered inserts do not schedule a rebuild and
+25 do. Corrections, missing provenance, wrong hash markers and supported owned
+trigger repair are immediately eligible. A failed attempt at the same source
+and dependency retains its retry baseline. The synthetic 75-add gate starts
+from a tracked empty bootstrap and requires 0 additional full builds and
+0 style worker requests.
+
+Failed and unavailable attempts retain that same 25-insert retry budget even
+when hash2 or complete coverage is missing. At 0, 1 and 24 subsequent appends,
+repeated notifications produce 0 worker opens and 0 integrity scans; at 25,
+one retry advances the attempt baseline. Source corrections and changed
+dependencies remain immediately eligible. This also bounds retries for an
+unsupported future accumulator format.
+
+The coordinator retains one active worker and one immutable pending request.
+Coalescing unions requested work kinds and retains the latest threshold; it
+does not turn a busy or failed attempt into an automatic retry loop. Style-only
+jobs open an existing canonical database using an escaped `mode=rw` URI. They
+retain tuple rows, foreign keys, the 10000 ms busy timeout and existing local
+cache/synchronization settings. They do not create a database, set its journal
+mode, initialize general schema, load extensions or repair canonical source
+tracking. Unsupported MAIN/TEMP triggers on style profiles, checkpoints or
+metadata return `deferred` with `StyleTriggersUnsupported`, without enrollment,
+diagnostic writes or repeated scheduling. Missing or incompatible canonical
+source readiness is `unavailable`; normal schema initialization remains the
+repair route. The existing public-layer and combined opener still uses its
+general initialization contract.
+
+After safe metadata preflight, the style-only worker runs `quick_check(1)`
+before style writes. This is a background database scan, not a bounded
+foreground probe. Corrupt, failed or cancelled checks do not claim a successful
+open. Only an exclusively owned connection receives its cancellation handler;
+the handler is cleared before cleanup or style execution. Existing SQLite busy
+waits can delay cancellation. The worker closes its handle before releasing
+canonical ownership, including on setup and execution failure.
+
+The deprecated `open()` route now schedules guarded work instead of rebuilding
+style synchronously or independently claiming hash2. Explicit consolidation
+and bulk ingestion use the same private tracked route; bulk publishes style
+once and preserves its existing result key. Successful manual and worker
+observations are ordered within the process and published after dedicated
+connection cleanup. Borrowed work remains pending caller commit, leaves its
+original handle open and never clears earlier completed failure evidence.
+Rollback restores prior output and provenance. Conditional hash/format
+invalidation compares the entire observed checkpoint under writer ownership;
+a newer row survives, and lock deferral requires confirmed rollback.
+
+Owned manual execution carries an unready foreground style observation into
+its private report instead of bypassing TEMP-trigger restrictions on a new
+connection. Public-layer work retains its existing initialization behavior.
+Canonical style preparation validates source readiness under `BEGIN IMMEDIATE`
+or an upgraded caller savepoint before enrollment. Diagnostic, restoration
+and output paths revalidate at their explicit writer admission points, so a
+currently missing or changed source trigger cannot publish certified output.
+These checks preserve protected rollback and the standalone low-level contract.
+An unstarted worker records its failure before releasing ownership; later
+lifecycle cleanup cannot overwrite a newer manual observation.
+
+Public contracts remain eight maintenance layers and nine consolidation
+result keys. Private style results affect aggregate status and appear separately
+in `maintenance.style` health. This bounded observation does not connect or
+schedule work. It distinguishes missing/unverified provenance, current complete
+coverage, successful empty output, failures, unsupported readiness and pending
+caller commits. Current database invalidation overrides historical success;
+a genuinely committed current checkpoint can supersede historical failure.
+Future declared accumulator formats remain unverified until guarded inspection;
+health does not scan rows to infer per-row format compatibility. Mixed-case
+message deletion normalizes only the style aggregate key to lowercase.
+
+Exact current source-trigger definitions establish structural readiness only.
+They cannot detect a prior drop/change/recreate interval in which changes went
+untracked. Matching definitions cannot promote missing or unverified provenance
+or clear a known invalidation. These routes retain the existing uninterrupted
+canonical-tracking assumption; they add no interval-attestation mechanism or
+native performance/retrieval-quality claim.
+
+Canonical style no-op decisions validate source readiness in the same read
+snapshot as their checkpoint and revision. Owned probes roll back only their
+own read transaction; borrowed probes retain the caller's transaction. They
+perform no source/profile scan, writer admission, rebuild or enrollment. A
+trigger lost after the initial scheduling observation returns unverified
+`StyleSourceChanged`, including at the per-layer and cancelled-result reads.
+Read rollback failure remains an error. Worker observation ordering begins
+before ownership binding, so a binding failure reports its category while
+preserving a newer manual observation.
+
+Fixtures that exclusively test public consolidation or explicit vector rebuilds
+disable their unrelated style capability before opening or adding. Production
+style startup remains independent of the public consolidation flag. The public
+threshold still requires an established durable attempt: 24 later inserts
+produce no request, and the 25th makes the layer eligible.
+
+Canonical complete-coverage reads also validate hash2, the declared accumulator
+format, exact owned output triggers and enrollment, and unsupported MAIN/TEMP
+triggers in the checkpoint's read snapshot. TEMP tables or views that shadow
+the five canonical source, checkpoint, metadata and output table names are
+unsupported. These checks use schema and keyed metadata reads; they scan no
+source or profile rows and acquire no writer. A readiness change after
+preparation returns unverified coverage without a durable attempted baseline,
+so the next wake can repair supported enrollment or perform hash migration.
+Cancelled result reads use the same proof. Initial unverified migrations still
+run normally. A real failed builder keeps its error and insert-count baseline;
+if old complete coverage loses its metadata proof, only the returned coverage
+is downgraded. Its 25-insert retry and explicit force behavior are preserved.
+That downgrade survives the output-state reload if a retry fails. Successful
+rebuilds publish their newly verified coverage.

@@ -35,11 +35,11 @@ def _make_engine(n_messages=0, consolidation=False, vectors=False):
 
     eng = TrueMemoryEngine(db_path=db)
     eng._has_consolidation = False
+    eng._has_style_vec = False
     eng._ensure_connection()
     eng._has_consolidation = consolidation
     eng._has_vectors = vectors
     eng._has_hybrid = vectors
-    eng._has_style_vec = False
     return eng, td
 
 
