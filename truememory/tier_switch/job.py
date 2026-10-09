@@ -346,6 +346,60 @@ def check_selected_tier_job(conn: sqlite3.Connection, job: TierJob) -> None:
         raise TierJobSelectionError("Selected background job could not be validated") from None
 
 
+def check_selected_tier_job_in_writer(conn: sqlite3.Connection, job: TierJob) -> None:
+    """Read only inside the caller's owned BEGIN IMMEDIATE transaction.
+
+    Python sqlite3 exposes whether a transaction exists, not its lock kind.
+    The caller must establish writer ownership; this helper neither acquires it
+    nor commits/rolls back caller work. Stable-path/maintenance ownership is
+    still required, just as for the public clean-connection check.
+    """
+    if not conn.in_transaction:
+        raise TierJobSelectionError("Selected job certification requires caller writer ownership")
+    values = _selection_values(job)
+    shape = conn.execute(
+        "SELECT typeof(sql), length(CAST(sql AS BLOB)) FROM main.sqlite_master "
+        "WHERE name = ? COLLATE NOCASE", (_SELECTION_TABLE,),
+    ).fetchone()
+    if shape is None or shape[0] != "text" or not 1 <= shape[1] <= 8192:
+        raise TierJobSelectionError("Selected job schema exceeds its protocol bounds")
+    _selection_source(conn, job)
+    _selection_schema(conn)
+    if _selection_row(conn) != (*values, "selected"):
+        raise TierJobSelectionError("Background job is no longer selected")
+    _selection_source(conn, job)
+
+
+def _retire_selected_tier_job_in_writer(conn: sqlite3.Connection, job: TierJob) -> None:
+    """Retire this exact successful marker only within certified selection SQL.
+
+    Reject incoming foreign keys before DELETE, including when enforcement is
+    disabled on this connection. The bounded schema walk never copies table
+    definitions or unbounded names into Python. No commit or rollback occurs.
+    """
+    check_selected_tier_job_in_writer(conn, job)
+    count = 0
+    for (name,) in conn.execute(
+        "SELECT CASE WHEN typeof(name)='text' AND length(CAST(name AS BLOB)) BETWEEN 1 AND 512 "
+        "THEN name END FROM main.sqlite_master WHERE type='table' LIMIT 4097",
+    ):
+        count += 1
+        if name is None or count > 4096:
+            raise TierJobSelectionError("Database schema exceeds safe marker retirement bounds")
+        if conn.execute(
+            'SELECT 1 FROM pragma_foreign_key_list(?, \'main\') WHERE "table" = ? COLLATE NOCASE LIMIT 1',
+            (name, _SELECTION_TABLE),
+        ).fetchone() is not None:
+            raise TierJobSelectionError("Selected job marker has an incoming foreign key")
+    where = " AND ".join(f"{name} = ?" for name in _SELECTION_FIELDS)
+    changed = conn.execute(
+        f"DELETE FROM main.{_SELECTION_TABLE} WHERE singleton=1 AND state='selected' AND {where}",
+        _selection_values(job),
+    ).rowcount
+    if changed != 1:
+        raise TierJobSelectionError("Selected job changed before retirement")
+
+
 @contextmanager
 def open_selected_tier_job(job: TierJob) -> Iterator[sqlite3.Connection]:
     """Reopen under worker ownership and validate the committed selection."""

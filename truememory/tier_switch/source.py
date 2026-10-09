@@ -462,3 +462,32 @@ def finish_tier_source(conn: sqlite3.Connection, plan: TierSourcePlan) -> TierSo
                           and current.high_id == plan.manifest.cursor)
         updated = _persist(conn, replace(plan, action="complete", manifest=replace(plan.manifest, complete=True)))
     return TierSourceCompletion(updated, True, covers_current)
+
+
+def require_current_completion_in_writer(conn: sqlite3.Connection, plan: TierSourcePlan) -> None:
+    """Read-only final certification inside an owned BEGIN IMMEDIATE.
+
+    sqlite3 cannot expose transaction lock kind: the caller must hold the writer
+    and cooperative pair ownership. Unlike finish, this never persists or ends
+    a transaction. One bounded-memory full pair audit occurs at activation,
+    not after every page. Strict native table/model validation remains caller
+    responsibility; the adapter attests stored bytes and source coverage.
+    """
+    if not conn.in_transaction:
+        raise TierSourceUntrusted("Current completion requires caller writer ownership")
+    if (plan.action != "complete" or not plan.manifest.complete
+            or plan.manifest.consumed != plan.manifest.total
+            or plan.saved_manifest is None or plan.saved_receipt is None):
+        raise TierSourceUntrusted("A finished paired generation is required")
+    _check(conn, plan)
+    parsed = _parse_manifest(plan.saved_manifest, plan.manifest.model,
+                             plan.manifest.dimension, plan.manifest.targets)
+    if parsed != plan.manifest or _parse_receipt(plan.saved_receipt, parsed, plan.schema) != (
+        plan.digest, plan.prefix_count, plan.prefix_cursor,
+    ):
+        raise TierSourceUntrusted("Completion does not match its persisted paired certificate")
+    current = capture_source(conn)
+    if (current.total != plan.prefix_count + plan.manifest.outputs
+            or current.high_id != plan.manifest.cursor):
+        raise TierSourceUntrusted("Captured pair does not cover the current source")
+    _audit_pair(conn, plan)
