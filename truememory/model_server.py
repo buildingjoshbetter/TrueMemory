@@ -816,7 +816,9 @@ class ModelServer:
         ))
         return model
 
-    def _get_fast_encoder(self, tier: str, deadline: _RequestDeadline | None = None):
+    def _get_fast_encoder(
+        self, tier: str, deadline: _RequestDeadline | None = None, *, expected_target: "EmbeddingTarget | None" = None,
+    ):
         """CPU-resident encoder for the single-text fast lane (issue #577).
 
         Loaded lazily on the first single-text request that finds the global
@@ -842,9 +844,15 @@ class ModelServer:
             return None
 
         model_id, generation = state.model_id, state.generation
+        if expected_target is not None and model_id != expected_target.model_id:
+            from truememory.embedding_target import EmbeddingTargetError
+            raise EmbeddingTargetError("Fast encoder residency does not match the serving target")
         # A slow CPU constructor must not retain the old main model snapshot.
         state = None
         if self._fast_encoder is not None and self._fast_generation is generation:
+            if expected_target is not None and self._fast_model_id != model_id:
+                from truememory.embedding_target import EmbeddingTargetError
+                raise EmbeddingTargetError("Fast encoder cache does not match the serving target")
             return self._fast_encoder
 
         self._fast_encoder = None
@@ -900,8 +908,40 @@ class ModelServer:
         log.info("Loaded reranker model=%s device=%s", name, device)
         return self._reranker
 
+    def _check_serving_embed_model(self, model: object, target: "EmbeddingTarget | None") -> None:
+        if target is None:
+            return
+        from truememory.embedding_target import EmbeddingTargetError
+
+        state = self._embed_state
+        if state is None or state.model is not model or state.model_id != target.model_id:
+            raise EmbeddingTargetError("Effective encoder does not match the serving target")
+
+    @staticmethod
+    def _serving_embed_response(vectors: object, count: int, target: "EmbeddingTarget | None") -> dict:
+        if target is None:
+            return {"ok": True, "vectors": vectors}
+        from truememory.embedding_target import check_target_vectors
+
+        check_target_vectors(target, vectors, count)
+        return {"ok": True, "vectors": vectors, "target": target.to_wire(), "protocol": PROTOCOL_VERSION}
+
+    @staticmethod
+    def _serving_reranker_name(value: object) -> str:
+        import re
+
+        if (type(value) is not str or len(value.encode("utf-8")) > 512
+                or re.fullmatch(r"[\w][\w.\-]*(/[\w][\w.\-]*)?", value) is None):
+            raise ValueError("Selected reranking requires an explicit model identity")
+        return value
+
+    def _check_serving_reranker(self, model: object, expected: str | None) -> None:
+        if expected is not None and (self._reranker is not model or self._reranker_name != expected):
+            raise ValueError("Effective reranker does not match the serving target")
+
     def _handle_fast_embed(
         self, texts: list, tier: str, deadline: _RequestDeadline | None = None,
+        *, expected_target: "EmbeddingTarget | None" = None,
     ) -> dict | None:
         """Single-text fast lane (issue #577).
 
@@ -927,6 +967,7 @@ class ModelServer:
                         self._preflight_embed_result(tier, len(texts))
                         deadline.check()
                         model = self._get_embed_model(tier, deadline=deadline)
+                        self._check_serving_embed_model(model, expected_target)
                         self._check_process_memory("embed slice", deadline)
                         deadline.check()
                         recover = False
@@ -945,7 +986,9 @@ class ModelServer:
                             self._check_process_memory("embed CPU retry", deadline)
                             deadline.check()
                             vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
-                        return {"ok": True, "vectors": _checked_batch(vectors, len(texts), len(texts), "vectors")}
+                        return self._serving_embed_response(
+                            _checked_batch(vectors, len(texts), len(texts), "vectors"), len(texts), expected_target,
+                        )
                     finally:
                         model = None
                         self._lock.release()
@@ -961,7 +1004,8 @@ class ModelServer:
                     model = None
                     try:
                         deadline.start_inference()
-                        model = self._get_fast_encoder(tier, deadline=deadline)
+                        model = (self._get_fast_encoder(tier, deadline=deadline) if expected_target is None else
+                                 self._get_fast_encoder(tier, deadline=deadline, expected_target=expected_target))
                         deadline.check()
                         if model is None:
                             if deadline.transport is not None:
@@ -971,15 +1015,26 @@ class ModelServer:
                         self._check_process_memory("fast embed slice", deadline)
                         deadline.check()
                         vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
+                        if expected_target is not None:
+                            response = self._serving_embed_response(
+                                _checked_batch(vectors, len(texts), len(texts), "vectors"), len(texts), expected_target,
+                            )
                     finally:
                         model = None
             finally:
                 if fast_owned:
                     self._retire_stale_fast_encoder()
-            return {"ok": True, "vectors": _checked_batch(vectors, len(texts), len(texts), "vectors")}
+            return (response if expected_target is not None else
+                    {"ok": True, "vectors": _checked_batch(vectors, len(texts), len(texts), "vectors")})
         except (_RequestDeadlineExceeded, _ResultTooLarge, _ProcessMemoryRefused):
             raise
-        except Exception:
+        except Exception as exc:
+            if expected_target is not None:
+                from truememory.embedding_target import EmbeddingTargetError
+                if isinstance(exc, EmbeddingTargetError):
+                    # An identity/shape rejection cannot be relabelled by a
+                    # later fallback. Other fast-lane failures still retry.
+                    raise
             if deadline.transport is not None:
                 deadline.transport.started = was_started
             log.warning(
@@ -1024,6 +1079,7 @@ class ModelServer:
 
         if op in ("embed", "embed_batched", "prepare_embed_target_v1", "embed_target_v1"):
             target = None
+            expected_target = None
             preparing = op == "prepare_embed_target_v1"
             if op in ("prepare_embed_target_v1", "embed_target_v1"):
                 from truememory.embedding_target import (
@@ -1041,6 +1097,13 @@ class ModelServer:
             else:
                 texts = request["texts"]
                 tier = request.get("tier", "")
+                if "expected_target" in request:
+                    from truememory.embedding_target import EmbeddingTarget, EmbeddingTargetError, check_target_vectors
+                    expected_target = EmbeddingTarget.from_wire(request["expected_target"])
+                    if expected_target.tier == "custom" or tier != expected_target.model_id:
+                        raise EmbeddingTargetError("Selected serving requires its canonical built-in model identity")
+                    if not isinstance(texts, list) or not all(isinstance(text, str) for text in texts):
+                        raise EmbeddingTargetError("Selected embedding inputs must be a list of strings")
             try:
                 batch_limit = _batch_limit(request.get("batch_size", _EMBED_BATCH_LIMIT),
                                            _EMBED_BATCH_LIMIT)
@@ -1050,7 +1113,8 @@ class ModelServer:
             # Single-text fast lane (issue #577): hook recall queries must
             # never queue behind batch ingestion work or OOM recovery.
             if target is None and len(texts) <= self._FAST_LANE_MAX_TEXTS:
-                fast = self._handle_fast_embed(texts, tier, deadline)
+                fast = (self._handle_fast_embed(texts, tier, deadline) if expected_target is None else
+                        self._handle_fast_embed(texts, tier, deadline, expected_target=expected_target))
                 if fast is not None:
                     return fast
 
@@ -1090,6 +1154,7 @@ class ModelServer:
                                 deadline.check()
                                 model = (self._get_embed_model(tier, deadline=deadline) if target is None
                                          else self._get_prepared_embed_model(target, deadline))
+                                self._check_serving_embed_model(model, expected_target)
                                 order = self._embed_global_order(model, texts, limit, deadline)
                             while offset < len(texts) or vectors is None:
                                 deadline.check()
@@ -1113,8 +1178,8 @@ class ModelServer:
                                     self._recover_embed_oom_locked(model, deadline)
                                     retry = batch
                                     break
-                                if target is not None:
-                                    check_target_vectors(target, values, len(batch))
+                                if target is not None or expected_target is not None:
+                                    check_target_vectors(target or expected_target, values, len(batch))
                                 vectors = _store_batch_result(
                                     vectors, values, offset, len(batch), len(texts), indices=indices,
                                 )
@@ -1126,8 +1191,8 @@ class ModelServer:
                             deadline.check()
                             log.warning("MPS OOM during encoding; retrying microbatch on CPU")
                             values = model.encode(retry, batch_size=limit, show_progress_bar=False)
-                            if target is not None:
-                                check_target_vectors(target, values, len(retry))
+                            if target is not None or expected_target is not None:
+                                check_target_vectors(target or expected_target, values, len(retry))
                             vectors = _store_batch_result(
                                 vectors, values, offset, len(retry), len(texts), indices=indices,
                             )
@@ -1143,13 +1208,18 @@ class ModelServer:
                         return ({"ok": True, "target": target.to_wire()} if preparing else
                                 {"ok": True, "target": target.to_wire(),
                                  "vectors": vectors[:0] if empty_target_input else vectors})
-                    return {"ok": True, "vectors": vectors}
+                    return self._serving_embed_response(vectors, len(texts), expected_target)
                 finally:
                     model = None
 
         if op in ("rerank", "rerank_batched"):
             pairs = request["pairs"]
             model_name = request.get("model_name")
+            expected_name = None
+            if "expected_model_name" in request:
+                expected_name = self._serving_reranker_name(request["expected_model_name"])
+                if model_name != expected_name:
+                    raise ValueError("Selected reranking requires its explicit model identity")
             try:
                 batch_limit = _batch_limit(request.get("batch_size", _RERANK_BATCH_LIMIT),
                                            _RERANK_BATCH_LIMIT)
@@ -1172,6 +1242,7 @@ class ModelServer:
                                 self._preflight_rerank_result(model_name, len(pairs))
                                 deadline.check()
                                 reranker = self._get_reranker(model_name, deadline=deadline)
+                                self._check_serving_reranker(reranker, expected_name)
                                 order = self._rerank_global_order(reranker, pairs, limit, deadline)
                                 if order is not None:
                                     recovery_name = self._reranker_name
@@ -1204,6 +1275,7 @@ class ModelServer:
                                     flush_mps_cache()
                                     deadline.check()
                                     reranker = self._get_reranker(recovery_name, deadline=deadline)
+                                    self._check_serving_reranker(reranker, expected_name)
                                     retry = batch
                                     break
                                 if indices is None:
@@ -1225,7 +1297,9 @@ class ModelServer:
                                 )
                             offset += len(retry)
                     self._after_request_batches(throttler, len(pairs), predict_start, deadline)
-                    return {"ok": True, "scores": scores}
+                    return ({"ok": True, "scores": scores} if expected_name is None else
+                            {"ok": True, "scores": scores, "protocol": PROTOCOL_VERSION,
+                             "reranker": {"version": 1, "model_name": expected_name}})
                 finally:
                     reranker = None
 

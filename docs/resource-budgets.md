@@ -2189,3 +2189,45 @@ ingest, initialization, compatibility/migration, and maintenance entrypoints
 still require the integrated serving boundary or explicit refusal before public
 activation. Arbitrary raw SQL is not fenced. This checkpoint adds no activation
 call, changes no model or retrieval policy, and makes no measured memory claim.
+
+### Per-response selected serving receipts
+
+`CertifiedEmbeddingProxy(target)` is an additive remote proxy for the fixed
+edge/base/pro embedding targets. It remains an `EmbeddingProxy` subclass for
+existing remote ownership/concurrency handling. Each call uses the ordinary
+`embed` or `embed_batched` operation, an explicit canonical model ID, and an
+`expected_target` descriptor. A successful response must carry integer protocol
+version 1, an exact valid target receipt including public tier, and an array of
+shape `(input_count, target.dimension)`. An older daemon that ignores the new
+field cannot pass by returning equal-width vectors or by succeeding at an
+earlier preparation request. Missing, malformed, or different receipts fail
+closed on every call, including empty input. Custom targets continue using
+`PreparedEmbeddingProxy` and its strict prepared-target operations.
+
+The server checks canonical built-in identity before admission and the effective
+cached model identity under its existing owner before native work. Both direct
+main fast inference and the dedicated CPU fast lane return receipts. CPU clone
+construction binds the captured residency identity; generation churn can let an
+already-admitted correct model finish without publishing a stale clone. Every
+main microbatch and CPU retry must match the expected width. Identity/width
+refusal cannot become an ordinary fallback result; other transient CPU fast
+errors retain the existing main-path fallback with the same expected target.
+Microbatch ceilings, ordering, admission/deadline checks, sustained-workload
+bookkeeping, and residency generation policy remain in place.
+
+`CertifiedRerankerProxy(model_name)` requires an explicit bounded model identity.
+Each ordinary `rerank`/`rerank_batched` request carries `expected_model_name`;
+every successful response requires protocol version 1 and the exact versioned
+effective reranker receipt. The server verifies its owned model/name pair after
+initial acquisition and after CPU replacement, before prediction or retry.
+There is no fallback to another reranker name. Ordinary proxies, request fields,
+default selection, and ordinary response behavior remain unchanged.
+
+Both certified proxy constructors configure identity only. They perform no
+network request, native load, or inference and do not prove daemon-native model
+readiness or residency. This extension adds no background probe or extra model
+cache. Empty inputs retain the native path's existing behavior; successful
+empty results still require receipts, without a new synthetic probe. Tests use
+stdlib loaders and synthetic model/array doubles; native numerical parity and
+full integration remain separate GPUBox gates. No activation call or measured
+memory reduction is claimed by this protocol extension.

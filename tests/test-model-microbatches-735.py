@@ -605,7 +605,8 @@ def load_order_runtime() -> dict:
                "_request_batch_limit", "_after_request_batches", "_recover_embed_oom_locked",
                "_check_embed_recovery_deadline_locked", "_rerank_global_order", "_rerank_slice_indices",
                "_preflight_rerank_result", "_publish_embed_state", "_retire_stale_fast_encoder",
-               "_check_process_memory"}
+               "_check_process_memory", "_check_serving_embed_model", "_serving_embed_response",
+               "_serving_reranker_name", "_check_serving_reranker"}
     body = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
     for node in ast.parse(path.read_text(encoding="utf-8")).body:
         if isinstance(node, ast.FunctionDef) and node.name in functions:
