@@ -24,8 +24,12 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from truememory.embedding_target import EmbeddingTarget
 
 from truememory._platform import (
     _LOOPBACK_HOST,
@@ -624,6 +628,49 @@ class EmbeddingProxy:
         resp = _request_with_autostart(request, timeout=timeout)
         _check_model_response(resp, request)
         return resp["vectors"]
+
+
+class PreparedEmbeddingProxy:
+    """Strict target requests; no fallback to the ordinary embedding protocol."""
+
+    def __init__(self, target: "EmbeddingTarget") -> None:
+        self.target = target
+
+    def _request(self, operation: str, timeout: float | None, **fields: object) -> dict:
+        from truememory.embedding_target import EmbeddingTarget, EmbeddingTargetError
+
+        request = {"op": operation, "target": self.target.to_wire(), **fields}
+        response = _request_with_autostart(request, timeout=timeout)
+        if response.get("error") == f"Unknown op: {operation}":
+            raise ProtocolMismatchError(
+                "Model server does not support certified embedding targets; restart it after upgrading"
+            )
+        _check_model_response(response, request)
+        try:
+            effective = EmbeddingTarget.from_wire(response.get("target"))
+        except EmbeddingTargetError as exc:
+            raise ProtocolMismatchError("Model server omitted a valid embedding target receipt") from exc
+        if effective != self.target:
+            raise ProtocolMismatchError("Model server returned a different embedding target")
+        return response
+
+    def prepare(self, timeout: float | None = None) -> None:
+        self._request("prepare_embed_target_v1", timeout)
+
+    def encode(
+        self, texts: str | list[str], *, timeout: float | None = None, batch_size: int = 32,
+    ) -> np.ndarray:
+        from truememory.embedding_target import check_target_vectors
+
+        if isinstance(texts, str):
+            texts = [texts]
+        texts = list(texts)
+        if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
+        response = self._request("embed_target_v1", timeout, texts=texts, batch_size=batch_size)
+        vectors = response["vectors"]
+        check_target_vectors(self.target, vectors, len(texts))
+        return vectors
 
 
 class RerankerProxy:

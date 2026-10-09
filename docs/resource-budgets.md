@@ -1586,8 +1586,9 @@ default alone does not invalidate an already published empty-tier snapshot.
 `base`, `pro` and `qwen3_256` reuse the same loaded Qwen3 instance; `edge` and
 `model2vec` reuse the same loaded Model2Vec instance. These are the two
 deterministic identities already allowed by the fast lane. Alias updates
-publish one immutable cache snapshot. A failed distinct load preserves the
-previous snapshot.
+publish one immutable cache snapshot. The later resident-replacement checkpoint
+supersedes the original failure behavior: distinct loads release the old cache
+before construction, and a failed replacement leaves that cache empty.
 
 The removed `qwen3` name still raises the existing migration error, including
 case and whitespace variants. This validation does not mutate the default or
@@ -1797,3 +1798,65 @@ Synthetic tests cover ordinary errors, memory errors and cancellation, retained
 identity, ownership release and weak references after exception tracebacks are
 released. This bounds failed Python cache retention, not native allocator
 reclamation, CPU-transfer peak memory or the original Mac memory incident.
+
+### Certified inactive embedding targets (#795)
+
+`EmbeddingTarget.capture(tier)` freezes the requested public tier, effective
+model ID, dimension and table group. Its exact completion/separation table pair
+is derived from that validated group. `prepare_embedding_target(target)` yields
+an encode-only context lease without changing the active `vector_search` model,
+dimension or generation, config, environment, metadata or registry. Daemon cache
+residency generations still change when resident models are replaced. Call preparation outside SQLite
+transactions; this API has no connection argument and cannot discover an
+unrelated transaction held by its caller. No tier-switch caller adopts it yet.
+
+Shared preparation uses additive `prepare_embed_target_v1` and
+`embed_target_v1` operations. Older daemons must reject these operations; the
+client raises a protocol error and never falls back to ordinary embedding.
+Every successful response carries the exact descriptor. Preparation encodes one fixed
+synthetic validation string under the existing inference/state owners, batch
+policy, cooperative RSS admission, deadline and CPU-recovery path. Every actual
+output slice must have the captured width, including CPU retries. Model dimension
+getters and configured truncation bounds alone cannot certify a target. Empty
+encode requests also validate the descriptor and a probe, returning shape
+`(0, dimension)` only after successful certification.
+
+The daemon uses its existing single main cache and release-before-load policy;
+prepared requests do not add a target cache or fast CPU clone. Deterministic
+built-ins can reuse the same resident weights. Legacy custom cache labels are
+insufficient evidence because their constructor may have fallen back. Strict
+custom construction uses frozen arguments and rechecks configuration/download
+permission after ownership waits and before construction. It never relabels a
+fallback as the requested model. Legacy `minilm`, `bge-small` and removed `qwen3`
+identities are rejected by this new API; their ordinary loader behavior is
+unchanged. A receipt certifies the embedding identity at that operation, not
+persistent residency, a source generation or database readiness. Later requests
+may reload after eviction or reject changed configuration.
+
+Explicit local mode permits one outstanding preparation lease per process. It
+borrows a matching active built-in model, or owns at most one additional target.
+Construction and inference do not hold the active-model state lock. Local
+encoding shares the existing exact-instance ownership registry; optional
+deadlines cover state, lease and model-owner admission and are checked again
+before native work. The ownership helper's ordinary callers retain unbounded
+waiting. Cleanup unregisters users even after timeout. Local target encoding
+does not introduce another OOM-retry policy. Closing rejects new calls before
+waiting for active encoding, clears its model reference, then releases the
+preparation slot. An interrupted closer can retry, and active encoding drains
+the pending close itself. Same-target leases do not get independent native
+owners. This is a reference-count policy, not a byte bound or a guarantee that
+external references and exception tracebacks have disappeared.
+
+`init_prepared_target_tables(conn, target)` creates or validates only the exact
+named pair in `main`. It rejects temporary objects shadowing either name and
+requires the canonical `vec0` float dimension and cosine metric. Existing table
+contents are neither cleared nor certified. A failed pair rolls back together;
+an existing caller transaction remains open under a savepoint. No active-table
+migration or active metadata write occurs. Future publishers must retain main
+schema qualification or recheck shadowing and must separately attest source,
+target generation and content identity.
+
+Synthetic tests use stub models and in-memory SQLite transaction controls. They
+do not measure native loading, MPS memory, allocator release or latency. The
+tier manager still retains its complete source list; bounded source enrollment,
+truthful activation and the original Mac memory incident remain unresolved.
