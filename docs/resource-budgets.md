@@ -1860,3 +1860,53 @@ Synthetic tests use stub models and in-memory SQLite transaction controls. They
 do not measure native loading, MPS memory, allocator release or latency. The
 tier manager still retains its complete source list; bounded source enrollment,
 truthful activation and the original Mac memory incident remain unresolved.
+
+### Streamed inactive-pair worker primitive
+
+`RebuildWorker.run_source(target, plan)` consumes an already initialized source
+plan and frozen embedding target. It prepares an encode-only lease outside SQL,
+retains one pending source page, and publishes only an encoded prefix of that
+page. Prefix text/vector buffers and the adapter's writer/retry validation reads
+are also bounded by the requested page row limit. That limit defaults to 64;
+it does not bound the bytes in an individual message. Completion text, separation
+formatting and float serialization are unchanged. Inner encode batch size remains
+32, with no added normalization, alternate model or reranker changes.
+
+The caller must own the clean connection, verified database identity, canonical
+maintenance lease and exclusive inactive-pair writer. This entrypoint neither
+initializes schemas nor clears data. Its durable progress is the paired manifest;
+optional callbacks receive live counts and metrics without worker status SQL.
+There are no registry, configuration, active-model or serving-pair writes. The
+structured result reports commits during this call separately from the plan's
+durable cursor and distinguishes captured-range coverage from current-source
+coverage. `activated` is always false. Empty ranges still prepare and certify the
+target and finish the source checkpoint.
+
+OOM recovery retains the actual failed prefix and the existing halving credits:
+at a fixed committed cursor, initial failed size N allows at most
+`2 * (floor(log2(N)) + 1)` failures. N=1 permits 2; N=8 permits 8. Failed arrays
+and tracebacks are released before recovery hooks. Only a committed pair resets
+credits. A clean rolled-back SQL OOM may require one bounded restart audit before
+its retry; the generation, manifest and exact pending rows must still agree.
+Revalidation does not reset credits. Ordinary errors, changed sources and
+uncertain rollback propagate, without status writes or additional database work
+after rollback uncertainty. Exceptions from SQLite, leases and hooks are not
+translated into a result that could hide an ambiguous commit.
+SQL-origin OOM requires checkpoint revalidation before any ordinary result,
+including terminal exhaustion. If cancellation or deadline expiry prevents that
+validation, publication uncertainty propagates without additional SQL.
+
+Cancellation and the 9000-second maximum deadline are checked at worker-owned
+boundaries, including after preparation, throttle admission, encoding, recovery,
+callbacks and publication. Remaining time is passed into each prepared lease
+call. Cancellation cannot interrupt an active native or SQLite call, including
+its internal ownership/writer wait. If a call commits before returning, the
+returned plan preserves that committed prefix even when cancellation is then
+observed. A stronger cancellable admission contract remains necessary before
+claiming interruption after every internal wait.
+
+The existing manager still calls the original full-list worker path. This unused
+primitive does not yet reduce production tier-switch source residency or provide
+activation, background reopen ownership, inactive reset or active-force staging.
+Native allocator behavior, latency and the original Mac memory incident remain
+unproven by these synthetic tests.
