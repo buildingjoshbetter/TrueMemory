@@ -2231,3 +2231,84 @@ empty results still require receipts, without a new synthetic probe. Tests use
 stdlib loaders and synthetic model/array doubles; native numerical parity and
 full integration remain separate GPUBox gates. No activation call or measured
 memory reduction is claimed by this protocol extension.
+
+
+### Selected runtime bridge and whole-operation serving leases (#795, Unit B)
+
+`serving_operation(conn, *, deadline=None, cancelled=None, reranker_id=None)`
+reads the bounded selected journal before admission and verifies it again after
+waiting. An admitted operation freezes the public tier, embedding descriptor,
+exact completion/separation pair and effective reranker. Nested calls on the
+same accepted connection reuse that snapshot without repeating journal/schema
+reads. Another connection is refused unless explicitly admitted through a child
+reservation. Same-width Edge/Base embeddings never establish identity by width.
+
+Selected runtime projection uses the existing process singleton slots. It
+releases a replaced active embedding reference before construction, uses the
+existing local preparation slot and model ownership for the bounded width probe,
+and publishes only the frozen descriptor. Base/Pro reuse the same exact embedding
+identity without a second native load. Built-in daemon embeddings use certified
+responses on the existing main/fast request paths; custom embeddings retain the
+strict prepared-target protocol. A restart cannot silently accept an old daemon
+response lacking the expected identity receipt. Selected rerankers similarly use
+certified per-response names; local construction uses the frozen explicit name.
+No model, dtype, batch policy, ranking formula or result limit changes here.
+
+`apply_frozen_selection(selection, *, deadline=None, cancelled=None,
+reranker_id=None)` may run inside the same thread's exclusive activation lease,
+but never upgrades a serving reader. It has no connection argument: callers must
+establish that they own no SQL transaction. The process acknowledgement is cleared
+before partial projection and set only after both local slots match. With daemon
+proxies this acknowledges configured routing identity, not daemon model residency,
+native warmup, config-file persistence or activation completion. A failure after
+DB selection remains pending. The optional outer reranker override captures the
+existing deep/explicit model before admission without changing the journal's tier
+default; nested calls inherit it and refuse a different explicit override.
+
+Engine add/update/delete/delete_all and search variants, direct vector search and
+embed_single, and the entire hybrid encode/completion/separation operation now
+hold serving leases. Cached Engine handles reconcile selection too. Selected
+initialization validates the exact prepared pair before serving and skips legacy
+vector compatibility writes/migrations; its cache is bound to both generation
+and the accepted connection. Replacement handles reload their SQLite extension
+and validate again. Existing startup/cached maintenance scheduling remains.
+
+`current_operation(conn)` distinguishes unbound from a bound legacy `None`
+selection and rejects the wrong connection. Child reservations pin the group
+before submission and may outlive the parent. A clean child connection must match
+the captured database-path identity and committed selection before its body; this
+is cooperative pathname binding, not native SQLite-descriptor or hostile-clone
+proof. Unused or never-admitted reservations remain caller-owned and must close.
+Thread-local state is restored on body `BaseException`; forked process state and
+inherited tokens cannot authorize work.
+
+A borrowed SQL transaction receives one nonblocking gate/connection-lock
+admission attempt, never a native reconciliation or transaction commit/rollback.
+Cached legacy work remains available when coherent; a process already projected
+to a selected target refuses an unrelated unselected database instead of guessing
+its identity. Direct embedding/reranker setters, unloaders and slot replacement
+join exclusive admission. `blocking=False` bounds admission attempts only.
+Deadline/cancellation checks run before and after projection and after final
+journal/identity reads. The 0.05-second wait interval is not a hard return bound:
+condition reacquisition, cleanup, scheduling and an already-entered native call
+can delay return. The prepared embedding API carries a deadline, not an Event;
+cancellation during its internal wait/native work is observed on return before
+another projection or serving body is admitted.
+
+This is partial boundary adoption, not a completed public tier switch. Remaining
+Unit C work includes maintenance-owner internal serving admission, rebuild and
+migration owners, ingest/import and EncodingGate cached references, MCP decisions
+and explicit parallel-child binding, and manager/config/CLI activation. Those
+paths must preserve maintenance owner -> serving lease -> Engine writer -> SQL
+writer order. Unbound selected direct initialization is not a serving contract.
+The separate writer-fence prerequisite establishes SQL writer ownership; a
+read-only selection comparison or `in_transaction` alone cannot prove it.
+
+Validation uses stdlib production-source stubs and in-memory journals, including
+partial projection, borrowed transactions, overrides, child controls, final-read
+cancellation/deadlines, replacement refusal and selected reconnect. A separate
+opt-in GPUBox test composes the real Engine/runtime/vector code with native
+sqlite-vec and synthetic encoders through CRUD, nested search and reconnect.
+Local checks do not load native models or file-backed databases. This checkpoint
+does not prove reduced unified-memory use, native MPS acceptance, or resolution
+of the original 26.24 GB Mac incident.

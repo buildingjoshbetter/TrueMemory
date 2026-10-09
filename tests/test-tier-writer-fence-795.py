@@ -189,7 +189,7 @@ class TestWriterFence(unittest.TestCase):
         )]
         helpers = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in {"_delete_in_chunks", "_resolve_vec_tables"}]
         namespace = dict(__builtins__=self.vector.__dict__["__builtins__"], logger=logging.getLogger(__name__),
-                         MAX_CONTENT_LENGTH=10000, sqlite3=sqlite3,
+                         MAX_CONTENT_LENGTH=10000, sqlite3=sqlite3, engine_operation=lambda function: function,
                          insert_message=self.modules["storage"].insert_message,
                          update_message=self.modules["storage"].update_message,
                          delete_message=self.modules["storage"].delete_message)

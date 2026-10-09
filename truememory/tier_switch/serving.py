@@ -108,6 +108,10 @@ class OperationLease(_OpaqueToken):
         """Reserve one child now; close it if the task never enters join()."""
         return _issuer(self)._fork_child(self)
 
+    def check_admission(self) -> None:
+        """Recheck inherited controls before a caller's deferred body admission."""
+        _issuer(self)._check_lease_admission(self)
+
 
 class ChildReservation(_OpaqueToken):
     __slots__ = ()
@@ -173,12 +177,18 @@ class ServingGate:
             raise ServingLeaseError("Serving state cannot be inherited by another process")
 
     @contextmanager
-    def _locked(self, control: _Control | None = None) -> Iterator[None]:
+    def _locked(self, control: _Control | None = None, *, blocking: bool = True) -> Iterator[None]:
         self._check_process()
         acquired = False
         try:
             while not acquired:
-                if control is None:
+                if not blocking:
+                    if control is not None:
+                        _check(control)
+                    acquired = self._condition.acquire(blocking=False)
+                    if not acquired:
+                        raise ServingLeaseError("Serving admission is busy")
+                elif control is None:
                     acquired = self._condition.acquire()
                 else:
                     _check(control)
@@ -231,6 +241,12 @@ class ServingGate:
         with self._locked():
             return self._owned_reader(lease).key
 
+    def _check_lease_admission(self, lease: OperationLease) -> None:
+        self._check_process()
+        control = self._owned_reader(lease).control
+        with self._locked(control):
+            _check(self._owned_reader(lease).control)
+
     def _release_reader(self, lease: OperationLease) -> None:
         with self._locked():
             reader = self._readers.get(lease)
@@ -249,7 +265,10 @@ class ServingGate:
     def operation_lease(
         self, selection_key: SelectionKey, *, timeout: float | None = None,
         deadline: float | None = None, cancelled: threading.Event | None = None,
+        blocking: bool = True,
     ) -> Iterator[OperationLease]:
+        if type(blocking) is not bool:
+            raise ServingLeaseError("Serving admission blocking must be boolean")
         key, control = _selection_key(selection_key), _control(timeout, deadline, cancelled)
         lease = self._token(OperationLease)
         thread = threading.current_thread()
@@ -259,7 +278,7 @@ class ServingGate:
             control = _combine(parent.control, control)
         entered = False
         try:
-            with self._locked(control):
+            with self._locked(control, blocking=blocking):
                 entered = True
                 while True:
                     _check(control)
@@ -268,6 +287,8 @@ class ServingGate:
                     if writer is thread or (writer is None and (parent is not None or not self._waiting_writers)):
                         self._register_reader(lease, _Reader(thread, key, control, writer is thread or bool(parent and parent.writer_owned)))
                         break
+                    if not blocking:
+                        raise ServingLeaseError("Serving admission is busy")
                     self._condition.wait(_wait_seconds(control))
             yield lease
         finally:
@@ -392,10 +413,10 @@ if hasattr(os, "register_at_fork"):
 
 def operation_lease(
     selection_key: SelectionKey, *, timeout: float | None = None, deadline: float | None = None,
-    cancelled: threading.Event | None = None,
+    cancelled: threading.Event | None = None, blocking: bool = True,
 ) -> AbstractContextManager[OperationLease]:
     """Acquire the process-wide serving boundary for one logical operation."""
-    return _DEFAULT_GATE.operation_lease(selection_key, timeout=timeout, deadline=deadline, cancelled=cancelled)
+    return _DEFAULT_GATE.operation_lease(selection_key, timeout=timeout, deadline=deadline, cancelled=cancelled, blocking=blocking)
 
 
 def exclusive_activation(

@@ -168,6 +168,7 @@ class TestPreparedTargets(unittest.TestCase):
         self.client.use_model_server = lambda: False
         self.vector = load("vector_search", definitions=True, namespace={
             "np": Numpy(), "threading": threading, "contextmanager": contextmanager,
+            "database_operation": lambda function: function,
             "time": time, "math": math, "re": re, "sqlite3": sqlite3,
             "_lock": threading.Lock(), "_prepared_target_slot": threading.Lock(),
             "_model": None, "EMBEDDING_MODEL": "model2vec", "_embedding_dim": 256,
@@ -598,6 +599,7 @@ class TestNativePreparedTables(unittest.TestCase):
             load("tier_config")
             vector = load("vector_search", definitions=True, namespace={
                 "np": Numpy(), "threading": threading, "contextmanager": contextmanager,
+                "database_operation": lambda function: function,
                 "time": time, "math": math, "re": re, "sqlite3": sqlite3,
                 "_VEC_DISTANCE_METRIC": "cosine",
             })

@@ -146,13 +146,22 @@ class SharedModelOwnership(unittest.TestCase):
         mps.ensure_mps_memory_budget = lambda _device: None
         namespace = {"_model": None, "_lock": threading.Lock(), "_embedding_dim": 256,
                      "EMBEDDING_MODEL": "qwen3_256", "os": os, "sys": sys,
-                     "_model_name": None, "get_current_reranker_name": lambda: "synthetic-reranker"}
+                     "_model_name": None, "_model_certified": False, "_frozen_embedding_target": None,
+                     "contextmanager": contextmanager,
+                     "get_current_reranker_name": lambda: "synthetic-reranker"}
         vectors = load_definitions("vector_search.py", dict(namespace), {"get_model"})
-        reranker = load_definitions("reranker.py", dict(namespace), {"get_reranker"})
+        reranker = load_definitions("reranker.py", dict(namespace), {"get_reranker", "_reranker_load_lock"})
+        serving = types.ModuleType("synthetic_serving_741")
+        with patch.dict(sys.modules, {serving.__name__: serving}):
+            exec(compile((SOURCE / "tier_switch/serving.py").read_text(), "synthetic-serving", "exec"), serving.__dict__)
+        runtime = types.SimpleNamespace(current_runtime_operation=lambda: None,
+                                        require_model_load_allowed=lambda: None, TierRuntimeError=RuntimeError)
         package = types.ModuleType("truememory")
         package.__path__ = []
         with patch.dict(sys.modules, {"truememory": package, "truememory.model_client": self.client,
-                                     "truememory.mps_utils": mps, "sentence_transformers": transformers}):
+                                     "truememory.mps_utils": mps, "sentence_transformers": transformers,
+                                     "truememory.tier_switch.serving": serving,
+                                     "truememory.tier_switch.runtime": runtime}):
             yield vectors, reranker, factories
 
     def test_missing_endpoints_return_proxies_in_independent_clients(self) -> None:

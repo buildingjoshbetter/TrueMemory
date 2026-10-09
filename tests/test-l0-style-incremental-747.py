@@ -30,7 +30,8 @@ def load_add() -> types.FunctionType:
     selected = [node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "rebuild_transaction"]
     exec(compile(ast.Module(body=selected, type_ignores=[]), "synthetic-rebuild", "exec"), rebuild.__dict__)
     modules = {"truememory.personality_style_vec": STYLE, "truememory.rebuild_source": rebuild,
-               "truememory.maintenance": MAINTENANCE}
+               "truememory.maintenance": MAINTENANCE,
+               "truememory.tier_switch.writer": ACCUMULATOR["load_stdlib_source"]("tier_switch/writer")}
 
     def safe_import(name: str, globals: dict | None = None, locals: dict | None = None,
                     fromlist: tuple = (), level: int = 0) -> object:
@@ -43,7 +44,7 @@ def load_add() -> types.FunctionType:
     tree = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
     engine = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
     add = next(node for node in engine.body if isinstance(node, ast.FunctionDef) and node.name == "add")
-    namespace = {"__builtins__": dict(vars(builtins), __import__=safe_import), "MAX_CONTENT_LENGTH": 50000,
+    namespace = {"engine_operation": lambda function: function, "__builtins__": dict(vars(builtins), __import__=safe_import), "MAX_CONTENT_LENGTH": 50000,
                  "insert_message": STORAGE.insert_message, "_update_style_vec": STYLE.update_entity_style_vector_incremental,
                  "logger": logging.getLogger("synthetic-style-incremental")}
     exec(compile(ast.Module(body=[add], type_ignores=[]), "actual-engine-add", "exec"), namespace)

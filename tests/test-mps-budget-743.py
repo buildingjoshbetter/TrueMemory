@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import ast
+from contextlib import contextmanager
+from collections.abc import Iterator
 import dataclasses
 import logging
 import re
@@ -250,12 +252,17 @@ class TestFactoryCoverage(BudgetTestCase):
             get_embedding_proxy=lambda **kwargs: self.proxy,
             get_reranker_proxy=lambda **kwargs: self.proxy,
         )
+        serving = source_module("tier_switch/serving.py")
+        runtime = types.SimpleNamespace(current_runtime_operation=lambda: None,
+                                        require_model_load_allowed=lambda: None, TierRuntimeError=RuntimeError)
         fake_tiers = types.SimpleNamespace(resolve_custom_tier=lambda: {"embed_dim": 192})
         self.static = Mock(return_value=object())
         for name, module in {
             "sentence_transformers": types.SimpleNamespace(SentenceTransformer=transformer, CrossEncoder=transformer),
             "model2vec": types.SimpleNamespace(StaticModel=types.SimpleNamespace(from_pretrained=self.static)),
             "truememory.model_client": fake_client,
+            "truememory.tier_switch.serving": serving,
+            "truememory.tier_switch.runtime": runtime,
             "truememory.tier_config": fake_tiers,
             "truememory.reranker": types.SimpleNamespace(get_current_reranker_name=lambda: "synthetic/reranker"),
         }.items():
@@ -265,7 +272,7 @@ class TestFactoryCoverage(BudgetTestCase):
 
     def local_embed(self, model_id: str) -> types.ModuleType:
         return source_module("vector_search.py", {
-            "_model": None, "_embedding_dim": -1, "EMBEDDING_MODEL": model_id,
+            "_model": None, "_frozen_embedding_target": None, "_embedding_dim": -1, "EMBEDDING_MODEL": model_id,
             "_MODEL_DIMS": {"model2vec": 256, "minilm": 384, "bge-small": 384, "qwen3_256": 256},
             "_lock": threading.Lock(), "os": types.SimpleNamespace(environ=self.env),
             "logger": logging.getLogger("synthetic743"),
@@ -295,10 +302,12 @@ class TestFactoryCoverage(BudgetTestCase):
 
     def local_reranker(self) -> types.ModuleType:
         return source_module("reranker.py", {
-            "_model": None, "_model_name": None, "_lock": threading.Lock(),
+            "_model": None, "_model_name": None, "_model_certified": False,
+            "contextmanager": contextmanager, "Iterator": Iterator,
+            "_lock": threading.Lock(),
             "get_current_reranker_name": lambda: "synthetic/reranker",
             "log": logging.getLogger("synthetic743"),
-        }, ("get_reranker",))
+        }, ("get_reranker", "_reranker_load_lock"))
 
     def test_all_local_embedding_factories_calibrate_before_constructor(self) -> None:
         for model_id, dim in (("minilm", 384), ("bge-small", 384), ("qwen3_256", 256),

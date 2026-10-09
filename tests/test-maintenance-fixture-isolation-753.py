@@ -34,7 +34,24 @@ def fixture_loader(process_sys: object) -> Callable[[str], dict]:
 
     def safe_exec(code: object, namespace: dict) -> None:
         namespace.setdefault("__builtins__", fixture_builtins)
-        exec(code, namespace)
+        name = namespace.get("__name__", "")
+        module = process_sys.modules.get(name)
+        if (not name.startswith("synthetic_") or not isinstance(module, types.ModuleType)
+                or module.__dict__ is not namespace):
+            exec(code, namespace)
+            return
+        # stdlib dataclasses resolves postponed annotations through real sys.
+        # Expose only this temporary synthetic namespace, never application peers.
+        absent = object()
+        previous = sys.modules.get(name, absent)
+        sys.modules[name] = module
+        try:
+            exec(code, namespace)
+        finally:
+            if previous is absent:
+                del sys.modules[name]
+            else:
+                sys.modules[name] = previous
 
     fixture_builtins = dict(vars(builtins), __import__=safe_import, exec=safe_exec)
 
