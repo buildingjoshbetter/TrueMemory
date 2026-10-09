@@ -60,8 +60,20 @@ def engine_with_surprise(tmp_path, monkeypatch):
     conn.close()
 
     eng = TrueMemoryEngine(db_path)
-    eng.open(rebuild_vectors=False)
-    return eng
+    # These tests own their surprise rows and do not exercise maintenance.
+    eng._has_consolidation = False
+    eng._has_style_vec = False
+    try:
+        eng.open(rebuild_vectors=False)
+        yield eng
+    finally:
+        coordinator = eng._maintenance_coordinator
+        try:
+            if coordinator is not None:
+                coordinator.cancel()
+                assert coordinator.wait(10), "Fixture maintenance worker did not stop"
+        finally:
+            eng.close()
 
 
 def _fake_results(ids_and_scores, source=None):
