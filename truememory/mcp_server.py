@@ -40,6 +40,8 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+from truememory.tier_switch.projection import CONFIG_WRITE_LOCK, ConfigFileLock
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -58,7 +60,7 @@ _config_cache_mtime: float = 0.0
 _config_cache_time: float = 0.0
 
 # M7 (#504) — Serialize config writes from concurrent MCP handlers / tier-switch.
-_config_write_lock = threading.Lock()
+_config_write_lock = CONFIG_WRITE_LOCK
 
 # M-58 (#641) — Cross-process advisory lock for config writes. _config_write_lock
 # above only serializes threads inside ONE process; a separate `truememory-mcp`,
@@ -68,60 +70,11 @@ _config_write_lock = threading.Lock()
 _CONFIG_LOCK_PATH = _TRUEMEMORY_DIR / "config.json.lock"
 
 
-class _config_file_lock:
-    """Context manager taking a cross-process exclusive lock on config writes.
+class _config_file_lock(ConfigFileLock):
+    """Preserve the old best-effort entry point and injectable config paths."""
 
-    Reuses the same fcntl/msvcrt pattern as
-    ``tier_switch.manager.run_rebuild_sync`` (#641). Best-effort: if the lock
-    cannot be acquired (e.g. a filesystem without flock support) we proceed
-    anyway rather than fail the write — the in-process ``_config_write_lock``
-    plus the atomic ``os.replace`` still bound the damage. Held in BLOCKING mode
-    (LK_LOCK / LOCK_EX) so concurrent writers serialize instead of failing.
-    """
-
-    def __init__(self) -> None:
-        self._fd = None
-
-    def __enter__(self):
-        try:
-            _CONFIG_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-            self._fd = open(_CONFIG_LOCK_PATH, "w")
-            if os.name == "nt":
-                import msvcrt
-                msvcrt.locking(self._fd.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(self._fd, fcntl.LOCK_EX)
-        except OSError:
-            # Could not open or lock — proceed unlocked (best effort).
-            if self._fd is not None:
-                try:
-                    self._fd.close()
-                except OSError:
-                    pass
-                self._fd = None
-        return self
-
-    def __exit__(self, *exc):
-        if self._fd is None:
-            return False
-        try:
-            if os.name == "nt":
-                import msvcrt
-                try:
-                    msvcrt.locking(self._fd.fileno(), msvcrt.LK_UNLCK, 1)
-                except OSError:
-                    pass
-            else:
-                import fcntl
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
-        finally:
-            try:
-                self._fd.close()
-            except OSError:
-                pass
-            self._fd = None
-        return False
+    def __init__(self, *, strict: bool = False) -> None:
+        super().__init__(_CONFIG_LOCK_PATH, strict=strict)
 
 
 class _ConfigShapeError(ValueError):
