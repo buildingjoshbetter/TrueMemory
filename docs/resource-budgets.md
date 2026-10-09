@@ -2312,3 +2312,225 @@ sqlite-vec and synthetic encoders through CRUD, nested search and reconnect.
 Local checks do not load native models or file-backed databases. This checkpoint
 does not prove reduced unified-memory use, native MPS acceptance, or resolution
 of the original 26.24 GB Mac incident.
+
+### Guarded base/pro policy and config projection
+
+The activation journal also accepts version 2 intents. A guarded rebuild records
+its observed config tier/generation and optional status-row identity before source
+planning. Existing version 1 records retain their exact wire shape. Their missing
+config guard means unknown prior config, never an assumed absent generation.
+
+A base/pro policy-only publication changes public tier and generation without
+reading the corpus, encoding, preparing a model, or certifying legacy vectors.
+An already certified selection preserves its historical paired certificate. A
+legacy result is a separate `LegacyTierPolicy` with its observed generic or
+basepro table pair; it does not create `tier_selected_v1`. Exact pair schema,
+embedding metadata and registry identity must agree with the unchanged Qwen3
+256-dimensional space. Caller-owned maintenance and exclusive serving admission
+remain required. Active-force/reset and other policy-only transitions are refused.
+
+Policy publication compares the previous selection and intent under its owned
+writer and cancels only that intent's exact selected job marker in the same
+transaction. It neither deletes a newer job nor claims an abandoned rebuild
+succeeded. Pending config results must be acknowledged before a later intent.
+A guarded rebuild preserves an acknowledged legacy policy while its target builds.
+
+`read_tier_progress` reads bounded manifest/receipt scalars. It performs no vector
+or source audit, no status write, and no model call. Its complete flag describes
+the captured range, not current source completeness. Status callers compare the
+journal's target/status/job with the marker and progress tracker/epoch/schema in
+one read snapshot. Borrowed snapshots are left open; owned read cleanup failure
+propagates without a second rollback attempt.
+
+Config projection uses the same in-process and cross-process locks as MCP config
+writes. Activation requires successful lock acquisition; old config APIs retain
+their best-effort default. Capture seeds a generation without changing policy.
+Independent settings use a fresh locked field merge. Mirroring changes only tier
+and generation after an exact prior-guard comparison, or accepts an already
+applied exact result. It refuses unknown prior state and concurrent untagged tier
+edits. The config read is bounded to 1 MiB, including bytes after NUL characters.
+A cooperating generation marker cannot detect identical ABA edits by arbitrary
+external writers. JSON and SQLite remain separate resources: any projection
+failure leaves the database decision authoritative and config acknowledgement
+pending. Neither acknowledgement nor a configured proxy proves native readiness.
+
+Selected daemon identity/shape rejections now carry `serving_identity_mismatch`.
+The client maps that code to `ServingIdentityMismatchError`, a protocol error,
+so callers can stop a stale operation without misclassifying a genuine native
+availability failure. Ordinary successful wire defaults and fast-lane eligibility
+remain unchanged. These APIs require public caller adoption and runtime boundary
+integration; this isolated journal/config patch alone does not reduce archive
+residency or establish a fix for the original Mac memory observation.
+
+### Public maintenance and ingestion boundaries (#795, Unit C)
+
+This checkpoint carries the captured database selection or bounded legacy
+base/pro policy through maintenance admission, vector compatibility work, and
+one fact's encoding gate, duplicate decision and storage. It does not change
+retrieval formulas, models, dimensions, reranker overrides or native batches.
+Transcript parsing and remote extraction remain outside the per-fact lease.
+The gate clears its cached encoder and nearest-search results on a changed
+admitted generation, and releases its encoder reference after prediction-error
+inference. The existing process singleton remains the model cache; exceptions
+and callers can still retain their own references.
+
+A same-space policy projection can rebind an existing certified proxy or local
+slot and publish the public tier without constructing, probing or encoding a
+model. Empty or different slots stay empty. The configured runtime acknowledgement
+is absent until both required slots are available; that absence does not mean a
+zero-load policy projection failed. A later ordinary operation prepares missing
+slots outside SQL. A legacy policy is never represented as a vector certificate.
+Writer captures include the exact policy generation or its absence and accepted
+connection; a policy appearing or changing before publication refuses the write.
+Config acknowledgement alone does not invalidate the captured embedding space.
+
+The journal-aware factory opens existing databases in SQLite `mode=rw` and
+validates controlled journals before connection-local settings, bypassing general
+schema/tracking initialization. Legacy schema initialization, compatibility work, standalone
+metadata setters and cosine/legacy migrations retain cooperative maintenance
+ownership. Owner contention refuses without waiting or upgrading a serving read.
+The file/in-memory NaN rebuild also owns maintenance before extension preparation
+or table removal. Admission never ends caller-owned SQL.
+
+Foreground `add`, `update` and `embed_single` can publish matching embedding
+metadata inside their existing model fence and database writer transaction,
+without acquiring maintenance ownership. They validate the captured writer,
+serving identity and vector target before publication. Missing identity rows can
+be filled; partial or conflicting identity refuses. This helper creates no schema
+and does not commit. Controlled metadata publication remains a writer-validated
+no-op; it does not rewrite the selected generation or policy.
+
+Completed legacy file initialization can retain one bounded scalar receipt per
+Engine. An externally closed handle or clean I/O-error handle can reconnect using
+a separately validated candidate; explicit `close()` clears that Engine's receipt.
+A fresh Engine can receive initialization evidence only from the current automatic
+worker, bound to the exact coordinator, process, descriptor and launch token.
+Cancellation, worker completion, failed launch and fork revoke that evidence.
+A busy launch also discards its own receipt while retaining its pending work.
+A distinct newer pending request retains only its own matching generation receipt.
+Manual or foreign owners and automatic requests without a valid receipt provide
+no such bypass.
+
+Both paths recheck file/schema identity and the current journal, run
+`quick_check(1)`, and restore connection-local settings and required extension
+registration. For legacy readiness they also compare the bounded registry and
+embedding metadata. Newly written metadata must match the captured model and
+dimension. Absent metadata requires FTS-only initialization or empty initialized
+vector tables. Read cleanup must finish before receipt or
+candidate publication. Candidate validation rejection preserves the prior Engine
+handle.
+Fresh selected/policy authority clears legacy readiness and uses normal controlled
+reconciliation; initialization receipts are not vector certificates.
+
+Before reusing receipt-backed legacy readiness, Engine compares the admitted
+embedding model and dimension with the receipt. A reranker-only Deep override
+remains compatible. This check adds no SQL, file stat or model construction to the
+ready path. Receipt reuse does not run migrations, transfer caller SQL, wait for an
+owner, or retain models/connections in its evidence. These checks assume
+cooperating owners and stable paths, not hostile file replacement protection.
+
+A fresh public Engine, fact, or MCP search boundary may coordinate a retry after
+that single-attempt opener reports busy. Only a proven local automatic launch
+originating with a valid initialization receipt permits waiting. Manual, foreign,
+receiptless and cancelled owners retain refusal. Waiting occurs outside current
+runtime operations, raw serving readers/exclusive leases, Engine writers and SQL.
+The exact owner observed during failed acquisition supplies a per-launch release
+notification; a wake grants no initialization or vector authority. The caller
+retries normal opening and validation from scratch, preserving lazy style
+initialization and exact schema/token checks.
+
+One monotonic budget covers the initial attempt and later admission retries:
+`DEFAULT_BUSY_TIMEOUT_MS` gives 10,000 / 1,000 = 10 seconds. The budget bounds
+retry admission and waiting, not hard preemption of an already-running native or
+SQLite call. Successors do not reset it. Cancellation or expiry returns typed
+busy. Parallel MCP child opens and manual consolidation retain their existing
+single-attempt behavior; a child cannot wait behind its parent's serving lease.
+
+Cold legacy initialization completes under a provisional admission before the
+public operation captures its immutable table pair. A generic-to-tiered migration
+therefore cannot leave the first search or fact operation using dropped generic
+tables. Existing parent operations retain their captured identity. A nested cold
+Engine may attach to a validated existing pair or initialize an absent generic
+pair without migrating those names; migration that would invalidate the parent's
+pair refuses before mutation. Unrelated inactive caches remain intact.
+
+Automatic maintenance is deferred across the public operation and its reserved
+children. The outer Engine scope requests normal maintenance after its serving
+lease releases; nested calls and children do not launch competing workers.
+Explicit maintenance suppression still applies. MCP serializes only sibling
+connection-open steps within one request, releasing that lock before child
+admission and search. Strict child opens retain their single-attempt contract.
+
+For synchronous in-memory macOS Qwen repair, legacy-name migration follows the
+existing repair so the repaired vectors become the registered serving pair.
+File-backed background repair retains its existing order. These ordering checks
+do not establish native device behavior or a memory reduction.
+
+Concrete model-backed maintenance enters ownership before serving/dependencies.
+Selected and policy clustering is explicitly deferred before native preparation
+because its derived-vector publication is not adopted here. Cold public
+consolidation and coordinator reopen preserve that deferral. Eligible nonvector
+layers and lexical style work retain their existing transactions and scheduling;
+they do not retain embedding models. Deferred work is reported as such.
+Typed serving, writer, source-fence and receipt refusals propagate through Engine,
+hybrid, gate, duplicate and ingestion availability fallbacks. Ordinary dependency
+failures retain the existing fallback behavior.
+
+Tests distinguish standard-library production-AST/in-memory checks from opt-in
+file-backed SQLite/sqlite-vec cases using synthetic encoders and real Engine,
+serving, writer and automatic-worker paths. Local safe checks exclude native
+models and file-backed databases; native tests run in the isolated test environment.
+Results belong to their exact source snapshot and gate receipts. These scopes do
+not establish a native Mac residency bound or prove that the original 26.24 GB
+memory incident is fixed. Complete-archive Deep Search remains future scope.
+
+
+### Public tier adoption and interrupted jobs (#795)
+
+Both public manager routes use one inactive-job preparation path and the bounded
+source worker. The background handoff contains only the accepted job, intent and
+status ID. It never retains source pages or passes a connection between threads.
+The worker requires captured-range and current-source completion before the
+certified finalizer can publish. Progress callbacks do not write per-page status.
+
+Configure keeps the compatibility `tier` response as the requested tier and
+reports `served_tier` separately. Queued and failed requests clear the cached
+Memory reference; existing operations retain their admitted references. Same-tier
+requests consult the journal and retry config/runtime reconciliation. A commit or
+projection ambiguity remains `activation_pending`. Suspect connections are closed;
+committed tier readback uses a fresh validated connection and may remain unknown.
+
+Base/pro policy requests and CLI setup after a policy transition do not probe or
+construct models. A first-run absent or schema-empty store can persist onboarding
+without a vector certificate. Different first-run identities require both model
+slots to be unloaded; supported lazy setters run under exclusive serving. Loaded
+mismatches refuse before config writes. A failed config write restores the old
+unloaded identity only after a locked read proves the old file remains; an
+already-replaced file retains its matching new identity and reports pending.
+
+Interrupted selected jobs are never taken over automatically. `get_status` exposes
+the exact job ID; explicit `cancel(status_id, expected_job_id=...)` requires matching
+identity and maintenance admission. An orphan marker uses its explicit job ID
+without asserting that a stale status row owns it. Terminal markers permit the
+existing explicit previous-job admission on a later request. Status text is bounded
+before materialization, and superseded rows cannot continue reporting running.
+
+Supplied backup paths remain recorded in status. This inactive workflow does not
+invoke the legacy destructive backup-pruning helper. Force on the serving pair,
+unsupported existing metadata, and unreceipted nonempty inactive pairs refuse.
+These are implementation contracts, not native/full-gate or memory-reduction claims.
+
+
+#### Explicit CLI recovery
+
+Read `truememory_status(status_id)` for `rebuild.id` and its matching `rebuild.job_id`.
+For interrupted work, run `truememory-ingest cancel-rebuild --status-id ID --job-id JOB_ID`
+and supply `--db PATH` when the original request used a different database path.
+Both IDs are required; status IDs must be positive SQLite integers and job IDs must
+be exact lowercase 32-character hexadecimal values. The command does not discover
+or substitute IDs, automatically retry, start work, or delete source/vector rows.
+A live maintenance owner, stale/mismatched IDs, or an unbound orphan marker refuses.
+Only the exact terminal cancellation result counts as success. Then retry the
+original `upgrade-tier` request explicitly; existing source/receipt validation
+still controls whether the inactive prefix is resumable. An orphan
+`selected_job_id` is not proof that a stale status row belongs to that job.
