@@ -2007,3 +2007,58 @@ exact pair generation, final writer ownership and activation remain separate.
 Synthetic tests use in-memory databases and mocked file observations only. This
 binding neither removes the public manager's retained source list nor proves the
 original Mac memory incident fixed.
+
+### Serving operation admission prerequisite
+
+`tier_switch/serving.py` adds an unused process-wide reader/exclusive-writer
+boundary. `operation_lease(selection_key)` pins a caller-supplied identity for a
+whole logical operation; `exclusive_activation()` drains readers and reserved
+children before admitting a writer. The key must be an exact tuple of 1 through
+8 exact strings, each 1 through 512 characters. It is opaque metadata, not a
+certified database generation. Concurrent admitted keys must agree. Errors and
+token representations do not include key contents.
+
+Same-thread reads are reentrant. Unrelated readers wait behind queued writers,
+and writers enter in FIFO order. A live reader can call `fork_child()` to reserve
+one parallel task before submitting it. The reservation immediately pins the
+group and can outlive its parent; its single successful `join()` bypasses a
+waiting writer so the parent can wait for its children without deadlocking.
+Joined descendants retain the pin until their own contexts exit. This fairness
+exception does not bound the duration or number of descendants in one operation.
+
+Unused reservations must be closed, including a task that never starts or whose
+join fails before admission. Such a failure leaves the reservation available for
+retry or explicit `close()`; it does not report successful admission. Close is
+idempotent for an authentic unused or retired reservation and rejects a running
+joined child. Retired identities are weakly retained, so completed reservations
+do not accumulate a process-lifetime strong-reference history. Stale, forged,
+foreign-gate and already consumed tokens cannot grant admission.
+
+Read-to-write upgrades fail immediately. Writers may reenter and synchronously
+acquire reads, but those reads cannot export cross-thread child reservations.
+A writer-owned read still pins admission if its outer writer exits first.
+Every context must enter and exit on the same thread; transferring an entered
+generator context across threads is unsupported and fails closed. Ordinary
+same-thread body exceptions, including `BaseException`, release registrations.
+
+Optional timeout and absolute monotonic deadline bounds apply to admission,
+including the bookkeeping mutex. Read reentry, child reservation and child join
+inherit the parent's deadline and cancellation events. Each exclusive entry
+uses its own supplied controls. Cancellation is checked before admission and
+after waits. A supplied `threading.Event` sets a maximum timed-wait/poll interval
+of 0.05 seconds, not a wall-clock return bound. `Condition.wait()` internally
+reacquires the bookkeeping mutex without an interruptible deadline; mutex
+reacquisition, cleanup and thread scheduling can delay return. Cancellation and
+deadline are checked after reacquisition, so expired or cancelled work is still
+refused before admission. There is no background polling thread. Admission bounds
+do not interrupt an admitted body, native inference, SQLite work or cleanup.
+
+The module gate spans all databases within one process. Explicit gate instances
+and inherited tokens reject a changed process ID before acquiring an inherited
+lock; the module default is replaced in a forked child. This is not a
+cross-process mutex or selected-generation writer check. No engine, vector,
+MCP, manager, configuration or activation caller adopts it in this checkpoint.
+The silent equal-dimension encode/table-selection race remains until complete
+nested and parallel operations use this boundary with certified identities.
+Local tests use only stdlib threads, events and controlled clocks. No serving
+latency, native-memory reduction or fix for the original Mac incident is claimed.
