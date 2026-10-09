@@ -46,8 +46,12 @@ from concurrent.futures import Future, ThreadPoolExecutor  # noqa: E402
 from contextlib import contextmanager  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
+from typing import TYPE_CHECKING  # noqa: E402
 
 import numpy as np  # noqa: E402
+
+if TYPE_CHECKING:
+    from truememory.embedding_target import EmbeddingTarget
 
 try:
     import psutil  # noqa: E402
@@ -234,6 +238,7 @@ class _EmbedState:
     tier: str
     model_id: str
     generation: object = None
+    prepared_identity: tuple[str, int, str] | None = None
 
     def __post_init__(self) -> None:
         if self.generation is None:
@@ -767,6 +772,7 @@ class ModelServer:
             if state.tier != tier:
                 self._publish_embed_state(_EmbedState(
                     model=state.model, tier=tier, model_id=model_id, generation=state.generation,
+                    prepared_identity=state.prepared_identity,
                 ))
             return state.model
 
@@ -782,6 +788,32 @@ class ModelServer:
         # fast lane can never observe a torn (model, tier, model_id) triple.
         self._publish_embed_state(_EmbedState(model=model, tier=tier, model_id=model_id))
         log.info("Loaded embedding model for tier=%s (model=%s)", tier, model_id)
+        return model
+
+    def _get_prepared_embed_model(self, target: "EmbeddingTarget", deadline: _RequestDeadline) -> object:
+        from truememory.embedding_target import build_target_model
+
+        target.check_configuration()
+        deadline.check()
+        state = self._embed_state
+        if state is not None and (
+            state.prepared_identity == target.identity
+            or (state.model_id == target.model_id and target.model_id in self._FAST_LANE_SAFE_MODEL_IDS)
+        ):
+            return state.model
+        # A legacy custom label is not evidence that its constructor did not
+        # fall back. Only strict construction can establish that identity.
+        state = None
+        self._publish_embed_state(None)
+        self._check_process_memory("prepared embed construction", deadline)
+        device = self._embed_device()
+        deadline.check()
+        model = build_target_model(target, device, check=deadline.check)
+        self._check_process_memory("prepared embed construction completion", deadline)
+        self._publish_embed_state(_EmbedState(
+            model=model, tier=target.tier, model_id=target.model_id,
+            prepared_identity=target.identity,
+        ))
         return model
 
     def _get_fast_encoder(self, tier: str, deadline: _RequestDeadline | None = None):
@@ -990,9 +1022,25 @@ class ModelServer:
         if op == "ping":
             return {"ok": True}
 
-        if op in ("embed", "embed_batched"):
-            texts = request["texts"]
-            tier = request.get("tier", "")
+        if op in ("embed", "embed_batched", "prepare_embed_target_v1", "embed_target_v1"):
+            target = None
+            preparing = op == "prepare_embed_target_v1"
+            if op in ("prepare_embed_target_v1", "embed_target_v1"):
+                from truememory.embedding_target import (
+                    EmbeddingTarget, TARGET_PROBE_TEXT, check_target_vectors,
+                )
+                target = EmbeddingTarget.from_wire(request.get("target"))
+                target.check_configuration()
+                texts = [TARGET_PROBE_TEXT] if preparing else request["texts"]
+                if not isinstance(texts, list) or not all(isinstance(text, str) for text in texts):
+                    raise ValueError("Prepared embedding inputs must be a list of strings")
+                empty_target_input = not texts
+                if empty_target_input:
+                    texts = [TARGET_PROBE_TEXT]
+                tier = target.tier
+            else:
+                texts = request["texts"]
+                tier = request.get("tier", "")
             try:
                 batch_limit = _batch_limit(request.get("batch_size", _EMBED_BATCH_LIMIT),
                                            _EMBED_BATCH_LIMIT)
@@ -1001,7 +1049,7 @@ class ModelServer:
 
             # Single-text fast lane (issue #577): hook recall queries must
             # never queue behind batch ingestion work or OOM recovery.
-            if len(texts) <= self._FAST_LANE_MAX_TEXTS:
+            if target is None and len(texts) <= self._FAST_LANE_MAX_TEXTS:
                 fast = self._handle_fast_embed(texts, tier, deadline)
                 if fast is not None:
                     return fast
@@ -1035,9 +1083,13 @@ class ModelServer:
                         with deadline.locked(self._lock):
                             if model is None:
                                 deadline.start_inference()
-                                self._preflight_embed_result(tier, len(texts))
+                                if target is None:
+                                    self._preflight_embed_result(tier, len(texts))
+                                else:
+                                    _check_result_size((len(texts), target.dimension), "vectors")
                                 deadline.check()
-                                model = self._get_embed_model(tier, deadline=deadline)
+                                model = (self._get_embed_model(tier, deadline=deadline) if target is None
+                                         else self._get_prepared_embed_model(target, deadline))
                                 order = self._embed_global_order(model, texts, limit, deadline)
                             while offset < len(texts) or vectors is None:
                                 deadline.check()
@@ -1061,6 +1113,8 @@ class ModelServer:
                                     self._recover_embed_oom_locked(model, deadline)
                                     retry = batch
                                     break
+                                if target is not None:
+                                    check_target_vectors(target, values, len(batch))
                                 vectors = _store_batch_result(
                                     vectors, values, offset, len(batch), len(texts), indices=indices,
                                 )
@@ -1072,6 +1126,8 @@ class ModelServer:
                             deadline.check()
                             log.warning("MPS OOM during encoding; retrying microbatch on CPU")
                             values = model.encode(retry, batch_size=limit, show_progress_bar=False)
+                            if target is not None:
+                                check_target_vectors(target, values, len(retry))
                             vectors = _store_batch_result(
                                 vectors, values, offset, len(retry), len(texts), indices=indices,
                             )
@@ -1083,6 +1139,10 @@ class ModelServer:
                         if should_deactivate:
                             self._deactivate_throttler()
 
+                    if target is not None:
+                        return ({"ok": True, "target": target.to_wire()} if preparing else
+                                {"ok": True, "target": target.to_wire(),
+                                 "vectors": vectors[:0] if empty_target_input else vectors})
                     return {"ok": True, "vectors": vectors}
                 finally:
                     model = None

@@ -45,6 +45,9 @@ import re
 import struct
 import sqlite3
 import threading
+import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -53,7 +56,7 @@ from truememory._platform import _env_int
 from truememory.storage import _deserialize_metadata, select_message_cols
 
 if TYPE_CHECKING:
-    pass
+    from truememory.embedding_target import EmbeddingTarget
 
 logger = logging.getLogger(__name__)
 
@@ -315,6 +318,236 @@ def get_model():
             _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
             _embedding_dim = 256
     return _model
+
+
+_prepared_target_slot = threading.Lock()
+
+
+class _PreparedEmbeddingLease:
+    """An encode-only handle; closing drains work before releasing residency."""
+
+    def __init__(
+        self, target: EmbeddingTarget, encoder: object, *, shared: bool,
+        release_slot: Callable[[], None] | None = None,
+    ) -> None:
+        self._target = target
+        self._encoder = encoder
+        self._shared = shared
+        self._release_slot = release_slot
+        self._state_lock = threading.Lock()
+        self._encode_lock = threading.Lock()
+        self._closed = False
+        self._released = False
+
+    @property
+    def target(self) -> EmbeddingTarget:
+        return self._target
+
+    def encode(
+        self, texts: str | list[str], *, timeout: float | None = None, batch_size: int = 32,
+    ) -> np.ndarray:
+        from truememory.embedding_target import TARGET_PROBE_TEXT, check_target_vectors
+        from truememory.mps_utils import _own_model
+
+        expires = _target_deadline(timeout)
+        if type(batch_size) is not int or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
+        if isinstance(texts, str):
+            texts = [texts]
+        texts = list(texts)
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("Prepared embedding target is closed")
+        remaining = _target_remaining(expires)
+        if remaining is None:
+            self._encode_lock.acquire()
+        elif not self._encode_lock.acquire(timeout=min(remaining, threading.TIMEOUT_MAX)):
+            raise TimeoutError("Prepared embedding deadline exceeded")
+        encoder = None
+        try:
+            with self._state_lock:
+                if self._closed:
+                    raise RuntimeError("Prepared embedding target is closed")
+                encoder = self._encoder
+            remaining = _target_remaining(expires)
+            if self._shared:
+                return encoder.encode(texts, timeout=remaining, batch_size=batch_size)
+            # The local tier worker owns its retry policy. Preserve exact-model
+            # exclusion without adding an independent native recovery loop.
+            with _own_model(encoder, remaining=lambda: _target_remaining(expires)):
+                self.target.check_configuration()
+                _target_remaining(expires)
+                probe = not texts
+                values = encoder.encode(
+                    [TARGET_PROBE_TEXT] if probe else texts,
+                    batch_size=batch_size, show_progress_bar=False,
+                )
+                _target_remaining(expires)
+                values = np.asarray(values, dtype=np.float32)
+                check_target_vectors(self.target, values, 1 if probe else len(texts))
+                return values[:0] if probe else values
+        finally:
+            encoder = None
+            with self._state_lock:
+                closed = self._closed
+            if closed:
+                self._finish_close()
+            self._encode_lock.release()
+
+    def _finish_close(self) -> None:
+        # Called only by the encode-lock owner, including an encode that drains
+        # after its closing thread was cancelled while waiting.
+        self._encoder = None
+        release_slot, self._release_slot = self._release_slot, None
+        if release_slot is not None:
+            release_slot()
+        with self._state_lock:
+            self._released = True
+
+    def close(self) -> None:
+        with self._state_lock:
+            if self._released:
+                return
+            # Queued calls must see closure before the current call drains.
+            self._closed = True
+        try:
+            with self._encode_lock:
+                self._finish_close()
+        except BaseException:
+            if self._encode_lock.acquire(blocking=False):
+                try:
+                    self._finish_close()
+                finally:
+                    self._encode_lock.release()
+            raise
+
+
+def _target_deadline(timeout: float | None) -> float | None:
+    if timeout is None:
+        return None
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout):
+        raise ValueError("Prepared embedding timeout must be finite")
+    if timeout <= 0:
+        raise TimeoutError("Prepared embedding deadline exceeded")
+    return time.monotonic() + timeout
+
+
+def _target_remaining(expires: float | None) -> float | None:
+    if expires is None:
+        return None
+    remaining = expires - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Prepared embedding deadline exceeded")
+    return remaining
+
+
+@contextmanager
+def prepare_embedding_target(
+    target: EmbeddingTarget, *, timeout: float | None = None,
+) -> Iterator[_PreparedEmbeddingLease]:
+    """Prepare outside SQLite transactions; never activate a tier or expose weights."""
+    from truememory.embedding_target import EmbeddingTarget, TARGET_PROBE_TEXT, build_target_model
+    from truememory.model_client import PreparedEmbeddingProxy, use_model_server
+    from truememory.mps_utils import resolve_device
+
+    if not isinstance(target, EmbeddingTarget):
+        raise TypeError("Expected an immutable EmbeddingTarget")
+    expires = _target_deadline(timeout)
+    target.check_configuration()
+    shared = use_model_server()
+    owns_slot = False
+    encoder = lease = None
+    try:
+        if shared:
+            encoder = PreparedEmbeddingProxy(target)
+            encoder.prepare(timeout=_target_remaining(expires))
+        else:
+            if not _prepared_target_slot.acquire(blocking=False):
+                raise RuntimeError("Another prepared embedding target lease is active")
+            owns_slot = True
+            remaining = _target_remaining(expires)
+            if remaining is None:
+                _lock.acquire()
+            elif not _lock.acquire(timeout=min(remaining, threading.TIMEOUT_MAX)):
+                raise TimeoutError("Prepared embedding deadline exceeded")
+            try:
+                _target_remaining(expires)
+                # Legacy custom loaders may have fallen back despite their
+                # label. Only deterministic built-ins can borrow active weights.
+                if (target.model_id in {"model2vec", "qwen3_256"}
+                        and EMBEDDING_MODEL == target.model_id and _embedding_dim == target.dimension):
+                    encoder = _model
+            finally:
+                _lock.release()
+            if encoder is None:
+                device = resolve_device(None)
+                _target_remaining(expires)
+                encoder = build_target_model(target, device, check=lambda: _target_remaining(expires))
+                _target_remaining(expires)
+        lease = _PreparedEmbeddingLease(
+            target, encoder, shared=shared,
+            release_slot=_prepared_target_slot.release if owns_slot else None,
+        )
+        owns_slot = False
+        encoder = None
+        if not shared:
+            lease.encode([TARGET_PROBE_TEXT], timeout=_target_remaining(expires))
+        yield lease
+    finally:
+        encoder = None
+        if lease is not None:
+            lease.close()
+        elif owns_slot:
+            _prepared_target_slot.release()
+
+
+def init_prepared_target_tables(conn: sqlite3.Connection, target: EmbeddingTarget) -> tuple[str, str]:
+    """Initialize only the named main-schema pair; preserve a caller transaction."""
+    from truememory.embedding_target import EmbeddingTarget
+    import sqlite_vec
+
+    if not isinstance(target, EmbeddingTarget):
+        raise TypeError("Expected an immutable EmbeddingTarget")
+    conn.enable_load_extension(True)
+    try:
+        sqlite_vec.load(conn)
+    finally:
+        conn.enable_load_extension(False)
+    owned = not conn.in_transaction
+    conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT prepared_embedding_target")
+    try:
+        for name in target.tables:
+            if conn.execute("SELECT 1 FROM temp.sqlite_master WHERE name = ? COLLATE NOCASE", (name,)).fetchone():
+                raise ValueError("A temporary object shadows the prepared target table")
+            existing = conn.execute(
+                "SELECT type, sql FROM main.sqlite_master WHERE name = ?", (name,),
+            ).fetchone()
+            if existing is not None:
+                declaration = (
+                    r"CREATE\s+VIRTUAL\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+                    + r'(?:"' + name + r'"|`' + name + r'`|\[' + name + r'\]|' + name + r')'
+                    + r"\s+USING\s+vec0\s*\(\s*embedding\s+float\["
+                    + str(target.dimension) + r"\]\s+distance_metric\s*=\s*cosine\s*\)\s*"
+                )
+                if (existing[0] != "table" or not isinstance(existing[1], str)
+                        or re.fullmatch(declaration, existing[1], re.IGNORECASE) is None):
+                    raise ValueError("Existing table does not match the prepared target schema")
+            else:
+                conn.execute(
+                    f'CREATE VIRTUAL TABLE main."{name}" USING vec0({_vec0_column_decl(target.dimension)})'
+                )
+        if owned:
+            conn.commit()
+        else:
+            conn.execute("RELEASE SAVEPOINT prepared_embedding_target")
+    except BaseException:
+        if owned:
+            conn.rollback()
+        else:
+            conn.execute("ROLLBACK TO SAVEPOINT prepared_embedding_target")
+            conn.execute("RELEASE SAVEPOINT prepared_embedding_target")
+        raise
+    return target.tables
 
 
 # ---------------------------------------------------------------------------
