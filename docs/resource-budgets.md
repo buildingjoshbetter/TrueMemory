@@ -1506,3 +1506,47 @@ retain their existing savepoint and caller-transaction semantics.
 This bounds repeated nonprogress, not one native call's duration, allocator bytes,
 the complete source list retained by the worker, or whole-process memory. Native
 Mac/MPS calibration and the original memory incident remain unresolved.
+
+### Tier source adapter: bounded checkpoints for an inactive pair
+
+`tier_switch/source.py` supplies model-free plan, initialize, read, publish-prefix,
+and finish operations. It is not yet called by the tier manager or worker, so it
+does not remove their retained source list or change serving activation. Callers
+must own an inactive completion/separation pair, validate its exact model and
+schema beforehand, install source tracking and metadata before planning, and
+hold the canonical maintenance lease plus exclusive cooperating pair-writer
+ownership. Database identity on background reopen and snapshot consistency are
+caller obligations. The adapter does not establish these preconditions.
+
+Full initialization accepts only an already empty pair and never clears tables.
+A registry row, matching row count, generic manifest, or schema alone cannot
+certify existing vector contents. Resume and delta require both a strict source
+manifest and this adapter's receipt. The receipt binds the model, dimension,
+target names, schema generation, consumed source range, and an ordered SHA256
+chain over signed 64-bit row IDs and both serialized vector blobs. Restart
+recomputes that chain once in pages of 64 rows. Dimensions are limited to 1..4096;
+each stored blob must contain exactly `4 * dimension` bytes. Two vector pages
+therefore contain at most `2 * 64 * 4096 * 4 = 2,097,152` bytes of serialized
+payload, excluding Python objects, SQLite buffers and transient hash input.
+Receipts detect changed bytes under cooperating ownership; they do not authenticate
+data against a writer that can forge both metadata and vectors.
+
+Restart verification takes O(N) time in one read snapshot and can retain WAL
+pages until that snapshot ends. Source pages default to 64 rows and honor the
+explicit caller row limit. A row limit is not a text-byte bound: one message can
+still be large. Reads finish before encoding. Every encoded prefix publishes both
+target rows, the consumed cursor and the receipt in one owned transaction. The
+returned immutable pending suffix supports shrinking retries without skipping
+inputs. Failed database writes require replanning because SQLite total_changes
+also counts rolled-back writes. Borrowed transactions are refused untouched.
+
+The plan pins its connection, data_version and total_changes. Any intervening
+write, including a legitimate concurrent tail append or unrelated status write,
+requires explicit replanning and bounded restart verification. TEMP shadows and
+side-effect triggers on pair/metadata tables are refused. Source corrections,
+deletions and low-ID insertions invalidate captured provenance; a separately
+prepared empty pair is then required. Negative and zero IDs remain valid cursors.
+Finish distinguishes complete captured-range coverage from whole-source coverage
+at its own transaction snapshot. Neither result activates a target or promises
+future freshness. Final concurrent-tail caller adoption, native memory budgets,
+and the original Mac memory incident remain unresolved.
