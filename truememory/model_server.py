@@ -490,7 +490,15 @@ class ModelServer:
         if deadline is not None:
             self._check_embed_recovery_deadline_locked(model, deadline)
         if hasattr(model, "to"):
-            model.to("cpu")
+            try:
+                model.to("cpu")
+            except BaseException:
+                # Failed or cancelled transfers cannot certify this instance
+                # as CPU-ready. Preserve the original error and sticky choice.
+                state = self._embed_state
+                if state is not None and state.model is model:
+                    self._publish_embed_state(None)
+                raise
 
     def _check_embed_recovery_deadline_locked(
         self, model: object, deadline: _RequestDeadline,
