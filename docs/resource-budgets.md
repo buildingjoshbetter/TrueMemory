@@ -1957,3 +1957,53 @@ activation remain separate requirements. Ordinary edits within the same epoch
 remain the source adapter's responsibility. Local tests use mocked file handles
 and in-memory SQLite; the synthetic file-backed worker test is opt-in for GPUBox.
 No native-memory reduction or resolution of the original Mac incident is claimed.
+
+### Selected tier job: durable binding through the accepted connection
+
+The additive `select_tier_job`, `check_selected_tier_job`,
+`open_selected_tier_job` and `end_selected_tier_job` APIs bind a background job
+to a committed marker written through the accepted clean connection. The original
+capture/check/open functions retain their previous behavior. The descriptor still
+contains no source corpus, connection, model or ownership token. No public manager
+or worker caller adopts these selected-job functions in this checkpoint.
+
+Selection owns one `BEGIN IMMEDIATE` transaction. It validates source identity in
+that writer snapshot, creates or checks the exact reserved singleton schema,
+writes the generated job ID with the explicit target and tracker/epoch/schema,
+rechecks identity, and commits. It never installs source tracking. Creating the
+marker leaves the captured messages-schema signature unchanged, but changes the
+global SQLite schema version: select the job before preparing a source plan.
+Borrowed transactions are refused untouched. A live selection cannot be replaced.
+Replacing a failed/cancelled selection requires its exact previous job ID.
+
+Selected reopen retains worker-thread maintenance ownership and the existing
+file/path/source checks, then verifies the committed job marker before yielding
+a clean connection. Marker checks read a coherent source/selection snapshot and
+make no writes, so they do not invalidate a source plan's total_changes fence.
+Ending a job accepts only `cancelled` or `failed` and compares the complete job,
+target and source identity before updating its state. A stale job cannot end a
+replacement. Terminal writes belong after abandoning the source plan; there are
+no per-page marker writes or automatically inferred generation associations.
+Successful completion and activation require a later certified publication API.
+
+The marker stores explicit typed columns, not JSON or source content. Text bounds
+are 32 job-ID characters, 6 tier, 512 model ID, 7 group, 30 tracker, 128 epoch,
+64 schema signature and 9 state. Before payload materialization, SQL probes byte
+lengths using BLOB casts, including bytes after embedded NUL. The conservative
+UTF-8 admission bound is `4 * (32+6+512+7+30+128+64+9) = 3152` payload bytes,
+plus one integer dimension and object/SQLite overhead. Character lengths and
+exact identities are checked after that bounded read. Noncanonical schema,
+unexpected marker indexes/triggers, TEMP objects, invalid values, mismatched
+selection and uncertain rollback fail closed. Errors do not include path,
+target or source details. Commit errors report failure without assuming that an
+ambiguous completed commit can safely be undone or retried.
+
+A clone made before selection lacks the newly committed marker (or retains an
+older job ID), so reopening it is rejected even if it shares the source epoch.
+A clone or hostile marker copy after that commit is outside this guarantee.
+The stable-path and known-current-connection preconditions remain; Python SQLite
+still exposes no native database descriptor identity. Current-source coverage,
+exact pair generation, final writer ownership and activation remain separate.
+Synthetic tests use in-memory databases and mocked file observations only. This
+binding neither removes the public manager's retained source list nor proves the
+original Mac memory incident fixed.
