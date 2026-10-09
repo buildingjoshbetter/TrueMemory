@@ -103,7 +103,7 @@ class TestWriterFence(unittest.TestCase):
             sys.modules[module.__name__] = module
             module.__dict__["__builtins__"] = dict(vars(builtins), __import__=safe_import)
             path = ROOT / "truememory" / (name.replace(".", "/") + ".py")
-            exec(compile(path.read_text(), str(path), "exec"), module.__dict__)
+            exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
             self.modules[name] = module
         self.api = self.modules["tier_switch.writer"]
         self.activation = self.modules["tier_switch.activation"]
@@ -179,7 +179,7 @@ class TestWriterFence(unittest.TestCase):
         return conn.execute("SELECT id,content FROM messages ORDER BY id").fetchall()
 
     def engine(self, *, vectors=True):
-        tree = ast.parse((ROOT / "truememory/engine.py").read_text())
+        tree = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
         original = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "TrueMemoryEngine")
         methods = [n for n in original.body if isinstance(n, ast.FunctionDef) and n.name in {"add", "update", "delete", "delete_all"}]
         cls = ast.ClassDef(name="SyntheticEngine", bases=[], keywords=[], body=methods, decorator_list=[])

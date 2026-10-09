@@ -89,7 +89,7 @@ class TestRuntimeBridge(unittest.TestCase):
         sys.modules[self.api.__name__] = self.api
         self.api.__dict__["__builtins__"] = dict(vars(builtins), __import__=safe_import)
         path = ROOT / "truememory/tier_switch/runtime.py"
-        exec(compile(path.read_text(), str(path), "exec"), self.api.__dict__)
+        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), self.api.__dict__)
         self.modules["tier_switch.runtime"] = self.api
         self.api._database_identity = lambda conn: ("memory", conn)
 
@@ -330,12 +330,12 @@ class TestRuntimeBridge(unittest.TestCase):
                     self.fail("Inherited cancellation precedes admission")
 
     def test_engine_and_hybrid_outer_boundaries_are_present(self) -> None:
-        engine = ast.parse((ROOT / "truememory/engine.py").read_text())
+        engine = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
         klass = next(node for node in engine.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
         for name in ("search", "search_agentic", "search_vectors_raw", "add", "update", "delete", "delete_all"):
             node = next(node for node in klass.body if isinstance(node, ast.FunctionDef) and node.name == name)
             self.assertIn("engine_operation", [ast.unparse(value) for value in node.decorator_list])
-        hybrid = ast.parse((ROOT / "truememory/hybrid.py").read_text())
+        hybrid = ast.parse((ROOT / "truememory/hybrid.py").read_text(encoding="utf-8"))
         function = next(node for node in hybrid.body if isinstance(node, ast.FunctionDef) and node.name == "search_hybrid")
         self.assertIn("database_operation", [ast.unparse(value) for value in function.decorator_list])
 
@@ -407,7 +407,7 @@ class TestRuntimeBridge(unittest.TestCase):
 
     def test_actual_selected_engine_init_reconciles_before_validation_and_keeps_schedule(self) -> None:
         selected = self.select()
-        tree = ast.parse((ROOT / "truememory/engine.py").read_text())
+        tree = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
         source = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
         source.body = [node for node in source.body if isinstance(node, ast.FunctionDef) and node.name in {
             "_ensure_connection", "_initialize_connection", "_open_connection_handle", "close",
@@ -464,7 +464,7 @@ class TestRuntimeBridge(unittest.TestCase):
 
 
     def test_ready_legacy_borrowed_connection_does_not_reinitialize(self) -> None:
-        tree = ast.parse((ROOT / "truememory/engine.py").read_text())
+        tree = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
         source = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
         source.body = [node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "_initialize_connection"]
         namespace = {"__builtins__": dict(vars(builtins), __import__=self.safe_import)}
@@ -484,7 +484,7 @@ class TestRuntimeBridge(unittest.TestCase):
                 engine._initialize_connection(_suppress_maintenance=True)
 
     def test_fresh_or_closed_handle_clears_legacy_ready_before_initialization(self) -> None:
-        tree = ast.parse((ROOT / "truememory/engine.py").read_text())
+        tree = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
         source = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
         source.body = [node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "_open_connection_handle"]
         replacement = sqlite3.connect(":memory:")
@@ -595,7 +595,7 @@ class TestRuntimeBridge(unittest.TestCase):
         self.assertEqual(conn.execute("SELECT value FROM synthetic").fetchall(), [])
 
     def test_connection_probe_error_preserves_handle_under_both_locks(self) -> None:
-        tree = ast.parse((ROOT / "truememory/engine.py").read_text())
+        tree = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
         source = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
         source.body = [node for node in source.body if isinstance(node, ast.FunctionDef)
                        and node.name == "_open_connection_handle"]
