@@ -29,7 +29,9 @@ class TestForegroundPublication(unittest.TestCase):
                          logger=logging.getLogger(__name__), MAX_CONTENT_LENGTH=10000,
                          insert_message=self.modules["storage"].insert_message,
                          update_message=self.modules["storage"].update_message)
-        exec(compile(ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[])), "actual-engine-boundaries", "exec"), namespace)
+        validators = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "_validate_add_content"]
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[*validators, cls], type_ignores=[])), "actual-engine-boundaries", "exec"), namespace)
         engine = namespace["SyntheticEngine"]()
         engine.conn = conn or self.conn
         engine._write_lock = threading.Lock()

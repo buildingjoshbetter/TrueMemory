@@ -723,7 +723,9 @@ class StyleAccumulatorTests(unittest.TestCase):
         namespace = {"engine_operation": lambda function: function, "__builtins__": dict(vars(builtins), __import__=safe_import), "MAX_CONTENT_LENGTH": 50000,
                      "insert_message": STORAGE.insert_message, "_update_style_vec": STYLE.update_entity_style_vector_incremental,
                      "logger": logging.getLogger("synthetic_style_engine")}
-        exec(compile(ast.Module(body=[add], type_ignores=[]), "engine.py", "exec"), namespace)
+        validator = next(node for node in tree.body
+                         if isinstance(node, ast.FunctionDef) and node.name == "_validate_add_content")
+        exec(compile(ast.Module(body=[validator, add], type_ignores=[]), "engine.py", "exec"), namespace)
         for caller, directive in itertools.product((False, True), (False, True)):
             conn = self.connection(legacy=True, full=True)
             before = self.seed_legacy(conn)

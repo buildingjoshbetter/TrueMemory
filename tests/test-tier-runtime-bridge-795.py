@@ -148,6 +148,50 @@ class TestRuntimeBridge(unittest.TestCase):
                 pass
         self.assertEqual(observed, [{"model_name": "synthetic/deep", "deadline": None, "cancelled": cancelled}])
 
+    def test_legacy_optional_reranker_failure_preserves_bound_retrieval(self) -> None:
+        for error in (OSError("synthetic unavailable"), ImportError("synthetic missing")):
+            with self.subTest(error=type(error).__name__):
+                with patch.object(self.reranker, "get_reranker", side_effect=error) as loader:
+                    with self.api.serving_operation(self.conn, reranker_id="synthetic/deep") as operation:
+                        self.assertEqual(operation.reranker_id, "synthetic/deep")
+                        self.assertIs(self.api.current_operation(self.conn), operation)
+                        self.assertIsNone(operation.selection)
+                        self.assertIsNone(operation.policy)
+                    loader.assert_called_once()
+                self.assertIsNone(self.api.current_operation(self.conn))
+                self.assertFalse(self.conn.in_transaction)
+
+    def test_legacy_reranker_identity_and_control_refusals_remain_hard(self) -> None:
+        for error in (self.api.TierRuntimeError("identity"), self.gate.ServingLeaseError("admission"),
+                      self.gate.ServingLeaseTimeout("timeout"), self.gate.ServingLeaseCancelled("cancelled")):
+            with self.subTest(error=type(error).__name__):
+                with patch.object(self.reranker, "get_reranker", side_effect=error):
+                    with self.assertRaises(type(error)):
+                        with self.api.serving_operation(self.conn, reranker_id="synthetic/deep"):
+                            self.fail("Typed refusal must prevent retrieval")
+                self.assertIsNone(self.api.current_operation(self.conn))
+
+    def test_borrowed_legacy_uncached_reranker_never_attempts_load(self) -> None:
+        self.conn.execute("BEGIN")
+        before = (self.conn.commits, self.conn.rollbacks)
+        with patch.object(self.reranker, "get_reranker", side_effect=OSError("synthetic unavailable")) as loader:
+            with self.assertRaises(self.api.TierRuntimeError):
+                with self.api.serving_operation(self.conn, reranker_id="synthetic/deep"):
+                    self.fail("Borrowed SQL cannot load an uncached reranker")
+            loader.assert_not_called()
+        self.assertTrue(self.conn.in_transaction)
+        self.assertEqual((self.conn.commits, self.conn.rollbacks), before)
+        self.conn.rollback()
+
+    def test_selected_reranker_preparation_failure_never_enters_body(self) -> None:
+        self.select()
+        with patch.object(self.reranker, "apply_frozen_reranker", side_effect=OSError("synthetic unavailable")):
+            with self.assertRaises(OSError):
+                with self.api.serving_operation(self.conn, reranker_id="synthetic/deep"):
+                    self.fail("Selected certification is required before retrieval")
+        self.assertIsNone(self.api.current_operation(self.conn))
+        self.assertIsNone(self.api.runtime_acknowledgement())
+
     def test_nested_search_has_zero_selection_sql_and_reuses_context(self) -> None:
         self.select()
         queries = []
@@ -1095,7 +1139,8 @@ class TestNativeRuntimeComposition(unittest.TestCase):
 
         with ExitStack() as stack:
             stack.enter_context(patch.multiple(vector_search, _model=None, _frozen_embedding_target=None,
-                                               EMBEDDING_MODEL="model2vec", _embedding_dim=256, _model_generation=0))
+                                               EMBEDDING_MODEL="model2vec", _embedding_dim=256, _model_generation=0,
+                                               _runtime_policy_tier=None))
             stack.enter_context(patch.multiple(reranker, _model=None, _model_name="synthetic/old", _active_tier="edge",
                                                _frozen_reranker_id=None, _model_certified=False))
             stack.enter_context(patch.multiple(runtime, _local=threading.local(), _acknowledged=None))

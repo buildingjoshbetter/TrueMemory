@@ -16,7 +16,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from truememory.tier_switch.activation import TierSelection
+    from truememory.tier_switch.activation import TierSelection, LegacyTierPolicy
 
 
 class WriterSelectionChanged(RuntimeError):
@@ -27,28 +27,38 @@ class WriterSelectionChanged(RuntimeError):
 class WriterCapture:
     connection: sqlite3.Connection = field(repr=False)
     selection: TierSelection | None
+    policy: LegacyTierPolicy | None = None
 
     def __post_init__(self) -> None:
         _validate(self.selection)
+        if self.policy is not None:
+            from truememory.tier_switch.activation import LegacyTierPolicy
+            if type(self.policy) is not LegacyTierPolicy or self.selection is not None:
+                raise WriterSelectionChanged("Writer policy capture must be an immutable journal result")
 
 
-def _selection(conn: sqlite3.Connection) -> TierSelection | None:
+def _authority(conn: sqlite3.Connection) -> tuple[TierSelection | None, LegacyTierPolicy | None]:
     table = conn.execute(
         "SELECT type FROM main.sqlite_master WHERE name='metadata' COLLATE NOCASE",
     ).fetchone()
     if table is None:
-        return None
+        return None, None
     if table[0] != "table":
         raise WriterSelectionChanged("Selected metadata is not an ordinary table")
-    if conn.execute("SELECT 1 FROM main.metadata WHERE key='tier_selected_v1'").fetchone() is None:
-        return None
+    if conn.execute("SELECT 1 FROM main.metadata WHERE key IN ('tier_selected_v1','tier_activation_v1') LIMIT 1").fetchone() is None:
+        return None, None
     from truememory.tier_switch.activation import TierActivationError, _guard_storage, _state
 
     try:
         _guard_storage(conn)
-        return _state(conn).selection
+        state = _state(conn)
+        return state.selection, getattr(state, "legacy_policy", None)
     except (TierActivationError, sqlite3.Error) as exc:
         raise WriterSelectionChanged("Selected journal cannot be validated") from exc
+
+
+def _selection(conn: sqlite3.Connection) -> TierSelection | None:
+    return _authority(conn)[0]
 
 
 def _validate(selection: TierSelection | None) -> None:
@@ -72,12 +82,12 @@ def capture_writer_selection(conn: sqlite3.Connection) -> WriterCapture:
         operation = runtime.current_operation(conn)
         if operation is not None:
             _validate(operation.selection)
-            return WriterCapture(conn, operation.selection)
+            return WriterCapture(conn, operation.selection, getattr(operation, "policy", None))
     owned = not conn.in_transaction
     if owned:
         conn.execute("BEGIN")
     try:
-        return WriterCapture(conn, _selection(conn))
+        return WriterCapture(conn, *_authority(conn))
     finally:
         if owned:
             # One cleanup attempt only, including failure after rollback.
@@ -103,26 +113,36 @@ def require_writer_selection(
     if captured is not None and (type(captured) is not WriterCapture or captured.connection is not conn):
         raise WriterSelectionChanged("Writer capture belongs to a different accepted connection")
     selected = captured.selection if captured is not None else None
-    current = _selection(conn)
-    if selected is None:
+    current, current_policy = _authority(conn)
+    policy = captured.policy if captured is not None else None
+    if policy is None:
+        if current_policy is not None:
+            raise WriterSelectionChanged("A legacy policy appeared after writer admission")
+    elif current_policy is None or replace(current_policy, config_acknowledged=policy.config_acknowledged) != policy:
+        raise WriterSelectionChanged("Legacy policy generation changed; retry the operation")
+    if selected is None and policy is None:
         if current is not None:
             raise WriterSelectionChanged("A selected tier appeared after legacy admission")
         return
-    if current is None or replace(current, config_acknowledged=selected.config_acknowledged) != selected:
+    if selected is not None and (current is None or replace(current, config_acknowledged=selected.config_acknowledged) != selected):
         raise WriterSelectionChanged("Selected tier generation or descriptor changed; retry the operation")
+    if policy is not None and current is not None:
+        raise WriterSelectionChanged("A selected tier appeared after policy admission")
+    selected = selected if selected is not None else policy
     if ((model_id is not None and model_id != selected.target.model_id)
             or (dimension is not None and (type(dimension) is not int or dimension != selected.target.dimension))
             or (tables is not None and (type(tables) is not tuple or tables != selected.tables))):
         raise WriterSelectionChanged("Prepared output does not match the captured selected pair")
-    # Boolean SQL avoids copying unbounded registry/metadata values into Python.
-    row = conn.execute(
-        "SELECT vec_table=? AND sep_table=? AND model_name=? "
-        "AND typeof(embedding_dim)='integer' AND embedding_dim=? "
-        "FROM main.vector_cache_registry WHERE tier_group=?",
-        (*selected.tables, selected.target.model_id, selected.target.dimension, selected.target.tier_group),
-    ).fetchone()
-    if row is None or row[0] != 1:
-        raise WriterSelectionChanged("Selected vector registry identity changed")
+    if policy is None:
+        # Boolean SQL avoids copying unbounded registry/metadata values into Python.
+        row = conn.execute(
+            "SELECT vec_table=? AND sep_table=? AND model_name=? "
+            "AND typeof(embedding_dim)='integer' AND embedding_dim=? "
+            "FROM main.vector_cache_registry WHERE tier_group=?",
+            (*selected.tables, selected.target.model_id, selected.target.dimension, selected.target.tier_group),
+        ).fetchone()
+        if row is None or row[0] != 1:
+            raise WriterSelectionChanged("Selected vector registry identity changed")
     for key, value in (("embed_model", selected.target.model_id), ("embed_dim", str(selected.target.dimension))):
         row = conn.execute(
             "SELECT typeof(value)='text' AND value=? FROM main.metadata WHERE key=?", (value, key),

@@ -129,30 +129,43 @@ def _isolate_environ():
 
 @pytest.fixture(autouse=True)
 def _isolate_vector_search_globals():
-    """Snapshot/restore ``truememory.vector_search`` embedder globals.
+    """Snapshot/restore the complete process-local serving identity.
 
     These are process-global (module-level) and several tests mutate them via
     ``set_embedding_model`` or ``monkeypatch.setattr``. monkeypatch reverts the
-    ones it owns, but a defensive snapshot here keeps the embedder identity
-    deterministic regardless of test order or ambient config.json.
+    ones it owns, but policy projection also changes embedding/reranker identity
+    and runtime acknowledgement. Restore those fields together without resetting
+    serving leases, runtime locals or background workers.
     """
     try:
         from truememory import vector_search as _vs
+        from truememory import reranker as _rr
+        from truememory.tier_switch import runtime as _runtime
     except Exception:
         # vector_search may be unimportable in minimal-dep environments; nothing
         # to isolate in that case.
         yield
         return
 
-    saved = (
+    saved_vector = (
         getattr(_vs, "EMBEDDING_MODEL", None),
         getattr(_vs, "_embedding_dim", None),
         getattr(_vs, "_model", None),
+        getattr(_vs, "_model_generation", 0),
+        getattr(_vs, "_frozen_embedding_target", None),
+        getattr(_vs, "_runtime_policy_tier", None),
     )
+    saved_reranker = (_rr._model, _rr._model_name, _rr._model_certified,
+                      _rr._active_tier, _rr._frozen_reranker_id)
+    saved_acknowledgement = _runtime._acknowledged
     try:
         yield
     finally:
-        _vs.EMBEDDING_MODEL, _vs._embedding_dim, _vs._model = saved
+        (_vs.EMBEDDING_MODEL, _vs._embedding_dim, _vs._model, _vs._model_generation,
+         _vs._frozen_embedding_target, _vs._runtime_policy_tier) = saved_vector
+        (_rr._model, _rr._model_name, _rr._model_certified,
+         _rr._active_tier, _rr._frozen_reranker_id) = saved_reranker
+        _runtime._acknowledged = saved_acknowledgement
 
 
 @pytest.fixture(autouse=True)

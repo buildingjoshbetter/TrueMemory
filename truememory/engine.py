@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from truememory.maintenance import LayerResult, MaintenanceCoordinator
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -47,7 +48,7 @@ from truememory.storage import (
 from truememory.fts_search import search_fts
 from truememory._platform import _env_int
 
-from truememory.tier_switch.runtime import engine_operation
+from truememory.tier_switch.runtime import engine_handle_operation, engine_operation
 
 logger = logging.getLogger(__name__)
 
@@ -259,6 +260,44 @@ except (ImportError, ModuleNotFoundError):
 # Helper
 # ───────────────────────────────────────────────────────────────────────────
 
+def _validate_add_content(function: "Callable") -> "Callable":
+    """Validate pure store arguments before database or runtime admission."""
+    from functools import wraps
+
+    @wraps(function)
+    def validated(engine: object, content: str, *args: object, **kwargs: object) -> dict:
+        if not isinstance(content, str):
+            raise TypeError(f"content must be a string, got {type(content).__name__}")
+
+        # M-60: enforce the store size cap at the engine level so ALL entry
+        # points (client.add, hooks, direct Engine.add) inherit it — not just
+        # mcp_server. Unbounded content means unbounded embed latency and
+        # poison-large rows. Mirror the mcp_server limit.
+        if len(content) > MAX_CONTENT_LENGTH:
+            raise ValueError(
+                f"Content too large ({len(content)} chars). "
+                f"Maximum is {MAX_CONTENT_LENGTH}."
+            )
+
+        return function(engine, content, *args, **kwargs)
+    return validated
+
+
+def _validate_delete_user(function: "Callable") -> "Callable":
+    """Reject invalid deletion scope without opening or initializing storage."""
+    from functools import wraps
+
+    @wraps(function)
+    def validated(engine: object, user_id: str | None = None, *args: object, **kwargs: object) -> bool:
+        if user_id is not None and not isinstance(user_id, str):
+            raise TypeError(f"user_id must be a string or None, got {type(user_id).__name__}")
+        if isinstance(user_id, str) and not user_id.strip():
+            raise ValueError("user_id cannot be an empty string")
+
+        return function(engine, user_id, *args, **kwargs)
+    return validated
+
+
 def _has_personality_intent(query: str) -> bool:
     """
     Return True if the query is genuinely asking about personality, preferences,
@@ -346,6 +385,7 @@ class TrueMemoryEngine:
         self._runtime_initialized = False
         self._runtime_vector_generation = None
         self._runtime_vector_connection = None
+        self._reconnect_receipt = None
 
         # L5 surprise rerank boost coefficient. None = resolve from env
         # var / default at call-time via _get_alpha_surprise().
@@ -380,57 +420,282 @@ class TrueMemoryEngine:
 
     def _open_connection_handle(self) -> None:
         """Open a plain handle before serving admission or vector initialization."""
-        from truememory.tier_switch.runtime import _connection_read
+        from truememory.tier_switch.runtime import _connection_read, _open_serving_connection_at_path
+        sqlite_ioerr = getattr(sqlite3, "SQLITE_IOERR", 10)
+
+        def replacement_reason() -> str | None:
+            if self.conn is None:
+                return "missing"
+            try:
+                self.conn.execute("PRAGMA schema_version")
+                return None
+            except (sqlite3.ProgrammingError, sqlite3.OperationalError) as exc:
+                if (isinstance(exc, sqlite3.ProgrammingError)
+                        and str(exc) == "Cannot operate on a closed database."):
+                    return "closed"
+                code = getattr(exc, "sqlite_errorcode", None)
+                io_error = (isinstance(exc, sqlite3.OperationalError) and (
+                    str(exc) == "disk I/O error"
+                    or (isinstance(code, int) and code & 0xff == sqlite_ioerr)))
+                if not io_error or self.conn.in_transaction:
+                    raise
+                return "io_error"
+
         with _connection_read(self.conn, self._init_lock, None, None,
-                              transaction_owner=self._write_lock, allow_closed=True), \
-                _connection_read(self.conn, self._write_lock, None, None, allow_closed=True):
-            if self.conn is not None:
-                try:
-                    self.conn.execute("PRAGMA schema_version")
+                              transaction_owner=self._write_lock, allow_closed=True):
+            with _connection_read(self.conn, self._write_lock, None, None, allow_closed=True):
+                reason = replacement_reason()
+                if reason is None:
                     return
-                except (sqlite3.ProgrammingError, sqlite3.OperationalError) as exc:
-                    closed = (isinstance(exc, sqlite3.ProgrammingError)
-                              and str(exc) == "Cannot operate on a closed database.")
-                    code = getattr(exc, "sqlite_errorcode", None)
-                    io_error = (isinstance(exc, sqlite3.OperationalError) and (
-                        str(exc) == "disk I/O error"
-                        or (isinstance(code, int) and code & 0xff == getattr(sqlite3, "SQLITE_IOERR", 10))))
-                    if not closed:
-                        if not io_error or self.conn.in_transaction:
-                            raise
-                        self.conn.close()
-                    self.conn = None
-                    self._has_vectors = False
-                    self.ready = False
-                    self._runtime_initialized = False
-                    self._runtime_vector_generation = None
-                    self._runtime_vector_connection = None
-            if str(self.db_path) != ":memory:":
-                self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            path = self.db_path if str(self.db_path) == ":memory:" else self.db_path.resolve()
+            if reason != "missing" and getattr(self, "_reconnect_receipt", None) is not None:
+                replacement = self._reopen_initialized_connection(path, receipt=self._reconnect_receipt)
+                if replacement is not None:
+                    candidate, controlled = replacement
+                    installed = False
+                    try:
+                        with _connection_read(self.conn, self._write_lock, None, None, allow_closed=True):
+                            reason = replacement_reason()
+                            if reason is None:
+                                return
+                            if reason == "io_error":
+                                self.conn.close()
+                            self.conn = candidate
+                            installed = True
+                            self._runtime_vector_generation = None
+                            self._runtime_vector_connection = None
+                            if controlled:
+                                self.ready = self._runtime_initialized = self._has_vectors = False
+                                self._reconnect_receipt = None
+                            return
+                    finally:
+                        if not installed:
+                            candidate.close()
+            if reason == "missing" and str(path) != ":memory:":
+                from truememory.maintenance import _active_initialization_receipt
+                with _active_initialization_receipt(path) as observed:
+                    offered = observed
+                if offered is not None:
+                    replacement = self._reopen_initialized_connection(path, receipt=offered[2])
+                    if replacement is not None:
+                        candidate, controlled = replacement
+                        installed = False
+                        try:
+                            with _connection_read(self.conn, self._write_lock, None, None, allow_closed=True):
+                                reason = replacement_reason()
+                                if reason is None:
+                                    return
+                                if reason == "missing":
+                                    with _active_initialization_receipt(path, expected=offered[:2]) as current:
+                                        if current is not None:
+                                            self.conn = candidate
+                                            self._has_vectors = not controlled and offered[2][7]
+                                            self._has_hybrid = _HAS_HYBRID and self._has_vectors
+                                            self.ready = self._runtime_initialized = not controlled
+                                            self._runtime_vector_generation = None
+                                            self._runtime_vector_connection = None
+                                            self._reconnect_receipt = None if controlled else offered[2]
+                                            installed = True
+                                    if installed:
+                                        return
+                        finally:
+                            if not installed:
+                                candidate.close()
+            from truememory.maintenance import maintenance_owner
+            if str(path) != ":memory:":
+                path.parent.mkdir(parents=True, exist_ok=True)
                 try:
-                    self.db_path.parent.chmod(0o700)
+                    path.parent.chmod(0o700)
                 except OSError:
                     pass
-            self.conn = create_db(self.db_path)
-            self.ready = False
-            self._runtime_initialized = False
-            self._runtime_vector_generation = None
-            self._runtime_vector_connection = None
+            # Keep same-Engine openers serialized, but never claim maintenance
+            # ownership while holding the connection writer.
+            with maintenance_owner(None if str(path) == ":memory:" else path), \
+                    _connection_read(self.conn, self._write_lock, None, None, allow_closed=True):
+                reason = replacement_reason()
+                if reason is None:
+                    return
+                if reason == "io_error":
+                    self.conn.close()
+                self.conn = None
+                self._has_vectors = False
+                self.ready = False
+                self._runtime_initialized = False
+                self._runtime_vector_generation = None
+                self._runtime_vector_connection = None
+                self._reconnect_receipt = None
+                self.conn = _open_serving_connection_at_path(path, create_db)
+
+    @staticmethod
+    def _reconnect_registry(conn: sqlite3.Connection) -> tuple | None:
+        """Bound the legacy registry identity, including mutations without DDL."""
+        if not conn.execute(
+                "SELECT 1 FROM main.sqlite_master WHERE name='vector_cache_registry' COLLATE NOCASE"
+        ).fetchone():
+            return ()
+        if conn.execute(
+                "SELECT 1 FROM main.vector_cache_registry WHERE "
+                "typeof(tier_group)!='text' OR length(CAST(tier_group AS BLOB))>16 OR "
+                "typeof(vec_table)!='text' OR length(CAST(vec_table AS BLOB))>64 OR "
+                "typeof(sep_table)!='text' OR length(CAST(sep_table AS BLOB))>64 OR "
+                "(model_name IS NOT NULL AND (typeof(model_name)!='text' OR length(CAST(model_name AS BLOB))>512)) OR "
+                "typeof(embedding_dim) NOT IN ('integer','real','null') OR "
+                "typeof(last_embedded_id) NOT IN ('integer','real','null') OR "
+                "typeof(vector_count) NOT IN ('integer','real','null') OR "
+                "typeof(last_updated) NOT IN ('integer','real','null') OR "
+                "typeof(created) NOT IN ('integer','real','null') LIMIT 1"
+        ).fetchone():
+            return None
+        rows = tuple(tuple(row) for row in conn.execute(
+            "SELECT tier_group,vec_table,sep_table,model_name,embedding_dim,"
+            "last_embedded_id,vector_count,last_updated,created "
+            "FROM main.vector_cache_registry ORDER BY tier_group LIMIT 4"
+        ).fetchall())
+        if len(rows) > 3 or any(
+                row[1] not in _ALL_VEC_TABLES or row[2] not in _ALL_VEC_TABLES
+                or any(value is not None and type(value) not in (int, float) for value in row[4:])
+                for row in rows):
+            return None
+        return rows
+
+    def _capture_reconnect_receipt(self, operation: object) -> None:
+        """Remember only this Engine's completed legacy initialization, never a model."""
+        self._reconnect_receipt = None
+        if self.conn.in_transaction or (not self._has_vectors and _HAS_VECTOR):
+            return
+        from truememory.tier_switch.runtime import _legacy_key, TierRuntimeError
+        from truememory import vector_search
+        key = operation.key
+        if (key != _legacy_key() or key[0] != "legacy"
+                or any(type(value) is not str or len(value) > 512 for value in key)):
+            return
+        path = self.db_path.resolve()
+        if operation._database != ("file", str(path)):
+            return
+        receipt = None
+        try:
+            self.conn.execute("BEGIN")
+            stat = path.stat()
+            registry = self._reconnect_registry(self.conn)
+            if registry is None:
+                return
+            group = vector_search._active_tier_group()
+            tables = next((row[1:3] for row in registry if row[0] == group),
+                          ("vec_messages", "vec_messages_sep"))
+            schema = self.conn.execute("PRAGMA schema_version").fetchone()[0]
+            if not self.conn.execute(
+                    "SELECT 1 FROM main.metadata WHERE key='l4_entity_profile_migration_done' AND value='1'"
+            ).fetchone():
+                return
+            receipt = (str(path), stat.st_dev, stat.st_ino, schema,
+                                       key, tables, registry, self._has_vectors, _HAS_VECTOR,
+                                       self.conn.execute("PRAGMA journal_mode").fetchone()[0])
+        except (OSError, sqlite3.Error):
+            logger.debug("Connection initialization cannot be reused", exc_info=True)
+        finally:
+            if self.conn.in_transaction:
+                self.conn.rollback()
+            if self.conn.in_transaction:
+                raise TierRuntimeError("Reconnect receipt requires completed read cleanup")
+        self._reconnect_receipt = receipt
+
+    def _reopen_initialized_connection(self, path: Path, *, receipt: tuple | None = None) -> tuple[sqlite3.Connection, bool] | None:
+        """Read-only validation allows same-Engine reconnect without migration ownership."""
+        from truememory.storage import DatabaseOpenError, _integrity_message
+        from truememory.tier_switch.runtime import _legacy_key, _read_selection, _read_policy, TierRuntimeError
+        if receipt is None:
+            receipt = self._reconnect_receipt
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        identity = (str(path), stat.st_dev, stat.st_ino)
+        if identity != receipt[:3] or _HAS_VECTOR != receipt[8]:
+            return None
+        candidate = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, check_same_thread=False)
+        retained = False
+        try:
+            candidate.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
+            candidate.execute("PRAGMA foreign_keys=ON")
+            candidate.execute("PRAGMA synchronous=NORMAL")
+            candidate.execute("PRAGMA cache_size=-64000")
+            candidate.execute("PRAGMA mmap_size=268435456")
+            if candidate.execute("PRAGMA journal_mode").fetchone()[0] != receipt[9]:
+                return None
+            try:
+                qc = candidate.execute("PRAGMA quick_check(1)").fetchone()
+            except sqlite3.DatabaseError as exc:
+                if "i/o error" in str(exc).lower():
+                    raise DatabaseOpenError(
+                        "TrueMemory could not open the database due to a disk "
+                        f"I/O error: {path}\n"
+                        "This usually means the SQLite WAL file is "
+                        "inconsistent (e.g. a -wal/-shm file was removed while "
+                        "a connection was still open). Close ALL TrueMemory "
+                        "processes (hooks, MCP server, CLI) and retry."
+                    ) from exc
+                raise DatabaseOpenError(_integrity_message(path, str(exc))) from exc
+            if qc is not None and qc[0] != "ok":
+                raise DatabaseOpenError(_integrity_message(path, str(qc[0])))
+            if receipt[7]:
+                import sqlite_vec
+                candidate.enable_load_extension(True)
+                try:
+                    sqlite_vec.load(candidate)
+                finally:
+                    candidate.enable_load_extension(False)
+            candidate.execute("BEGIN")
+            if candidate.execute("PRAGMA schema_version").fetchone()[0] != receipt[3]:
+                return None
+            selection = _read_selection(candidate)
+            policy = _read_policy(candidate) if selection is None else None
+            controlled = selection is not None or policy is not None
+            if not controlled:
+                if _legacy_key() != receipt[4] or self._reconnect_registry(candidate) != receipt[6]:
+                    return None
+                values = candidate.execute(
+                    "SELECT key, CASE WHEN typeof(value)='text' AND length(CAST(value AS BLOB))<=512 "
+                    "THEN value ELSE NULL END FROM main.metadata "
+                    "WHERE key IN ('embed_model','embed_dim') LIMIT 3"
+                ).fetchall()
+                expected = {"embed_model": receipt[4][1], "embed_dim": receipt[4][2]}
+                if values:
+                    if len(values) != 2 or dict(values) != expected:
+                        return None
+                elif receipt[7]:
+                    # A first add may publish metadata after initialization. Its
+                    # absence is safe only while both initialized vector tables are empty.
+                    for table in receipt[5]:
+                        if candidate.execute(f'SELECT 1 FROM main."{table}" LIMIT 1').fetchone():
+                            return None
+            current = path.stat()
+            if (str(path), current.st_dev, current.st_ino) != identity:
+                return None
+            candidate.rollback()
+            if candidate.in_transaction:
+                raise TierRuntimeError("Reconnect candidate requires completed read cleanup")
+            retained = True
+            return candidate, controlled
+        finally:
+            if not retained:
+                candidate.close()
 
     def _ensure_connection(self, *, _suppress_maintenance: bool = False) -> None:
         """Reconcile committed selection before any vector compatibility work."""
-        from truememory.tier_switch.runtime import serving_operation
-        self._open_connection_handle()
-        with serving_operation(self.conn, connection_lock=self._write_lock):
+        from truememory.tier_switch.runtime import engine_serving_operation
+        with engine_serving_operation(self, _suppress_maintenance=_suppress_maintenance):
             self._initialize_connection(_suppress_maintenance=_suppress_maintenance)
 
-    def _initialize_connection(self, *, _suppress_maintenance: bool = False) -> None:
+    def _initialize_connection(self, *, _suppress_maintenance: bool = False,
+                               _preparing: bool = False) -> None:
         from truememory.tier_switch.runtime import current_operation, TierRuntimeError, _connection_read
         operation = current_operation(self.conn)
-        if operation.selection is not None:
+        _suppress_maintenance = _suppress_maintenance or operation._defer_maintenance
+        controlled = operation.selection or operation.policy
+        if controlled is not None:
             if (getattr(self, "_runtime_initialized", False)
                     and getattr(self, "_runtime_vector_connection", None) is self.conn
-                    and getattr(self, "_runtime_vector_generation", None) == operation.selection.generation):
+                    and getattr(self, "_runtime_vector_generation", None) == controlled.generation):
                 if not _suppress_maintenance:
                     self._maybe_auto_consolidate()
                 return
@@ -440,7 +705,7 @@ class TrueMemoryEngine:
                     _connection_read(self.conn, self._write_lock, None, None):
                 if not (getattr(self, "_runtime_initialized", False)
                         and getattr(self, "_runtime_vector_connection", None) is self.conn
-                        and getattr(self, "_runtime_vector_generation", None) == operation.selection.generation):
+                        and getattr(self, "_runtime_vector_generation", None) == controlled.generation):
                     if self.conn.in_transaction:
                         raise TierRuntimeError("Selected vector initialization requires a clean connection")
                     if not _HAS_VECTOR:
@@ -456,7 +721,7 @@ class TrueMemoryEngine:
                     self._has_hybrid = _HAS_HYBRID
                     self._purge_legacy_entity_profile_summaries()
                     self.ready = self._runtime_initialized = True
-                    self._runtime_vector_generation = operation.selection.generation
+                    self._runtime_vector_generation = controlled.generation
                     self._runtime_vector_connection = self.conn
                     initialized = True
             if not _suppress_maintenance:
@@ -466,9 +731,16 @@ class TrueMemoryEngine:
                     self._maybe_auto_consolidate()
             return
         if getattr(self, "_runtime_initialized", True) or getattr(self, "ready", False):
+            receipt = getattr(self, "_reconnect_receipt", None)
+            if receipt is not None and operation.key[1:3] != receipt[4][1:3]:
+                raise TierRuntimeError("Initialized embedding identity changed before serving admission")
             if not _suppress_maintenance:
                 self._maybe_auto_consolidate()
             return
+        import sys as _sys
+        defer_legacy_migration = (_preparing and _sys.platform == "darwin"
+                                  and operation.tier in ("base", "pro", "qwen3_256")
+                                  and str(self.db_path) == ":memory:")
         with _connection_read(self.conn, self._init_lock, None, None,
                               transaction_owner=self._write_lock):
             if self._runtime_initialized:
@@ -478,6 +750,8 @@ class TrueMemoryEngine:
             with _connection_read(self.conn, self._write_lock, None, None):
                 if self.conn.in_transaction:
                     raise TierRuntimeError("Vector initialization requires a clean connection")
+                from truememory.tier_switch.runtime import _legacy_initialization_is_local
+                local_only = False
                 # Load sqlite-vec extension
                 global _vectors_load_error
                 if _HAS_VECTOR:
@@ -486,6 +760,7 @@ class TrueMemoryEngine:
                         self.conn.enable_load_extension(True)
                         sqlite_vec.load(self.conn)
                         self.conn.enable_load_extension(False)
+                        local_only = not _preparing and _legacy_initialization_is_local(self.conn, operation)
                         # init_vec_table() runs _check_embedder_compatibility(),
                         # which raises TrueMemoryMigrationError on a dim/model
                         # mismatch. That must NOT be swallowed as a generic
@@ -493,12 +768,16 @@ class TrueMemoryEngine:
                         # the degradation from truememory_stats.health and lets
                         # add() silently fail vec INSERTs. Surface the migration
                         # guidance so the user can re-embed instead.
-                        init_vec_table(self.conn)
-                        try:
-                            from truememory.vector_search import migrate_legacy_vec_tables
-                            migrate_legacy_vec_tables(self.conn)
-                        except Exception:
-                            logger.debug("Legacy vec table migration skipped", exc_info=True)
+                        if not local_only:
+                            init_vec_table(self.conn)
+                            try:
+                                from truememory.vector_search import migrate_legacy_vec_tables
+                                if _preparing and not defer_legacy_migration:
+                                    migrate_legacy_vec_tables(self.conn)
+                            except Exception as _serving_error:
+                                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                                raise_if_serving_rejection(_serving_error)
+                                logger.debug("Legacy vec table migration skipped", exc_info=True)
                         self._has_vectors = True
                     except TrueMemoryMigrationError as exc:
                         # M-12/M-46: record the degradation in module state so
@@ -508,6 +787,8 @@ class TrueMemoryEngine:
                         self._has_vectors = False
                         raise
                     except Exception as exc:
+                        from truememory.tier_switch.runtime import raise_if_serving_rejection
+                        raise_if_serving_rejection(exc)
                         _vectors_load_error = f"{type(exc).__name__}: {exc}"
                         logger.warning("Failed to load sqlite-vec — FTS-only mode: %s", exc)
                         self._has_vectors = False
@@ -516,8 +797,7 @@ class TrueMemoryEngine:
 
             # Qwen3 NaN fix: macOS SDPA kernel produces NaN embeddings.
             # Re-embed once for Base/Pro users on macOS.
-            import sys as _sys
-            if (_sys.platform == "darwin" and self._has_vectors
+            if (not local_only and _sys.platform == "darwin" and self._has_vectors
                     and current_operation(self.conn).selection is None):
                 try:
                     _embed_model = resolve_tier()
@@ -535,46 +815,49 @@ class TrueMemoryEngine:
                                 ).fetchone()[0] if "messages" in _tables else 0
                                 if _msg_count > 0:
                                     def _bg_reembed(db_path):
-                                        import sqlite3 as _sql
+                                        from truememory.tier_switch.runtime import open_serving_connection, legacy_rebuild_operation
                                         _conn = None
                                         try:
-                                            _conn = _sql.connect(str(db_path), check_same_thread=False)
-                                            _conn.execute("PRAGMA journal_mode=WAL")
-                                            _conn.execute("PRAGMA busy_timeout=%d" % DEFAULT_BUSY_TIMEOUT_MS)
-                                            _conn.execute("PRAGMA synchronous=NORMAL")
-                                            _conn.execute("PRAGMA foreign_keys=ON")
-                                            # Issue #499: load sqlite-vec on the
-                                            # background thread's connection so
-                                            # vec virtual tables are available.
-                                            import sqlite_vec as _sv
-                                            _conn.enable_load_extension(True)
-                                            _sv.load(_conn)
-                                            _conn.enable_load_extension(False)
-                                            from truememory.vector_search import (
-                                                build_vectors as _bv,
-                                                build_separation_vectors as _bsv,
-                                                init_vec_table as _ivt,
-                                            )
-                                            _conn.execute("DROP TABLE IF EXISTS vec_messages")
-                                            _conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
-                                            _conn.commit()
-                                            _ivt(_conn)
-                                            _bv(_conn)
-                                            _bsv(_conn)
-                                            # Issue #485: only set the flag AFTER
-                                            # successful re-embed so a failed
-                                            # thread allows retry on next init.
-                                            _conn.execute(
-                                                "INSERT OR REPLACE INTO metadata "
-                                                "(key, value) VALUES (?, ?)",
-                                                ("qwen3_nan_fix_applied", "1"),
-                                            )
-                                            _conn.commit()
-                                            logger.warning(
-                                                "Qwen3 NaN fix: re-embedded %d vectors "
-                                                "in background", _msg_count,
-                                            )
-                                        except Exception:
+                                            _conn = open_serving_connection(db_path, create_db)
+                                            with legacy_rebuild_operation(_conn):
+                                                _conn.execute("PRAGMA journal_mode=WAL")
+                                                _conn.execute("PRAGMA busy_timeout=%d" % DEFAULT_BUSY_TIMEOUT_MS)
+                                                _conn.execute("PRAGMA synchronous=NORMAL")
+                                                _conn.execute("PRAGMA foreign_keys=ON")
+                                                # Issue #499: load sqlite-vec on the
+                                                # background thread's connection so
+                                                # vec virtual tables are available.
+                                                import sqlite_vec as _sv
+                                                _conn.enable_load_extension(True)
+                                                _sv.load(_conn)
+                                                _conn.enable_load_extension(False)
+                                                from truememory.vector_search import (
+                                                    build_vectors as _bv,
+                                                    build_separation_vectors as _bsv,
+                                                    init_vec_table as _ivt,
+                                                )
+                                                _conn.execute("DROP TABLE IF EXISTS vec_messages")
+                                                _conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
+                                                _conn.commit()
+                                                _ivt(_conn)
+                                                _bv(_conn)
+                                                _bsv(_conn)
+                                                # Issue #485: only set the flag AFTER
+                                                # successful re-embed so a failed
+                                                # thread allows retry on next init.
+                                                _conn.execute(
+                                                    "INSERT OR REPLACE INTO metadata "
+                                                    "(key, value) VALUES (?, ?)",
+                                                    ("qwen3_nan_fix_applied", "1"),
+                                                )
+                                                _conn.commit()
+                                                logger.warning(
+                                                    "Qwen3 NaN fix: re-embedded %d vectors "
+                                                    "in background", _msg_count,
+                                                )
+                                        except Exception as _serving_error:
+                                            from truememory.tier_switch.runtime import raise_if_serving_rejection
+                                            raise_if_serving_rejection(_serving_error)
                                             logger.warning(
                                                 "Qwen3 NaN background migration failed — "
                                                 "will retry on next startup",
@@ -584,7 +867,9 @@ class TrueMemoryEngine:
                                             if _conn is not None:
                                                 try:
                                                     _conn.close()
-                                                except Exception:
+                                                except Exception as _serving_error:
+                                                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                                                    raise_if_serving_rejection(_serving_error)
                                                     pass
                                     _db = self.db_path
                                     if str(_db) != ":memory:":
@@ -604,36 +889,42 @@ class TrueMemoryEngine:
                                             "in background thread", _msg_count,
                                         )
                                     else:
-                                        from truememory.vector_search import (
-                                            build_vectors as _bv,
-                                            build_separation_vectors as _bsv,
-                                            init_vec_table as _ivt,
-                                        )
-                                        self.conn.execute("DROP TABLE IF EXISTS vec_messages")
-                                        self.conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
-                                        self.conn.commit()
-                                        _ivt(self.conn)
-                                        _bv(self.conn)
-                                        _bsv(self.conn)
+                                        from truememory.tier_switch.runtime import legacy_rebuild_operation
+                                        with legacy_rebuild_operation(self.conn):
+                                            from truememory.vector_search import (
+                                                build_vectors as _bv,
+                                                build_separation_vectors as _bsv,
+                                                init_vec_table as _ivt,
+                                            )
+                                            self.conn.execute("DROP TABLE IF EXISTS vec_messages")
+                                            self.conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
+                                            self.conn.commit()
+                                            _ivt(self.conn)
+                                            _bv(self.conn)
+                                            _bsv(self.conn)
+                                            self.conn.execute(
+                                                "INSERT OR REPLACE INTO metadata "
+                                                "(key, value) VALUES (?, ?)",
+                                                ("qwen3_nan_fix_applied", "1"),
+                                            )
+                                            self.conn.commit()
+                                            logger.warning(
+                                                "Qwen3 NaN fix: re-embedded all vectors",
+                                            )
+                                else:
+                                    # No messages — just set the flag to skip
+                                    # future checks.
+                                    from truememory.tier_switch.runtime import legacy_vector_mutation
+                                    with legacy_vector_mutation(self.conn):
                                         self.conn.execute(
                                             "INSERT OR REPLACE INTO metadata "
                                             "(key, value) VALUES (?, ?)",
                                             ("qwen3_nan_fix_applied", "1"),
                                         )
                                         self.conn.commit()
-                                        logger.warning(
-                                            "Qwen3 NaN fix: re-embedded all vectors",
-                                        )
-                                else:
-                                    # No messages — just set the flag to skip
-                                    # future checks.
-                                    self.conn.execute(
-                                        "INSERT OR REPLACE INTO metadata "
-                                        "(key, value) VALUES (?, ?)",
-                                        ("qwen3_nan_fix_applied", "1"),
-                                    )
-                                    self.conn.commit()
-                except Exception:
+                except Exception as _serving_error:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(_serving_error)
                     logger.warning(
                         "Qwen3 NaN migration failed — run "
                         "'truememory-ingest upgrade-tier base --force' to fix manually",
@@ -644,9 +935,20 @@ class TrueMemoryEngine:
             # M-84: previously this only ran in the deprecated open() path, so
             # production (which uses _ensure_connection) never purged them.
             with _connection_read(self.conn, self._write_lock, None, None):
-                self._purge_legacy_entity_profile_summaries()
+                if defer_legacy_migration and self._has_vectors:
+                    try:
+                        from truememory.vector_search import migrate_legacy_vec_tables
+                        migrate_legacy_vec_tables(self.conn)
+                    except Exception as _serving_error:
+                        from truememory.tier_switch.runtime import raise_if_serving_rejection
+                        raise_if_serving_rejection(_serving_error)
+                        logger.debug("Legacy vec table migration skipped", exc_info=True)
+                if not local_only:
+                    self._purge_legacy_entity_profile_summaries()
                 self.ready = True
                 self._runtime_initialized = True
+                if getattr(operation, "_database", (None,))[0] == "file":
+                    self._capture_reconnect_receipt(operation)
         if not _suppress_maintenance:
             self._maybe_startup_consolidate()
 
@@ -730,6 +1032,7 @@ class TrueMemoryEngine:
     # Production CRUD API
     # ──────────────────────────────────────────────────────────────────────
 
+    @_validate_add_content
     @engine_operation
     def add(
         self,
@@ -757,19 +1060,6 @@ class TrueMemoryEngine:
         Returns:
             Dict with ``id`` and the stored fields.
         """
-        if not isinstance(content, str):
-            raise TypeError(f"content must be a string, got {type(content).__name__}")
-
-        # M-60: enforce the store size cap at the engine level so ALL entry
-        # points (client.add, hooks, direct Engine.add) inherit it — not just
-        # mcp_server. Unbounded content means unbounded embed latency and
-        # poison-large rows. Mirror the mcp_server limit.
-        if len(content) > MAX_CONTENT_LENGTH:
-            raise ValueError(
-                f"Content too large ({len(content)} chars). "
-                f"Maximum is {MAX_CONTENT_LENGTH}."
-            )
-
         self._ensure_connection()
 
         from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
@@ -790,7 +1080,9 @@ class TrueMemoryEngine:
                 pre_sep_embedding = _encode_with_mps_fallback(model, [sep_text])[0]
             except VectorPublicationChanged:
                 raise
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("Failed to pre-compute embedding during add()", exc_info=True)
 
         pre_style_vec = None
@@ -798,7 +1090,9 @@ class TrueMemoryEngine:
             try:
                 from truememory.personality_style_vec import compute_style_vector
                 pre_style_vec = compute_style_vector(content)
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("Failed to pre-compute style vector during add()", exc_info=True)
 
         from contextlib import nullcontext
@@ -833,7 +1127,7 @@ class TrueMemoryEngine:
                 try:
                     from truememory.vector_search import (
                         serialize_f32,
-                        _write_embedder_metadata_no_commit,
+                        _write_foreground_embedder_metadata_no_commit,
                     )
                     vec_tbl, sep_tbl = _validate_foreground_vector_target(
                         self.conn, pre_identity, new_id, selection=write_selection,
@@ -847,10 +1141,12 @@ class TrueMemoryEngine:
                             f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
                             (new_id, serialize_f32(pre_sep_embedding)),
                         )
-                    _write_embedder_metadata_no_commit(self.conn)
+                    _write_foreground_embedder_metadata_no_commit(self.conn, pre_identity, selection=write_selection)
                 except VectorPublicationChanged:
                     raise
-                except Exception:
+                except Exception as _serving_error:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(_serving_error)
                     logger.warning("Failed to store embedding for message %s during add()", new_id, exc_info=True)
 
             # Incrementally update entity profile.
@@ -861,7 +1157,9 @@ class TrueMemoryEngine:
                 try:
                     from truememory.personality import update_entity_profile_incremental
                     update_entity_profile_incremental(self.conn, sender, content, recipient)
-                except Exception:
+                except Exception as _serving_error:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(_serving_error)
                     logger.debug("Failed to update entity profile for %s during add()", sender, exc_info=True)
 
             if self._has_style_vec:
@@ -904,6 +1202,10 @@ class TrueMemoryEngine:
 
     def _maybe_auto_consolidate(self) -> None:
         """Probe fixed metadata without waiting on foreground or model work."""
+        from truememory.tier_switch.runtime import current_operation
+        operation = current_operation(self.conn) if self.conn is not None else None
+        if operation is not None and getattr(operation, "_defer_maintenance", False):
+            return
         if (not self._has_consolidation and not getattr(self, "_has_style_vec", False)) or self.conn is None:
             return
         if not self._write_lock.acquire(blocking=False):
@@ -937,11 +1239,13 @@ class TrueMemoryEngine:
             self._write_lock.release()
         if (eligible or style_eligible) and coordinator is not None:
             try:
+                initialization = ({"_initialization_receipt": self._reconnect_receipt}
+                                  if getattr(self, "_reconnect_receipt", None) is not None else {})
                 if style_eligible:
                     coordinator.request_layers(threshold=self._auto_consolidate_threshold,
-                                               include_layers=bool(eligible), include_style=True)
+                                               include_layers=bool(eligible), include_style=True, **initialization)
                 else:
-                    coordinator.request_layers(threshold=self._auto_consolidate_threshold)
+                    coordinator.request_layers(threshold=self._auto_consolidate_threshold, **initialization)
             except Exception as error:
                 self._maintenance_pending_reason = type(error).__name__[:64]
 
@@ -964,6 +1268,7 @@ class TrueMemoryEngine:
             self._maybe_auto_consolidate()
         return deleted
 
+    @_validate_delete_user
     @engine_operation
     def delete_all(self, user_id: str | None = None) -> bool:
         """Delete all memories, optionally filtered by user.
@@ -981,11 +1286,6 @@ class TrueMemoryEngine:
         Returns:
             True if any rows were deleted from messages.
         """
-        if user_id is not None and not isinstance(user_id, str):
-            raise TypeError(f"user_id must be a string or None, got {type(user_id).__name__}")
-        if isinstance(user_id, str) and not user_id.strip():
-            raise ValueError("user_id cannot be an empty string")
-
         self._ensure_connection()
         from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
         write_selection = capture_writer_selection(self.conn)
@@ -1021,7 +1321,9 @@ class TrueMemoryEngine:
                             raise ValueError(f"Invalid column name: {col}")
                         try:
                             _delete_in_chunks(self.conn, table, col, msg_ids)
-                        except Exception:
+                        except Exception as _serving_error:
+                            from truememory.tier_switch.runtime import raise_if_serving_rejection
+                            raise_if_serving_rejection(_serving_error)
                             logger.warning("Failed to clean %s for user %s", table, user_id, exc_info=True)
 
                 # Clean entity profile for this user (normalize to lowercase #467)
@@ -1029,7 +1331,9 @@ class TrueMemoryEngine:
                     self.conn.execute(
                         "DELETE FROM entity_profiles WHERE entity = ?", (user_id.lower(),)
                     )
-                except Exception:
+                except Exception as _serving_error:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(_serving_error)
                     logger.warning("Failed to clean entity_profiles for user %s", user_id, exc_info=True)
 
                 # Clean entity style vectors for this user (normalize to lowercase #467)
@@ -1037,7 +1341,9 @@ class TrueMemoryEngine:
                     self.conn.execute(
                         "DELETE FROM entity_style_vectors WHERE entity = ?", (user_id.lower(),)
                     )
-                except Exception:
+                except Exception as _serving_error:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(_serving_error)
                     logger.warning("Failed to clean entity_style_vectors for user %s", user_id, exc_info=True)
 
                 # Clean entity relationships involving this user (normalize to lowercase #467)
@@ -1046,7 +1352,9 @@ class TrueMemoryEngine:
                         "DELETE FROM entity_relationships WHERE entity_a = ? OR entity_b = ?",
                         (user_id.lower(), user_id.lower()),
                     )
-                except Exception:
+                except Exception as _serving_error:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(_serving_error)
                     logger.warning("Failed to clean entity_relationships for user %s", user_id, exc_info=True)
 
                 # Clean summaries scoped to this user
@@ -1054,13 +1362,17 @@ class TrueMemoryEngine:
                     self.conn.execute(
                         "DELETE FROM summaries WHERE entity = ?", (user_id.lower(),)
                     )
-                except Exception:
+                except Exception as _serving_error:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(_serving_error)
                     logger.warning("Failed to clean summaries for user %s", user_id, exc_info=True)
 
                 if episode_ids:
                     try:
                         _delete_in_chunks(self.conn, "episodes", "id", episode_ids)
-                    except Exception:
+                    except Exception as _serving_error:
+                        from truememory.tier_switch.runtime import raise_if_serving_rejection
+                        raise_if_serving_rejection(_serving_error)
                         logger.warning("Failed to clean episodes for user %s", user_id, exc_info=True)
 
                 # Clean vector tables for deleted message IDs
@@ -1070,14 +1382,18 @@ class TrueMemoryEngine:
                     else:
                         try:
                             vec_tbl, sep_tbl = _resolve_vec_tables(self.conn)
-                        except Exception:
+                        except Exception as _serving_error:
+                            from truememory.tier_switch.runtime import raise_if_serving_rejection
+                            raise_if_serving_rejection(_serving_error)
                             logger.warning("_resolve_vec_tables failed in delete_all(user_id=%s); falling back to legacy table names", user_id, exc_info=True)
                             vec_tbl, sep_tbl = "vec_messages", "vec_messages_sep"
                     # dict.fromkeys deduplicates in case vec_tbl == sep_tbl (shouldn't happen, but defensive)
                     for vec_table in dict.fromkeys((vec_tbl, sep_tbl)):
                         try:
                             _delete_in_chunks(self.conn, vec_table, "rowid", msg_ids)
-                        except Exception:
+                        except Exception as _serving_error:
+                            from truememory.tier_switch.runtime import raise_if_serving_rejection
+                            raise_if_serving_rejection(_serving_error)
                             logger.warning("Failed to clean %s for user %s", vec_table, user_id, exc_info=True)
 
                 # Remove orphaned cluster_centroids (clusters with no
@@ -1087,7 +1403,9 @@ class TrueMemoryEngine:
                         "DELETE FROM cluster_centroids WHERE cluster_id NOT IN "
                         "(SELECT DISTINCT cluster_id FROM message_clusters)"
                     )
-                except Exception:
+                except Exception as _serving_error:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(_serving_error)
                     logger.warning("Failed to clean cluster_centroids for user %s", user_id, exc_info=True)
 
                 # Delete parent rows AFTER all child FK references are gone
@@ -1115,14 +1433,18 @@ class TrueMemoryEngine:
                         raise ValueError(f"Invalid table name: {table}")
                     try:
                         self.conn.execute(f"DELETE FROM {table}")
-                    except Exception:
+                    except Exception as _serving_error:
+                        from truememory.tier_switch.runtime import raise_if_serving_rejection
+                        raise_if_serving_rejection(_serving_error)
                         logger.warning("Failed to clear table %s during delete_all", table, exc_info=True)
 
                 # Clear ALL known vector tables across all tiers.
                 for vec_table in _ALL_VEC_TABLES:
                     try:
                         self.conn.execute(f"DELETE FROM {vec_table}")
-                    except Exception:
+                    except Exception as _serving_error:
+                        from truememory.tier_switch.runtime import raise_if_serving_rejection
+                        raise_if_serving_rejection(_serving_error)
                         logger.debug("Failed to clear %s during delete_all (table may not exist)", vec_table, exc_info=True)
 
                 cursor = self.conn.execute("DELETE FROM messages")
@@ -1131,7 +1453,9 @@ class TrueMemoryEngine:
             # Rebuild FTS index
             try:
                 self.conn.execute("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')")
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.warning("Failed to rebuild FTS index during delete_all", exc_info=True)
 
         if deleted:
@@ -1152,33 +1476,40 @@ class TrueMemoryEngine:
             MaintenanceBusyError, format_maintenance_report, maintenance_busy_result,
             maintenance_observation, observe_style, run_engine_maintenance, _style_unready_result,
         )
-        self._ensure_connection(_suppress_maintenance=True)
-        with self._write_lock:
+        from truememory.tier_switch.runtime import _read_selection, _read_policy, _connection_read
+        self._open_connection_handle()
+        with _connection_read(self.conn, self._write_lock, None, None):
+            controlled = _read_selection(self.conn) is not None or _read_policy(self.conn) is not None
+            if controlled:
+                self._has_style_vec = self.conn.execute(
+                    "SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='entity_style_vectors' COLLATE NOCASE"
+                ).fetchone() is not None
+        if not controlled:
+            self._ensure_connection(_suppress_maintenance=True)
+        with _connection_read(self.conn, self._write_lock, None, None):
             coordinator = self._get_maintenance_coordinator()
             coordinator.refresh_capabilities()
             borrowed = self.conn.in_transaction
-            if borrowed or coordinator.path is None:
-                try:
-                    with maintenance_observation(coordinator, borrowed=borrowed) as observed:
-                        report = run_engine_maintenance(self.conn, coordinator, force=True,
-                            threshold=self._auto_consolidate_threshold, prepare_extensions=False,
-                            allow_caller_transaction=borrowed, include_style=getattr(self, "_has_style_vec", False))
-                        if not borrowed and self.conn.in_transaction:
-                            self.conn.rollback()
-                            raise RuntimeError("Maintenance work left an unfinished transaction")
-                        observed.append(report)
-                except MaintenanceBusyError:
-                    return maintenance_busy_result()
-                self._apply_manual_maintenance_capabilities(report.results)
-                return format_maintenance_report(report)
             foreground_style = None
-            if getattr(self, "_has_style_vec", False):
+            if not borrowed and coordinator.path is not None and getattr(self, "_has_style_vec", False):
                 observation = observe_style(self.conn, threshold=self._auto_consolidate_threshold)
                 if observation.state is None:
                     foreground_style = _style_unready_result(observation.health)
+        if borrowed or coordinator.path is None:
+            try:
+                with maintenance_observation(coordinator, borrowed=borrowed) as observed:
+                    report = run_engine_maintenance(self.conn, coordinator, force=True,
+                        threshold=self._auto_consolidate_threshold, prepare_extensions=False,
+                        _connection_lock=self._write_lock, allow_caller_transaction=borrowed, include_style=getattr(self, "_has_style_vec", False))
+                    observed.append(report)
+            except MaintenanceBusyError:
+                return maintenance_busy_result()
+            self._apply_manual_maintenance_capabilities(report.results)
+            return format_maintenance_report(report)
         try:
             with maintenance_observation(coordinator) as observed:
-                connection = create_db(coordinator.path)
+                from truememory.tier_switch.runtime import open_serving_connection
+                connection = open_serving_connection(coordinator.path, create_db)
                 try:
                     report = run_engine_maintenance(connection, coordinator, force=True,
                         threshold=self._auto_consolidate_threshold,
@@ -1240,7 +1571,9 @@ class TrueMemoryEngine:
                     pre_sep_embedding = _encode_with_mps_fallback(model, [sep_text])[0]
             except VectorPublicationChanged:
                 raise
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("Failed to pre-compute embedding during update()", exc_info=True)
 
         source_committed = False
@@ -1262,13 +1595,15 @@ class TrueMemoryEngine:
                 if pre_embedding is not None:
                     from truememory.vector_search import VectorPublicationChanged, _foreground_vector_publication
                     try:
-                        from truememory.vector_search import serialize_f32, _write_embedder_metadata_no_commit
+                        from truememory.vector_search import serialize_f32, _write_foreground_embedder_metadata_no_commit
                         with _foreground_vector_publication(
                             self.conn, pre_identity, memory_id, selection=write_selection,
                         ) as (vec_tbl, sep_tbl):
                             try:
                                 self.conn.execute(f"DELETE FROM {vec_tbl} WHERE rowid = ?", (memory_id,))
-                            except Exception:
+                            except Exception as _serving_error:
+                                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                                raise_if_serving_rejection(_serving_error)
                                 logger.debug("Failed to delete old vector embedding for message %d", memory_id, exc_info=True)
                             self.conn.execute(
                                 f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
@@ -1277,16 +1612,20 @@ class TrueMemoryEngine:
                             if pre_sep_embedding is not None:
                                 try:
                                     self.conn.execute(f"DELETE FROM {sep_tbl} WHERE rowid = ?", (memory_id,))
-                                except Exception:
+                                except Exception as _serving_error:
+                                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                                    raise_if_serving_rejection(_serving_error)
                                     logger.debug("Failed to delete old sep vector for message %d", memory_id, exc_info=True)
                                 self.conn.execute(
                                     f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
                                     (memory_id, serialize_f32(pre_sep_embedding)),
                                 )
-                            _write_embedder_metadata_no_commit(self.conn)
+                            _write_foreground_embedder_metadata_no_commit(self.conn, pre_identity, selection=write_selection)
                     except VectorPublicationChanged as exc:
                         raise VectorPublicationChanged("Source update committed; retry update to publish vectors") from exc
-                    except Exception:
+                    except Exception as _serving_error:
+                        from truememory.tier_switch.runtime import raise_if_serving_rejection
+                        raise_if_serving_rejection(_serving_error)
                         logger.warning("Vector embedding failed for message %d", memory_id, exc_info=True)
         finally:
             if source_committed:
@@ -1349,20 +1688,33 @@ class TrueMemoryEngine:
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found: {self.db_path}")
 
-        from truememory.storage import _validate_db_path
-        self.conn = sqlite3.connect(
-            _validate_db_path(self.db_path), check_same_thread=False
-        )
-        self.conn.row_factory = None  # Use default tuple rows
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
-        self.conn.execute("PRAGMA foreign_keys=ON")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self.conn.execute("PRAGMA cache_size=-64000")
-        self.conn.execute("PRAGMA mmap_size=268435456")
+        from truememory.tier_switch.runtime import open_serving_connection
+
+        def open_existing(path: Path) -> sqlite3.Connection:
+            from truememory.storage import _validate_db_path
+            uri = Path(_validate_db_path(path)).as_uri() + "?mode=rw"
+            candidate = sqlite3.connect(uri, uri=True, check_same_thread=False)
+            try:
+                candidate.row_factory = None
+                candidate.execute("PRAGMA journal_mode=WAL")
+                candidate.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
+                candidate.execute("PRAGMA foreign_keys=ON")
+                candidate.execute("PRAGMA synchronous=NORMAL")
+                candidate.execute("PRAGMA cache_size=-64000")
+                candidate.execute("PRAGMA mmap_size=268435456")
+                return candidate
+            except BaseException:
+                candidate.close()
+                raise
+
+        self.conn = open_serving_connection(self.db_path, open_existing)
 
         from truememory.tier_switch.runtime import serving_operation
-        with serving_operation(self.conn, connection_lock=self._write_lock):
+        with serving_operation(self.conn, connection_lock=self._write_lock) as operation:
+            if operation.selection is not None or operation.policy is not None:
+                self._initialize_connection()
+                self.stats["message_count"] = get_message_count(self.conn)
+                return self
             # Detect available tables
             tables = {
                 row[0]
@@ -1389,6 +1741,8 @@ class TrueMemoryEngine:
                     sqlite_vec.load(self.conn)
                     _vectors_load_error = None
                 except Exception as e:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(e)
                     _vectors_load_error = f"{type(e).__name__}: {e}"
                     logger.warning(
                         "sqlite-vec unavailable (%s); falling back to FTS-only "
@@ -1447,7 +1801,9 @@ class TrueMemoryEngine:
                             )
                         except TrueMemoryMigrationError:
                             raise
-                        except Exception:
+                        except Exception as _serving_error:
+                            from truememory.tier_switch.runtime import raise_if_serving_rejection
+                            raise_if_serving_rejection(_serving_error)
                             logger.exception("Vector table rebuild failed")
                             self._has_vectors = False
 
@@ -1458,7 +1814,9 @@ class TrueMemoryEngine:
             try:
                 count = self.conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
                 self.stats["message_count"] = count
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("Failed to count messages in open()", exc_info=True)
                 self.stats["message_count"] = 0
 
@@ -1491,285 +1849,321 @@ class TrueMemoryEngine:
         Returns:
             Dict mapping step names to timing strings (or error messages).
         """
-        data_path = Path(data_path)
-        stats: dict = {}
+        from truememory.tier_switch.runtime import destructive_ingest_operation
+        with destructive_ingest_operation(self):
+            data_path = Path(data_path)
+            stats: dict = {}
 
-        # ── 1. Create database ────────────────────────────────────────────
-        try:
-            t0 = time.time()
-            # Remove stale database so every run is clean.
-            if self.db_path.exists() and str(self.db_path) != ":memory:":
-                self.db_path.unlink()
-            self.conn = create_db(self.db_path)
-            stats["create_db"] = f"{time.time() - t0:.3f}s"
-        except Exception as exc:
-            stats["create_db"] = f"ERROR: {exc}"
-            logger.warning("create_db failed", exc_info=True)
-            return stats  # Can't continue without a database.
-
-        # ── 2. Load messages ──────────────────────────────────────────────
-        try:
-            t0 = time.time()
-            msg_count = load_messages_from_file(self.conn, data_path)
-            elapsed = time.time() - t0
-            stats["load_messages"] = f"{msg_count} messages in {elapsed:.3f}s"
-            self.stats["message_count"] = msg_count
-        except Exception as exc:
-            stats["load_messages"] = f"ERROR: {exc}"
-            logger.warning("load_messages failed", exc_info=True)
-            self.stats["message_count"] = 0
-
-        # ── 3. Build vector embeddings ────────────────────────────────────
-        if _HAS_VECTOR:
+            # ── 1. Create database ────────────────────────────────────────────
             try:
                 t0 = time.time()
-                init_vec_table(self.conn)
-                vec_count = build_vectors(self.conn)
+                # Remove stale database so every run is clean.
+                if self.db_path.exists() and str(self.db_path) != ":memory:":
+                    self.db_path.unlink()
+                self.conn = create_db(self.db_path)
+                stats["create_db"] = f"{time.time() - t0:.3f}s"
+            except Exception as exc:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(exc)
+                stats["create_db"] = f"ERROR: {exc}"
+                logger.warning("create_db failed", exc_info=True)
+                return stats  # Can't continue without a database.
+
+            # ── 2. Load messages ──────────────────────────────────────────────
+            try:
+                t0 = time.time()
+                msg_count = load_messages_from_file(self.conn, data_path)
                 elapsed = time.time() - t0
-                stats["build_vectors"] = f"{vec_count} vectors in {elapsed:.3f}s"
-                self._has_vectors = True
+                stats["load_messages"] = f"{msg_count} messages in {elapsed:.3f}s"
+                self.stats["message_count"] = msg_count
             except Exception as exc:
-                stats["build_vectors"] = f"ERROR: {exc}"
-                logger.debug("build_vectors failed", exc_info=True)
-                self._has_vectors = False
-        else:
-            stats["build_vectors"] = "SKIPPED (sqlite-vec or model2vec not installed)"
-            self._has_vectors = False
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(exc)
+                stats["load_messages"] = f"ERROR: {exc}"
+                logger.warning("load_messages failed", exc_info=True)
+                self.stats["message_count"] = 0
 
-        # Update hybrid capability — needs vectors to be useful.
-        self._has_hybrid = _HAS_HYBRID and self._has_vectors
-
-        # ── 3b. Build scene clusters ───────────────────────────────────────
-        if _HAS_CLUSTERING and self._has_vectors:
-            try:
-                t0 = time.time()
-                n_clusters = cluster_messages(self.conn)
-                stats["build_clusters"] = f"{n_clusters} clusters in {time.time() - t0:.3f}s"
-                self._has_clustering = True
-                if not self.conn.in_transaction:
-                    self._get_maintenance_coordinator().observe_clustering_outcome(
-                        "success_empty" if n_clusters == 0 else "success")
-            except Exception as exc:
-                stats["build_clusters"] = f"ERROR: {exc}"
-                self._get_maintenance_coordinator().observe_clustering_outcome(
-                    "unavailable" if isinstance(exc, ImportError) else "failed", type(exc).__name__)
-                self._has_clustering = False
-        else:
-            stats["build_clusters"] = "SKIPPED (clustering or vectors not available)"
-            self._get_maintenance_coordinator().observe_clustering_outcome(
-                "unavailable", "ClusteringRuntimeUnavailable" if not _HAS_CLUSTERING else "VectorRuntimeUnavailable")
-            self._has_clustering = False
-
-        # ── 4. Build entity profiles (L0) ─────────────────────────────────
-        if _HAS_PERSONALITY:
-            try:
-                t0 = time.time()
-                build_entity_profiles(self.conn)
-                stats["build_profiles"] = f"{time.time() - t0:.3f}s"
-            except Exception as exc:
-                stats["build_profiles"] = f"ERROR: {exc}"
-                logger.debug("build_profiles failed", exc_info=True)
-                self._has_personality = False
-        else:
-            stats["build_profiles"] = "SKIPPED (personality module not available)"
-
-        # ── 4.5. Build entity style vectors (L0 char-n-gram) ─────────────
-        if _HAS_STYLE_VEC:
-            try:
-                from truememory.maintenance import maintenance_observation, run_engine_maintenance
-                coordinator = self._get_maintenance_coordinator()
-                borrowed = self.conn.in_transaction
-                with maintenance_observation(coordinator, borrowed=borrowed) as observed:
-                    report = run_engine_maintenance(self.conn, coordinator, force=True, prepare_extensions=False,
-                        include_layers=False, include_style=True, allow_caller_transaction=borrowed)
-                    if not borrowed and self.conn.in_transaction:
-                        self.conn.rollback()
-                        raise RuntimeError("Style work left an unfinished transaction")
-                    observed.append(report)
-                result = report.style_result
-                if result.outcome in {"success", "success_empty"}:
-                    stats["build_style_vectors"] = f"{result.output_count} vectors in {result.elapsed_seconds:.3f}s"
-                else:
-                    stats["build_style_vectors"] = result.outcome.upper() + " (" + (result.error_category or "Pending") + ")"
-                if result.pending_caller_commit:
-                    stats["build_style_vectors"] += " (pending caller commit)"
-                self._has_style_vec = True
-            except Exception as exc:
-                stats["build_style_vectors"] = "ERROR (" + type(exc).__name__[:64] + ")"
-                logger.debug("build_style_vectors failed", exc_info=True)
-        else:
-            stats["build_style_vectors"] = "SKIPPED (personality_style_vec module not available)"
-
-        # ── 5. Extract preferences (L0) ───────────────────────────────────
-        if _HAS_PERSONALITY:
-            try:
-                t0 = time.time()
-                extract_preferences(self.conn)
-                stats["extract_preferences"] = f"{time.time() - t0:.3f}s"
-            except Exception as exc:
-                stats["extract_preferences"] = f"ERROR: {exc}"
-                logger.debug("extract_preferences failed", exc_info=True)
-        else:
-            stats["extract_preferences"] = "SKIPPED (personality module not available)"
-
-        # ── 6. Build summaries (L5) ───────────────────────────────────────
-        if _HAS_CONSOLIDATION:
-            try:
-                t0 = time.time()
-                build_summaries(self.conn)
-                stats["build_summaries"] = f"{time.time() - t0:.3f}s"
-            except Exception as exc:
-                stats["build_summaries"] = f"ERROR: {exc}"
-                logger.debug("build_summaries failed", exc_info=True)
-                self._has_consolidation = False
-        else:
-            stats["build_summaries"] = "SKIPPED (consolidation module not available)"
-
-        # ── 7. Detect contradictions (L5) ─────────────────────────────────
-        if _HAS_CONSOLIDATION:
-            try:
-                t0 = time.time()
-                detect_contradictions(self.conn)
-                stats["detect_contradictions"] = f"{time.time() - t0:.3f}s"
-            except Exception as exc:
-                stats["detect_contradictions"] = f"ERROR: {exc}"
-                logger.debug("detect_contradictions failed", exc_info=True)
-        else:
-            stats["detect_contradictions"] = "SKIPPED (consolidation module not available)"
-
-        # ── 8. Build surprise index (predictive coding) ───────────────────
-        if _HAS_PREDICTIVE:
-            try:
-                t0 = time.time()
-                build_surprise_index(self.conn)
-                stats["build_surprise_index"] = f"{time.time() - t0:.3f}s"
-            except Exception as exc:
-                stats["build_surprise_index"] = f"ERROR: {exc}"
-                logger.debug("build_surprise_index failed", exc_info=True)
-                self._has_predictive = False
-        else:
-            stats["build_surprise_index"] = "SKIPPED (predictive module not available)"
-
-        # ── 9. Build separation vectors (B2) ─────────────────────────────
-        if _HAS_VECTOR:
-            try:
-                t0 = time.time()
-                sep_count = build_separation_vectors(self.conn)
-                stats["build_separation_vectors"] = f"{sep_count} vectors in {time.time() - t0:.3f}s"
-            except Exception as exc:
-                stats["build_separation_vectors"] = f"ERROR: {exc}"
-                logger.debug("build_separation_vectors failed", exc_info=True)
-        else:
-            stats["build_separation_vectors"] = "SKIPPED (vector module not available)"
-
-        # ── 10. Detect episodes (B1) ─────────────────────────────────────
-        if _HAS_TEMPORAL:
-            try:
-                t0 = time.time()
-                ep_count = detect_episodes(self.conn)
-                stats["detect_episodes"] = f"{ep_count} episodes in {time.time() - t0:.3f}s"
-            except Exception as exc:
-                stats["detect_episodes"] = f"ERROR: {exc}"
-                logger.debug("detect_episodes failed", exc_info=True)
-        else:
-            stats["detect_episodes"] = "SKIPPED (temporal module not available)"
-
-        # ── 11. Detect landmark events (E3) ──────────────────────────────
-        if _HAS_TEMPORAL:
-            try:
-                t0 = time.time()
-                lm_count = detect_landmark_events(self.conn)
-                stats["detect_landmarks"] = f"{lm_count} events in {time.time() - t0:.3f}s"
-            except Exception as exc:
-                stats["detect_landmarks"] = f"ERROR: {exc}"
-                logger.debug("detect_landmarks failed", exc_info=True)
-        else:
-            stats["detect_landmarks"] = "SKIPPED (temporal module not available)"
-
-        # ── 12. Build entity summary sheets (B3) ─────────────────────────
-        # Disabled 2026-04-24 per MEMORIST-L4 research.
-        # See CHANGELOG v0.6.0 for rationale.
-        # The function wrote `summaries` rows with period='entity_profile'
-        # that saturated top-1 retrieval by keyword match and leaked
-        # superseded facts into contradiction scoring. Disabling produced
-        # +5.3 pts on the L4 composite probe metric (Pareto-dominant,
-        # see REPORT.md §3 Table "D1 vs C1" and §10.7 Ablation 2).
-        #
-        # Escape hatch: set TRUEMEMORY_ENTITY_SHEETS=1 to re-enable this
-        # function. Users who regress on real-world workloads can revert
-        # without a code patch. Intended to be removed in a future release
-        # once long-horizon production telemetry confirms the disable.
-        _entity_sheets_enabled = (
-            os.environ.get("TRUEMEMORY_ENTITY_SHEETS", "")
-            .strip().lower() in {"1", "true", "yes", "on"}
-        )
-        if _HAS_CONSOLIDATION and _entity_sheets_enabled:
-            try:
-                t0 = time.time()
-                sheet_count = build_entity_summary_sheets(self.conn)
-                stats["entity_summary_sheets"] = f"{sheet_count} sheets in {time.time() - t0:.3f}s (re-enabled via TRUEMEMORY_ENTITY_SHEETS=1)"
-            except Exception as exc:
-                stats["entity_summary_sheets"] = f"ERROR: {exc}"
-                logger.debug("entity_summary_sheets failed", exc_info=True)
-        elif _HAS_CONSOLIDATION:
-            stats["entity_summary_sheets"] = "DISABLED (MEMORIST-L4; set TRUEMEMORY_ENTITY_SHEETS=1 to re-enable)"
-        else:
-            stats["entity_summary_sheets"] = "SKIPPED (consolidation module not available)"
-
-        # ── 13. Build structured facts (B4) ──────────────────────────────
-        if _HAS_CONSOLIDATION:
-            try:
-                t0 = time.time()
-                fact_count = build_structured_facts(self.conn)
-                stats["structured_facts"] = f"{fact_count} facts in {time.time() - t0:.3f}s"
-            except Exception as exc:
-                stats["structured_facts"] = f"ERROR: {exc}"
-                logger.debug("structured_facts failed", exc_info=True)
-        else:
-            stats["structured_facts"] = "SKIPPED (consolidation module not available)"
-
-        # ── 14. Build Dunbar hierarchy (E2) ──────────────────────────────
-        if _HAS_PERSONALITY:
-            try:
-                t0 = time.time()
-                primary = None
+            # ── 3. Build vector embeddings ────────────────────────────────────
+            if _HAS_VECTOR:
                 try:
-                    row = self.conn.execute(
-                        "SELECT sender, COUNT(*) as cnt FROM messages "
-                        "WHERE sender != '' AND sender IS NOT NULL "
-                        "GROUP BY sender ORDER BY cnt DESC LIMIT 1"
-                    ).fetchone()
-                    if row and row[0] and row[0].strip():
-                        primary = row[0]
+                    t0 = time.time()
+                    init_vec_table(self.conn)
+                    vec_count = build_vectors(self.conn)
+                    elapsed = time.time() - t0
+                    stats["build_vectors"] = f"{vec_count} vectors in {elapsed:.3f}s"
+                    self._has_vectors = True
                 except Exception as exc:
-                    logger.debug("Failed to detect primary entity for Dunbar: %s", exc)
-                dunbar_result = build_dunbar_hierarchy(self.conn, primary_entity=primary)
-                dunbar_count = len(dunbar_result) if isinstance(dunbar_result, dict) else dunbar_result
-                stats["dunbar_hierarchy"] = f"{dunbar_count} relationships in {time.time() - t0:.3f}s"
-            except Exception as exc:
-                stats["dunbar_hierarchy"] = f"ERROR: {exc}"
-                logger.debug("dunbar_hierarchy failed", exc_info=True)
-        else:
-            stats["dunbar_hierarchy"] = "SKIPPED (personality module not available)"
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(exc)
+                    stats["build_vectors"] = f"ERROR: {exc}"
+                    logger.debug("build_vectors failed", exc_info=True)
+                    self._has_vectors = False
+            else:
+                stats["build_vectors"] = "SKIPPED (sqlite-vec or model2vec not installed)"
+                self._has_vectors = False
 
-        # ── Record capabilities ───────────────────────────────────────────
-        self.stats["capabilities"] = {
-            "fts5": True,
-            "vector_search": self._has_vectors,
-            "hybrid_rrf": self._has_hybrid,
-            "temporal": self._has_temporal,
-            "salience": self._has_salience,
-            "personality": self._has_personality,
-            "style_vec": self._has_style_vec,
-            "consolidation": self._has_consolidation,
-            "predictive": self._has_predictive,
-            "reranker": self._has_reranker,
-            "hyde": self._has_hyde,
-            "clustering": self._has_clustering,
-        }
+            # Update hybrid capability — needs vectors to be useful.
+            self._has_hybrid = _HAS_HYBRID and self._has_vectors
 
-        self.ready = True
-        return stats
+            # ── 3b. Build scene clusters ───────────────────────────────────────
+            if _HAS_CLUSTERING and self._has_vectors:
+                try:
+                    t0 = time.time()
+                    n_clusters = cluster_messages(self.conn)
+                    stats["build_clusters"] = f"{n_clusters} clusters in {time.time() - t0:.3f}s"
+                    self._has_clustering = True
+                    if not self.conn.in_transaction:
+                        self._get_maintenance_coordinator().observe_clustering_outcome(
+                            "success_empty" if n_clusters == 0 else "success")
+                except Exception as exc:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(exc)
+                    stats["build_clusters"] = f"ERROR: {exc}"
+                    self._get_maintenance_coordinator().observe_clustering_outcome(
+                        "unavailable" if isinstance(exc, ImportError) else "failed", type(exc).__name__)
+                    self._has_clustering = False
+            else:
+                stats["build_clusters"] = "SKIPPED (clustering or vectors not available)"
+                self._get_maintenance_coordinator().observe_clustering_outcome(
+                    "unavailable", "ClusteringRuntimeUnavailable" if not _HAS_CLUSTERING else "VectorRuntimeUnavailable")
+                self._has_clustering = False
+
+            # ── 4. Build entity profiles (L0) ─────────────────────────────────
+            if _HAS_PERSONALITY:
+                try:
+                    t0 = time.time()
+                    build_entity_profiles(self.conn)
+                    stats["build_profiles"] = f"{time.time() - t0:.3f}s"
+                except Exception as exc:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(exc)
+                    stats["build_profiles"] = f"ERROR: {exc}"
+                    logger.debug("build_profiles failed", exc_info=True)
+                    self._has_personality = False
+            else:
+                stats["build_profiles"] = "SKIPPED (personality module not available)"
+
+            # ── 4.5. Build entity style vectors (L0 char-n-gram) ─────────────
+            if _HAS_STYLE_VEC:
+                try:
+                    from truememory.maintenance import maintenance_observation, run_engine_maintenance
+                    coordinator = self._get_maintenance_coordinator()
+                    borrowed = self.conn.in_transaction
+                    with maintenance_observation(coordinator, borrowed=borrowed) as observed:
+                        report = run_engine_maintenance(self.conn, coordinator, force=True, prepare_extensions=False,
+                            include_layers=False, include_style=True, allow_caller_transaction=borrowed)
+                        if not borrowed and self.conn.in_transaction:
+                            self.conn.rollback()
+                            raise RuntimeError("Style work left an unfinished transaction")
+                        observed.append(report)
+                    result = report.style_result
+                    if result.outcome in {"success", "success_empty"}:
+                        stats["build_style_vectors"] = f"{result.output_count} vectors in {result.elapsed_seconds:.3f}s"
+                    else:
+                        stats["build_style_vectors"] = result.outcome.upper() + " (" + (result.error_category or "Pending") + ")"
+                    if result.pending_caller_commit:
+                        stats["build_style_vectors"] += " (pending caller commit)"
+                    self._has_style_vec = True
+                except Exception as exc:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(exc)
+                    stats["build_style_vectors"] = "ERROR (" + type(exc).__name__[:64] + ")"
+                    logger.debug("build_style_vectors failed", exc_info=True)
+            else:
+                stats["build_style_vectors"] = "SKIPPED (personality_style_vec module not available)"
+
+            # ── 5. Extract preferences (L0) ───────────────────────────────────
+            if _HAS_PERSONALITY:
+                try:
+                    t0 = time.time()
+                    extract_preferences(self.conn)
+                    stats["extract_preferences"] = f"{time.time() - t0:.3f}s"
+                except Exception as exc:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(exc)
+                    stats["extract_preferences"] = f"ERROR: {exc}"
+                    logger.debug("extract_preferences failed", exc_info=True)
+            else:
+                stats["extract_preferences"] = "SKIPPED (personality module not available)"
+
+            # ── 6. Build summaries (L5) ───────────────────────────────────────
+            if _HAS_CONSOLIDATION:
+                try:
+                    t0 = time.time()
+                    build_summaries(self.conn)
+                    stats["build_summaries"] = f"{time.time() - t0:.3f}s"
+                except Exception as exc:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(exc)
+                    stats["build_summaries"] = f"ERROR: {exc}"
+                    logger.debug("build_summaries failed", exc_info=True)
+                    self._has_consolidation = False
+            else:
+                stats["build_summaries"] = "SKIPPED (consolidation module not available)"
+
+            # ── 7. Detect contradictions (L5) ─────────────────────────────────
+            if _HAS_CONSOLIDATION:
+                try:
+                    t0 = time.time()
+                    detect_contradictions(self.conn)
+                    stats["detect_contradictions"] = f"{time.time() - t0:.3f}s"
+                except Exception as exc:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(exc)
+                    stats["detect_contradictions"] = f"ERROR: {exc}"
+                    logger.debug("detect_contradictions failed", exc_info=True)
+            else:
+                stats["detect_contradictions"] = "SKIPPED (consolidation module not available)"
+
+            # ── 8. Build surprise index (predictive coding) ───────────────────
+            if _HAS_PREDICTIVE:
+                try:
+                    t0 = time.time()
+                    build_surprise_index(self.conn)
+                    stats["build_surprise_index"] = f"{time.time() - t0:.3f}s"
+                except Exception as exc:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(exc)
+                    stats["build_surprise_index"] = f"ERROR: {exc}"
+                    logger.debug("build_surprise_index failed", exc_info=True)
+                    self._has_predictive = False
+            else:
+                stats["build_surprise_index"] = "SKIPPED (predictive module not available)"
+
+            # ── 9. Build separation vectors (B2) ─────────────────────────────
+            if _HAS_VECTOR:
+                try:
+                    t0 = time.time()
+                    sep_count = build_separation_vectors(self.conn)
+                    stats["build_separation_vectors"] = f"{sep_count} vectors in {time.time() - t0:.3f}s"
+                except Exception as exc:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(exc)
+                    stats["build_separation_vectors"] = f"ERROR: {exc}"
+                    logger.debug("build_separation_vectors failed", exc_info=True)
+            else:
+                stats["build_separation_vectors"] = "SKIPPED (vector module not available)"
+
+            # ── 10. Detect episodes (B1) ─────────────────────────────────────
+            if _HAS_TEMPORAL:
+                try:
+                    t0 = time.time()
+                    ep_count = detect_episodes(self.conn)
+                    stats["detect_episodes"] = f"{ep_count} episodes in {time.time() - t0:.3f}s"
+                except Exception as exc:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(exc)
+                    stats["detect_episodes"] = f"ERROR: {exc}"
+                    logger.debug("detect_episodes failed", exc_info=True)
+            else:
+                stats["detect_episodes"] = "SKIPPED (temporal module not available)"
+
+            # ── 11. Detect landmark events (E3) ──────────────────────────────
+            if _HAS_TEMPORAL:
+                try:
+                    t0 = time.time()
+                    lm_count = detect_landmark_events(self.conn)
+                    stats["detect_landmarks"] = f"{lm_count} events in {time.time() - t0:.3f}s"
+                except Exception as exc:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(exc)
+                    stats["detect_landmarks"] = f"ERROR: {exc}"
+                    logger.debug("detect_landmarks failed", exc_info=True)
+            else:
+                stats["detect_landmarks"] = "SKIPPED (temporal module not available)"
+
+            # ── 12. Build entity summary sheets (B3) ─────────────────────────
+            # Disabled 2026-04-24 per MEMORIST-L4 research.
+            # See CHANGELOG v0.6.0 for rationale.
+            # The function wrote `summaries` rows with period='entity_profile'
+            # that saturated top-1 retrieval by keyword match and leaked
+            # superseded facts into contradiction scoring. Disabling produced
+            # +5.3 pts on the L4 composite probe metric (Pareto-dominant,
+            # see REPORT.md §3 Table "D1 vs C1" and §10.7 Ablation 2).
+            #
+            # Escape hatch: set TRUEMEMORY_ENTITY_SHEETS=1 to re-enable this
+            # function. Users who regress on real-world workloads can revert
+            # without a code patch. Intended to be removed in a future release
+            # once long-horizon production telemetry confirms the disable.
+            _entity_sheets_enabled = (
+                os.environ.get("TRUEMEMORY_ENTITY_SHEETS", "")
+                .strip().lower() in {"1", "true", "yes", "on"}
+            )
+            if _HAS_CONSOLIDATION and _entity_sheets_enabled:
+                try:
+                    t0 = time.time()
+                    sheet_count = build_entity_summary_sheets(self.conn)
+                    stats["entity_summary_sheets"] = f"{sheet_count} sheets in {time.time() - t0:.3f}s (re-enabled via TRUEMEMORY_ENTITY_SHEETS=1)"
+                except Exception as exc:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(exc)
+                    stats["entity_summary_sheets"] = f"ERROR: {exc}"
+                    logger.debug("entity_summary_sheets failed", exc_info=True)
+            elif _HAS_CONSOLIDATION:
+                stats["entity_summary_sheets"] = "DISABLED (MEMORIST-L4; set TRUEMEMORY_ENTITY_SHEETS=1 to re-enable)"
+            else:
+                stats["entity_summary_sheets"] = "SKIPPED (consolidation module not available)"
+
+            # ── 13. Build structured facts (B4) ──────────────────────────────
+            if _HAS_CONSOLIDATION:
+                try:
+                    t0 = time.time()
+                    fact_count = build_structured_facts(self.conn)
+                    stats["structured_facts"] = f"{fact_count} facts in {time.time() - t0:.3f}s"
+                except Exception as exc:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(exc)
+                    stats["structured_facts"] = f"ERROR: {exc}"
+                    logger.debug("structured_facts failed", exc_info=True)
+            else:
+                stats["structured_facts"] = "SKIPPED (consolidation module not available)"
+
+            # ── 14. Build Dunbar hierarchy (E2) ──────────────────────────────
+            if _HAS_PERSONALITY:
+                try:
+                    t0 = time.time()
+                    primary = None
+                    try:
+                        row = self.conn.execute(
+                            "SELECT sender, COUNT(*) as cnt FROM messages "
+                            "WHERE sender != '' AND sender IS NOT NULL "
+                            "GROUP BY sender ORDER BY cnt DESC LIMIT 1"
+                        ).fetchone()
+                        if row and row[0] and row[0].strip():
+                            primary = row[0]
+                    except Exception as exc:
+                        from truememory.tier_switch.runtime import raise_if_serving_rejection
+                        raise_if_serving_rejection(exc)
+                        logger.debug("Failed to detect primary entity for Dunbar: %s", exc)
+                    dunbar_result = build_dunbar_hierarchy(self.conn, primary_entity=primary)
+                    dunbar_count = len(dunbar_result) if isinstance(dunbar_result, dict) else dunbar_result
+                    stats["dunbar_hierarchy"] = f"{dunbar_count} relationships in {time.time() - t0:.3f}s"
+                except Exception as exc:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(exc)
+                    stats["dunbar_hierarchy"] = f"ERROR: {exc}"
+                    logger.debug("dunbar_hierarchy failed", exc_info=True)
+            else:
+                stats["dunbar_hierarchy"] = "SKIPPED (personality module not available)"
+
+            # ── Record capabilities ───────────────────────────────────────────
+            self.stats["capabilities"] = {
+                "fts5": True,
+                "vector_search": self._has_vectors,
+                "hybrid_rrf": self._has_hybrid,
+                "temporal": self._has_temporal,
+                "salience": self._has_salience,
+                "personality": self._has_personality,
+                "style_vec": self._has_style_vec,
+                "consolidation": self._has_consolidation,
+                "predictive": self._has_predictive,
+                "reranker": self._has_reranker,
+                "hyde": self._has_hyde,
+                "clustering": self._has_clustering,
+            }
+
+            self.ready = True
+            return stats
 
     # ──────────────────────────────────────────────────────────────────────
     # Search — full 6-layer pipeline
@@ -1789,7 +2183,9 @@ class TrueMemoryEngine:
         try:
             from truememory.vector_search import search_vector_raw
             return search_vector_raw(self.conn, query, limit=limit)
-        except Exception:
+        except Exception as _serving_error:
+            from truememory.tier_switch.runtime import raise_if_serving_rejection
+            raise_if_serving_rejection(_serving_error)
             return None
 
     @engine_operation
@@ -1836,7 +2232,9 @@ class TrueMemoryEngine:
             try:
                 query_info = classify_query(query)
                 search_mode = get_search_mode(query)
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("Query classification failed in search()", exc_info=True)
 
         fts_w = query_info["weights"].get("fts", 1.0)
@@ -1851,7 +2249,9 @@ class TrueMemoryEngine:
                     include_directives=include_directives,
                 )
                 source_label = "hybrid"
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("Hybrid search failed, falling back to FTS5", exc_info=True)
                 results = []
 
@@ -1863,7 +2263,9 @@ class TrueMemoryEngine:
                 for r in results:
                     if "source" not in r:
                         r["source"] = "fts"
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("FTS search failed in search()", exc_info=True)
                 results = []
 
@@ -1880,14 +2282,18 @@ class TrueMemoryEngine:
         if _high_diversity and len(results) >= 3:
             try:
                 results = self._scent_trail(query, results, limit)
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("Scent trail failed in search()", exc_info=True)
 
         # ── 3. Retrieval quality self-check (A4) — only with high diversity
         if _high_diversity:
             try:
                 results = self._quality_self_check(query, results, limit)
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("Quality self-check failed in search()", exc_info=True)
 
         # ── 4. Temporal filtering with cross-source feedback (A1) ─────────
@@ -1966,10 +2372,14 @@ class TrueMemoryEngine:
                                         rr["score"] = _resc_max * 0.8 * max(0.0, min(_rs, 1.0))
                                         results.append(rr)
                                         existing_ids.add(rr["id"])
-                        except Exception:
+                        except Exception as _serving_error:
+                            from truememory.tier_switch.runtime import raise_if_serving_rejection
+                            raise_if_serving_rejection(_serving_error)
                             logger.debug("Temporal cross-source rescope failed in search()", exc_info=True)
 
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("Temporal filtering failed in search()", exc_info=True)
 
         # ── 5. Personality supplementation ────────────────────────────────
@@ -2008,7 +2418,9 @@ class TrueMemoryEngine:
                         results.append(pr)
                         if pr_id:
                             existing_ids.add(pr_id)
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("Personality supplementation failed in search()", exc_info=True)
 
         # ── 6. Contradiction / fact timeline ──────────────────────────────
@@ -2044,7 +2456,9 @@ class TrueMemoryEngine:
                         if cr.get("id") and cr["id"] not in existing_ids:
                             results.append(cr)
                             existing_ids.add(cr["id"])
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("Contradiction search failed in search()", exc_info=True)
 
             try:
@@ -2077,7 +2491,9 @@ class TrueMemoryEngine:
                         if sr.get("id") and sr["id"] not in existing_ids:
                             results.append(sr)
                             existing_ids.add(sr["id"])
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("Consolidated search failed in search()", exc_info=True)
 
         # ── 7. Salience guard with mode-aware threshold (A5) ──────────────
@@ -2097,7 +2513,9 @@ class TrueMemoryEngine:
                 results = apply_salience_guard(
                     results, query, conn=self.conn, min_salience=min_sal,
                 )
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("Salience guard failed in search()", exc_info=True)
 
         # ── 7.5 L5 surprise rerank boost (MEMORIST-L5) ──
@@ -2129,7 +2547,9 @@ class TrueMemoryEngine:
                     rrf_weight=0.4,
                     rerank_weight=0.6,
                 )
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("Cross-encoder rerank failed in search()", exc_info=True)
 
         # ── 9. Ensure all results have required fields and trim ───────────
@@ -2266,7 +2686,9 @@ class TrueMemoryEngine:
                     primary_results = reciprocal_rank_fusion(
                         [primary_results, hyde_results]
                     )
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("HyDE search failed in search_agentic()", exc_info=True)
 
         # ── Score normalization (issue #584) ─────────────────────────────
@@ -2307,7 +2729,9 @@ class TrueMemoryEngine:
                             cr["source"] = cr.get("source", "") + "+cluster_supp"
                             primary_results.append(cr)
                             existing_ids.add(cid)
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("Cluster search failed in search_agentic()", exc_info=True)
 
         # ── Entity-focused search ───────────────────────────────────────
@@ -2341,7 +2765,9 @@ class TrueMemoryEngine:
                     _ent_after = _validate_iso_date(_ent_intent.get("after"))
                     _eb = _validate_iso_date(_ent_intent.get("before"))
                     _ent_before = _exclusive_upper_bound(_eb) if _eb else None
-                except Exception:
+                except Exception as _serving_error:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(_serving_error)
                     logger.debug("Entity temporal-window detection failed", exc_info=True)
 
                 def _in_window(row: dict) -> bool:
@@ -2399,7 +2825,9 @@ class TrueMemoryEngine:
                 primary_results.sort(
                     key=lambda d: (-d.get("score", 0), d.get("id", 0))
                 )
-        except Exception:
+        except Exception as _serving_error:
+            from truememory.tier_switch.runtime import raise_if_serving_rejection
+            raise_if_serving_rejection(_serving_error)
             logger.debug("Entity-focused search failed in search_agentic()", exc_info=True)
 
         # ── Salience guard (deferred from search() for #582) ─────────────
@@ -2425,7 +2853,9 @@ class TrueMemoryEngine:
                         if r.get("_entity_boosted") and r.get("id")
                     ),
                 )
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("Salience guard failed in search_agentic()", exc_info=True)
 
         # ── Sufficiency check ─────────────────────────────────────────────
@@ -2455,7 +2885,9 @@ class TrueMemoryEngine:
                                 if pr.get("id") == rid:
                                     pr["score"] = pr.get("score", 0) * 1.15
                                     break
-                except Exception:
+                except Exception as _serving_error:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(_serving_error)
                     logger.debug("Refined query search failed in search_agentic()", exc_info=True)
 
             # Re-sort after adding refined results
@@ -2491,11 +2923,15 @@ class TrueMemoryEngine:
                             query, final_results[:_llm_cap],
                             llm_fn=llm_fn, top_k=limit,
                         )
-                    except Exception:
+                    except Exception as _serving_error:
+                        from truememory.tier_switch.runtime import raise_if_serving_rejection
+                        raise_if_serving_rejection(_serving_error)
                         logger.debug("LLM reranking failed in search_agentic()", exc_info=True)
                 return self._clean_results(final_results, limit, max_per_session=max_per_session,
                                            include_directives=include_directives)
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.warning("Cross-encoder rerank failed in search_agentic()", exc_info=True)
 
         # ── LLM reranking without cross-encoder ──────────────────────────
@@ -2507,7 +2943,9 @@ class TrueMemoryEngine:
                     query, primary_results[:_llm_cap],
                     llm_fn=llm_fn, top_k=limit,
                 )
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.debug("LLM reranking (standalone) failed in search_agentic()", exc_info=True)
 
         return self._clean_results(primary_results, limit, max_per_session=max_per_session,
@@ -2581,7 +3019,7 @@ class TrueMemoryEngine:
     # Search — simple FTS5-only (for benchmarking)
     # ──────────────────────────────────────────────────────────────────────
 
-    @engine_operation
+    @engine_handle_operation
     def search_simple(self, query: str, limit: int = 10) -> list[dict]:
         """
         Simple FTS5-only search (no vector, no layers).
@@ -2594,7 +3032,9 @@ class TrueMemoryEngine:
 
         try:
             results = search_fts(self.conn, query, limit=limit)
-        except Exception:
+        except Exception as _serving_error:
+            from truememory.tier_switch.runtime import raise_if_serving_rejection
+            raise_if_serving_rejection(_serving_error)
             return []
 
         cleaned: list[dict] = []
@@ -2707,6 +3147,7 @@ class TrueMemoryEngine:
             self._runtime_initialized = False
             self._runtime_vector_generation = None
             self._runtime_vector_connection = None
+            self._reconnect_receipt = None
 
     def __enter__(self):
         return self

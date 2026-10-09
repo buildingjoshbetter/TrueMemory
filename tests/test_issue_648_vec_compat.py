@@ -224,6 +224,8 @@ class TestM23TierSwitchGuard:
                     )
                 return getattr(self._real, name)
 
+        from truememory.storage import create_db
+        create_db(db).close()
         real = sqlite3.connect(str(db))
         with patch("sqlite3.connect", return_value=_NoExtConn(real)):
             with pytest.raises(TierSwitchUnsupportedError) as exc:
@@ -236,13 +238,22 @@ class TestM23TierSwitchGuard:
 class TestM51StartRebuildNotBricked:
     """A pre-thread failure in start_rebuild must not brick later rebuilds."""
 
-    def test_pre_thread_failure_does_not_brick(self):
+    def test_pre_thread_failure_does_not_brick(self, tmp_path, monkeypatch):
         from truememory.tier_switch.manager import (
             RebuildManager,
             TierSwitchUnsupportedError,
         )
 
         mgr = RebuildManager()
+        from truememory.storage import create_db
+        from truememory.tier_switch import manager as manager_module
+        db_path = tmp_path / "synthetic-pre-thread.db"
+        conn = create_db(db_path)
+        conn.execute("INSERT INTO messages(content, timestamp) VALUES ('synthetic source', '2026-01-01')")
+        conn.commit()
+        conn.close()
+        monkeypatch.setattr(manager_module, "_TRUEMEMORY_DIR", tmp_path)
+        monkeypatch.setattr(manager_module, "_get_db_path", lambda: db_path)
 
         # First call: _open_db fails before the worker thread starts (M-23).
         with patch(

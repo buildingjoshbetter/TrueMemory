@@ -149,32 +149,57 @@ def test_get_reranker_default_routes_via_tier_resolution():
     )
 
 
-def test_truememory_configure_propagates_tier_to_reranker_module():
-    """Change B.4 regression lock.
+@pytest.mark.parametrize("tier,expected", [("edge", EDGE_RERANKER), ("base", GTE_RERANKER), ("pro", GTE_RERANKER)])
+def test_truememory_configure_propagates_tier_to_reranker_module(tier, expected, tmp_path, monkeypatch):
+    """Guarded configuration persists the correct lazy identity without model work."""
+    import json
+    from truememory import mcp_server, model_client, vector_search
+    from truememory.tier_switch.manager import RebuildManager
 
-    `truememory_configure` must call `reranker.set_active_tier(tier)` AND
-    pre-load the tier's reranker via `_set_reranker(_current_reranker())`.
-    Without the first call, changing tier via MCP leaves the reranker module
-    stuck on the old tier. Without the second, the first post-configure
-    search pays a cold-start that defeats the whole "configure is the right
-    moment to warm the new model" design.
+    config = tmp_path / "config.json"
+    monkeypatch.setattr(mcp_server, "_TRUEMEMORY_DIR", tmp_path)
+    monkeypatch.setattr(mcp_server, "_CONFIG_PATH", config)
+    monkeypatch.setattr(mcp_server, "_CONFIG_LOCK_PATH", tmp_path / "config.json.lock")
+    monkeypatch.setattr(mcp_server, "_DB_PATH", str(tmp_path / "synthetic-memories.db"))
+    monkeypatch.setattr(mcp_server, "_config_cache", None)
+    monkeypatch.setattr(mcp_server, "_memory", None)
+    monkeypatch.setattr(RebuildManager, "_instance", RebuildManager())
+    monkeypatch.setenv("TRUEMEMORY_EMBED_MODEL", "edge")
+    monkeypatch.setattr(vector_search, "EMBEDDING_MODEL", "model2vec")
+    monkeypatch.setattr(vector_search, "_embedding_dim", 256)
+    monkeypatch.setattr(vector_search, "_model", None)
+    monkeypatch.setattr(vector_search, "_frozen_embedding_target", None)
+    monkeypatch.setattr(vector_search, "_runtime_policy_tier", None)
+    monkeypatch.setattr(reranker, "_model", None)
+    monkeypatch.setattr(reranker, "_model_name", GTE_RERANKER if expected == EDGE_RERANKER else EDGE_RERANKER)
+    monkeypatch.setattr(reranker, "_active_tier", "edge")
+    monkeypatch.setattr(reranker, "_frozen_reranker_id", None)
+    monkeypatch.setattr(reranker, "_model_certified", False)
+    calls = []
+    embedding_attempts = []
+    proxy = object()
 
-    Guarded by source inspection for the same reason as the test above —
-    calling `truememory_configure` in a unit test would require mocking
-    sentence_transformers, the Memory singleton, and the re-embed path. Too
-    much surface for a contract check.
-    """
-    import inspect
+    def forbidden_embedding(*args, **kwargs):
+        embedding_attempts.append((args, kwargs))
+        raise AssertionError("Configuration cannot construct or encode embeddings")
 
-    from truememory import mcp_server
+    def synthetic_proxy(*, model_name):
+        calls.append(model_name)
+        return proxy
 
-    src = inspect.getsource(mcp_server.truememory_configure)
-    assert "_set_active_tier(tier)" in src, (
-        "truememory_configure must call set_active_tier(tier) (imported as "
-        "_set_active_tier) after saving the new tier to config, so subsequent "
-        "get_reranker(model_name=None) calls resolve to the new tier's reranker."
-    )
-    assert "_set_reranker(_current_reranker())" in src, (
-        "truememory_configure must pre-load the tier's reranker so the first "
-        "post-configure search does not pay a cold-start (~70ms-3s)."
-    )
+    monkeypatch.setattr(vector_search, "get_model", forbidden_embedding)
+    monkeypatch.setattr(vector_search, "_load_frozen_embedding_target", forbidden_embedding)
+    monkeypatch.setattr(model_client, "use_model_server", lambda: True)
+    monkeypatch.setattr(model_client, "get_reranker_proxy", synthetic_proxy)
+    result = json.loads(mcp_server.truememory_configure(tier=tier))
+    assert result["status"] == "configured"
+    assert result["served_tier"] == tier
+    assert json.loads(config.read_text(encoding="utf-8"))["tier"] == tier
+    assert reranker._active_tier == tier
+    assert get_current_reranker_name() == expected
+    assert vector_search._model is None
+    assert reranker._model is None
+    assert calls == []
+    assert embedding_attempts == []
+    assert reranker.get_reranker() is proxy
+    assert calls == [expected]

@@ -283,7 +283,10 @@ def test_migration_idempotent_across_opens(tmp_path, monkeypatch, caplog):
 
     # First open: should purge.
     with caplog.at_level(logging.INFO):
-        eng1 = TrueMemoryEngine(db_path).open(rebuild_vectors=False)
+        eng1 = TrueMemoryEngine(db_path)
+        eng1._has_consolidation = False
+        eng1._has_style_vec = False
+        eng1.open(rebuild_vectors=False)
         eng1.close()
     first_text = caplog.text
     assert "purged 4" in first_text
@@ -302,7 +305,10 @@ def test_migration_idempotent_across_opens(tmp_path, monkeypatch, caplog):
     # Second open: must NOT re-emit the purge log.
     caplog.clear()
     with caplog.at_level(logging.INFO):
-        eng2 = TrueMemoryEngine(db_path).open(rebuild_vectors=False)
+        eng2 = TrueMemoryEngine(db_path)
+        eng2._has_consolidation = False
+        eng2._has_style_vec = False
+        eng2.open(rebuild_vectors=False)
         eng2.close()
     assert "MEMORIST-L4 migration: purged" not in caplog.text, (
         f"Idempotent open should skip the migration log; got: {caplog.text!r}"

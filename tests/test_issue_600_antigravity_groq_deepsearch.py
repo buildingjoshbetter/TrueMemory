@@ -201,7 +201,9 @@ def test_groq_configure_accepted(tmp_path, monkeypatch):
     config_path = tmp_path / "config.json"
     config_path.write_text("{}")
     monkeypatch.setattr(mcp_server, "_CONFIG_PATH", config_path)
+    monkeypatch.setattr(mcp_server, "_CONFIG_LOCK_PATH", mcp_server._CONFIG_PATH.with_name("config.json.lock"))
     monkeypatch.setattr(mcp_server, "_TRUEMEMORY_DIR", tmp_path)
+    monkeypatch.setattr(mcp_server, "_DB_PATH", str(tmp_path / "synthetic-configure.db"))
     # Invalidate config cache
     monkeypatch.setattr(mcp_server, "_config_cache", None)
     monkeypatch.setattr(mcp_server, "_config_cache_time", 0.0)
@@ -224,6 +226,7 @@ def test_deepsearch_falls_back_when_not_configured(tmp_path, monkeypatch):
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"tier": "pro"}))
     monkeypatch.setattr(mcp_server, "_CONFIG_PATH", config_path)
+    monkeypatch.setattr(mcp_server, "_CONFIG_LOCK_PATH", mcp_server._CONFIG_PATH.with_name("config.json.lock"))
     monkeypatch.setattr(mcp_server, "_config_cache", None)
     monkeypatch.setattr(mcp_server, "_config_cache_time", 0.0)
 
@@ -243,6 +246,7 @@ def test_deepsearch_uses_custom_provider_when_configured(tmp_path, monkeypatch):
         "groq_api_key": "gsk_test_deepsearch",
     }))
     monkeypatch.setattr(mcp_server, "_CONFIG_PATH", config_path)
+    monkeypatch.setattr(mcp_server, "_CONFIG_LOCK_PATH", mcp_server._CONFIG_PATH.with_name("config.json.lock"))
     monkeypatch.setattr(mcp_server, "_config_cache", None)
     monkeypatch.setattr(mcp_server, "_config_cache_time", 0.0)
 
@@ -261,6 +265,7 @@ def test_deepsearch_returns_none_for_unknown_provider(tmp_path, monkeypatch):
         "deepsearch_provider": "nonexistent_provider",
     }))
     monkeypatch.setattr(mcp_server, "_CONFIG_PATH", config_path)
+    monkeypatch.setattr(mcp_server, "_CONFIG_LOCK_PATH", mcp_server._CONFIG_PATH.with_name("config.json.lock"))
     monkeypatch.setattr(mcp_server, "_config_cache", None)
     monkeypatch.setattr(mcp_server, "_config_cache_time", 0.0)
 
@@ -279,6 +284,7 @@ def test_deepsearch_returns_none_when_no_api_key(tmp_path, monkeypatch):
         # No groq_api_key set
     }))
     monkeypatch.setattr(mcp_server, "_CONFIG_PATH", config_path)
+    monkeypatch.setattr(mcp_server, "_CONFIG_LOCK_PATH", mcp_server._CONFIG_PATH.with_name("config.json.lock"))
     monkeypatch.setattr(mcp_server, "_config_cache", None)
     monkeypatch.setattr(mcp_server, "_config_cache_time", 0.0)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
@@ -298,6 +304,7 @@ def test_deepsearch_resolve_uses_override(tmp_path, monkeypatch):
         "openai_api_key": "sk-test-deepsearch",
     }))
     monkeypatch.setattr(mcp_server, "_CONFIG_PATH", config_path)
+    monkeypatch.setattr(mcp_server, "_CONFIG_LOCK_PATH", mcp_server._CONFIG_PATH.with_name("config.json.lock"))
     monkeypatch.setattr(mcp_server, "_config_cache", None)
     monkeypatch.setattr(mcp_server, "_config_cache_time", 0.0)
     # Reset deepsearch cache
@@ -315,6 +322,7 @@ def test_deepsearch_resolve_falls_back_to_default_on_pro(tmp_path, monkeypatch):
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"tier": "pro"}))
     monkeypatch.setattr(mcp_server, "_CONFIG_PATH", config_path)
+    monkeypatch.setattr(mcp_server, "_CONFIG_LOCK_PATH", mcp_server._CONFIG_PATH.with_name("config.json.lock"))
     monkeypatch.setattr(mcp_server, "_config_cache", None)
     monkeypatch.setattr(mcp_server, "_config_cache_time", 0.0)
     # Reset caches
@@ -334,6 +342,7 @@ def test_deepsearch_resolve_returns_none_on_edge_no_override(tmp_path, monkeypat
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"tier": "edge"}))
     monkeypatch.setattr(mcp_server, "_CONFIG_PATH", config_path)
+    monkeypatch.setattr(mcp_server, "_CONFIG_LOCK_PATH", mcp_server._CONFIG_PATH.with_name("config.json.lock"))
     monkeypatch.setattr(mcp_server, "_config_cache", None)
     monkeypatch.setattr(mcp_server, "_config_cache_time", 0.0)
     # Reset caches

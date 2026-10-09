@@ -58,6 +58,7 @@ from truememory.storage import _deserialize_metadata, select_message_cols
 
 if TYPE_CHECKING:
     from truememory.embedding_target import EmbeddingTarget
+    from truememory.tier_switch.writer import WriterCapture
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,8 @@ def resolve_tier() -> str:
     operation = runtime.current_runtime_operation() if runtime is not None else None
     if operation is not None:
         return operation.tier
+    if globals().get("_runtime_policy_tier") is not None:
+        return _runtime_policy_tier
     env = os.environ.get("TRUEMEMORY_EMBED_MODEL", "").strip().lower()
     if env:
         return env
@@ -174,6 +177,7 @@ _embedding_dim: int = _MODEL_DIMS.get(EMBEDDING_MODEL, 256)
 _lock = threading.Lock()
 _model_generation = 0
 _frozen_embedding_target = None
+_runtime_policy_tier: str | None = None
 
 
 def _active_tier_group() -> str:
@@ -226,12 +230,13 @@ def set_embedding_model(name: str) -> None:
 
     Accepts tier names ("base", "pro") or internal model names.
     """
-    global EMBEDDING_MODEL, _model, _embedding_dim, _model_generation, _frozen_embedding_target
+    global EMBEDDING_MODEL, _model, _embedding_dim, _model_generation, _frozen_embedding_target, _runtime_policy_tier
     from truememory.tier_switch.serving import exclusive_activation
     with exclusive_activation(), _lock:
         _model_generation += 1
         _model = None  # Force reload
         _frozen_embedding_target = None
+        _runtime_policy_tier = None
         EMBEDDING_MODEL = _resolve_model_name(name)
         _embedding_dim = get_embedding_dim(EMBEDDING_MODEL)
 
@@ -399,9 +404,38 @@ def _load_frozen_embedding_target(target: EmbeddingTarget, *, timeout: float | N
         _prepared_target_slot.release()
 
 
+def apply_embedding_policy(target: EmbeddingTarget, *, certified: bool, deadline: float | None = None,
+                           load: bool = False) -> None:
+    """Rebind same-space slots; construction is opt-in for ordinary admission."""
+    global _model, EMBEDDING_MODEL, _embedding_dim, _model_generation
+    global _frozen_embedding_target, _runtime_policy_tier
+    from truememory.embedding_target import EmbeddingTarget
+    from truememory.model_client import CertifiedEmbeddingProxy, EmbeddingProxy
+    from truememory.tier_switch.serving import exclusive_activation
+    if type(target) is not EmbeddingTarget or target.tier not in {"base", "pro"}:
+        raise ValueError("Policy projection requires an explicit same-space public target")
+    if type(certified) is not bool or type(load) is not bool:
+        raise TypeError("Policy projection controls must be boolean")
+    with exclusive_activation(deadline=deadline):
+        with _target_state_lock(deadline):
+            if (EMBEDDING_MODEL, _embedding_dim) != (target.model_id, target.dimension):
+                _model = None
+                _model_generation += 1
+            elif isinstance(_model, EmbeddingProxy):
+                _model = CertifiedEmbeddingProxy(target)
+            EMBEDDING_MODEL, _embedding_dim = target.model_id, target.dimension
+            _frozen_embedding_target = target if certified else None
+            _runtime_policy_tier = target.tier
+            needs_load = _model is None and load
+        if needs_load:
+            model = _load_frozen_embedding_target(target, timeout=_target_remaining(deadline))
+            with _target_state_lock(deadline):
+                _model = model
+
+
 def apply_frozen_embedding_target(target: EmbeddingTarget, *, timeout: float | None = None) -> None:
     """Fill the existing active slot from exact prepared-target arguments."""
-    global _model, _embedding_dim, EMBEDDING_MODEL, _model_generation, _frozen_embedding_target
+    global _model, _embedding_dim, EMBEDDING_MODEL, _model_generation, _frozen_embedding_target, _runtime_policy_tier
     from truememory.embedding_target import EmbeddingTarget
     from truememory.tier_switch.serving import exclusive_activation
     if type(target) is not EmbeddingTarget:
@@ -409,6 +443,7 @@ def apply_frozen_embedding_target(target: EmbeddingTarget, *, timeout: float | N
     expires = _target_deadline(timeout)
     target.check_configuration()
     with exclusive_activation(deadline=expires):
+        _runtime_policy_tier = target.tier
         with _target_state_lock(expires):
             if (_frozen_embedding_target is not None and _frozen_embedding_target.identity == target.identity
                     and _model is not None):
@@ -693,22 +728,73 @@ def _write_embedder_metadata_no_commit(conn: sqlite3.Connection) -> None:
     metadata in the same transaction as clearing the in-progress marker, so the
     table is never "trusted" under stale metadata (issue #647).
     """
-    _ensure_metadata_table(conn)
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    conn.execute(
-        "INSERT OR REPLACE INTO metadata(key, value, updated_at) VALUES (?, ?, ?)",
-        ("embed_model", EMBEDDING_MODEL, now),
-    )
-    conn.execute(
-        "INSERT OR REPLACE INTO metadata(key, value, updated_at) VALUES (?, ?, ?)",
-        ("embed_dim", str(_embedding_dim), now),
-    )
+    from truememory.tier_switch.runtime import current_operation
+    operation = current_operation(conn)
+    if operation is not None and (operation.selection is not None or operation.policy is not None):
+        from truememory.tier_switch.writer import capture_writer_selection, require_writer_selection
+        require_writer_selection(conn, capture_writer_selection(conn), model_id=EMBEDDING_MODEL,
+                                 dimension=_embedding_dim, tables=operation.tables)
+        return
+    from truememory.tier_switch.runtime import legacy_vector_mutation
+    with legacy_vector_mutation(conn):
+        _ensure_metadata_table(conn)
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata(key, value, updated_at) VALUES (?, ?, ?)",
+            ("embed_model", EMBEDDING_MODEL, now),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata(key, value, updated_at) VALUES (?, ?, ?)",
+            ("embed_dim", str(_embedding_dim), now),
+        )
 
 
 def _write_embedder_metadata(conn: sqlite3.Connection) -> None:
     """Record `(embed_model, embed_dim)` so later opens can detect drift."""
-    _write_embedder_metadata_no_commit(conn)
-    conn.commit()
+    from truememory.tier_switch.runtime import legacy_vector_mutation
+    with legacy_vector_mutation(conn):
+        _write_embedder_metadata_no_commit(conn)
+        conn.commit()
+
+
+def _write_foreground_embedder_metadata_no_commit(
+    conn: sqlite3.Connection, identity: tuple[int, str, int], *, selection: WriterCapture,
+) -> None:
+    """Publish identity inside the caller's model fence and database writer.
+
+    Only add/update/embed_single call this after validating their vector target.
+    Their writer_transaction owns BEGIN IMMEDIATE or a writer-upgraded savepoint;
+    in_transaction alone cannot establish that ownership. Maintenance continues
+    independently, while rebuilds and standalone metadata writes keep its owner.
+    """
+    from truememory.tier_switch.runtime import current_operation
+    from truememory.tier_switch.writer import capture_writer_selection, require_writer_selection
+
+    operation = current_operation(conn)
+    if operation is None or selection != capture_writer_selection(conn):
+        raise VectorPublicationChanged("Foreground metadata requires the admitted writer selection")
+    if identity != (_model_generation, EMBEDDING_MODEL, _embedding_dim):
+        raise VectorPublicationChanged("Foreground metadata model identity changed")
+    require_writer_selection(conn, selection, model_id=identity[1], dimension=identity[2],
+                             tables=operation.tables)
+    if operation.selection is not None or operation.policy is not None:
+        return
+    if operation.key[:3] != ("legacy", identity[1], str(identity[2])):
+        raise VectorPublicationChanged("Foreground metadata disagrees with serving admission")
+    matches: list[int | None] = []
+    for key, value in (("embed_model", identity[1]), ("embed_dim", str(identity[2]))):
+        row = conn.execute(
+            "SELECT typeof(value)='text' AND value=? FROM main.metadata WHERE key=?", (value, key),
+        ).fetchone()
+        matches.append(None if row is None else row[0])
+    if matches not in ([None, None], [1, 1]):
+        raise VectorPublicationChanged("Foreground metadata is partial or uses another embedding identity")
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    for key, value in (("embed_model", identity[1]), ("embed_dim", str(identity[2]))):
+        conn.execute(
+            "INSERT OR REPLACE INTO main.metadata(key, value, updated_at) VALUES (?, ?, ?)",
+            (key, value, now),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -841,42 +927,44 @@ def _check_embedder_compatibility(conn: sqlite3.Connection) -> None:
     so that explicit re-embed flows (truememory_configure dropping + rebuilding)
     aren't blocked by stale metadata from the previous embedder.
     """
-    existing_dim = _detect_existing_vec_dim(conn)
-    if existing_dim is None:
-        return  # fresh DB or dropped-for-re-embed — nothing to protect
+    from truememory.tier_switch.runtime import legacy_vector_mutation
+    with legacy_vector_mutation(conn):
+        existing_dim = _detect_existing_vec_dim(conn)
+        if existing_dim is None:
+            return  # fresh DB or dropped-for-re-embed — nothing to protect
 
-    stored_model, _stored_dim = _read_embedder_metadata(conn)
-    current_dim = _embedding_dim
+        stored_model, _stored_dim = _read_embedder_metadata(conn)
+        current_dim = _embedding_dim
 
-    if existing_dim != current_dim:
-        stored_hint = (
-            f" (stored embed_model={stored_model!r})"
-            if stored_model
-            else " (no metadata — likely a legacy v0.3.0 DB)"
-        )
-        raise TrueMemoryMigrationError(
-            f"Database has a {existing_dim}d vec_messages table but the "
-            f"current embedder produces {current_dim}d vectors{stored_hint}. "
-            f"This commonly happens when upgrading between tiers with "
-            f"different embedding dimensions (e.g. v0.3.0 Pro @ 1024d → "
-            f"v0.4.0 Pro @ 256d). " + _migration_hint()
-        )
+        if existing_dim != current_dim:
+            stored_hint = (
+                f" (stored embed_model={stored_model!r})"
+                if stored_model
+                else " (no metadata — likely a legacy v0.3.0 DB)"
+            )
+            raise TrueMemoryMigrationError(
+                f"Database has a {existing_dim}d vec_messages table but the "
+                f"current embedder produces {current_dim}d vectors{stored_hint}. "
+                f"This commonly happens when upgrading between tiers with "
+                f"different embedding dimensions (e.g. v0.3.0 Pro @ 1024d → "
+                f"v0.4.0 Pro @ 256d). " + _migration_hint()
+            )
 
-    if stored_model is not None and stored_model != EMBEDDING_MODEL:
-        raise TrueMemoryMigrationError(
-            f"Database was built with embed_model={stored_model!r}; current "
-            f"is {EMBEDDING_MODEL!r}. Matching dims ({current_dim}d) would "
-            f"otherwise mask a silent vector-space mismatch. " + _migration_hint()
-        )
+        if stored_model is not None and stored_model != EMBEDDING_MODEL:
+            raise TrueMemoryMigrationError(
+                f"Database was built with embed_model={stored_model!r}; current "
+                f"is {EMBEDDING_MODEL!r}. Matching dims ({current_dim}d) would "
+                f"otherwise mask a silent vector-space mismatch. " + _migration_hint()
+            )
 
-    if stored_model is None:
-        logger.warning(
-            "vec_messages exists without embedder metadata (legacy v0.3.0-style "
-            "DB). Current embedder=%r at %dd. If you have switched embedding "
-            "models since ingestion, re-embed via truememory_configure() — "
-            "otherwise new vectors will carry the %r marker going forward.",
-            EMBEDDING_MODEL, current_dim, EMBEDDING_MODEL,
-        )
+        if stored_model is None:
+            logger.warning(
+                "vec_messages exists without embedder metadata (legacy v0.3.0-style "
+                "DB). Current embedder=%r at %dd. If you have switched embedding "
+                "models since ingestion, re-embed via truememory_configure() — "
+                "otherwise new vectors will carry the %r marker going forward.",
+                EMBEDDING_MODEL, current_dim, EMBEDDING_MODEL,
+            )
 
 
 def _check_rebuild_allowed(conn: sqlite3.Connection) -> None:
@@ -1006,41 +1094,49 @@ def init_vec_table(
             raise ValueError("Selected initialization requires the captured table group")
         _guard_pair(conn, operation.selection.target)
         return
-    import sqlite_vec
+    if operation is not None and operation.policy is not None:
+        from truememory.tier_switch.activation import _guard_legacy_policy_pair
+        if tier_group is not None and operation.tables != (f"vec_messages_{tier_group}", f"vec_messages_sep_{tier_group}"):
+            raise ValueError("Policy initialization requires the captured table pair")
+        _guard_legacy_policy_pair(conn, operation.policy.target, operation.tables)
+        return
+    from truememory.tier_switch.runtime import legacy_vector_mutation
+    with legacy_vector_mutation(conn):
+        import sqlite_vec
 
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
 
-    _ensure_metadata_table(conn)
+        _ensure_metadata_table(conn)
 
-    if tier_group:
-        if tier_group not in _VALID_GROUPS:
-            raise ValueError(
-                f"Invalid tier_group: {tier_group!r}. "
-                f"Valid: {sorted(_VALID_GROUPS)}"
-            )
-        vec_name = f"vec_messages_{tier_group}"
-        sep_name = f"vec_messages_sep_{tier_group}"
-    else:
-        _check_embedder_compatibility(conn)
-        vec_name = _active_vec_table(conn)
-        sep_name = _active_sep_table(conn)
+        if tier_group:
+            if tier_group not in _VALID_GROUPS:
+                raise ValueError(
+                    f"Invalid tier_group: {tier_group!r}. "
+                    f"Valid: {sorted(_VALID_GROUPS)}"
+                )
+            vec_name = f"vec_messages_{tier_group}"
+            sep_name = f"vec_messages_sep_{tier_group}"
+        else:
+            _check_embedder_compatibility(conn)
+            vec_name = _active_vec_table(conn)
+            sep_name = _active_sep_table(conn)
 
-    dim = _embedding_dim
-    conn.execute(
-        f"CREATE VIRTUAL TABLE IF NOT EXISTS {vec_name} "
-        f"USING vec0({_vec0_column_decl(dim)})"
-    )
-    conn.execute(
-        f"CREATE VIRTUAL TABLE IF NOT EXISTS {sep_name} "
-        f"USING vec0({_vec0_column_decl(dim)})"
-    )
-    conn.commit()
+        dim = _embedding_dim
+        conn.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {vec_name} "
+            f"USING vec0({_vec0_column_decl(dim)})"
+        )
+        conn.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {sep_name} "
+            f"USING vec0({_vec0_column_decl(dim)})"
+        )
+        conn.commit()
 
-    # Upgrade any pre-#631 L2-default tables to cosine in place. Idempotent:
-    # a no-op once the active tables already declare distance_metric=cosine.
-    migrate_to_cosine_metric(conn)
+        # Upgrade any pre-#631 L2-default tables to cosine in place. Idempotent:
+        # a no-op once the active tables already declare distance_metric=cosine.
+        migrate_to_cosine_metric(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -1598,16 +1694,20 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
             sep_normed = _normalize_for_cosine(sep_embedding)
             if sep_normed is not None:
                 separation = serialize_f32(sep_normed)
-    except Exception:
+    except Exception as _serving_error:
+        from truememory.tier_switch.runtime import raise_if_serving_rejection
+        raise_if_serving_rejection(_serving_error)
         logger.warning("Failed to prepare separation vector during incremental publication", exc_info=True)
     with _foreground_vector_publication(conn, identity, message_id, selection=write_selection) as (vec_tbl, sep_tbl):
         conn.execute(f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)", (message_id, completion))
         if separation is not None:
             try:
                 conn.execute(f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)", (message_id, separation))
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 logger.warning("Failed to create separation vector during incremental publication", exc_info=True)
-        _write_embedder_metadata_no_commit(conn)
+        _write_foreground_embedder_metadata_no_commit(conn, identity, selection=write_selection)
 
 
 @database_operation
@@ -1727,61 +1827,63 @@ def _rebuild_table_as_cosine(conn: sqlite3.Connection, table_name: str) -> int:
 
     Returns the number of vectors carried over.
     """
-    dim = _detect_existing_vec_dim(conn, table_name)
-    if dim is None:
-        return 0
+    from truememory.tier_switch.runtime import legacy_vector_mutation
+    with legacy_vector_mutation(conn):
+        dim = _detect_existing_vec_dim(conn, table_name)
+        if dim is None:
+            return 0
 
-    stage = f"{table_name}_cos_stage"
-    stage_done = f"{stage}_done"
-    fmt = f"{dim}f"
+        stage = f"{table_name}_cos_stage"
+        stage_done = f"{stage}_done"
+        fmt = f"{dim}f"
 
-    # Phase 1: copy normalized vectors into a durable plain staging table.
-    # D1-2 crash-safety: a separate "done" marker row is written in the SAME
-    # commit as the staged rows. An interrupted stage (crash mid-copy) leaves an
-    # empty/partial stage with NO done marker, so resume can tell it apart from a
-    # complete stage and re-stage from the still-intact original instead of
-    # swapping an empty stage over it and losing every vector.
-    conn.execute(f"DROP TABLE IF EXISTS {stage}")
-    conn.execute(f"DROP TABLE IF EXISTS {stage_done}")
-    conn.execute(
-        f"CREATE TABLE {stage} (rowid INTEGER PRIMARY KEY, embedding BLOB)"
-    )
-    conn.execute(f"CREATE TABLE {stage_done} (done INTEGER PRIMARY KEY)")
-    rows = conn.execute(
-        f"SELECT rowid, embedding FROM {table_name}"
-    ).fetchall()
-    skipped = 0
-    staged = 0
-    for rowid, blob in rows:
-        if blob is None or len(blob) != dim * 4:
-            skipped += 1
-            continue
-        normed = _normalize_for_cosine(struct.unpack(fmt, blob))
-        if normed is None:
-            skipped += 1
-            continue
+        # Phase 1: copy normalized vectors into a durable plain staging table.
+        # D1-2 crash-safety: a separate "done" marker row is written in the SAME
+        # commit as the staged rows. An interrupted stage (crash mid-copy) leaves an
+        # empty/partial stage with NO done marker, so resume can tell it apart from a
+        # complete stage and re-stage from the still-intact original instead of
+        # swapping an empty stage over it and losing every vector.
+        conn.execute(f"DROP TABLE IF EXISTS {stage}")
+        conn.execute(f"DROP TABLE IF EXISTS {stage_done}")
         conn.execute(
-            f"INSERT INTO {stage}(rowid, embedding) VALUES (?, ?)",
-            (rowid, serialize_f32(normed)),
+            f"CREATE TABLE {stage} (rowid INTEGER PRIMARY KEY, embedding BLOB)"
         )
-        staged += 1
-    # Mark staging complete in the SAME transaction as the staged rows, so the
-    # marker is durable iff every row is.
-    conn.execute(f"INSERT INTO {stage_done}(done) VALUES (1)")
-    conn.commit()  # staged rows + completeness marker durable before we touch the original
+        conn.execute(f"CREATE TABLE {stage_done} (done INTEGER PRIMARY KEY)")
+        rows = conn.execute(
+            f"SELECT rowid, embedding FROM {table_name}"
+        ).fetchall()
+        skipped = 0
+        staged = 0
+        for rowid, blob in rows:
+            if blob is None or len(blob) != dim * 4:
+                skipped += 1
+                continue
+            normed = _normalize_for_cosine(struct.unpack(fmt, blob))
+            if normed is None:
+                skipped += 1
+                continue
+            conn.execute(
+                f"INSERT INTO {stage}(rowid, embedding) VALUES (?, ?)",
+                (rowid, serialize_f32(normed)),
+            )
+            staged += 1
+        # Mark staging complete in the SAME transaction as the staged rows, so the
+        # marker is durable iff every row is.
+        conn.execute(f"INSERT INTO {stage_done}(done) VALUES (1)")
+        conn.commit()  # staged rows + completeness marker durable before we touch the original
 
-    # Phase 2: replace the vec0 table with a cosine one and refill it.
-    carried = _finish_cosine_swap(conn, table_name, dim)
+        # Phase 2: replace the vec0 table with a cosine one and refill it.
+        carried = _finish_cosine_swap(conn, table_name, dim)
 
-    if skipped:
-        logger.warning(
-            "Cosine migration for %s dropped %d zero-norm/invalid vector(s)",
-            table_name, skipped,
+        if skipped:
+            logger.warning(
+                "Cosine migration for %s dropped %d zero-norm/invalid vector(s)",
+                table_name, skipped,
+            )
+        logger.info(
+            "Rebuilt %s as cosine (%d vectors carried over)", table_name, carried
         )
-    logger.info(
-        "Rebuilt %s as cosine (%d vectors carried over)", table_name, carried
-    )
-    return carried
+        return carried
 
 
 def _finish_cosine_swap(
@@ -1792,24 +1894,26 @@ def _finish_cosine_swap(
     Assumes ``{table_name}_cos_stage`` exists and is populated. Idempotent /
     resumable: safe to call after a crash that left the staging table behind.
     """
-    stage = f"{table_name}_cos_stage"
-    conn.execute(f"DROP TABLE IF EXISTS {table_name}")
-    conn.execute(
-        f"CREATE VIRTUAL TABLE {table_name} USING vec0({_vec0_column_decl(dim)})"
-    )
-    carried = 0
-    staged_rows = conn.execute(
-        f"SELECT rowid, embedding FROM {stage}"
-    ).fetchall()
-    if staged_rows:
-        conn.executemany(
-            f"INSERT INTO {table_name}(rowid, embedding) VALUES (?, ?)",
-            staged_rows,
+    from truememory.tier_switch.runtime import legacy_vector_mutation
+    with legacy_vector_mutation(conn):
+        stage = f"{table_name}_cos_stage"
+        conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+        conn.execute(
+            f"CREATE VIRTUAL TABLE {table_name} USING vec0({_vec0_column_decl(dim)})"
         )
-        carried = len(staged_rows)
-    conn.execute(f"DROP TABLE IF EXISTS {stage}")
-    conn.execute(f"DROP TABLE IF EXISTS {stage}_done")
-    return carried
+        carried = 0
+        staged_rows = conn.execute(
+            f"SELECT rowid, embedding FROM {stage}"
+        ).fetchall()
+        if staged_rows:
+            conn.executemany(
+                f"INSERT INTO {table_name}(rowid, embedding) VALUES (?, ?)",
+                staged_rows,
+            )
+            carried = len(staged_rows)
+        conn.execute(f"DROP TABLE IF EXISTS {stage}")
+        conn.execute(f"DROP TABLE IF EXISTS {stage}_done")
+        return carried
 
 
 def migrate_to_cosine_metric(conn: sqlite3.Connection) -> bool:
@@ -1826,67 +1930,69 @@ def migrate_to_cosine_metric(conn: sqlite3.Connection) -> bool:
     """
     # Ensure the extension is loaded (callers from engine.open already load it,
     # but init_vec_table is the common entry and loads it just above).
-    try:
-        import sqlite_vec
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
-    except Exception:
-        # If the extension cannot load, there are no vec0 tables to migrate.
-        return False
+    from truememory.tier_switch.runtime import legacy_vector_mutation
+    with legacy_vector_mutation(conn):
+        try:
+            import sqlite_vec
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+        except Exception:
+            # If the extension cannot load, there are no vec0 tables to migrate.
+            return False
 
-    migrated = False
-    for table in _KNOWN_VEC_TABLES:
-        stage = f"{table}_cos_stage"
-        has_stage = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE name = ? AND type='table'",
-            (stage,),
-        ).fetchone()
-        if has_stage:
-            # A prior run was interrupted between staging and swap. Only finish
-            # the swap if the staging completed durably (the "done" marker is
-            # present); otherwise the stage is empty/partial and the ORIGINAL
-            # table is still intact, so drop the partial stage and re-stage from
-            # scratch below rather than swapping an empty stage over the original
-            # and losing every vector (D1-2).
-            stage_done = f"{stage}_done"
-            stage_complete = bool(
-                conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE name = ? AND type='table'",
-                    (stage_done,),
-                ).fetchone()
-                and conn.execute(f"SELECT 1 FROM {stage_done} LIMIT 1").fetchone()
-            )
-            if stage_complete:
-                dim = (
-                    _detect_existing_vec_dim(conn, table)
-                    or _detect_existing_vec_dim(conn, stage)
-                    or _embedding_dim
+        migrated = False
+        for table in _KNOWN_VEC_TABLES:
+            stage = f"{table}_cos_stage"
+            has_stage = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = ? AND type='table'",
+                (stage,),
+            ).fetchone()
+            if has_stage:
+                # A prior run was interrupted between staging and swap. Only finish
+                # the swap if the staging completed durably (the "done" marker is
+                # present); otherwise the stage is empty/partial and the ORIGINAL
+                # table is still intact, so drop the partial stage and re-stage from
+                # scratch below rather than swapping an empty stage over the original
+                # and losing every vector (D1-2).
+                stage_done = f"{stage}_done"
+                stage_complete = bool(
+                    conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE name = ? AND type='table'",
+                        (stage_done,),
+                    ).fetchone()
+                    and conn.execute(f"SELECT 1 FROM {stage_done} LIMIT 1").fetchone()
                 )
-                _finish_cosine_swap(conn, table, dim)
+                if stage_complete:
+                    dim = (
+                        _detect_existing_vec_dim(conn, table)
+                        or _detect_existing_vec_dim(conn, stage)
+                        or _embedding_dim
+                    )
+                    _finish_cosine_swap(conn, table, dim)
+                    conn.commit()
+                    migrated = True
+                    continue
+                # Incomplete stage from an interrupted copy — discard it and fall
+                # through to a fresh rebuild from the intact original table.
+                conn.execute(f"DROP TABLE IF EXISTS {stage}")
+                conn.execute(f"DROP TABLE IF EXISTS {stage_done}")
                 conn.commit()
-                migrated = True
+
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = ? AND type='table'",
+                (table,),
+            ).fetchone()
+            if not exists:
                 continue
-            # Incomplete stage from an interrupted copy — discard it and fall
-            # through to a fresh rebuild from the intact original table.
-            conn.execute(f"DROP TABLE IF EXISTS {stage}")
-            conn.execute(f"DROP TABLE IF EXISTS {stage_done}")
+            if _table_uses_cosine(conn, table):
+                continue
+            _rebuild_table_as_cosine(conn, table)
+            migrated = True
+
+        if migrated:
             conn.commit()
-
-        exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE name = ? AND type='table'",
-            (table,),
-        ).fetchone()
-        if not exists:
-            continue
-        if _table_uses_cosine(conn, table):
-            continue
-        _rebuild_table_as_cosine(conn, table)
-        migrated = True
-
-    if migrated:
-        conn.commit()
-    return migrated
+        return migrated
 
 
 # ---------------------------------------------------------------------------
@@ -1906,82 +2012,84 @@ def migrate_legacy_vec_tables(conn: sqlite3.Connection) -> bool:
 
     Returns True if migration occurred, False if nothing to migrate.
     """
-    from truememory.tier_switch.cache import VectorCacheRegistry
+    from truememory.tier_switch.runtime import legacy_vector_mutation
+    with legacy_vector_mutation(conn):
+        from truememory.tier_switch.cache import VectorCacheRegistry
 
-    has_old = conn.execute(
-        "SELECT name FROM sqlite_master WHERE name='vec_messages' AND type='table'"
-    ).fetchone()
-    if not has_old:
-        return False
-
-    stored_model, _ = _read_embedder_metadata(conn)
-    group = _MODEL_TO_GROUP.get(stored_model, "edge")
-    if group not in _VALID_GROUPS:
-        group = "edge"
-
-    new_vec = f"vec_messages_{group}"
-    new_sep = f"vec_messages_sep_{group}"
-
-    count = conn.execute("SELECT COUNT(*) FROM vec_messages").fetchone()[0]
-    if count == 0:
-        has_tiered = conn.execute(
-            "SELECT name FROM sqlite_master WHERE name=? AND type='table'",
-            (new_vec,),
+        has_old = conn.execute(
+            "SELECT name FROM sqlite_master WHERE name='vec_messages' AND type='table'"
         ).fetchone()
-        if not has_tiered:
+        if not has_old:
             return False
-        conn.execute("DROP TABLE IF EXISTS vec_messages")
-        conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
-        conn.commit()
+
+        stored_model, _ = _read_embedder_metadata(conn)
+        group = _MODEL_TO_GROUP.get(stored_model, "edge")
+        if group not in _VALID_GROUPS:
+            group = "edge"
+
+        new_vec = f"vec_messages_{group}"
+        new_sep = f"vec_messages_sep_{group}"
+
+        count = conn.execute("SELECT COUNT(*) FROM vec_messages").fetchone()[0]
+        if count == 0:
+            has_tiered = conn.execute(
+                "SELECT name FROM sqlite_master WHERE name=? AND type='table'",
+                (new_vec,),
+            ).fetchone()
+            if not has_tiered:
+                return False
+            conn.execute("DROP TABLE IF EXISTS vec_messages")
+            conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
+            conn.commit()
+            return True
+
+        dim = _detect_existing_vec_dim(conn, "vec_messages") or 256
+
+        import sqlite_vec
+
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+
+        conn.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {new_vec} "
+            f"USING vec0({_vec0_column_decl(dim)})"
+        )
+        conn.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {new_sep} "
+            f"USING vec0({_vec0_column_decl(dim)})"
+        )
+
+        conn.execute(f"INSERT INTO {new_vec} SELECT * FROM vec_messages")
+        try:
+            conn.execute(f"INSERT INTO {new_sep} SELECT * FROM vec_messages_sep")
+        except sqlite3.OperationalError:
+            pass
+
+        conn.execute("DROP TABLE vec_messages")
+        try:
+            conn.execute("DROP TABLE vec_messages_sep")
+        except sqlite3.OperationalError:
+            pass
+
+        max_id = conn.execute(
+            f"SELECT MAX(rowid) FROM {new_vec}"
+        ).fetchone()[0] or 0
+
+        model_map = {"edge": "potion-base-8M", "basepro": "Qwen3-Embedding-0.6B"}
+        VectorCacheRegistry.set(
+            conn,
+            group,
+            vec_table=new_vec,
+            sep_table=new_sep,
+            last_embedded_id=max_id,
+            vector_count=count,
+            model_name=model_map.get(group, "potion-base-8M"),
+            embedding_dim=dim,
+        )
+
+        logger.info(
+            "Migrated %d vectors from vec_messages → %s (group=%s)",
+            count, new_vec, group,
+        )
         return True
-
-    dim = _detect_existing_vec_dim(conn, "vec_messages") or 256
-
-    import sqlite_vec
-
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
-
-    conn.execute(
-        f"CREATE VIRTUAL TABLE IF NOT EXISTS {new_vec} "
-        f"USING vec0({_vec0_column_decl(dim)})"
-    )
-    conn.execute(
-        f"CREATE VIRTUAL TABLE IF NOT EXISTS {new_sep} "
-        f"USING vec0({_vec0_column_decl(dim)})"
-    )
-
-    conn.execute(f"INSERT INTO {new_vec} SELECT * FROM vec_messages")
-    try:
-        conn.execute(f"INSERT INTO {new_sep} SELECT * FROM vec_messages_sep")
-    except sqlite3.OperationalError:
-        pass
-
-    conn.execute("DROP TABLE vec_messages")
-    try:
-        conn.execute("DROP TABLE vec_messages_sep")
-    except sqlite3.OperationalError:
-        pass
-
-    max_id = conn.execute(
-        f"SELECT MAX(rowid) FROM {new_vec}"
-    ).fetchone()[0] or 0
-
-    model_map = {"edge": "potion-base-8M", "basepro": "Qwen3-Embedding-0.6B"}
-    VectorCacheRegistry.set(
-        conn,
-        group,
-        vec_table=new_vec,
-        sep_table=new_sep,
-        last_embedded_id=max_id,
-        vector_count=count,
-        model_name=model_map.get(group, "potion-base-8M"),
-        embedding_dim=dim,
-    )
-
-    logger.info(
-        "Migrated %d vectors from vec_messages → %s (group=%s)",
-        count, new_vec, group,
-    )
-    return True

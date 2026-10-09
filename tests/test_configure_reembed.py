@@ -31,8 +31,19 @@ def server(monkeypatch, tmp_path):
     import truememory.mcp_server as ms
     monkeypatch.setattr(ms, "_TRUEMEMORY_DIR", home / ".truememory")
     monkeypatch.setattr(ms, "_CONFIG_PATH", home / ".truememory" / "config.json")
+    monkeypatch.setattr(ms, "_CONFIG_LOCK_PATH", ms._CONFIG_PATH.with_name("config.json.lock"))
     monkeypatch.setattr(ms, "_DB_PATH", str(db_path))
     monkeypatch.setattr(ms, "_memory", None)
+    import numpy as np
+    import truememory.vector_search as vs
+
+    class SyntheticEncoder:
+        def encode(self, texts, **kwargs):
+            # 256 * (1 / 16) ** 2 = 1, so the synthetic vectors have unit norm.
+            return np.full((len(texts), 256), 1 / 16, dtype=np.float32)
+
+    encoder = SyntheticEncoder()
+    monkeypatch.setattr(vs, "get_model", lambda: encoder)
     yield ms
     # Teardown: drop cached Memory and any model-level state mutated by
     # truememory_configure (which modifies vector_search globals via

@@ -103,6 +103,14 @@ class TestFixtureIsolation(unittest.TestCase):
         source = (ROOT / "truememory/maintenance.py").read_text(encoding="utf-8")
         exec(compile(source, "synthetic-foreign-maintenance", "exec"), self.foreign.__dict__)
         self.foreign.sys = self.process_sys
+        # This fixture invokes a worker directly for an in-memory coordinator.
+        # Production workers reopen file paths; give its real opener the explicit
+        # in-memory identity instead of the scheduler's non-launchable None.
+        class MemoryWorkerCoordinator(self.foreign.MaintenanceCoordinator):
+            def __init__(self, path: object) -> None:
+                super().__init__(":memory:" if path is None else path)
+
+        self.foreign.MaintenanceCoordinator = MemoryWorkerCoordinator
 
         self.uri = "file:synthetic-fixture-" + uuid.uuid4().hex + "?mode=memory&cache=shared"
         self.connect = sqlite3.connect

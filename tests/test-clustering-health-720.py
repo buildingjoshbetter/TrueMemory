@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import runpy
 import sqlite3
 import sys
 import threading
@@ -33,10 +34,14 @@ def load_functions(path: str, names: set[str], namespace: dict, *, method: bool 
 
 
 def isolated_builtins(modules: dict) -> dict:
+    runtime = MAINTENANCE._fixture_modules["tier_switch.runtime"]
+
     def safe_import(name: str, globals: dict | None = None, locals: dict | None = None,
                     fromlist: tuple = (), level: int = 0) -> object:
         if name in modules:
             return modules[name]
+        if name == "truememory.tier_switch.runtime":
+            return runtime
         if name.startswith("truememory") or name.split(".")[0] in {"torch", "numpy", "hdbscan", "sqlite_vec"}:
             raise AssertionError("Unexpected production or native import: " + name)
         return builtins.__import__(name, globals, locals, fromlist, level)
@@ -44,14 +49,8 @@ def isolated_builtins(modules: dict) -> dict:
 
 
 def load_primitives() -> tuple[types.ModuleType, types.ModuleType]:
-    modules = {}
-    for name in ("storage", "_platform", "maintenance"):
-        module = types.ModuleType("synthetic_clustering_health_" + name)
-        module.__dict__["__builtins__"] = isolated_builtins(modules)
-        path = ROOT / "truememory" / (name + ".py")
-        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
-        modules["truememory." + name] = module
-    return modules["truememory.storage"], modules["truememory.maintenance"]
+    loader = runpy.run_path(str(Path(__file__).with_name("test-maintenance-source-revision-753.py")))
+    return loader["STORAGE"], loader["MAINTENANCE"]
 
 
 STORAGE, MAINTENANCE = load_primitives()
@@ -71,7 +70,10 @@ class HealthFixture(unittest.TestCase):
         self.vector = types.SimpleNamespace(
             _lock=threading.Lock(), EMBEDDING_MODEL="synthetic-model", _embedding_dim=2,
             _active_tier_group=lambda: "edge", _active_vec_table=lambda conn: "synthetic_vectors",
+            _active_sep_table=lambda conn: "synthetic_separation", resolve_tier=lambda: "edge",
+            _frozen_embedding_target=None, _runtime_policy_tier=None,
         )
+        self.enter_context(patch.dict(MAINTENANCE._fixture_modules, {"vector_search": self.vector}))
         self.versions = {"numpy": "synthetic", "hdbscan": "synthetic", "sqlite_vec": "synthetic"}
         self.absent: set[str] = set()
         self.probes = []

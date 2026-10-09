@@ -2,6 +2,7 @@
 
 import ast
 import builtins
+import datetime
 import gc
 import logging
 import os
@@ -16,7 +17,7 @@ import types
 import unittest
 import warnings
 import weakref
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,35 +39,53 @@ def stdlib_module(name: str, modules: dict) -> types.ModuleType:
 
     module.__dict__["__builtins__"] = dict(vars(builtins), __import__=safe_import)
     path = ROOT / "truememory" / (name + ".py")
-    with patch.dict(sys.modules, {module.__name__: module}):
+    missing = object()
+    previous = sys.modules.get(module.__name__, missing)
+    sys.modules[module.__name__] = module
+    try:
         exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
+    finally:
+        if previous is missing:
+            sys.modules.pop(module.__name__, None)
+        else:
+            sys.modules[module.__name__] = previous
     return module
 
 
 def load_engine(modules: dict) -> types.ModuleType:
     modules["truememory.tier_switch.writer"] = stdlib_module("tier_switch/writer", modules)
-    serving_path = ROOT / "truememory/tier_switch/serving.py"
-    serving_source = ast.parse(serving_path.read_text(encoding="utf-8"))
-    serving_names = {"ServingLeaseError", "ServingLeaseTimeout", "ServingLeaseCancelled"}
-    serving_nodes = [node for node in serving_source.body
-                     if isinstance(node, ast.ClassDef) and node.name in serving_names]
-    serving_namespace = {}
-    exec(compile(ast.Module(body=serving_nodes, type_ignores=[]), str(serving_path), "exec"), serving_namespace)
-    runtime_path = ROOT / "truememory/tier_switch/runtime.py"
-    runtime_source = ast.parse(runtime_path.read_text(encoding="utf-8"))
-    runtime_names = {"TierRuntimeError", "ConnectionWriteLock", "_check", "_remaining", "_connection_read"}
-    runtime_nodes = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
-    runtime_nodes.extend(node for node in runtime_source.body
-                         if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in runtime_names)
-    runtime_namespace = {"threading": threading, "sqlite3": sqlite3, "time": time,
-                         "contextmanager": contextmanager,
-                         "serving": types.SimpleNamespace(**{name: serving_namespace[name] for name in serving_names})}
-    exec(compile(ast.fix_missing_locations(ast.Module(body=runtime_nodes, type_ignores=[])),
-                 str(runtime_path), "exec"), runtime_namespace)
-    modules["truememory.tier_switch.runtime"] = types.SimpleNamespace(
-        **{name: runtime_namespace[name] for name in runtime_names},
-        serving_operation=lambda *args, **kwargs: nullcontext(types.SimpleNamespace(selection=None)),
-        current_operation=lambda conn: types.SimpleNamespace(selection=None))
+    # Runtime guards execute unchanged; only native identities are synthetic.
+    modules["psutil"] = types.SimpleNamespace()
+    for name in ("embedding_target", "tier_config", "tier_switch/cache",
+                 "tier_switch/job", "tier_switch/source", "tier_switch/activation",
+                 "tier_switch/serving"):
+        modules["truememory." + name.replace("/", ".")] = stdlib_module(name, modules)
+    serving = modules["truememory.tier_switch.serving"]
+    modules["truememory.tier_switch"] = types.SimpleNamespace(serving=serving)
+    vector = modules["truememory.vector_search"]
+    vector._frozen_embedding_target = None
+    vector._runtime_policy_tier = None
+    vector.resolve_tier = lambda: "edge"
+    vector_source = ast.parse((ROOT / "truememory/vector_search.py").read_text(encoding="utf-8"))
+    sep = next(node for node in vector_source.body
+               if isinstance(node, ast.FunctionDef) and node.name == "_active_sep_table")
+    exec(compile(ast.Module(body=[sep], type_ignores=[]), "actual-separation-resolver", "exec"),
+         vector.__dict__)
+    modules["truememory"] = types.SimpleNamespace(
+        vector_search=vector,
+        reranker=types.SimpleNamespace(get_current_reranker_name=lambda: "synthetic/reranker"),
+    )
+    runtime = stdlib_module("tier_switch/runtime", modules)
+    runtime.sys = types.SimpleNamespace(modules=modules)
+    modules["truememory.tier_switch.runtime"] = runtime
+    vector.__dict__.update(__builtins__=runtime.__dict__["__builtins__"],
+                           datetime=datetime, _model_generation=0)
+    metadata_nodes = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
+    metadata_nodes.extend(node for node in vector_source.body
+                          if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+                          and node.name in {"_write_foreground_embedder_metadata_no_commit", "VectorPublicationChanged"})
+    exec(compile(ast.fix_missing_locations(ast.Module(body=metadata_nodes, type_ignores=[])),
+                 "actual-foreground-metadata", "exec"), vector.__dict__)
     module = types.ModuleType("synthetic_routing_engine")
 
     def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
@@ -80,6 +99,7 @@ def load_engine(modules: dict) -> types.ModuleType:
         "__file__": str(ROOT / "truememory/engine.py"), "Path": Path, "sqlite3": sqlite3,
         "threading": threading, "time": time, "os": os, "warnings": warnings,
         "engine_operation": lambda function: function,
+        "engine_handle_operation": runtime.engine_handle_operation,
         "logger": logging.getLogger("synthetic-routing"), "MAX_CONTENT_LENGTH": 50_000,
         "_env_int": lambda name, default, **kwargs: default})
     source = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
@@ -112,6 +132,17 @@ class RoutingFixture(ADAPTERS["AdapterFixture"]):
                              "sqlite_vec": types.SimpleNamespace(load=lambda conn: None)})
         self.modules["truememory.rebuild_source"] = stdlib_module("rebuild_source", self.modules)
         self.engine_module = load_engine(self.modules)
+        original_import = MAINTENANCE.__dict__["__builtins__"]["__import__"]
+
+        def maintenance_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name in self.modules:
+                return self.modules[name]
+            if name.startswith("truememory"):
+                raise ImportError("Synthetic boundary excludes native modules")
+            return original_import(name, globals, locals, fromlist, level)
+
+        self.enterContext(patch.dict(MAINTENANCE.__dict__["__builtins__"],
+                                     {"__import__": maintenance_import}))
         create = STORAGE.create_db
 
         class ExtensionBoundary:
