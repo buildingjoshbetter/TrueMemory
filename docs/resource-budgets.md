@@ -518,3 +518,18 @@ sensor reads when disabled. Finite-default calibration, workspace reservations,
 system headroom, bounded recovery and actual Mac/MPS memory and thermal gates
 remain pending. This checkpoint does not establish that the original 26.24 GB
 Mac symptom is fixed.
+
+### Failed embedding transfer retention checkpoint
+
+If embedding recovery's CPU transfer fails or is cancelled, the daemon drops
+the cached embedding snapshot only when it still names that failed instance.
+The original exception propagates unchanged, with no extra load, retry or
+partial successful result. Sticky CPU selection remains set; the next admitted
+request rebuilds the same requested model on CPU. An unrelated replacement
+snapshot survives. Existing generation fencing retires idle obsolete fast
+clones and lets active captured work finish before retirement.
+
+Synthetic tests cover ordinary errors, memory errors and cancellation, retained
+identity, ownership release and weak references after exception tracebacks are
+released. This bounds failed Python cache retention, not native allocator
+reclamation, CPU-transfer peak memory or the original Mac memory incident.

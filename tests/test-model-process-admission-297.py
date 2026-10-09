@@ -5,6 +5,7 @@ import ast
 import importlib.util
 import os
 import sys
+import threading
 import types
 import unittest
 import weakref
@@ -558,6 +559,185 @@ class TestProcessAdmission(unittest.TestCase):
     def test_invalid_sensor_cases_do_not_activate_unrelated_throttler(self) -> None:
         with patch.object(self.server, "_activate_throttler", side_effect=AssertionError("Unrelated throttler")):
             self.test_invalid_and_missing_measurements_refuse_before_construction()
+
+    def assert_failed_transfer(self, failure: BaseException, count: int) -> None:
+        responses = []
+        try:
+            responses.append(self.request(count=count, tier="base"))
+        except BaseException as caught:
+            self.assertIs(caught, failure)
+        else:
+            self.fail("A failed transfer returned a response")
+        self.assertEqual(responses, [])
+        self.assertIn("embed", self.server._sticky_cpu)
+        self.assertEqual(self.moves, ["cpu"])
+        self.assertFalse(self.server._lock.locked())
+        self.assertFalse(self.server._inference_lock.locked())
+
+    def test_failed_cpu_transfer_drops_cache_and_next_request_rebuilds_same_identity(self) -> None:
+        for count, fail_at in ((1, 1), (5, 2)):
+            for error_type in (RuntimeError, MemoryError, ValueError, KeyboardInterrupt, SystemExit):
+                with self.subTest(count=count, error=error_type.__name__):
+                    self.clear_models()
+                    self.server._sticky_cpu.clear()
+                    self.moves.clear()
+                    failure = error_type("synthetic failed CPU transfer")
+                    workspaces = []
+
+                    def fail_inference(model: Model) -> None:
+                        if len(self.calls) == fail_at:
+                            self.fail_mps(model)
+
+                    def fail_transfer(model: Model, device: str) -> None:
+                        self.assertEqual(model.identity, "qwen3_256")
+                        self.assertEqual(model.device, "mps")
+                        self.assertTrue(self.server._inference_lock.locked())
+                        self.assertTrue(self.server._lock.locked())
+                        self.moves.append(device)
+                        workspace = SUPPORT.Workspace()
+                        workspaces.append(weakref.ref(workspace))
+                        raise failure
+
+                    self.inference_hook = fail_inference
+                    with patch.object(Model, "to", fail_transfer):
+                        self.assert_failed_transfer(failure, count)
+                    self.assertIsNone(self.server._embed_state)
+                    self.assertEqual(len(self.calls), fail_at)
+                    self.assertEqual(self.builds, [("qwen3_256", "mps")])
+                    self.assertEqual(self.server._inflight, 0)
+                    self.assertFalse(self.server._fast_lock.locked())
+                    self.assertIsNotNone(workspaces[0]())
+                    self.assertIsNotNone(self.refs[-1]())
+                    failure.__traceback__ = None
+                    self.assertIsNone(workspaces[0]())
+                    self.assertIsNone(self.refs[-1]())
+
+                    self.inference_hook = self.fail_mps
+                    response = self.request(count=count, tier="base")
+                    self.assertTrue(response["ok"])
+                    self.assertEqual(self.builds, [("qwen3_256", "mps"), ("qwen3_256", "cpu")])
+                    self.assertEqual(self.moves, ["cpu"])
+                    self.assertEqual(response["vectors"].data,
+                                     [value for index in range(count) for value in (float(index), 0.5)])
+                    self.assertEqual(response["vectors"].dtype, "float32")
+
+    def test_failed_transfer_preserves_an_unrelated_replacement_snapshot(self) -> None:
+        for count in (1, 3):
+            with self.subTest(count=count):
+                self.clear_models()
+                self.server._sticky_cpu.clear()
+                self.moves.clear()
+                failure = ValueError("synthetic transfer failure after replacement")
+                replacement = Model(self, "qwen3_256", "cpu")
+                replacement_state = self.ms._EmbedState(replacement, "base", "qwen3_256")
+
+                def fail_transfer(model: Model, device: str) -> None:
+                    self.moves.append(device)
+                    self.server._publish_embed_state(replacement_state)
+                    raise failure
+
+                self.inference_hook = self.fail_mps
+                with patch.object(Model, "to", fail_transfer):
+                    self.assert_failed_transfer(failure, count)
+                self.assertIs(self.server._embed_state, replacement_state)
+                failed = self.refs[-1]
+                failure.__traceback__ = None
+                self.assertIsNone(failed())
+                self.assertTrue(self.request(count=count, tier="base")["ok"])
+                self.assertEqual(self.builds, [("qwen3_256", "mps")])
+                self.assertIs(self.server._embed_state.model, replacement)
+
+    def test_failed_transfer_retires_idle_fast_clone(self) -> None:
+        self.assertTrue(self.request(tier="base")["ok"])
+        main = self.refs[-1]
+        with self.server._inference_lock:
+            self.assertTrue(self.request(count=1, tier="base")["ok"])
+        clone = self.refs[-1]
+        self.assertEqual(self.builds, [("qwen3_256", "mps"), ("qwen3_256", "cpu")])
+        failure = MemoryError("synthetic transfer allocation failure")
+
+        def fail_transfer(model: Model, device: str) -> None:
+            self.moves.append(device)
+            raise failure
+
+        self.inference_hook = self.fail_mps
+        with patch.object(Model, "to", fail_transfer):
+            self.assert_failed_transfer(failure, 3)
+        self.assertIsNone(self.server._embed_state)
+        self.assertIsNone(self.server._fast_encoder)
+        self.assertIsNone(self.server._fast_model_id)
+        self.assertIsNone(self.server._fast_generation)
+        self.assertIsNone(clone())
+        failure.__traceback__ = None
+        self.assertIsNone(main())
+
+    def test_failed_transfer_allows_active_fast_work_to_finish_without_stale_publication(self) -> None:
+        for phase in ("construction", "inference"):
+            with self.subTest(phase=phase):
+                self.clear_models()
+                self.server._sticky_cpu.clear()
+                self.moves.clear()
+                self.inference_hook = lambda model: None
+                self.build_hook = lambda model: None
+                self.assertTrue(self.request(tier="base")["ok"])
+                main = self.refs[-1]
+                entered, release = threading.Event(), threading.Event()
+                outcomes, errors = [], []
+                failure = ValueError("synthetic transfer failure beside active fast work")
+
+                def wait_for_release() -> None:
+                    entered.set()
+                    self.assertTrue(release.wait(2), "Synthetic fast work was not released")
+
+                def on_build(model: Model) -> None:
+                    if model.device == "cpu" and phase == "construction":
+                        wait_for_release()
+
+                def on_inference(model: Model) -> None:
+                    if model.device == "cpu" and phase == "inference":
+                        wait_for_release()
+                    elif model.device == "mps":
+                        self.fail_mps(model)
+
+                def run_fast() -> None:
+                    try:
+                        outcomes.append(self.request(count=1, tier="base"))
+                    except BaseException as error:
+                        errors.append(error)
+
+                def fail_transfer(model: Model, device: str) -> None:
+                    self.moves.append(device)
+                    raise failure
+
+                self.build_hook = on_build
+                self.inference_hook = on_inference
+                worker = threading.Thread(target=run_fast, daemon=True)
+                try:
+                    with self.server._inference_lock:
+                        worker.start()
+                        self.assertTrue(entered.wait(1), "Fast owner never entered its native stage")
+                    clone = self.refs[-1]
+                    with patch.object(Model, "to", fail_transfer):
+                        self.assert_failed_transfer(failure, 3)
+                    self.assertIsNone(self.server._embed_state)
+                    self.assertTrue(self.server._fast_lock.locked())
+                    self.assertTrue(worker.is_alive())
+                    failure.__traceback__ = None
+                    self.assertIsNone(main())
+                    self.assertIsNotNone(clone())
+                finally:
+                    release.set()
+                    if worker.ident is not None:
+                        worker.join(2)
+                    self.assertFalse(worker.is_alive(), "Fast owner remained blocked")
+                self.assertEqual(errors, [])
+                self.assertEqual(len(outcomes), 1)
+                self.assertTrue(outcomes[0]["ok"])
+                self.assertEqual(outcomes[0]["vectors"].data, [0.0, 0.5])
+                self.assertIsNone(self.server._fast_encoder)
+                self.assertIsNone(self.server._fast_model_id)
+                self.assertIsNone(self.server._fast_generation)
+                self.assertIsNone(clone())
 
 
 if __name__ == "__main__":
