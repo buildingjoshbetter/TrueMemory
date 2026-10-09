@@ -1022,11 +1022,17 @@ def _foreground_model_fence(identity: tuple[int, str, int], *, blocking: bool = 
 
 def _validate_foreground_vector_target(
     conn: sqlite3.Connection, identity: tuple[int, str, int], message_id: int,
+    *, selection=None,
 ) -> tuple[str, str]:
     """Validate while the caller owns both the database writer and model fence."""
     from truememory.rebuild_source import RebuildSourceChanged, load_manifest, manifest_key
 
     tables = (_active_vec_table(conn), _active_sep_table(conn))
+    from truememory.tier_switch.writer import WriterSelectionChanged, require_writer_selection
+    try:
+        require_writer_selection(conn, selection, model_id=identity[1], dimension=identity[2], tables=tables)
+    except WriterSelectionChanged as exc:
+        raise VectorPublicationChanged(str(exc)) from exc
     for table in tables:
         manifest = load_manifest(conn, manifest_key((table,)))
         if manifest is not None and (manifest.model != identity[1] or manifest.dimension != identity[2]):
@@ -1054,11 +1060,16 @@ def _validate_foreground_vector_target(
 @contextmanager
 def _foreground_vector_publication(
     conn: sqlite3.Connection, identity: tuple[int, str, int], message_id: int,
+    *, selection=None,
 ) -> Iterator[tuple[str, str]]:
-    from truememory.rebuild_source import rebuild_transaction
+    from truememory.tier_switch.writer import WriterSelectionChanged, writer_transaction
 
-    with _foreground_model_fence(identity, blocking=not conn.in_transaction), rebuild_transaction(conn, write=True):
-        yield _validate_foreground_vector_target(conn, identity, message_id)
+    with _foreground_model_fence(identity, blocking=not conn.in_transaction):
+        try:
+            with writer_transaction(conn, selection, model_id=identity[1], dimension=identity[2]):
+                yield _validate_foreground_vector_target(conn, identity, message_id, selection=selection)
+        except WriterSelectionChanged as exc:
+            raise VectorPublicationChanged(str(exc)) from exc
 
 
 def _build_streamed_vectors(
@@ -1066,6 +1077,7 @@ def _build_streamed_vectors(
     txn_batch: int | None, separation: bool,
 ) -> int:
     from truememory.maintenance import connection_database_path, maintenance_owner
+    from truememory.tier_switch.writer import capture_writer_selection, require_writer_selection
     from truememory.rebuild_source import (
         RebuildManifest, RebuildSourceChanged, capture_source, input_fingerprint,
         ensure_rebuild_tracking, load_manifest, manifest_key, rebuild_transaction, save_manifest,
@@ -1073,7 +1085,11 @@ def _build_streamed_vectors(
 
     if messages is not None and not messages:
         return 0
+    write_selection = capture_writer_selection(conn)
     table = table_name or (_active_sep_table(conn) if separation else _active_vec_table(conn))
+    publication_tables = None if write_selection.selection is None else (
+        (write_selection.selection.tables[0], table) if separation else (table, write_selection.selection.tables[1])
+    )
     quoted_table = '"' + table.replace('"', '""') + '"'
     key = manifest_key((table,))
     digest = input_fingerprint(messages, separation=separation) if messages is not None else None
@@ -1086,6 +1102,7 @@ def _build_streamed_vectors(
         if source_empty:
             identity = (_model_generation, EMBEDDING_MODEL, _embedding_dim)
             with rebuild_transaction(conn, write=True, publication_fence=_rebuild_model_fence(identity)):
+                require_writer_selection(conn, write_selection, model_id=identity[1], dimension=identity[2], tables=publication_tables)
                 empty_source = capture_source(conn)
                 if empty_source.total == 0:
                     # An empty range needs no native model allocation. Recheck
@@ -1100,6 +1117,7 @@ def _build_streamed_vectors(
                     return 0
         model, identity = _capture_rebuild_model(conn)
         with rebuild_transaction(conn, write=True, publication_fence=_rebuild_model_fence(identity)):
+            require_writer_selection(conn, write_selection, model_id=identity[1], dimension=identity[2], tables=publication_tables)
             manifest = load_manifest(conn, key)
             resumable = (manifest is not None and not manifest.complete
                          and manifest.model == identity[1] and manifest.dimension == identity[2]
@@ -1162,6 +1180,7 @@ def _build_streamed_vectors(
                     del embeddings, batch, texts, ids
                     _flush_mps_cache()
                 with rebuild_transaction(conn, write=True, publication_fence=_rebuild_model_fence(identity)):
+                    require_writer_selection(conn, write_selection, model_id=identity[1], dimension=identity[2], tables=publication_tables)
                     manifest.check(conn, key)
                     if rows_to_insert:
                         conn.executemany(f"INSERT INTO {quoted_table}(rowid, embedding) VALUES (?, ?)", rows_to_insert)
@@ -1171,6 +1190,7 @@ def _build_streamed_vectors(
                 del rows_to_insert
 
         with rebuild_transaction(conn, write=True, publication_fence=_rebuild_model_fence(identity)):
+            require_writer_selection(conn, write_selection, model_id=identity[1], dimension=identity[2], tables=publication_tables)
             manifest.check(conn, key)
             save_manifest(conn, key, replace(manifest, complete=True))
             _clear_build_in_progress(conn, table)
@@ -1433,6 +1453,8 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
         message_id: The ``messages.id`` of the row being embedded.
         content:    The text to embed.
     """
+    from truememory.tier_switch.writer import capture_writer_selection
+    write_selection = capture_writer_selection(conn)
     model, identity = _capture_rebuild_model(conn)
     embedding = _encode_with_mps_fallback(model, [content])[0]
     normed = _normalize_for_cosine(embedding)
@@ -1453,7 +1475,7 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
                 separation = serialize_f32(sep_normed)
     except Exception:
         logger.warning("Failed to prepare separation vector during incremental publication", exc_info=True)
-    with _foreground_vector_publication(conn, identity, message_id) as (vec_tbl, sep_tbl):
+    with _foreground_vector_publication(conn, identity, message_id, selection=write_selection) as (vec_tbl, sep_tbl):
         conn.execute(f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)", (message_id, completion))
         if separation is not None:
             try:

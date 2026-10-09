@@ -2130,3 +2130,62 @@ vectors, stub file observations, and explicit vec0 schema doubles. The opt-in
 Runtime reconciliation, operation leases, base/pro config-only publication, and
 manager/MCP/CLI adoption remain separate work. This API has no claimed public
 memory reduction and does not prove the original 26.24 GB Mac incident fixed.
+
+### Selected-generation fences for source and vector writers
+
+`capture_writer_selection(conn)` captures an immutable selected descriptor before
+native preparation or source mutation. Its `WriterCapture` binds the exact
+accepted connection object; it is not a file-descriptor or reopened-file identity
+proof. If the runtime bridge is already loaded, its current operation supplies
+the descriptor, including an explicitly admitted legacy `None`. The writer
+helper does not import or reconcile runtime state. Unbound callers use a short
+read snapshot, or borrow an existing transaction without ending or upgrading it.
+
+`writer_transaction` acquires BEGIN IMMEDIATE for owned work. Borrowed work uses
+a unique outer savepoint and a compatibility inner savepoint, then a zero-row
+`UPDATE messages SET id = id WHERE 0` to acquire SQLite's writer before checking
+the selection. This changes no source row or metadata. A stale snapshot that
+cannot upgrade fails for retry; the helper never commits or rolls back the
+caller's outer transaction. `require_writer_selection` itself is read-only and
+requires a proven writer acquisition: sqlite3's `in_transaction` alone cannot
+distinguish a deferred reader from a writer.
+
+The comparison rejects a first selection appearing after legacy admission and
+any changed generation or frozen descriptor. Config acknowledgement alone may
+change. Selected publication also verifies exact registry model, dimension, pair,
+and embedder metadata; model-backed paths check their prepared model/dimension
+and target tables. No publication rereads a newer generation to legitimize old
+vectors. Registry and metadata comparisons use boolean SQL, without copying
+unbounded stored values into Python.
+
+Engine `add`, `update`, `delete`, and `delete_all` fence before their source
+mutations, including failed native precomputation. Direct `embed_single` carries
+one capture through vector publication. Selected per-user `delete_all` uses the
+captured custom pair. Storage `update_message` and `delete_message` add
+`commit=False` for caller-owned transactions; their default commit behavior is
+unchanged. An owned Engine update still commits its source before vector
+publication, preserving the existing committed-source retry message if vectors
+cannot publish. Borrowed updates remain pending with the caller's work.
+
+`_build_streamed_vectors` captures once and checks inside all four existing writer
+sites: empty clear, initial clear, each prefix, and final completion. It preserves
+source receipts, progress, native batch policy, and the model-generation fence.
+Those bulk sites still use the existing `rebuild_source.rebuild_transaction`;
+its older commit/rollback uncertainty behavior is unchanged by this patch.
+
+The new foreground writer helper attempts owned rollback only while a
+transaction remains active, and never retries failed cleanup. Borrowed cleanup
+targets only its unique savepoint, so an inner RELEASE that succeeded before
+raising cannot roll back a same-named caller savepoint. A final unique-savepoint
+RELEASE error is ambiguous and propagates without another cleanup attempt.
+Post-commit errors propagate without claiming completion or writing status.
+
+Safe tests exercise actual in-memory SQLite transactions, shared-memory writer
+contention, journal parsing, and source/vector method bodies with synthetic
+records and model/table doubles. They do not establish native vec0 behavior,
+file identity, WAL/file-backed concurrency, or complete runtime adoption.
+Raw source-only storage APIs retain their existing defaults. Model-backed
+ingest, initialization, compatibility/migration, and maintenance entrypoints
+still require the integrated serving boundary or explicit refusal before public
+activation. Arbitrary raw SQL is not fenced. This checkpoint adds no activation
+call, changes no model or retrieval policy, and makes no measured memory claim.

@@ -712,6 +712,9 @@ class TrueMemoryEngine:
 
         self._ensure_connection()
 
+        from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
+        write_selection = capture_writer_selection(self.conn)
+
         pre_embedding = None
         pre_sep_embedding = None
         if self._has_vectors:
@@ -739,14 +742,17 @@ class TrueMemoryEngine:
                 logger.debug("Failed to pre-compute style vector during add()", exc_info=True)
 
         from contextlib import nullcontext
-        from truememory.rebuild_source import rebuild_transaction
         if pre_embedding is not None:
             from truememory.vector_search import _foreground_model_fence
 
         with self._write_lock, (
             _foreground_model_fence(pre_identity, blocking=not self.conn.in_transaction)
             if pre_embedding is not None else nullcontext()
-        ), rebuild_transaction(self.conn, write=True):
+        ), writer_transaction(
+            self.conn, write_selection,
+            model_id=pre_identity[1] if pre_embedding is not None else None,
+            dimension=pre_identity[2] if pre_embedding is not None else None,
+        ):
             if self._has_style_vec:
                 from truememory.maintenance import _capture_style_append, _publish_style_append
                 style_before = _capture_style_append(self.conn)
@@ -769,7 +775,9 @@ class TrueMemoryEngine:
                         serialize_f32,
                         _write_embedder_metadata_no_commit,
                     )
-                    vec_tbl, sep_tbl = _validate_foreground_vector_target(self.conn, pre_identity, new_id)
+                    vec_tbl, sep_tbl = _validate_foreground_vector_target(
+                        self.conn, pre_identity, new_id, selection=write_selection,
+                    )
                     self.conn.execute(
                         f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
                         (new_id, serialize_f32(pre_embedding)),
@@ -887,8 +895,10 @@ class TrueMemoryEngine:
         Returns True if deleted, False if not found.
         """
         self._ensure_connection()
-        with self._write_lock:
-            deleted = delete_message(self.conn, memory_id)
+        from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
+        write_selection = capture_writer_selection(self.conn)
+        with self._write_lock, writer_transaction(self.conn, write_selection):
+            deleted = delete_message(self.conn, memory_id, commit=False)
         if deleted:
             self._maybe_auto_consolidate()
         return deleted
@@ -915,8 +925,10 @@ class TrueMemoryEngine:
             raise ValueError("user_id cannot be an empty string")
 
         self._ensure_connection()
+        from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
+        write_selection = capture_writer_selection(self.conn)
 
-        with self._write_lock:
+        with self._write_lock, writer_transaction(self.conn, write_selection):
             if user_id is not None:
                 # Get message IDs and episode IDs for this user before deleting
                 msg_ids = [
@@ -991,11 +1003,14 @@ class TrueMemoryEngine:
 
                 # Clean vector tables for deleted message IDs
                 if msg_ids:
-                    try:
-                        vec_tbl, sep_tbl = _resolve_vec_tables(self.conn)
-                    except Exception:
-                        logger.warning("_resolve_vec_tables failed in delete_all(user_id=%s); falling back to legacy table names", user_id, exc_info=True)
-                        vec_tbl, sep_tbl = "vec_messages", "vec_messages_sep"
+                    if write_selection.selection is not None:
+                        vec_tbl, sep_tbl = write_selection.selection.tables
+                    else:
+                        try:
+                            vec_tbl, sep_tbl = _resolve_vec_tables(self.conn)
+                        except Exception:
+                            logger.warning("_resolve_vec_tables failed in delete_all(user_id=%s); falling back to legacy table names", user_id, exc_info=True)
+                            vec_tbl, sep_tbl = "vec_messages", "vec_messages_sep"
                     # dict.fromkeys deduplicates in case vec_tbl == sep_tbl (shouldn't happen, but defensive)
                     for vec_table in dict.fromkeys((vec_tbl, sep_tbl)):
                         try:
@@ -1057,7 +1072,6 @@ class TrueMemoryEngine:
             except Exception:
                 logger.warning("Failed to rebuild FTS index during delete_all", exc_info=True)
 
-            self.conn.commit()
         if deleted:
             self._maybe_auto_consolidate()
         return deleted
@@ -1137,6 +1151,8 @@ class TrueMemoryEngine:
             Updated memory dict, or None if not found.
         """
         self._ensure_connection()
+        from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
+        write_selection = capture_writer_selection(self.conn)
 
         pre_embedding = None
         pre_sep_embedding = None
@@ -1170,7 +1186,12 @@ class TrueMemoryEngine:
                 if content is not None:
                     fields["content"] = content
 
-                ok = update_message(self.conn, memory_id, **fields)
+                with writer_transaction(
+                    self.conn, write_selection,
+                    model_id=pre_identity[1] if pre_embedding is not None else None,
+                    dimension=pre_identity[2] if pre_embedding is not None else None,
+                ):
+                    ok = update_message(self.conn, memory_id, commit=False, **fields)
                 source_committed = ok and not self.conn.in_transaction
                 if not ok:
                     return None
@@ -1179,7 +1200,9 @@ class TrueMemoryEngine:
                     from truememory.vector_search import VectorPublicationChanged, _foreground_vector_publication
                     try:
                         from truememory.vector_search import serialize_f32, _write_embedder_metadata_no_commit
-                        with _foreground_vector_publication(self.conn, pre_identity, memory_id) as (vec_tbl, sep_tbl):
+                        with _foreground_vector_publication(
+                            self.conn, pre_identity, memory_id, selection=write_selection,
+                        ) as (vec_tbl, sep_tbl):
                             try:
                                 self.conn.execute(f"DELETE FROM {vec_tbl} WHERE rowid = ?", (memory_id,))
                             except Exception:

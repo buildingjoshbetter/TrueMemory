@@ -34,11 +34,11 @@ def load_modules():
             raise AssertionError("Unexpected application import: " + name)
         return builtins.__import__(name, globals, locals, fromlist, level)
 
-    for name in ("storage", "_platform", "maintenance", "rebuild_source"):
-        module = types.ModuleType("synthetic_stream_" + name)
+    for name in ("storage", "_platform", "maintenance", "rebuild_source", "tier_switch.writer"):
+        module = types.ModuleType("synthetic_stream_" + name.replace(".", "_"))
         sys.modules[module.__name__] = module
         module.__dict__["__builtins__"] = dict(vars(builtins), __import__=safe_import)
-        path = ROOT / "truememory" / (name + ".py")
+        path = ROOT / "truememory" / (name.replace(".", "/") + ".py")
         exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
         modules[name] = module
     vector = types.ModuleType("synthetic_stream_vector")
