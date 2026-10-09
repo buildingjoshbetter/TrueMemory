@@ -1910,3 +1910,50 @@ primitive does not yet reduce production tier-switch source residency or provide
 activation, background reopen ownership, inactive reset or active-force staging.
 Native allocator behavior, latency and the original Mac memory incident remain
 unproven by these synthetic tests.
+
+### Background tier job: immutable database admission
+
+`tier_switch/job.py` adds a frozen `TierJob` containing a generated job ID, the
+explicit prepared embedding target, canonical existing database path, physical
+file identity, tracker kind, source epoch and source-schema signature. It retains
+no messages, connection, model or maintenance ownership token. Nothing calls this
+API from the manager or public tier-switch path yet; this prerequisite does not
+reduce their retained source list or change active configuration or retrieval.
+
+`capture_tier_job(conn, target)` requires a known-current, transaction-clean file
+connection with source tracking already installed. It performs no tracking,
+status, registry or nonce writes. TEMP objects, attached databases, missing files
+and private/shared-memory databases are refused. Source identity reads use one
+short owned read snapshot and end it before returning. Uncertain rollback raises;
+the caller must abort and close that connection rather than publish status on it.
+
+`open_tier_job(job)` acquires the existing cooperative maintenance owner in its
+calling worker thread, then opens an existing database through a quoted SQLite
+file URI with `mode=rw`, never SQLite's create-on-open default. It checks the main
+database pathname, source tracker/epoch/schema and read-only file observations
+around reopening and before yielding a transaction-clean connection. Both the
+owned connection and maintenance owner are released on `BaseException`; owner
+release still runs if closing the connection fails. Guard errors contain fixed
+categories rather than paths or source contents. `check_tier_job(conn, job)`
+repeats admission before a future activation transaction. The descriptor's job ID
+does not by itself attest any durable status row or currently selected job.
+
+Physical identity is `(st_dev, st_ino)` from read-only `os.open`/`os.fstat`
+observations only. Mutable size, modification time and ctime are excluded; path
+stat and descriptor stat ctime are never compared across Windows semantics.
+Nonregular files and unavailable/zero inode identities fail closed. `O_NONBLOCK`
+where available prevents waiting for a FIFO writer before its type is checked;
+`O_BINARY` is used where available. This does not bound filesystem or SQLite I/O
+duration, and unsupported filesystems must not be treated as certified.
+
+The caller must cooperate in keeping the pathname stable and supply a connection
+known to refer to that current file. Python's SQLite API exposes no database file
+descriptor, so these checks cannot prove that association for a stale connection,
+a copied same-epoch database, or an adversarial replace-and-restore race. Future
+public adoption must bind a durable job/status marker through the accepted
+connection and validate it on reopen, or establish a stronger equivalent binding.
+Final writer ownership, current-source freshness, job selection and atomic
+activation remain separate requirements. Ordinary edits within the same epoch
+remain the source adapter's responsibility. Local tests use mocked file handles
+and in-memory SQLite; the synthetic file-backed worker test is opt-in for GPUBox.
+No native-memory reduction or resolution of the original Mac incident is claimed.
