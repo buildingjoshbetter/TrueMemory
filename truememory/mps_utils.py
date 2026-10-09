@@ -12,7 +12,7 @@ import math
 import os
 import threading
 from _thread import LockType
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -33,18 +33,39 @@ _model_owners: dict[int, _ModelOwnership] = {}
 
 
 @contextmanager
-def _own_model(model: object) -> Iterator[None]:
+def _own_model(
+    model: object, *, remaining: Callable[[], float | None] | None = None,
+) -> Iterator[None]:
+    @contextmanager
+    def locked(lock: LockType) -> Iterator[None]:
+        if remaining is None:
+            with lock:
+                yield
+            return
+        budget = remaining()
+        if budget is None:
+            lock.acquire()
+        elif budget <= 0 or not lock.acquire(timeout=min(budget, threading.TIMEOUT_MAX)):
+            raise TimeoutError("Model ownership deadline exceeded")
+        try:
+            remaining()
+            yield
+        finally:
+            lock.release()
+
     key = id(model)
-    with _device_lock:
+    with locked(_device_lock):
         owner = _model_owners.get(key)
         if owner is None:
             owner = _ModelOwnership()
             _model_owners[key] = owner
         owner.users += 1
     try:
-        with owner.lock:
+        with locked(owner.lock):
             yield
     finally:
+        # Cleanup cannot abandon a registered user when its request expires.
+        # The registry lock covers bookkeeping only, never native work.
         with _device_lock:
             owner.users -= 1
             if owner.users == 0:
