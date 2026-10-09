@@ -7,20 +7,63 @@ VectorCacheRegistry for progress tracking.
 """
 
 import logging
+import math
 import sqlite3
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Callable
+from typing import TYPE_CHECKING, Callable, NamedTuple
 
 from truememory.tier_switch.cache import VectorCacheRegistry
 from truememory.tier_switch.throttler import DynamicThrottler
+
+if TYPE_CHECKING:
+    from truememory.embedding_target import EmbeddingTarget
+    from truememory.tier_switch.source import TierSourcePlan
+    from truememory.vector_search import _PreparedEmbeddingLease
 
 log = logging.getLogger(__name__)
 
 _HARD_TIMEOUT = 9000  # 2.5 hours
 
 StatusCallback = Callable[[int, int, dict], None]
+
+
+class SourceBuildResult(NamedTuple):
+    status: str
+    plan: "TierSourcePlan"
+    processed: int
+    captured_range_complete: bool = False
+    current_source_complete: bool = False
+    activated: bool = False
+
+
+class _SourceStopped(Exception):
+    pass
+
+
+def _encode_source_prefix(lease: "_PreparedEmbeddingLease", rows: tuple, count: int,
+                          admit: Callable[[], float]) -> tuple[list[bytes], list[bytes]]:
+    from truememory.vector_search import _build_sep_text, serialize_f32
+
+    # Keep arrays inside this frame so a failed attempt releases its traceback
+    # before the outer loop performs allocator cleanup or revalidates SQL.
+    texts = [row[1] for row in rows[:count]]
+    embeddings = lease.encode(texts, timeout=admit(), batch_size=32)
+    admit()
+    if len(embeddings) != count:
+        raise ValueError("Completion embedding count does not match the rebuild prefix")
+    completion = [serialize_f32(vector) for vector in embeddings]
+    del embeddings, texts
+    sep_texts = [_build_sep_text(row[2], row[3], row[4], row[1]) for row in rows[:count]]
+    embeddings = lease.encode(sep_texts, timeout=admit(), batch_size=32)
+    admit()
+    if len(embeddings) != count:
+        raise ValueError("Separation embedding count does not match the rebuild prefix")
+    separation = [serialize_f32(vector) for vector in embeddings]
+    del embeddings, sep_texts
+    admit()
+    return completion, separation
 
 
 @contextmanager
@@ -63,6 +106,190 @@ class RebuildWorker:
     def cancel(self):
         """Signal the worker to stop after the current batch."""
         self._cancelled = True
+
+    def run_source(
+        self, target: "EmbeddingTarget", plan: "TierSourcePlan", *,
+        page_size: int = 64, timeout: float = _HARD_TIMEOUT,
+    ) -> SourceBuildResult:
+        """Build an initialized inactive pair without activating or clearing it.
+
+        The caller owns maintenance, the clean connection and exclusive pair
+        writer, and has validated target schema and database identity. At most
+        one source page plus encoded prefix buffers is retained. Cancellation is
+        cooperative between calls: it cannot interrupt native/SQLite calls or
+        their internal waits. Deadlines also flow into the prepared lease.
+        """
+        from truememory.embedding_target import EmbeddingTarget
+        from truememory.tier_switch.source import (
+            TierSourcePlan, TierSourceUntrusted, finish_tier_source, plan_tier_source,
+            publish_tier_prefix, read_tier_page,
+        )
+        from truememory.vector_search import prepare_embedding_target
+
+        if not isinstance(target, EmbeddingTarget) or not isinstance(plan, TierSourcePlan):
+            raise TypeError("An explicit frozen target and initialized source plan are required")
+        if (plan.connection is not self.conn or plan.action not in ("resume", "complete")
+                or plan.manifest.model != target.model_id or plan.manifest.dimension != target.dimension
+                or plan.manifest.targets != target.tables or self.target_tier != target.tier
+                or self.target_group != target.tier_group):
+            raise ValueError("Worker, initialized source and prepared target identities must agree")
+        if type(page_size) is not int or page_size < 1:
+            raise ValueError("Source page size must be a positive integer")
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("Source timeout must be finite and positive")
+        if self.conn.in_transaction:
+            raise RuntimeError("RebuildWorker.run_source requires a clean owned connection")
+        expires = time.monotonic() + min(timeout, _HARD_TIMEOUT)
+        initial_consumed = plan.manifest.consumed
+        phase_ceiling = effective_ceiling = None
+        phase_failures = 0
+        captured_complete = current_complete = False
+        publication_uncertain = False
+
+        def admit() -> float:
+            if self.conn.in_transaction:
+                raise RuntimeError("Source worker connection did not return to a clean boundary")
+            if self._cancelled:
+                raise _SourceStopped("cancelled")
+            remaining = expires - time.monotonic()
+            if remaining <= 0:
+                raise _SourceStopped("timeout")
+            return remaining
+
+        def result(status: str) -> SourceBuildResult:
+            if publication_uncertain:
+                raise TierSourceUntrusted("Failed publication requires durable checkpoint revalidation")
+            return SourceBuildResult(status, plan, plan.manifest.consumed - initial_consumed,
+                                     captured_complete, current_complete)
+
+        try:
+            admit()
+            # A stale plan must fail before preparation, even for an empty range.
+            pending = read_tier_page(self.conn, plan, size=page_size)
+            admit()
+            try:
+                import torch
+                no_grad = torch.no_grad()
+            except ImportError:
+                from contextlib import nullcontext
+                no_grad = nullcontext()
+            with no_grad, prepare_embedding_target(target, timeout=admit()) as lease:
+                admit()
+                while pending.rows:
+                    batch_size, metrics = self.throttler.before_batch()
+                    admit()
+                    if type(batch_size) is not int or batch_size < 1:
+                        raise ValueError("Throttle admission must grant a positive integer prefix")
+                    count = min(batch_size, len(pending.rows))
+                    if effective_ceiling is not None:
+                        count = min(count, effective_ceiling)
+                    started = time.monotonic()
+                    oom = False
+                    publishing = False
+                    completion = separation = None
+                    try:
+                        completion, separation = _encode_source_prefix(lease, pending.rows, count, admit)
+                        admit()
+                        publishing = True
+                        plan, pending = publish_tier_prefix(
+                            self.conn, plan, pending, completion=completion, separation=separation,
+                        )
+                    except _SourceStopped:
+                        raise
+                    except Exception as error:
+                        # No DB queries, status updates or retries after uncertain
+                        # rollback. The caller must discard this connection.
+                        if (self.conn.in_transaction or (publishing and
+                                (error.__context__ is not None or error.__cause__ is not None))):
+                            raise
+                        if not self._is_oom_error(error):
+                            raise
+                        publication_uncertain = publishing
+                        oom = True
+                    finally:
+                        completion = separation = None
+
+                    if oom:
+                        if phase_ceiling is None:
+                            phase_ceiling = effective_ceiling = count
+                            phase_failures = 1
+                        else:
+                            effective_ceiling = min(effective_ceiling, count)
+                            if count <= phase_ceiling // 2:
+                                phase_ceiling = count
+                                phase_failures = 1
+                            else:
+                                phase_failures += 1
+                        exhausted = phase_ceiling == 1 and phase_failures == 2
+                        if phase_failures == 2 and not exhausted:
+                            phase_ceiling //= 2
+                            effective_ceiling = min(effective_ceiling, phase_ceiling)
+                            phase_failures = 0
+                        admit()
+                        self.throttler.on_oom()
+                        admit()
+                        DynamicThrottler.flush_gpu_cache()
+                        admit()
+                        if exhausted and not publication_uncertain:
+                            return result("oom_exhausted")
+                        if self.conn.total_changes != plan.changes:
+                            # Rolled-back SQL contributes to total_changes. One
+                            # audit per failed attempt, bounded by OOM credits.
+                            resumed = plan_tier_source(
+                                self.conn, model_id=target.model_id, dimension=target.dimension,
+                                targets=target.tables,
+                            )
+                            admit()
+                            if resumed.action != "resume" or resumed.manifest != plan.manifest:
+                                raise TierSourceUntrusted("Failed publication no longer has the same source checkpoint")
+                            plan = resumed
+                        checked = read_tier_page(self.conn, plan, size=len(pending.rows))
+                        admit()
+                        # The adapter checks exact SQLite types again under the
+                        # writer. Retain the original immutable pending suffix.
+                        from truememory.tier_switch.source import _same_rows
+                        if checked.generation != pending.generation or checked.cursor != pending.cursor or not _same_rows(checked.rows, pending.rows):
+                            raise TierSourceUntrusted("Failed publication no longer has the same pending source rows")
+                        del checked
+                        publication_uncertain = False
+                        if exhausted:
+                            return result("oom_exhausted")
+                        continue
+
+                    # Capture the committed checkpoint before observing a
+                    # cancellation that arrived during SQLite's writer wait.
+                    phase_ceiling = effective_ceiling = None
+                    phase_failures = 0
+                    admit()
+                    self.throttler.after_batch(count, time.monotonic() - started)
+                    admit()
+                    flush = self.throttler.should_flush_cache()
+                    admit()
+                    if flush:
+                        DynamicThrottler.flush_gpu_cache()
+                        admit()
+                    if self.status_callback is not None:
+                        live = dict(metrics, batch_size=count, activated=False)
+                        try:
+                            self.status_callback(plan.manifest.consumed, plan.manifest.total, live)
+                        except Exception:
+                            pass
+                        admit()
+                    if not pending.rows:
+                        pending = read_tier_page(self.conn, plan, size=page_size)
+                        admit()
+                admit()
+                finished = finish_tier_source(self.conn, plan)
+                plan = finished.plan
+                captured_complete = finished.captured_range_complete
+                current_complete = finished.current_source_complete
+                admit()
+                return SourceBuildResult(
+                    "complete", plan, plan.manifest.consumed - initial_consumed,
+                    finished.captured_range_complete, finished.current_source_complete,
+                )
+        except _SourceStopped as stopped:
+            return result(str(stopped))
 
     def run(
         self,
