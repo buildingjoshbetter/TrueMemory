@@ -100,7 +100,7 @@ class TestIssue736RequestDeadlines(unittest.TestCase):
         self.loads: list[str] = []
         self.recoveries: list[str] = []
 
-        def load(tier: str | None) -> FakeModel:
+        def load(tier: str | None, deadline: object = None) -> FakeModel:
             self.loads.append(tier or "fixture")
             return self.model
 
@@ -217,7 +217,7 @@ class TestIssue736RequestDeadlines(unittest.TestCase):
             with self.subTest(op=op, single=single, contended=contended):
                 self.server._lock = FakeLock(self.clock, contended=contended)
 
-                def slow_load(_identity: str | None) -> FakeModel:
+                def slow_load(_identity: str | None, deadline: object = None) -> FakeModel:
                     self.clock.advance(2.0)
                     return self.model
 
@@ -339,7 +339,7 @@ class TestIssue736RequestDeadlines(unittest.TestCase):
         self.model = FakeModel(self.clock, oom=True)
         cpu_model = FakeModel(self.clock)
 
-        def load(_name: str | None) -> FakeModel:
+        def load(_name: str | None, deadline: object = None) -> FakeModel:
             if self.recoveries:
                 self.clock.advance(2.0)
                 return cpu_model
@@ -361,7 +361,7 @@ class TestIssue736RequestDeadlines(unittest.TestCase):
         self.assertIsNone(self.server._reranker_name)
 
     def test_wall_clock_rollback_cannot_extend_accepted_budget(self) -> None:
-        def slow_load(_tier: str) -> FakeModel:
+        def slow_load(_tier: str, deadline: object = None) -> FakeModel:
             self.clock.tick += 2.0
             self.clock.wall -= 100.0
             return self.model
@@ -371,7 +371,7 @@ class TestIssue736RequestDeadlines(unittest.TestCase):
         self.assertEqual(self.model.calls, 0)
 
     def test_wall_clock_jump_cannot_expire_unspent_monotonic_budget(self) -> None:
-        def load(_tier: str) -> FakeModel:
+        def load(_tier: str, deadline: object = None) -> FakeModel:
             self.clock.wall += 100.0
             return self.model
 
@@ -404,7 +404,7 @@ class TestIssue736RequestDeadlines(unittest.TestCase):
     def test_fast_model_failure_before_expiry_still_uses_main_fallback(self) -> None:
         self.server._lock = FakeLock(self.clock, contended=True)
 
-        def fail(_tier: str) -> FakeModel:
+        def fail(_tier: str, deadline: object = None) -> FakeModel:
             raise ValueError("synthetic model failure")
 
         self.server._get_fast_encoder = fail
