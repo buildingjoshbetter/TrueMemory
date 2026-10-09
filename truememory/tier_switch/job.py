@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from truememory.embedding_target import EmbeddingTarget
 from truememory.maintenance import MaintenanceUnavailableError, maintenance_owner
@@ -159,3 +160,227 @@ def open_tier_job(job: TierJob) -> Iterator[sqlite3.Connection]:
         except (OSError, ValueError, sqlite3.Error, MaintenanceUnavailableError):
             raise TierJobIdentityError("Background database could not be reopened") from None
         yield conn
+
+
+_SELECTION_TABLE = "truememory_tier_selected_job_v1"
+_SELECTION_SQL = f"""CREATE TABLE {_SELECTION_TABLE} (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    job_id TEXT NOT NULL CHECK (typeof(job_id) = 'text' AND length(job_id) = 32),
+    state TEXT NOT NULL CHECK (state IN ('selected', 'cancelled', 'failed')),
+    tier TEXT NOT NULL CHECK (tier IN ('edge', 'base', 'pro', 'custom')),
+    model_id TEXT NOT NULL CHECK (typeof(model_id) = 'text' AND length(model_id) BETWEEN 1 AND 512 AND length(CAST(model_id AS BLOB)) <= 2048),
+    dimension INTEGER NOT NULL CHECK (typeof(dimension) = 'integer' AND dimension BETWEEN 1 AND 4096),
+    tier_group TEXT NOT NULL CHECK (tier_group IN ('edge', 'basepro', 'custom')),
+    tracker TEXT NOT NULL CHECK (tracker IN ('canonical-v1', 'rebuild-bridge-v1', 'rebuild-bridge-conservative-v1')),
+    source_epoch TEXT NOT NULL CHECK (typeof(source_epoch) = 'text' AND length(source_epoch) BETWEEN 1 AND 128 AND length(CAST(source_epoch AS BLOB)) <= 512),
+    source_schema_signature TEXT NOT NULL CHECK (typeof(source_schema_signature) = 'text' AND length(source_schema_signature) = 64)
+)"""
+_SELECTION_FIELDS = ("job_id", "tier", "model_id", "dimension", "tier_group", "tracker",
+                     "source_epoch", "source_schema_signature")
+_SELECTION_BOUNDS = (32, 6, 512, None, 7, 30, 128, 64)
+
+
+class TierJobSelectionError(TierJobIdentityError):
+    """The durable selected job is unavailable or does not match this request."""
+
+
+def _selection_values(job: TierJob) -> tuple[str | int, ...]:
+    values = (job.job_id, job.target.tier, job.target.model_id, job.target.dimension,
+              job.target.tier_group, job.tracker, job.source_epoch, job.source_schema_signature)
+    for value, bound in zip(values, _SELECTION_BOUNDS):
+        if bound is None:
+            if type(value) is not int or not 1 <= value <= 4096:
+                raise TierJobSelectionError("Invalid selected job identity")
+        elif type(value) is not str or not 1 <= len(value) <= bound:
+            raise TierJobSelectionError("Selected job identity exceeds its protocol bounds")
+    return values
+
+
+def _selection_schema(conn: sqlite3.Connection, *, create: bool = False) -> None:
+    row = conn.execute(
+        "SELECT type, sql FROM main.sqlite_master WHERE name = ? COLLATE NOCASE", (_SELECTION_TABLE,),
+    ).fetchone()
+    if row is None and create:
+        conn.execute(_SELECTION_SQL)
+    elif (row is None or row[0] != "table" or type(row[1]) is not str
+          or " ".join(row[1].strip().rstrip(";").split()) != " ".join(_SELECTION_SQL.split())):
+        raise TierJobSelectionError("Selected job storage has an unsupported schema")
+    if conn.execute(
+        "SELECT 1 FROM main.sqlite_master WHERE tbl_name = ? COLLATE NOCASE "
+        "AND type IN ('index', 'trigger') LIMIT 1", (_SELECTION_TABLE,),
+    ).fetchone() is not None:
+        raise TierJobSelectionError("Selected job storage has unsupported side effects")
+
+
+def _selection_row(conn: sqlite3.Connection) -> tuple[str | int, ...] | None:
+    identifiers = [tuple(row) for row in conn.execute(f"SELECT singleton FROM main.{_SELECTION_TABLE} LIMIT 2")]
+    if not identifiers:
+        return None
+    if identifiers != [(1,)]:
+        raise TierJobSelectionError("Selected job storage contains an invalid singleton")
+    # Read only sizes/types before copying bounded marker values into Python.
+    probes = ", ".join(f"typeof({name}), length(CAST({name} AS BLOB))" for name in (*_SELECTION_FIELDS, "state"))
+    metadata = conn.execute(f"SELECT {probes} FROM main.{_SELECTION_TABLE} WHERE singleton = 1").fetchone()
+    if metadata is None:
+        raise TierJobSelectionError("Selected job storage changed during validation")
+    for index, bound in enumerate((*_SELECTION_BOUNDS, 9)):
+        kind, length = metadata[index * 2:index * 2 + 2]
+        if ((bound is None and kind != "integer")
+                or (bound is not None and (kind != "text" or type(length) is not int or not 1 <= length <= 4 * bound))):
+            raise TierJobSelectionError("Selected job storage contains invalid values")
+    fields = ", ".join((*_SELECTION_FIELDS, "state"))
+    row = tuple(conn.execute(f"SELECT {fields} FROM main.{_SELECTION_TABLE} WHERE singleton = 1").fetchone())
+    if any(bound is not None and (type(value) is not str or not 1 <= len(value) <= bound)
+           for value, bound in zip(row, (*_SELECTION_BOUNDS, 9))):
+        raise TierJobSelectionError("Selected job storage contains oversized values")
+    if (re.fullmatch(r"[0-9a-f]{32}", row[0]) is None
+            or re.fullmatch(r"[0-9a-f]{64}", row[7]) is None
+            or row[5] not in {"canonical-v1", "rebuild-bridge-v1", "rebuild-bridge-conservative-v1"}
+            or row[8] not in {"selected", "cancelled", "failed"}):
+        raise TierJobSelectionError("Selected job storage contains an invalid identity")
+    EmbeddingTarget(row[1], row[2], row[3], row[4])
+    return row
+
+
+def _rollback_selection(conn: sqlite3.Connection) -> None:
+    try:
+        conn.rollback()
+    except (OSError, sqlite3.Error):
+        raise TierJobSelectionError("Selected job transaction rollback is uncertain") from None
+    if conn.in_transaction:
+        raise TierJobSelectionError("Selected job transaction rollback is uncertain")
+
+
+@contextmanager
+def _selection_transaction(conn: sqlite3.Connection, *, write: bool) -> Iterator[None]:
+    if conn.in_transaction:
+        raise TierJobSelectionError("Selected job admission requires a clean connection")
+    conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+    try:
+        yield
+        if write:
+            conn.commit()
+            if conn.in_transaction:
+                raise TierJobSelectionError("Selected job transaction did not commit")
+    except BaseException:
+        if conn.in_transaction:
+            _rollback_selection(conn)
+        raise
+    else:
+        if not write:
+            _rollback_selection(conn)
+
+
+def _selection_source(conn: sqlite3.Connection, job: TierJob) -> None:
+    databases = tuple(conn.execute("PRAGMA database_list"))
+    mains = [row[2] for row in databases if row[1] == "main"]
+    if (len(mains) != 1 or not mains[0]
+            or any(row[1] not in {"main", "temp"} for row in databases)
+            or Path(mains[0]).expanduser().resolve(strict=True) != job.database_path):
+        raise TierJobSelectionError("Selected job database path changed")
+    if conn.execute("SELECT 1 FROM sqlite_temp_master LIMIT 1").fetchone() is not None:
+        raise TierJobSelectionError("Temporary database objects make selected job identity ambiguous")
+    tracker, revision, signature = read_rebuild_revision(conn)
+    if (tracker, revision.epoch, signature) != (job.tracker, job.source_epoch, job.source_schema_signature):
+        raise TierJobSelectionError("Selected job source identity changed")
+    with _observe_file(job.database_path) as identity:
+        if identity != job.file_identity:
+            raise TierJobSelectionError("Selected job database file changed")
+
+
+def select_tier_job(
+    conn: sqlite3.Connection, target: EmbeddingTarget, *, previous_job_id: str | None = None,
+) -> TierJob:
+    """Commit a new selection before planning, without replacing a live job.
+
+    A terminal marker can be replaced only by explicitly naming its previous ID.
+    The new ID is written through the accepted connection, not a pathname reopen.
+    """
+    if previous_job_id is not None and (type(previous_job_id) is not str
+            or re.fullmatch(r"[0-9a-f]{32}", previous_job_id) is None):
+        raise TierJobSelectionError("Invalid previous selected job identity")
+    job = capture_tier_job(conn, target)
+    values = _selection_values(job)
+    try:
+        with _selection_transaction(conn, write=True):
+            _selection_source(conn, job)
+            _selection_schema(conn, create=True)
+            previous = _selection_row(conn)
+            if previous is None:
+                if previous_job_id is not None:
+                    raise TierJobSelectionError("Previous selected job is no longer present")
+                fields = ", ".join(_SELECTION_FIELDS)
+                conn.execute(
+                    f"INSERT INTO main.{_SELECTION_TABLE}(singleton, {fields}, state) "
+                    "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 'selected')", values,
+                )
+            else:
+                if previous[0] != previous_job_id or previous[8] == "selected":
+                    raise TierJobSelectionError("Another job already owns the selection")
+                assignments = ", ".join(f"{name} = ?" for name in _SELECTION_FIELDS)
+                changed = conn.execute(
+                    f"UPDATE main.{_SELECTION_TABLE} SET {assignments}, state = 'selected' "
+                    "WHERE singleton = 1 AND job_id = ? AND state IN ('cancelled', 'failed')",
+                    (*values, previous_job_id),
+                ).rowcount
+                if changed != 1:
+                    raise TierJobSelectionError("Selected job changed during replacement")
+            _selection_source(conn, job)
+        return job
+    except (OSError, ValueError, sqlite3.Error, MaintenanceUnavailableError):
+        raise TierJobSelectionError("Background job could not be selected") from None
+
+
+def check_selected_tier_job(conn: sqlite3.Connection, job: TierJob) -> None:
+    """Read a coherent source/marker snapshot; return with no transaction open."""
+    values = _selection_values(job)
+    try:
+        check_tier_job(conn, job)
+        with _selection_transaction(conn, write=False):
+            _selection_source(conn, job)
+            _selection_schema(conn)
+            if _selection_row(conn) != (*values, "selected"):
+                raise TierJobSelectionError("Background job is no longer selected")
+            _selection_source(conn, job)
+    except (OSError, ValueError, sqlite3.Error, MaintenanceUnavailableError):
+        raise TierJobSelectionError("Selected background job could not be validated") from None
+
+
+@contextmanager
+def open_selected_tier_job(job: TierJob) -> Iterator[sqlite3.Connection]:
+    """Reopen under worker ownership and validate the committed selection."""
+    with open_tier_job(job) as conn:
+        check_selected_tier_job(conn, job)
+        yield conn
+
+
+def end_selected_tier_job(
+    conn: sqlite3.Connection, job: TierJob, *, outcome: Literal["cancelled", "failed"],
+) -> bool:
+    """End only this exact selected job; never modify a replacement's marker.
+
+    This is a terminal write after abandoning any source plan, not page progress
+    or successful completion/activation. False means the expected job is absent.
+    """
+    if outcome not in {"cancelled", "failed"}:
+        raise TierJobSelectionError("Unsupported terminal selected job outcome")
+    values = _selection_values(job)
+    try:
+        check_tier_job(conn, job)
+        with _selection_transaction(conn, write=True):
+            _selection_source(conn, job)
+            _selection_schema(conn)
+            row = _selection_row(conn)
+            if row != (*values, "selected"):
+                return False
+            conditions = " AND ".join(f"{name} = ?" for name in _SELECTION_FIELDS)
+            changed = conn.execute(
+                f"UPDATE main.{_SELECTION_TABLE} SET state = ? "
+                f"WHERE singleton = 1 AND {conditions} AND state = 'selected'", (outcome, *values),
+            ).rowcount
+            if changed != 1:
+                raise TierJobSelectionError("Selected job changed during termination")
+            _selection_source(conn, job)
+        return True
+    except (OSError, ValueError, sqlite3.Error, MaintenanceUnavailableError):
+        raise TierJobSelectionError("Selected background job could not be ended") from None
