@@ -75,21 +75,35 @@ class VectorCacheRegistry:
         vector_count: int = 0,
         model_name: str | None = None,
         embedding_dim: int = 256,
+        commit: bool = True,
     ) -> None:
-        """Insert or replace a cache entry."""
+        """Replace and commit by default; commit=False preserves the primary key.
+
+        The additive mode uses UPSERT inside the caller's transaction so that
+        metadata publication cannot cause an incoming foreign-key delete cascade.
+        """
         now = time.time()
         vt = vec_table or f"vec_messages_{group}"
         st = sep_table or f"vec_messages_sep_{group}"
         mn = model_name or model_name_for_group(group)
+        insertion = "INSERT OR REPLACE" if commit else "INSERT"
+        conflict = "" if commit else (
+            " ON CONFLICT(tier_group) DO UPDATE SET "
+            "vec_table=excluded.vec_table, sep_table=excluded.sep_table, "
+            "last_embedded_id=excluded.last_embedded_id, vector_count=excluded.vector_count, "
+            "model_name=excluded.model_name, embedding_dim=excluded.embedding_dim, "
+            "last_updated=excluded.last_updated, created=excluded.created"
+        )
         conn.execute(
-            "INSERT OR REPLACE INTO vector_cache_registry "
+            f"{insertion} INTO vector_cache_registry "
             "(tier_group, vec_table, sep_table, last_embedded_id, "
             "vector_count, model_name, embedding_dim, last_updated, created) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)" + conflict,
             (group, vt, st, last_embedded_id, vector_count, mn, embedding_dim,
              now, now),
         )
-        conn.commit()
+        if commit:
+            conn.commit()
 
     @staticmethod
     def update_progress(

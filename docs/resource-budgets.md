@@ -2007,3 +2007,126 @@ exact pair generation, final writer ownership and activation remain separate.
 Synthetic tests use in-memory databases and mocked file observations only. This
 binding neither removes the public manager's retained source list nor proves the
 original Mac memory incident fixed.
+
+### Serving operation admission prerequisite
+
+`tier_switch/serving.py` adds an unused process-wide reader/exclusive-writer
+boundary. `operation_lease(selection_key)` pins a caller-supplied identity for a
+whole logical operation; `exclusive_activation()` drains readers and reserved
+children before admitting a writer. The key must be an exact tuple of 1 through
+8 exact strings, each 1 through 512 characters. It is opaque metadata, not a
+certified database generation. Concurrent admitted keys must agree. Errors and
+token representations do not include key contents.
+
+Same-thread reads are reentrant. Unrelated readers wait behind queued writers,
+and writers enter in FIFO order. A live reader can call `fork_child()` to reserve
+one parallel task before submitting it. The reservation immediately pins the
+group and can outlive its parent; its single successful `join()` bypasses a
+waiting writer so the parent can wait for its children without deadlocking.
+Joined descendants retain the pin until their own contexts exit. This fairness
+exception does not bound the duration or number of descendants in one operation.
+
+Unused reservations must be closed, including a task that never starts or whose
+join fails before admission. Such a failure leaves the reservation available for
+retry or explicit `close()`; it does not report successful admission. Close is
+idempotent for an authentic unused or retired reservation and rejects a running
+joined child. Retired identities are weakly retained, so completed reservations
+do not accumulate a process-lifetime strong-reference history. Stale, forged,
+foreign-gate and already consumed tokens cannot grant admission.
+
+Read-to-write upgrades fail immediately. Writers may reenter and synchronously
+acquire reads, but those reads cannot export cross-thread child reservations.
+A writer-owned read still pins admission if its outer writer exits first.
+Every context must enter and exit on the same thread; transferring an entered
+generator context across threads is unsupported and fails closed. Ordinary
+same-thread body exceptions, including `BaseException`, release registrations.
+
+Optional timeout and absolute monotonic deadline bounds apply to admission,
+including the bookkeeping mutex. Read reentry, child reservation and child join
+inherit the parent's deadline and cancellation events. Each exclusive entry
+uses its own supplied controls. Cancellation is checked before admission and
+after waits. A supplied `threading.Event` sets a maximum timed-wait/poll interval
+of 0.05 seconds, not a wall-clock return bound. `Condition.wait()` internally
+reacquires the bookkeeping mutex without an interruptible deadline; mutex
+reacquisition, cleanup and thread scheduling can delay return. Cancellation and
+deadline are checked after reacquisition, so expired or cancelled work is still
+refused before admission. There is no background polling thread. Admission bounds
+do not interrupt an admitted body, native inference, SQLite work or cleanup.
+
+The module gate spans all databases within one process. Explicit gate instances
+and inherited tokens reject a changed process ID before acquiring an inherited
+lock; the module default is replaced in a forked child. This is not a
+cross-process mutex or selected-generation writer check. No engine, vector,
+MCP, manager, configuration or activation caller adopts it in this checkpoint.
+The silent equal-dimension encode/table-selection race remains until complete
+nested and parallel operations use this boundary with certified identities.
+Local tests use only stdlib threads, events and controlled clocks. No serving
+latency, native-memory reduction or fix for the original Mac incident is claimed.
+
+### Database-only certified tier selection (#795)
+
+`tier_switch.activation` is an unused database publication API. It does not
+change config, model defaults, rerankers, serving state, or public tier callers.
+The caller must establish coherent old serving state, an inactive target pair,
+cooperative maintenance/stable-path ownership, and a drained local serving
+boundary before final publication. These preconditions are not inferred or
+proved by the journal. There is no legacy bootstrap, active-force/reset, or
+alternate table slot. First selection with `expected_generation=None` certifies
+only the newly completed target; it does not certify the old legacy vectors.
+
+`stage_activation_intent(conn, job, expected_generation=..., reranker_id=...)`
+commits an immutable intent before source planning. An identical current intent
+is idempotent without data writes; a conflicting intent for the same live job
+is refused. A new intent is refused while the current selection still awaits
+config acknowledgement, preserving its reconciliation result until that CAS
+completes. Staged intents must name the current selected generation, or None
+only when no selection exists. A replacement job must first satisfy the selected-job admission
+protocol. The supplied effective reranker identity is frozen, not loaded or
+resolved from environment/config. Embedding tier/model/dimension/group come
+from the exact `EmbeddingTarget`; neither identity is substituted during SQL.
+
+The two versioned metadata records hold bounded descriptors, scalar counters,
+hashes, intent/job/selection generations, source identity, and explicit pair
+names. Each JSON value is limited to 16,384 UTF-8 bytes. Reads test type and
+`length(CAST(value AS BLOB))` before copying the value into Python, including
+NUL-tail cases. Parsers reject duplicate/unknown fields and invalid scalar
+types. Metadata and registry must already have supported ordinary schemas;
+TEMP objects, extra indexes, and side-effect triggers are refused. No schema
+creation occurs during staging, certification, acknowledgement, or readback.
+
+`commit_certified_selection(conn, intent, job, plan)` owns one BEGIN IMMEDIATE.
+It checks the exact current selected job and previous selection generation,
+intent, frozen target, native vec0 cosine schema/dimension, complete source
+manifest, paired receipt, and source revision/current coverage. The final pair
+digest audit reads bounded pages and costs O(N) once at final certification,
+not after each source page. New writer-side source/job helpers do not mutate,
+commit, or roll back. They require caller-owned BEGIN IMMEDIATE; Python sqlite3
+can verify an active transaction but cannot expose whether it is DEFERRED or
+IMMEDIATE, so they cannot independently prove the required writer lock kind.
+
+Successful publication writes exact registry model/dimension/pair/count/cursor,
+embedder metadata, selection, and intent result in the same transaction, then
+returns a config-pending selected record. Metadata and additive registry
+`commit=False` writes use UPSERT without deleting the primary key. The old
+registry default retains REPLACE plus commit. Successful job retirement deletes
+only its exact selected marker inside that same transaction; the journal keeps
+its job identity. Incoming foreign keys to the marker are refused even with
+enforcement disabled, using at most 4,097 bounded table-name observations to
+enforce a 4,096-table limit and 512-byte name bound. Rollback restores the marker;
+successful commit allows normal admission of a new job without a false failed
+or cancelled label.
+
+Commit/rollback/cancellation errors propagate, including exceptions raised after
+a successful commit. No handler claims rollback or completion from an ambiguous
+outcome or writes a follow-up status row. `read_activation_state` is separate
+bounded readback on a known-safe connection, not fresh vector certification or
+permission to reuse an uncertain connection. `acknowledge_config(generation=...)`
+is an idempotent generation CAS after caller-confirmed config mirroring; it
+performs no config write and acknowledges no process's runtime state.
+
+Safe tests use in-memory SQLite, actual source/marker control flow, synthetic
+vectors, stub file observations, and explicit vec0 schema doubles. The opt-in
+`TRUEMEMORY_TEST_NATIVE_VEC=1` smoke uses actual in-memory vec0 tables on GPUBox.
+Runtime reconciliation, operation leases, base/pro config-only publication, and
+manager/MCP/CLI adoption remain separate work. This API has no claimed public
+memory reduction and does not prove the original 26.24 GB Mac incident fixed.
