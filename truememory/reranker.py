@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 log = logging.getLogger(__name__)
@@ -40,6 +42,7 @@ if TYPE_CHECKING:
 
 _model = None
 _model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+_model_certified = False
 _lock = threading.Lock()
 _inference_lock = threading.Lock()  # Protects concurrent model.predict() calls
 
@@ -63,6 +66,7 @@ from truememory.tier_config import TIERS as _TIERS, get_reranker as _cfg_get_rer
 _TIER_RERANKERS = {t: cfg["reranker"] for t, cfg in _TIERS.items()}
 
 _active_tier: str | None = None  # None = not yet resolved; resolved lazily
+_frozen_reranker_id: str | None = None
 
 
 def get_reranker_name_for_tier(tier: str) -> str:
@@ -134,12 +138,15 @@ def set_active_tier(tier: str) -> None:
     resolve to the new tier's reranker. Empty / unknown tier falls back
     to "edge".
     """
-    global _active_tier
-    if not tier:
-        _active_tier = "edge"
-        return
-    t = tier.strip().lower()
-    _active_tier = t if t in ("edge", "base", "pro", "custom") else "edge"
+    global _active_tier, _frozen_reranker_id
+    from truememory.tier_switch.serving import exclusive_activation
+    with exclusive_activation():
+        _frozen_reranker_id = None
+        if not tier:
+            _active_tier = "edge"
+            return
+        t = tier.strip().lower()
+        _active_tier = t if t in ("edge", "base", "pro", "custom") else "edge"
 
 
 def get_current_reranker_name() -> str:
@@ -150,9 +157,33 @@ def get_current_reranker_name() -> str:
     is called.
     """
     global _active_tier
+    import sys
+    runtime = sys.modules.get("truememory.tier_switch.runtime")
+    operation = runtime.current_runtime_operation() if runtime is not None else None
+    if operation is not None:
+        return operation.reranker_id
+    if _frozen_reranker_id is not None:
+        return _frozen_reranker_id
     if _active_tier is None:
         _active_tier = _resolve_tier_from_env_and_config()
     return get_reranker_name_for_tier(_active_tier)
+
+
+def apply_frozen_reranker(
+    tier: str, model_name: str, *, deadline: float | None = None,
+    cancelled: threading.Event | None = None,
+) -> None:
+    """Publish an explicit default only after its existing singleton is ready."""
+    global _active_tier, _frozen_reranker_id
+    from truememory.tier_switch.serving import exclusive_activation
+    with exclusive_activation(deadline=deadline, cancelled=cancelled):
+        # Release before loading a distinct reranker. An acknowledgement belongs
+        # to the runtime bridge and is not published on this partial boundary.
+        if _model_name != model_name:
+            unload_reranker()
+        get_reranker(model_name=model_name, deadline=deadline, cancelled=cancelled, certified=True)
+        _active_tier = tier
+        _frozen_reranker_id = model_name
 
 
 def unload_reranker(
@@ -170,7 +201,8 @@ def unload_reranker(
         ``True`` if the model was actually unloaded, ``False`` if skipped.
     """
     global _model
-    with _lock:
+    from truememory.tier_switch.serving import exclusive_activation
+    with exclusive_activation(), _lock:
         if should_unload is not None and not should_unload():
             return False
         if _model is None:
@@ -179,7 +211,26 @@ def unload_reranker(
         return True
 
 
-def get_reranker(model_name: str | None = None, device: str | None = None):
+@contextmanager
+def _reranker_load_lock(control: object) -> Iterator[None]:
+    from truememory.tier_switch.serving import _check, _wait_seconds
+    acquired = False
+    try:
+        while not acquired:
+            _check(control)
+            seconds = _wait_seconds(control)
+            acquired = _lock.acquire() if seconds is None else _lock.acquire(timeout=seconds)
+        _check(control)
+        yield
+    finally:
+        if acquired:
+            _lock.release()
+
+
+def get_reranker(
+    model_name: str | None = None, device: str | None = None, *,
+    deadline: float | None = None, cancelled: threading.Event | None = None, certified: bool = False,
+):
     """
     Lazy-load the cross-encoder reranker (singleton).
 
@@ -199,37 +250,62 @@ def get_reranker(model_name: str | None = None, device: str | None = None):
     Returns:
         A ``sentence_transformers.CrossEncoder`` instance or RerankerProxy.
     """
-    global _model, _model_name
+    global _model, _model_name, _model_certified
+    from truememory.tier_switch.serving import _control, _check
+    control = _control(None, deadline, cancelled)
+    _check(control)
+    if type(certified) is not bool:
+        raise TypeError("Reranker certification must be boolean")
 
     name = model_name or get_current_reranker_name()
+    from truememory.tier_switch.runtime import current_runtime_operation, TierRuntimeError
+    operation = current_runtime_operation()
+    if operation is not None and name != operation.reranker_id:
+        raise TierRuntimeError("Reranker override must be captured before serving admission")
+    if operation is not None and operation.selection is not None:
+        certified = True
     cached_model, cached_name = _model, _model_name
-    if cached_model is not None and name == cached_name:
+    if cached_model is not None and name == cached_name and (not certified or _model_certified):
         return cached_model
-    with _lock:
-        cached_model, cached_name = _model, _model_name
-        if cached_model is not None and name == cached_name:
-            return cached_model
+    from truememory.tier_switch.runtime import require_model_load_allowed
+    require_model_load_allowed()
+    from contextlib import nullcontext
+    from truememory.tier_switch.serving import exclusive_activation
+    with exclusive_activation(deadline=deadline, cancelled=cancelled) if operation is None else nullcontext():
+        with _reranker_load_lock(control):
+            cached_model, cached_name = _model, _model_name
+            if cached_model is not None and name == cached_name and (not certified or _model_certified):
+                return cached_model
 
-        from truememory.model_client import use_model_server, get_reranker_proxy
-        if use_model_server():
-            proxy = get_reranker_proxy(model_name=name)
-            _model = proxy
+            _model = cached_model = None  # Release a distinct cached slot before construction.
+            from truememory.model_client import use_model_server, get_reranker_proxy
+            if use_model_server():
+                _check(control)
+                if certified:
+                    from truememory.model_client import CertifiedRerankerProxy
+                    proxy = CertifiedRerankerProxy(name)
+                else:
+                    proxy = get_reranker_proxy(model_name=name)
+                _model = proxy
+                _model_name = name
+                _model_certified = certified
+                return proxy
+
+            if device is None:
+                # Issue #577: honor TRUEMEMORY_DEVICE (cpu|mps|cuda|auto) before
+                # auto-detection. An explicit device= parameter wins over the env.
+                from truememory.mps_utils import auto_detect_device, resolve_device
+                device = resolve_device(auto_detect_device())
+
+            from truememory.mps_utils import ensure_mps_memory_budget
+            ensure_mps_memory_budget(device)
+            from sentence_transformers import CrossEncoder
+            _check(control)
+            _model = CrossEncoder(name, device=device)
             _model_name = name
-            return proxy
-
-        if device is None:
-            # Issue #577: honor TRUEMEMORY_DEVICE (cpu|mps|cuda|auto) before
-            # auto-detection. An explicit device= parameter wins over the env.
-            from truememory.mps_utils import auto_detect_device, resolve_device
-            device = resolve_device(auto_detect_device())
-
-        from truememory.mps_utils import ensure_mps_memory_budget
-        ensure_mps_memory_budget(device)
-        from sentence_transformers import CrossEncoder
-        _model = CrossEncoder(name, device=device)
-        _model_name = name
-        result = _model
-        return result
+            _model_certified = True
+            result = _model
+            return result
 
 
 # ---------------------------------------------------------------------------

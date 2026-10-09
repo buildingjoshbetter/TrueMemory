@@ -146,6 +146,11 @@ def resolve_tier() -> str:
     should call this instead so that ``~/.truememory/config.json`` is
     honoured when the env var is absent.
     """
+    import sys
+    runtime = sys.modules.get("truememory.tier_switch.runtime")
+    operation = runtime.current_runtime_operation() if runtime is not None else None
+    if operation is not None:
+        return operation.tier
     env = os.environ.get("TRUEMEMORY_EMBED_MODEL", "").strip().lower()
     if env:
         return env
@@ -168,6 +173,7 @@ _model = None
 _embedding_dim: int = _MODEL_DIMS.get(EMBEDDING_MODEL, 256)
 _lock = threading.Lock()
 _model_generation = 0
+_frozen_embedding_target = None
 
 
 def _active_tier_group() -> str:
@@ -177,6 +183,11 @@ def _active_tier_group() -> str:
 
 def _active_vec_table(conn: sqlite3.Connection) -> str:
     """Return the active vec_messages table name for the current tier."""
+    import sys
+    runtime = sys.modules.get("truememory.tier_switch.runtime")
+    operation = runtime.current_operation(conn) if runtime is not None else None
+    if operation is not None:
+        return operation.tables[0]
     try:
         group = _active_tier_group()
         row = conn.execute(
@@ -192,6 +203,11 @@ def _active_vec_table(conn: sqlite3.Connection) -> str:
 
 def _active_sep_table(conn: sqlite3.Connection) -> str:
     """Return the active vec_messages_sep table name for the current tier."""
+    import sys
+    runtime = sys.modules.get("truememory.tier_switch.runtime")
+    operation = runtime.current_operation(conn) if runtime is not None else None
+    if operation is not None:
+        return operation.tables[1]
     try:
         group = _active_tier_group()
         row = conn.execute(
@@ -210,10 +226,12 @@ def set_embedding_model(name: str) -> None:
 
     Accepts tier names ("base", "pro") or internal model names.
     """
-    global EMBEDDING_MODEL, _model, _embedding_dim, _model_generation
-    with _lock:
+    global EMBEDDING_MODEL, _model, _embedding_dim, _model_generation, _frozen_embedding_target
+    from truememory.tier_switch.serving import exclusive_activation
+    with exclusive_activation(), _lock:
         _model_generation += 1
         _model = None  # Force reload
+        _frozen_embedding_target = None
         EMBEDDING_MODEL = _resolve_model_name(name)
         _embedding_dim = get_embedding_dim(EMBEDDING_MODEL)
 
@@ -230,7 +248,8 @@ def get_embedding_dim(name: str | None = None) -> int:
 def unload_model() -> None:
     """Release the embedding model from memory."""
     global _model, _model_generation
-    with _lock:
+    from truememory.tier_switch.serving import exclusive_activation
+    with exclusive_activation(), _lock:
         _model_generation += 1
         _model = None
 
@@ -245,86 +264,177 @@ def get_model():
     global _model, _embedding_dim
     if _model is not None:
         return _model  # Fast path, no lock needed
-    with _lock:
-        if _model is not None:
-            return _model  # Another thread loaded it
+    from truememory.tier_switch.runtime import require_model_load_allowed
+    require_model_load_allowed()
+    from contextlib import nullcontext
+    from truememory.tier_switch.runtime import current_runtime_operation
+    from truememory.tier_switch.serving import exclusive_activation
+    with exclusive_activation() if current_runtime_operation() is None else nullcontext():
+        with _lock:
+            if _model is not None:
+                return _model  # Another thread loaded it
 
-        from truememory.model_client import use_model_server, get_embedding_proxy
-        if use_model_server():
-            _model = get_embedding_proxy(tier=EMBEDDING_MODEL)
-            return _model
+            if _frozen_embedding_target is not None:
+                _model = _load_frozen_embedding_target(_frozen_embedding_target)
+                _embedding_dim = _frozen_embedding_target.dimension
+                return _model
 
-        from truememory.mps_utils import ensure_mps_memory_budget, resolve_device
+            from truememory.model_client import use_model_server, get_embedding_proxy
+            if use_model_server():
+                _model = get_embedding_proxy(tier=EMBEDDING_MODEL)
+                return _model
 
-        resolved = EMBEDDING_MODEL
-        if resolved == "model2vec":
-            from model2vec import StaticModel
-            _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
-            _embedding_dim = 256
-        elif resolved == "minilm":
-            device = resolve_device(None)
-            ensure_mps_memory_budget(device)
-            from sentence_transformers import SentenceTransformer
-            _model = SentenceTransformer("all-MiniLM-L6-v2", device=device)
-            _embedding_dim = 384
-        elif resolved == "bge-small":
-            device = resolve_device(None)
-            ensure_mps_memory_budget(device)
-            from sentence_transformers import SentenceTransformer
-            _model = SentenceTransformer("BAAI/bge-small-en-v1.5", device=device)
-            _embedding_dim = 384
-        elif resolved == "qwen3_256":
-            device = resolve_device(None)
-            ensure_mps_memory_budget(device)
-            from sentence_transformers import SentenceTransformer
-            import sys as _sys
-            _mkwargs = {}
-            if _sys.platform == "darwin":
-                _mkwargs["attn_implementation"] = "eager"
-            _model = SentenceTransformer(
-                "Qwen/Qwen3-Embedding-0.6B",
-                truncate_dim=256,
-                model_kwargs=_mkwargs or None,
-                device=device,
-            )
-            _embedding_dim = 256
-        elif resolved not in _MODEL_DIMS:
-            # Custom tier: load arbitrary SentenceTransformer model.
-            # Requires TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 (enforced by
-            # tier_config.resolve_custom_tier at config time).
-            if os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "").strip() != "1":
-                logger.warning(
-                    "Custom model %r requested without "
-                    "TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 -- "
-                    "falling back to model2vec.",
-                    resolved,
-                )
+            from truememory.mps_utils import ensure_mps_memory_budget, resolve_device
+
+            resolved = EMBEDDING_MODEL
+            if resolved == "model2vec":
                 from model2vec import StaticModel
-                _model = StaticModel.from_pretrained(
-                    "minishlab/potion-base-8M", force_download=False
-                )
+                _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
                 _embedding_dim = 256
-            else:
-                from truememory.tier_config import resolve_custom_tier
-                cfg = resolve_custom_tier()
-                custom_dim = cfg["embed_dim"]
+            elif resolved == "minilm":
                 device = resolve_device(None)
                 ensure_mps_memory_budget(device)
                 from sentence_transformers import SentenceTransformer
+                _model = SentenceTransformer("all-MiniLM-L6-v2", device=device)
+                _embedding_dim = 384
+            elif resolved == "bge-small":
+                device = resolve_device(None)
+                ensure_mps_memory_budget(device)
+                from sentence_transformers import SentenceTransformer
+                _model = SentenceTransformer("BAAI/bge-small-en-v1.5", device=device)
+                _embedding_dim = 384
+            elif resolved == "qwen3_256":
+                device = resolve_device(None)
+                ensure_mps_memory_budget(device)
+                from sentence_transformers import SentenceTransformer
+                import sys as _sys
+                _mkwargs = {}
+                if _sys.platform == "darwin":
+                    _mkwargs["attn_implementation"] = "eager"
                 _model = SentenceTransformer(
-                    resolved, truncate_dim=custom_dim,
-                    trust_remote_code=False,
+                    "Qwen/Qwen3-Embedding-0.6B",
+                    truncate_dim=256,
+                    model_kwargs=_mkwargs or None,
                     device=device,
                 )
-                _embedding_dim = custom_dim
-        else:
-            from model2vec import StaticModel
-            _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
-            _embedding_dim = 256
+                _embedding_dim = 256
+            elif resolved not in _MODEL_DIMS:
+                # Custom tier: load arbitrary SentenceTransformer model.
+                # Requires TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 (enforced by
+                # tier_config.resolve_custom_tier at config time).
+                if os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "").strip() != "1":
+                    logger.warning(
+                        "Custom model %r requested without "
+                        "TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 -- "
+                        "falling back to model2vec.",
+                        resolved,
+                    )
+                    from model2vec import StaticModel
+                    _model = StaticModel.from_pretrained(
+                        "minishlab/potion-base-8M", force_download=False
+                    )
+                    _embedding_dim = 256
+                else:
+                    from truememory.tier_config import resolve_custom_tier
+                    cfg = resolve_custom_tier()
+                    custom_dim = cfg["embed_dim"]
+                    device = resolve_device(None)
+                    ensure_mps_memory_budget(device)
+                    from sentence_transformers import SentenceTransformer
+                    _model = SentenceTransformer(
+                        resolved, truncate_dim=custom_dim,
+                        trust_remote_code=False,
+                        device=device,
+                    )
+                    _embedding_dim = custom_dim
+            else:
+                from model2vec import StaticModel
+                _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
+                _embedding_dim = 256
     return _model
 
 
 _prepared_target_slot = threading.Lock()
+
+
+def _load_frozen_embedding_target(target: EmbeddingTarget, *, timeout: float | None = None) -> object:
+    from truememory.embedding_target import TARGET_PROBE_TEXT, build_target_model, check_target_vectors
+    from truememory.model_client import EmbeddingProxy, PreparedEmbeddingProxy, use_model_server
+    from truememory.mps_utils import _own_model, resolve_device
+
+    expires = _target_deadline(timeout)
+    target.check_configuration()
+    if use_model_server():
+        if target.tier != "custom":
+            from truememory.model_client import CertifiedEmbeddingProxy
+            proxy = CertifiedEmbeddingProxy(target)
+            PreparedEmbeddingProxy(target).prepare(timeout=_target_remaining(expires))
+            return proxy
+
+        class FrozenProxy(EmbeddingProxy):
+            def __init__(self) -> None:
+                super().__init__(tier=target.model_id)
+                self._prepared = PreparedEmbeddingProxy(target)
+
+            def encode(self, texts: str | list[str], timeout: float | None = None, **kwargs: object) -> np.ndarray:
+                texts = [texts] if isinstance(texts, str) else list(texts)
+                values = self._prepared.encode(texts, timeout=timeout, batch_size=kwargs.get("batch_size", 32))
+                check_target_vectors(target, values, len(texts))
+                return values
+
+        proxy = FrozenProxy()
+        proxy._prepared.prepare(timeout=_target_remaining(expires))
+        return proxy
+    if not _prepared_target_slot.acquire(blocking=False):
+        raise RuntimeError("Another prepared embedding target lease is active")
+    try:
+        encoder = build_target_model(target, resolve_device(None), check=lambda: _target_remaining(expires))
+        with _own_model(encoder, remaining=lambda: _target_remaining(expires)):
+            _target_remaining(expires)
+            values = encoder.encode([TARGET_PROBE_TEXT], batch_size=1, show_progress_bar=False)
+            _target_remaining(expires)
+            check_target_vectors(target, np.asarray(values, dtype=np.float32), 1)
+        return encoder
+    finally:
+        _prepared_target_slot.release()
+
+
+def apply_frozen_embedding_target(target: EmbeddingTarget, *, timeout: float | None = None) -> None:
+    """Fill the existing active slot from exact prepared-target arguments."""
+    global _model, _embedding_dim, EMBEDDING_MODEL, _model_generation, _frozen_embedding_target
+    from truememory.embedding_target import EmbeddingTarget
+    from truememory.tier_switch.serving import exclusive_activation
+    if type(target) is not EmbeddingTarget:
+        raise TypeError("Expected an immutable EmbeddingTarget")
+    expires = _target_deadline(timeout)
+    target.check_configuration()
+    with exclusive_activation(deadline=expires):
+        with _target_state_lock(expires):
+            if (_frozen_embedding_target is not None and _frozen_embedding_target.identity == target.identity
+                    and _model is not None):
+                _frozen_embedding_target = target
+                return
+            _model = None
+            _model_generation += 1
+            _frozen_embedding_target = target
+            EMBEDDING_MODEL, _embedding_dim = target.model_id, target.dimension
+        encoder = _load_frozen_embedding_target(target, timeout=_target_remaining(expires))
+        with _target_state_lock(expires):
+            _model = encoder
+
+
+@contextmanager
+def _target_state_lock(expires: float | None) -> Iterator[None]:
+    remaining = _target_remaining(expires)
+    if remaining is None:
+        _lock.acquire()
+    elif not _lock.acquire(timeout=min(remaining, threading.TIMEOUT_MAX)):
+        raise TimeoutError("Prepared embedding deadline exceeded")
+    try:
+        _target_remaining(expires)
+        yield
+    finally:
+        _lock.release()
 
 
 class _PreparedEmbeddingLease:
@@ -887,6 +997,15 @@ def init_vec_table(
         conn: An open SQLite connection (from :func:`truememory.storage.create_db`).
         tier_group: Optional explicit tier group name ("edge" or "basepro").
     """
+    import sys
+    runtime = sys.modules.get("truememory.tier_switch.runtime")
+    operation = runtime.current_operation(conn) if runtime is not None else None
+    if operation is not None and operation.selection is not None:
+        from truememory.tier_switch.activation import _guard_pair
+        if tier_group is not None and tier_group != operation.selection.target.tier_group:
+            raise ValueError("Selected initialization requires the captured table group")
+        _guard_pair(conn, operation.selection.target)
+        return
     import sqlite_vec
 
     conn.enable_load_extension(True)
@@ -1022,11 +1141,17 @@ def _foreground_model_fence(identity: tuple[int, str, int], *, blocking: bool = 
 
 def _validate_foreground_vector_target(
     conn: sqlite3.Connection, identity: tuple[int, str, int], message_id: int,
+    *, selection=None,
 ) -> tuple[str, str]:
     """Validate while the caller owns both the database writer and model fence."""
     from truememory.rebuild_source import RebuildSourceChanged, load_manifest, manifest_key
 
     tables = (_active_vec_table(conn), _active_sep_table(conn))
+    from truememory.tier_switch.writer import WriterSelectionChanged, require_writer_selection
+    try:
+        require_writer_selection(conn, selection, model_id=identity[1], dimension=identity[2], tables=tables)
+    except WriterSelectionChanged as exc:
+        raise VectorPublicationChanged(str(exc)) from exc
     for table in tables:
         manifest = load_manifest(conn, manifest_key((table,)))
         if manifest is not None and (manifest.model != identity[1] or manifest.dimension != identity[2]):
@@ -1054,11 +1179,16 @@ def _validate_foreground_vector_target(
 @contextmanager
 def _foreground_vector_publication(
     conn: sqlite3.Connection, identity: tuple[int, str, int], message_id: int,
+    *, selection=None,
 ) -> Iterator[tuple[str, str]]:
-    from truememory.rebuild_source import rebuild_transaction
+    from truememory.tier_switch.writer import WriterSelectionChanged, writer_transaction
 
-    with _foreground_model_fence(identity, blocking=not conn.in_transaction), rebuild_transaction(conn, write=True):
-        yield _validate_foreground_vector_target(conn, identity, message_id)
+    with _foreground_model_fence(identity, blocking=not conn.in_transaction):
+        try:
+            with writer_transaction(conn, selection, model_id=identity[1], dimension=identity[2]):
+                yield _validate_foreground_vector_target(conn, identity, message_id, selection=selection)
+        except WriterSelectionChanged as exc:
+            raise VectorPublicationChanged(str(exc)) from exc
 
 
 def _build_streamed_vectors(
@@ -1066,6 +1196,7 @@ def _build_streamed_vectors(
     txn_batch: int | None, separation: bool,
 ) -> int:
     from truememory.maintenance import connection_database_path, maintenance_owner
+    from truememory.tier_switch.writer import capture_writer_selection, require_writer_selection
     from truememory.rebuild_source import (
         RebuildManifest, RebuildSourceChanged, capture_source, input_fingerprint,
         ensure_rebuild_tracking, load_manifest, manifest_key, rebuild_transaction, save_manifest,
@@ -1073,7 +1204,11 @@ def _build_streamed_vectors(
 
     if messages is not None and not messages:
         return 0
+    write_selection = capture_writer_selection(conn)
     table = table_name or (_active_sep_table(conn) if separation else _active_vec_table(conn))
+    publication_tables = None if write_selection.selection is None else (
+        (write_selection.selection.tables[0], table) if separation else (table, write_selection.selection.tables[1])
+    )
     quoted_table = '"' + table.replace('"', '""') + '"'
     key = manifest_key((table,))
     digest = input_fingerprint(messages, separation=separation) if messages is not None else None
@@ -1086,6 +1221,7 @@ def _build_streamed_vectors(
         if source_empty:
             identity = (_model_generation, EMBEDDING_MODEL, _embedding_dim)
             with rebuild_transaction(conn, write=True, publication_fence=_rebuild_model_fence(identity)):
+                require_writer_selection(conn, write_selection, model_id=identity[1], dimension=identity[2], tables=publication_tables)
                 empty_source = capture_source(conn)
                 if empty_source.total == 0:
                     # An empty range needs no native model allocation. Recheck
@@ -1100,6 +1236,7 @@ def _build_streamed_vectors(
                     return 0
         model, identity = _capture_rebuild_model(conn)
         with rebuild_transaction(conn, write=True, publication_fence=_rebuild_model_fence(identity)):
+            require_writer_selection(conn, write_selection, model_id=identity[1], dimension=identity[2], tables=publication_tables)
             manifest = load_manifest(conn, key)
             resumable = (manifest is not None and not manifest.complete
                          and manifest.model == identity[1] and manifest.dimension == identity[2]
@@ -1162,6 +1299,7 @@ def _build_streamed_vectors(
                     del embeddings, batch, texts, ids
                     _flush_mps_cache()
                 with rebuild_transaction(conn, write=True, publication_fence=_rebuild_model_fence(identity)):
+                    require_writer_selection(conn, write_selection, model_id=identity[1], dimension=identity[2], tables=publication_tables)
                     manifest.check(conn, key)
                     if rows_to_insert:
                         conn.executemany(f"INSERT INTO {quoted_table}(rowid, embedding) VALUES (?, ?)", rows_to_insert)
@@ -1171,6 +1309,7 @@ def _build_streamed_vectors(
                 del rows_to_insert
 
         with rebuild_transaction(conn, write=True, publication_fence=_rebuild_model_fence(identity)):
+            require_writer_selection(conn, write_selection, model_id=identity[1], dimension=identity[2], tables=publication_tables)
             manifest.check(conn, key)
             save_manifest(conn, key, replace(manifest, complete=True))
             _clear_build_in_progress(conn, table)
@@ -1221,6 +1360,10 @@ def build_vectors(
 # Vector search
 # ---------------------------------------------------------------------------
 
+from truememory.tier_switch.runtime import database_operation
+
+
+@database_operation
 def search_vector(
     conn: sqlite3.Connection,
     query: str,
@@ -1313,6 +1456,7 @@ def search_vector(
     return results[:limit]
 
 
+@database_operation
 def search_vector_raw(
     conn: sqlite3.Connection,
     query: str,
@@ -1419,6 +1563,7 @@ def _build_sep_text(sender: str, recipient: str, timestamp: str, content: str) -
     )
 
 
+@database_operation
 def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> None:
     """
     Embed a single message and insert into ``vec_messages`` and ``vec_messages_sep``.
@@ -1433,6 +1578,8 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
         message_id: The ``messages.id`` of the row being embedded.
         content:    The text to embed.
     """
+    from truememory.tier_switch.writer import capture_writer_selection
+    write_selection = capture_writer_selection(conn)
     model, identity = _capture_rebuild_model(conn)
     embedding = _encode_with_mps_fallback(model, [content])[0]
     normed = _normalize_for_cosine(embedding)
@@ -1453,7 +1600,7 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
                 separation = serialize_f32(sep_normed)
     except Exception:
         logger.warning("Failed to prepare separation vector during incremental publication", exc_info=True)
-    with _foreground_vector_publication(conn, identity, message_id) as (vec_tbl, sep_tbl):
+    with _foreground_vector_publication(conn, identity, message_id, selection=write_selection) as (vec_tbl, sep_tbl):
         conn.execute(f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)", (message_id, completion))
         if separation is not None:
             try:
@@ -1463,6 +1610,7 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
         _write_embedder_metadata_no_commit(conn)
 
 
+@database_operation
 def search_vector_separation(
     conn: sqlite3.Connection,
     query: str,

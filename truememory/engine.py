@@ -47,6 +47,8 @@ from truememory.storage import (
 from truememory.fts_search import search_fts
 from truememory._platform import _env_int
 
+from truememory.tier_switch.runtime import engine_operation
+
 logger = logging.getLogger(__name__)
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -338,8 +340,12 @@ class TrueMemoryEngine:
         self.conn: sqlite3.Connection | None = None
         self.ready = False
         self.stats: dict = {}
-        self._write_lock = threading.Lock()
+        from truememory.tier_switch.runtime import ConnectionWriteLock
+        self._write_lock = ConnectionWriteLock(self)
         self._init_lock = threading.Lock()
+        self._runtime_initialized = False
+        self._runtime_vector_generation = None
+        self._runtime_vector_connection = None
 
         # L5 surprise rerank boost coefficient. None = resolve from env
         # var / default at call-time via _get_alpha_surprise().
@@ -372,95 +378,147 @@ class TrueMemoryEngine:
     # Auto-connect (production API)
     # ──────────────────────────────────────────────────────────────────────
 
-    def _ensure_connection(self, *, _suppress_maintenance: bool = False) -> None:
-        """Open (or create) the database and load extensions if needed.
-
-        Called automatically by :meth:`add`, :meth:`search`, and other
-        public methods so users never have to call ``ingest()`` or
-        ``open()`` manually for simple CRUD workflows.
-        """
-        if self.conn is not None:
-            # SRE-01: a cached handle can be poisoned by a transient disk I/O
-            # error (e.g. a stray -wal deletion) or closed out from under us.
-            # Previously the short-circuit returned the dead handle forever, so a
-            # long-lived MCP server failed every add/search/recall until manual
-            # restart. Probe the handle; if the probe fails, drop it and fall
-            # through to reconnect so the server self-heals once the FS recovers.
-            try:
-                self.conn.execute("PRAGMA schema_version")
-                if not _suppress_maintenance:
-                    self._maybe_auto_consolidate()
-                return
-            except sqlite3.Error:
-                logger.warning(
-                    "DB connection probe failed for %s; reconnecting",
-                    self.db_path, exc_info=True,
-                )
-                try:
-                    self.conn.close()
-                except sqlite3.Error:
-                    pass
-                self.conn = None
-                self._has_vectors = False
-
-        with self._init_lock:
+    def _open_connection_handle(self) -> None:
+        """Open a plain handle before serving admission or vector initialization."""
+        from truememory.tier_switch.runtime import _connection_read
+        with _connection_read(self.conn, self._init_lock, None, None,
+                              transaction_owner=self._write_lock, allow_closed=True), \
+                _connection_read(self.conn, self._write_lock, None, None, allow_closed=True):
             if self.conn is not None:
-                if not _suppress_maintenance:
-                    self._maybe_auto_consolidate()
-                return
-
-            # Create parent directory if using a real path
-            db_str = str(self.db_path)
-            if db_str != ":memory:":
-                # M-89: the DB dir holds real memories/PII — owner-only (0700).
+                try:
+                    self.conn.execute("PRAGMA schema_version")
+                    return
+                except (sqlite3.ProgrammingError, sqlite3.OperationalError) as exc:
+                    closed = (isinstance(exc, sqlite3.ProgrammingError)
+                              and str(exc) == "Cannot operate on a closed database.")
+                    code = getattr(exc, "sqlite_errorcode", None)
+                    io_error = (isinstance(exc, sqlite3.OperationalError) and (
+                        str(exc) == "disk I/O error"
+                        or (isinstance(code, int) and code & 0xff == getattr(sqlite3, "SQLITE_IOERR", 10))))
+                    if not closed:
+                        if not io_error or self.conn.in_transaction:
+                            raise
+                        self.conn.close()
+                    self.conn = None
+                    self._has_vectors = False
+                    self.ready = False
+                    self._runtime_initialized = False
+                    self._runtime_vector_generation = None
+                    self._runtime_vector_connection = None
+            if str(self.db_path) != ":memory:":
                 self.db_path.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     self.db_path.parent.chmod(0o700)
                 except OSError:
                     pass
-
             self.conn = create_db(self.db_path)
+            self.ready = False
+            self._runtime_initialized = False
+            self._runtime_vector_generation = None
+            self._runtime_vector_connection = None
 
-            # Load sqlite-vec extension
-            global _vectors_load_error
-            if _HAS_VECTOR:
-                try:
+    def _ensure_connection(self, *, _suppress_maintenance: bool = False) -> None:
+        """Reconcile committed selection before any vector compatibility work."""
+        from truememory.tier_switch.runtime import serving_operation
+        self._open_connection_handle()
+        with serving_operation(self.conn, connection_lock=self._write_lock):
+            self._initialize_connection(_suppress_maintenance=_suppress_maintenance)
+
+    def _initialize_connection(self, *, _suppress_maintenance: bool = False) -> None:
+        from truememory.tier_switch.runtime import current_operation, TierRuntimeError, _connection_read
+        operation = current_operation(self.conn)
+        if operation.selection is not None:
+            if (getattr(self, "_runtime_initialized", False)
+                    and getattr(self, "_runtime_vector_connection", None) is self.conn
+                    and getattr(self, "_runtime_vector_generation", None) == operation.selection.generation):
+                if not _suppress_maintenance:
+                    self._maybe_auto_consolidate()
+                return
+            initialized = False
+            with _connection_read(self.conn, self._init_lock, None, None,
+                                  transaction_owner=self._write_lock), \
+                    _connection_read(self.conn, self._write_lock, None, None):
+                if not (getattr(self, "_runtime_initialized", False)
+                        and getattr(self, "_runtime_vector_connection", None) is self.conn
+                        and getattr(self, "_runtime_vector_generation", None) == operation.selection.generation):
+                    if self.conn.in_transaction:
+                        raise TierRuntimeError("Selected vector initialization requires a clean connection")
+                    if not _HAS_VECTOR:
+                        raise TierRuntimeError("Selected vector dependencies are unavailable")
                     import sqlite_vec
                     self.conn.enable_load_extension(True)
-                    sqlite_vec.load(self.conn)
-                    self.conn.enable_load_extension(False)
-                    # init_vec_table() runs _check_embedder_compatibility(),
-                    # which raises TrueMemoryMigrationError on a dim/model
-                    # mismatch. That must NOT be swallowed as a generic
-                    # FTS-only fallback (M-12/M-46): a silent drop to FTS hides
-                    # the degradation from truememory_stats.health and lets
-                    # add() silently fail vec INSERTs. Surface the migration
-                    # guidance so the user can re-embed instead.
-                    init_vec_table(self.conn)
                     try:
-                        from truememory.vector_search import migrate_legacy_vec_tables
-                        migrate_legacy_vec_tables(self.conn)
-                    except Exception:
-                        logger.debug("Legacy vec table migration skipped", exc_info=True)
+                        sqlite_vec.load(self.conn)
+                    finally:
+                        self.conn.enable_load_extension(False)
+                    init_vec_table(self.conn)
                     self._has_vectors = True
-                except TrueMemoryMigrationError as exc:
-                    # M-12/M-46: record the degradation in module state so
-                    # health surfaces it, then propagate the actionable
-                    # migration guidance instead of falling back to FTS-only.
-                    _vectors_load_error = f"{type(exc).__name__}: {exc}"
-                    self._has_vectors = False
-                    raise
-                except Exception as exc:
-                    _vectors_load_error = f"{type(exc).__name__}: {exc}"
-                    logger.warning("Failed to load sqlite-vec — FTS-only mode: %s", exc)
-                    self._has_vectors = False
+                    self._has_hybrid = _HAS_HYBRID
+                    self._purge_legacy_entity_profile_summaries()
+                    self.ready = self._runtime_initialized = True
+                    self._runtime_vector_generation = operation.selection.generation
+                    self._runtime_vector_connection = self.conn
+                    initialized = True
+            if not _suppress_maintenance:
+                if initialized:
+                    self._maybe_startup_consolidate()
+                else:
+                    self._maybe_auto_consolidate()
+            return
+        if getattr(self, "_runtime_initialized", True) or getattr(self, "ready", False):
+            if not _suppress_maintenance:
+                self._maybe_auto_consolidate()
+            return
+        with _connection_read(self.conn, self._init_lock, None, None,
+                              transaction_owner=self._write_lock):
+            if self._runtime_initialized:
+                if not _suppress_maintenance:
+                    self._maybe_auto_consolidate()
+                return
+            with _connection_read(self.conn, self._write_lock, None, None):
+                if self.conn.in_transaction:
+                    raise TierRuntimeError("Vector initialization requires a clean connection")
+                # Load sqlite-vec extension
+                global _vectors_load_error
+                if _HAS_VECTOR:
+                    try:
+                        import sqlite_vec
+                        self.conn.enable_load_extension(True)
+                        sqlite_vec.load(self.conn)
+                        self.conn.enable_load_extension(False)
+                        # init_vec_table() runs _check_embedder_compatibility(),
+                        # which raises TrueMemoryMigrationError on a dim/model
+                        # mismatch. That must NOT be swallowed as a generic
+                        # FTS-only fallback (M-12/M-46): a silent drop to FTS hides
+                        # the degradation from truememory_stats.health and lets
+                        # add() silently fail vec INSERTs. Surface the migration
+                        # guidance so the user can re-embed instead.
+                        init_vec_table(self.conn)
+                        try:
+                            from truememory.vector_search import migrate_legacy_vec_tables
+                            migrate_legacy_vec_tables(self.conn)
+                        except Exception:
+                            logger.debug("Legacy vec table migration skipped", exc_info=True)
+                        self._has_vectors = True
+                    except TrueMemoryMigrationError as exc:
+                        # M-12/M-46: record the degradation in module state so
+                        # health surfaces it, then propagate the actionable
+                        # migration guidance instead of falling back to FTS-only.
+                        _vectors_load_error = f"{type(exc).__name__}: {exc}"
+                        self._has_vectors = False
+                        raise
+                    except Exception as exc:
+                        _vectors_load_error = f"{type(exc).__name__}: {exc}"
+                        logger.warning("Failed to load sqlite-vec — FTS-only mode: %s", exc)
+                        self._has_vectors = False
 
-            self._has_hybrid = _HAS_HYBRID and self._has_vectors
+                self._has_hybrid = _HAS_HYBRID and self._has_vectors
 
             # Qwen3 NaN fix: macOS SDPA kernel produces NaN embeddings.
             # Re-embed once for Base/Pro users on macOS.
             import sys as _sys
-            if _sys.platform == "darwin" and self._has_vectors:
+            if (_sys.platform == "darwin" and self._has_vectors
+                    and current_operation(self.conn).selection is None):
                 try:
                     _embed_model = resolve_tier()
                     if _embed_model in ("base", "pro", "qwen3_256"):
@@ -585,11 +643,12 @@ class TrueMemoryEngine:
             # MEMORIST-L4 migration: purge legacy entity_profile summary rows.
             # M-84: previously this only ran in the deprecated open() path, so
             # production (which uses _ensure_connection) never purged them.
-            self._purge_legacy_entity_profile_summaries()
-
-            self.ready = True
-            if not _suppress_maintenance:
-                self._maybe_startup_consolidate()
+            with _connection_read(self.conn, self._write_lock, None, None):
+                self._purge_legacy_entity_profile_summaries()
+                self.ready = True
+                self._runtime_initialized = True
+        if not _suppress_maintenance:
+            self._maybe_startup_consolidate()
 
     def _purge_legacy_entity_profile_summaries(self) -> None:
         """Delete legacy ``period='entity_profile'`` summary rows once.
@@ -671,6 +730,7 @@ class TrueMemoryEngine:
     # Production CRUD API
     # ──────────────────────────────────────────────────────────────────────
 
+    @engine_operation
     def add(
         self,
         content: str,
@@ -712,6 +772,9 @@ class TrueMemoryEngine:
 
         self._ensure_connection()
 
+        from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
+        write_selection = capture_writer_selection(self.conn)
+
         pre_embedding = None
         pre_sep_embedding = None
         if self._has_vectors:
@@ -739,14 +802,17 @@ class TrueMemoryEngine:
                 logger.debug("Failed to pre-compute style vector during add()", exc_info=True)
 
         from contextlib import nullcontext
-        from truememory.rebuild_source import rebuild_transaction
         if pre_embedding is not None:
             from truememory.vector_search import _foreground_model_fence
 
         with self._write_lock, (
             _foreground_model_fence(pre_identity, blocking=not self.conn.in_transaction)
             if pre_embedding is not None else nullcontext()
-        ), rebuild_transaction(self.conn, write=True):
+        ), writer_transaction(
+            self.conn, write_selection,
+            model_id=pre_identity[1] if pre_embedding is not None else None,
+            dimension=pre_identity[2] if pre_embedding is not None else None,
+        ):
             if self._has_style_vec:
                 from truememory.maintenance import _capture_style_append, _publish_style_append
                 style_before = _capture_style_append(self.conn)
@@ -769,7 +835,9 @@ class TrueMemoryEngine:
                         serialize_f32,
                         _write_embedder_metadata_no_commit,
                     )
-                    vec_tbl, sep_tbl = _validate_foreground_vector_target(self.conn, pre_identity, new_id)
+                    vec_tbl, sep_tbl = _validate_foreground_vector_target(
+                        self.conn, pre_identity, new_id, selection=write_selection,
+                    )
                     self.conn.execute(
                         f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
                         (new_id, serialize_f32(pre_embedding)),
@@ -881,18 +949,22 @@ class TrueMemoryEngine:
         """Compatibility entry point; the coordinator owns the worker handle."""
         self._maybe_auto_consolidate()
 
+    @engine_operation
     def delete(self, memory_id: int) -> bool:
         """Delete a memory by ID.
 
         Returns True if deleted, False if not found.
         """
         self._ensure_connection()
-        with self._write_lock:
-            deleted = delete_message(self.conn, memory_id)
+        from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
+        write_selection = capture_writer_selection(self.conn)
+        with self._write_lock, writer_transaction(self.conn, write_selection):
+            deleted = delete_message(self.conn, memory_id, commit=False)
         if deleted:
             self._maybe_auto_consolidate()
         return deleted
 
+    @engine_operation
     def delete_all(self, user_id: str | None = None) -> bool:
         """Delete all memories, optionally filtered by user.
 
@@ -915,8 +987,10 @@ class TrueMemoryEngine:
             raise ValueError("user_id cannot be an empty string")
 
         self._ensure_connection()
+        from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
+        write_selection = capture_writer_selection(self.conn)
 
-        with self._write_lock:
+        with self._write_lock, writer_transaction(self.conn, write_selection):
             if user_id is not None:
                 # Get message IDs and episode IDs for this user before deleting
                 msg_ids = [
@@ -991,11 +1065,14 @@ class TrueMemoryEngine:
 
                 # Clean vector tables for deleted message IDs
                 if msg_ids:
-                    try:
-                        vec_tbl, sep_tbl = _resolve_vec_tables(self.conn)
-                    except Exception:
-                        logger.warning("_resolve_vec_tables failed in delete_all(user_id=%s); falling back to legacy table names", user_id, exc_info=True)
-                        vec_tbl, sep_tbl = "vec_messages", "vec_messages_sep"
+                    if write_selection.selection is not None:
+                        vec_tbl, sep_tbl = write_selection.selection.tables
+                    else:
+                        try:
+                            vec_tbl, sep_tbl = _resolve_vec_tables(self.conn)
+                        except Exception:
+                            logger.warning("_resolve_vec_tables failed in delete_all(user_id=%s); falling back to legacy table names", user_id, exc_info=True)
+                            vec_tbl, sep_tbl = "vec_messages", "vec_messages_sep"
                     # dict.fromkeys deduplicates in case vec_tbl == sep_tbl (shouldn't happen, but defensive)
                     for vec_table in dict.fromkeys((vec_tbl, sep_tbl)):
                         try:
@@ -1057,7 +1134,6 @@ class TrueMemoryEngine:
             except Exception:
                 logger.warning("Failed to rebuild FTS index during delete_all", exc_info=True)
 
-            self.conn.commit()
         if deleted:
             self._maybe_auto_consolidate()
         return deleted
@@ -1122,6 +1198,7 @@ class TrueMemoryEngine:
             self._apply_manual_maintenance_capabilities(report.results)
         return format_maintenance_report(report)
 
+    @engine_operation
     def update(self, memory_id: int, content: str | None = None, **fields) -> dict | None:
         """Update a memory.
 
@@ -1137,6 +1214,8 @@ class TrueMemoryEngine:
             Updated memory dict, or None if not found.
         """
         self._ensure_connection()
+        from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
+        write_selection = capture_writer_selection(self.conn)
 
         pre_embedding = None
         pre_sep_embedding = None
@@ -1170,7 +1249,12 @@ class TrueMemoryEngine:
                 if content is not None:
                     fields["content"] = content
 
-                ok = update_message(self.conn, memory_id, **fields)
+                with writer_transaction(
+                    self.conn, write_selection,
+                    model_id=pre_identity[1] if pre_embedding is not None else None,
+                    dimension=pre_identity[2] if pre_embedding is not None else None,
+                ):
+                    ok = update_message(self.conn, memory_id, commit=False, **fields)
                 source_committed = ok and not self.conn.in_transaction
                 if not ok:
                     return None
@@ -1179,7 +1263,9 @@ class TrueMemoryEngine:
                     from truememory.vector_search import VectorPublicationChanged, _foreground_vector_publication
                     try:
                         from truememory.vector_search import serialize_f32, _write_embedder_metadata_no_commit
-                        with _foreground_vector_publication(self.conn, pre_identity, memory_id) as (vec_tbl, sep_tbl):
+                        with _foreground_vector_publication(
+                            self.conn, pre_identity, memory_id, selection=write_selection,
+                        ) as (vec_tbl, sep_tbl):
                             try:
                                 self.conn.execute(f"DELETE FROM {vec_tbl} WHERE rowid = ?", (memory_id,))
                             except Exception:
@@ -1275,108 +1361,110 @@ class TrueMemoryEngine:
         self.conn.execute("PRAGMA cache_size=-64000")
         self.conn.execute("PRAGMA mmap_size=268435456")
 
-        # Detect available tables
-        tables = {
-            row[0]
-            for row in self.conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
+        from truememory.tier_switch.runtime import serving_operation
+        with serving_operation(self.conn, connection_lock=self._write_lock):
+            # Detect available tables
+            tables = {
+                row[0]
+                for row in self.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
 
-        # ── MEMORIST-L4 migration: purge legacy entity_profile summary rows ─
-        # Shared with _ensure_connection (M-84): the purge logic lives in one
-        # idempotent helper so both the production path and this deprecated
-        # open() path behave identically.
-        self._purge_legacy_entity_profile_summaries()
+            # ── MEMORIST-L4 migration: purge legacy entity_profile summary rows ─
+            # Shared with _ensure_connection (M-84): the purge logic lives in one
+            # idempotent helper so both the production path and this deprecated
+            # open() path behave identically.
+            self._purge_legacy_entity_profile_summaries()
 
-        # Load sqlite-vec extension if available.
-        # upgrade DEBUG → WARNING and track failure in a
-        # module-level state so ``truememory_stats.health`` can report
-        # "search is FTS-only because sqlite-vec failed to load".
-        global _vectors_load_error
-        if _HAS_VECTOR:
-            try:
-                import sqlite_vec
-                self.conn.enable_load_extension(True)
-                sqlite_vec.load(self.conn)
-                _vectors_load_error = None
-            except Exception as e:
-                _vectors_load_error = f"{type(e).__name__}: {e}"
-                logger.warning(
-                    "sqlite-vec unavailable (%s); falling back to FTS-only "
-                    "search for this process. See "
-                    "https://github.com/buildingjoshbetter/TrueMemory for "
-                    "platform notes.",
-                    _vectors_load_error,
-                )
-
-        # Check for vector tables — rebuild if missing.
-        # if metadata names a different embedder, refuse silent
-        # rebuild; route the user through truememory_configure() instead.
-        self._has_vectors = False
-        if _HAS_VECTOR:
-            from truememory.vector_search import (
-                _active_vec_table,
-                _check_embedder_compatibility,
-                vectors_are_built,
-            )
-            vec_tbl = _active_vec_table(self.conn)
-            # vectors_are_built() returns False for a table left ``in_progress``
-            # by an interrupted build (issue #647) — so a partial/empty table is
-            # rebuilt rather than trusted, not just one that's missing.
-            if vectors_are_built(self.conn, vec_tbl):
-                # M-12: the exists-path previously trusted the table on a bare
-                # SELECT 1 and never checked embedder/dim compatibility. A dim
-                # mismatch then surfaced only as a per-query OperationalError
-                # caught at DEBUG → permanent silent FTS-only with
-                # _vectors_load_error=None (health reports vectors healthy) and
-                # silent vec-INSERT failures in add(). Run the compatibility
-                # check here so a mismatch surfaces as actionable migration
-                # guidance instead.
+            # Load sqlite-vec extension if available.
+            # upgrade DEBUG → WARNING and track failure in a
+            # module-level state so ``truememory_stats.health`` can report
+            # "search is FTS-only because sqlite-vec failed to load".
+            global _vectors_load_error
+            if _HAS_VECTOR:
                 try:
-                    _check_embedder_compatibility(self.conn)
-                    self._has_vectors = True
-                except TrueMemoryMigrationError as exc:
-                    _vectors_load_error = f"{type(exc).__name__}: {exc}"
-                    self._has_vectors = False
-                    raise
-            else:
-                logger.warning(
-                    "Vector table %r missing or unreadable; attempting rebuild "
-                    "with current model=%s",
-                    vec_tbl,
-                    resolve_tier(),
+                    import sqlite_vec
+                    self.conn.enable_load_extension(True)
+                    sqlite_vec.load(self.conn)
+                    _vectors_load_error = None
+                except Exception as e:
+                    _vectors_load_error = f"{type(e).__name__}: {e}"
+                    logger.warning(
+                        "sqlite-vec unavailable (%s); falling back to FTS-only "
+                        "search for this process. See "
+                        "https://github.com/buildingjoshbetter/TrueMemory for "
+                        "platform notes.",
+                        _vectors_load_error,
+                    )
+
+            # Check for vector tables — rebuild if missing.
+            # if metadata names a different embedder, refuse silent
+            # rebuild; route the user through truememory_configure() instead.
+            self._has_vectors = False
+            if _HAS_VECTOR:
+                from truememory.vector_search import (
+                    _active_vec_table,
+                    _check_embedder_compatibility,
+                    vectors_are_built,
                 )
-                if rebuild_vectors:
-                    _check_rebuild_allowed(self.conn)  # raises on model drift
+                vec_tbl = _active_vec_table(self.conn)
+                # vectors_are_built() returns False for a table left ``in_progress``
+                # by an interrupted build (issue #647) — so a partial/empty table is
+                # rebuilt rather than trusted, not just one that's missing.
+                if vectors_are_built(self.conn, vec_tbl):
+                    # M-12: the exists-path previously trusted the table on a bare
+                    # SELECT 1 and never checked embedder/dim compatibility. A dim
+                    # mismatch then surfaced only as a per-query OperationalError
+                    # caught at DEBUG → permanent silent FTS-only with
+                    # _vectors_load_error=None (health reports vectors healthy) and
+                    # silent vec-INSERT failures in add(). Run the compatibility
+                    # check here so a mismatch surfaces as actionable migration
+                    # guidance instead.
                     try:
-                        init_vec_table(self.conn)
-                        n = build_vectors(self.conn)
-                        self._has_vectors = n > 0
-                        logger.info(
-                            "Vector table %r rebuilt with %d vectors (model=%s)",
-                            vec_tbl, n, resolve_tier(),
-                        )
-                    except TrueMemoryMigrationError:
-                        raise
-                    except Exception:
-                        logger.exception("Vector table rebuild failed")
+                        _check_embedder_compatibility(self.conn)
+                        self._has_vectors = True
+                    except TrueMemoryMigrationError as exc:
+                        _vectors_load_error = f"{type(exc).__name__}: {exc}"
                         self._has_vectors = False
+                        raise
+                else:
+                    logger.warning(
+                        "Vector table %r missing or unreadable; attempting rebuild "
+                        "with current model=%s",
+                        vec_tbl,
+                        resolve_tier(),
+                    )
+                    if rebuild_vectors:
+                        _check_rebuild_allowed(self.conn)  # raises on model drift
+                        try:
+                            init_vec_table(self.conn)
+                            n = build_vectors(self.conn)
+                            self._has_vectors = n > 0
+                            logger.info(
+                                "Vector table %r rebuilt with %d vectors (model=%s)",
+                                vec_tbl, n, resolve_tier(),
+                            )
+                        except TrueMemoryMigrationError:
+                            raise
+                        except Exception:
+                            logger.exception("Vector table rebuild failed")
+                            self._has_vectors = False
 
-        self._has_hybrid = _HAS_HYBRID and self._has_vectors
-        self._has_clustering = _HAS_CLUSTERING and "message_clusters" in tables
+            self._has_hybrid = _HAS_HYBRID and self._has_vectors
+            self._has_clustering = _HAS_CLUSTERING and "message_clusters" in tables
 
-        # Count messages for stats
-        try:
-            count = self.conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-            self.stats["message_count"] = count
-        except Exception:
-            logger.debug("Failed to count messages in open()", exc_info=True)
-            self.stats["message_count"] = 0
+            # Count messages for stats
+            try:
+                count = self.conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+                self.stats["message_count"] = count
+            except Exception:
+                logger.debug("Failed to count messages in open()", exc_info=True)
+                self.stats["message_count"] = 0
 
-        self.ready = True
-        self._maybe_auto_consolidate()
-        return self
+            self.ready = True
+            self._maybe_auto_consolidate()
+            return self
 
     # ──────────────────────────────────────────────────────────────────────
     # Ingestion
@@ -1687,6 +1775,7 @@ class TrueMemoryEngine:
     # Search — full 6-layer pipeline
     # ──────────────────────────────────────────────────────────────────────
 
+    @engine_operation
     def search_vectors_raw(self, query: str, limit: int = 5) -> list[dict] | None:
         """Pure vector cosine similarity search, or None if unavailable.
 
@@ -1703,6 +1792,7 @@ class TrueMemoryEngine:
         except Exception:
             return None
 
+    @engine_operation
     def search(self, query: str, limit: int = 10, _skip_surprise_boost: bool = False, _skip_reranker: bool = False, _skip_salience_guard: bool = False, include_directives: bool = False) -> list[dict]:
         """
         Main search pipeline.
@@ -2100,6 +2190,7 @@ class TrueMemoryEngine:
     # Search — agentic multi-round retrieval
     # ──────────────────────────────────────────────────────────────────────
 
+    @engine_operation
     def search_agentic(
         self,
         query: str,
@@ -2490,6 +2581,7 @@ class TrueMemoryEngine:
     # Search — simple FTS5-only (for benchmarking)
     # ──────────────────────────────────────────────────────────────────────
 
+    @engine_operation
     def search_simple(self, query: str, limit: int = 10) -> list[dict]:
         """
         Simple FTS5-only search (no vector, no layers).
@@ -2612,6 +2704,9 @@ class TrueMemoryEngine:
                     logger.debug("Failed to close database connection", exc_info=True)
                 self.conn = None
                 self.ready = False
+            self._runtime_initialized = False
+            self._runtime_vector_generation = None
+            self._runtime_vector_connection = None
 
     def __enter__(self):
         return self

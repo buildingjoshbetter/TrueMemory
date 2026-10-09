@@ -14,7 +14,7 @@ import tempfile
 import threading
 import types
 import unittest
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 
@@ -22,7 +22,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_modules():
-    modules = {}
+    modules = {"tier_switch.runtime": types.SimpleNamespace(
+        serving_operation=lambda *args, **kwargs: nullcontext(types.SimpleNamespace(selection=None)),
+        current_operation=lambda conn: types.SimpleNamespace(selection=None), TierRuntimeError=RuntimeError)}
 
     def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
         if name == "torch":
@@ -34,16 +36,17 @@ def load_modules():
             raise AssertionError("Unexpected application import: " + name)
         return builtins.__import__(name, globals, locals, fromlist, level)
 
-    for name in ("storage", "_platform", "maintenance", "rebuild_source"):
-        module = types.ModuleType("synthetic_stream_" + name)
+    for name in ("storage", "_platform", "maintenance", "rebuild_source", "tier_switch.writer"):
+        module = types.ModuleType("synthetic_stream_" + name.replace(".", "_"))
         sys.modules[module.__name__] = module
         module.__dict__["__builtins__"] = dict(vars(builtins), __import__=safe_import)
-        path = ROOT / "truememory" / (name + ".py")
+        path = ROOT / "truememory" / (name.replace(".", "/") + ".py")
         exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
         modules[name] = module
     vector = types.ModuleType("synthetic_stream_vector")
     vector.__dict__.update(
         __builtins__=dict(vars(builtins), __import__=safe_import),
+        database_operation=lambda function: function,
         contextmanager=contextmanager, closing=closing, Iterator=Iterator, replace=replace, datetime=datetime,
         sqlite3=sqlite3, logger=logging.getLogger(__name__), _lock=threading.Lock(),
         _model_generation=0, EMBEDDING_MODEL="synthetic-model", _embedding_dim=2,
@@ -943,6 +946,7 @@ class TestLegacyRebuildBridge(unittest.TestCase):
         exec(compile(ast.fix_missing_locations(ast.Module(body=[cls], type_ignores=[])), "actual-legacy-open", "exec"), namespace)
         engine = namespace["LegacyEngine"]()
         engine.db_path, engine.stats = path, {}
+        engine._write_lock = threading.Lock()
         engine._has_consolidation = engine._has_style_vec = False
         engine._purge_legacy_entity_profile_summaries = lambda: None
         fake_vec = types.ModuleType("sqlite_vec")

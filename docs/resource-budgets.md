@@ -2130,3 +2130,185 @@ vectors, stub file observations, and explicit vec0 schema doubles. The opt-in
 Runtime reconciliation, operation leases, base/pro config-only publication, and
 manager/MCP/CLI adoption remain separate work. This API has no claimed public
 memory reduction and does not prove the original 26.24 GB Mac incident fixed.
+
+### Selected-generation fences for source and vector writers
+
+`capture_writer_selection(conn)` captures an immutable selected descriptor before
+native preparation or source mutation. Its `WriterCapture` binds the exact
+accepted connection object; it is not a file-descriptor or reopened-file identity
+proof. If the runtime bridge is already loaded, its current operation supplies
+the descriptor, including an explicitly admitted legacy `None`. The writer
+helper does not import or reconcile runtime state. Unbound callers use a short
+read snapshot, or borrow an existing transaction without ending or upgrading it.
+
+`writer_transaction` acquires BEGIN IMMEDIATE for owned work. Borrowed work uses
+a unique outer savepoint and a compatibility inner savepoint, then a zero-row
+`UPDATE messages SET id = id WHERE 0` to acquire SQLite's writer before checking
+the selection. This changes no source row or metadata. A stale snapshot that
+cannot upgrade fails for retry; the helper never commits or rolls back the
+caller's outer transaction. `require_writer_selection` itself is read-only and
+requires a proven writer acquisition: sqlite3's `in_transaction` alone cannot
+distinguish a deferred reader from a writer.
+
+The comparison rejects a first selection appearing after legacy admission and
+any changed generation or frozen descriptor. Config acknowledgement alone may
+change. Selected publication also verifies exact registry model, dimension, pair,
+and embedder metadata; model-backed paths check their prepared model/dimension
+and target tables. No publication rereads a newer generation to legitimize old
+vectors. Registry and metadata comparisons use boolean SQL, without copying
+unbounded stored values into Python.
+
+Engine `add`, `update`, `delete`, and `delete_all` fence before their source
+mutations, including failed native precomputation. Direct `embed_single` carries
+one capture through vector publication. Selected per-user `delete_all` uses the
+captured custom pair. Storage `update_message` and `delete_message` add
+`commit=False` for caller-owned transactions; their default commit behavior is
+unchanged. An owned Engine update still commits its source before vector
+publication, preserving the existing committed-source retry message if vectors
+cannot publish. Borrowed updates remain pending with the caller's work.
+
+`_build_streamed_vectors` captures once and checks inside all four existing writer
+sites: empty clear, initial clear, each prefix, and final completion. It preserves
+source receipts, progress, native batch policy, and the model-generation fence.
+Those bulk sites still use the existing `rebuild_source.rebuild_transaction`;
+its older commit/rollback uncertainty behavior is unchanged by this patch.
+
+The new foreground writer helper attempts owned rollback only while a
+transaction remains active, and never retries failed cleanup. Borrowed cleanup
+targets only its unique savepoint, so an inner RELEASE that succeeded before
+raising cannot roll back a same-named caller savepoint. A final unique-savepoint
+RELEASE error is ambiguous and propagates without another cleanup attempt.
+Post-commit errors propagate without claiming completion or writing status.
+
+Safe tests exercise actual in-memory SQLite transactions, shared-memory writer
+contention, journal parsing, and source/vector method bodies with synthetic
+records and model/table doubles. They do not establish native vec0 behavior,
+file identity, WAL/file-backed concurrency, or complete runtime adoption.
+Raw source-only storage APIs retain their existing defaults. Model-backed
+ingest, initialization, compatibility/migration, and maintenance entrypoints
+still require the integrated serving boundary or explicit refusal before public
+activation. Arbitrary raw SQL is not fenced. This checkpoint adds no activation
+call, changes no model or retrieval policy, and makes no measured memory claim.
+
+### Per-response selected serving receipts
+
+`CertifiedEmbeddingProxy(target)` is an additive remote proxy for the fixed
+edge/base/pro embedding targets. It remains an `EmbeddingProxy` subclass for
+existing remote ownership/concurrency handling. Each call uses the ordinary
+`embed` or `embed_batched` operation, an explicit canonical model ID, and an
+`expected_target` descriptor. A successful response must carry integer protocol
+version 1, an exact valid target receipt including public tier, and an array of
+shape `(input_count, target.dimension)`. An older daemon that ignores the new
+field cannot pass by returning equal-width vectors or by succeeding at an
+earlier preparation request. Missing, malformed, or different receipts fail
+closed on every call, including empty input. Custom targets continue using
+`PreparedEmbeddingProxy` and its strict prepared-target operations.
+
+The server checks canonical built-in identity before admission and the effective
+cached model identity under its existing owner before native work. Both direct
+main fast inference and the dedicated CPU fast lane return receipts. CPU clone
+construction binds the captured residency identity; generation churn can let an
+already-admitted correct model finish without publishing a stale clone. Every
+main microbatch and CPU retry must match the expected width. Identity/width
+refusal cannot become an ordinary fallback result; other transient CPU fast
+errors retain the existing main-path fallback with the same expected target.
+Microbatch ceilings, ordering, admission/deadline checks, sustained-workload
+bookkeeping, and residency generation policy remain in place.
+
+`CertifiedRerankerProxy(model_name)` requires an explicit bounded model identity.
+Each ordinary `rerank`/`rerank_batched` request carries `expected_model_name`;
+every successful response requires protocol version 1 and the exact versioned
+effective reranker receipt. The server verifies its owned model/name pair after
+initial acquisition and after CPU replacement, before prediction or retry.
+There is no fallback to another reranker name. Ordinary proxies, request fields,
+default selection, and ordinary response behavior remain unchanged.
+
+Both certified proxy constructors configure identity only. They perform no
+network request, native load, or inference and do not prove daemon-native model
+readiness or residency. This extension adds no background probe or extra model
+cache. Empty inputs retain the native path's existing behavior; successful
+empty results still require receipts, without a new synthetic probe. Tests use
+stdlib loaders and synthetic model/array doubles; native numerical parity and
+full integration remain separate GPUBox gates. No activation call or measured
+memory reduction is claimed by this protocol extension.
+
+
+### Selected runtime bridge and whole-operation serving leases (#795, Unit B)
+
+`serving_operation(conn, *, deadline=None, cancelled=None, reranker_id=None)`
+reads the bounded selected journal before admission and verifies it again after
+waiting. An admitted operation freezes the public tier, embedding descriptor,
+exact completion/separation pair and effective reranker. Nested calls on the
+same accepted connection reuse that snapshot without repeating journal/schema
+reads. Another connection is refused unless explicitly admitted through a child
+reservation. Same-width Edge/Base embeddings never establish identity by width.
+
+Selected runtime projection uses the existing process singleton slots. It
+releases a replaced active embedding reference before construction, uses the
+existing local preparation slot and model ownership for the bounded width probe,
+and publishes only the frozen descriptor. Base/Pro reuse the same exact embedding
+identity without a second native load. Built-in daemon embeddings use certified
+responses on the existing main/fast request paths; custom embeddings retain the
+strict prepared-target protocol. A restart cannot silently accept an old daemon
+response lacking the expected identity receipt. Selected rerankers similarly use
+certified per-response names; local construction uses the frozen explicit name.
+No model, dtype, batch policy, ranking formula or result limit changes here.
+
+`apply_frozen_selection(selection, *, deadline=None, cancelled=None,
+reranker_id=None)` may run inside the same thread's exclusive activation lease,
+but never upgrades a serving reader. It has no connection argument: callers must
+establish that they own no SQL transaction. The process acknowledgement is cleared
+before partial projection and set only after both local slots match. With daemon
+proxies this acknowledges configured routing identity, not daemon model residency,
+native warmup, config-file persistence or activation completion. A failure after
+DB selection remains pending. The optional outer reranker override captures the
+existing deep/explicit model before admission without changing the journal's tier
+default; nested calls inherit it and refuse a different explicit override.
+
+Engine add/update/delete/delete_all and search variants, direct vector search and
+embed_single, and the entire hybrid encode/completion/separation operation now
+hold serving leases. Cached Engine handles reconcile selection too. Selected
+initialization validates the exact prepared pair before serving and skips legacy
+vector compatibility writes/migrations; its cache is bound to both generation
+and the accepted connection. Replacement handles reload their SQLite extension
+and validate again. Existing startup/cached maintenance scheduling remains.
+
+`current_operation(conn)` distinguishes unbound from a bound legacy `None`
+selection and rejects the wrong connection. Child reservations pin the group
+before submission and may outlive the parent. A clean child connection must match
+the captured database-path identity and committed selection before its body; this
+is cooperative pathname binding, not native SQLite-descriptor or hostile-clone
+proof. Unused or never-admitted reservations remain caller-owned and must close.
+Thread-local state is restored on body `BaseException`; forked process state and
+inherited tokens cannot authorize work.
+
+A borrowed SQL transaction receives one nonblocking gate/connection-lock
+admission attempt, never a native reconciliation or transaction commit/rollback.
+Cached legacy work remains available when coherent; a process already projected
+to a selected target refuses an unrelated unselected database instead of guessing
+its identity. Direct embedding/reranker setters, unloaders and slot replacement
+join exclusive admission. `blocking=False` bounds admission attempts only.
+Deadline/cancellation checks run before and after projection and after final
+journal/identity reads. The 0.05-second wait interval is not a hard return bound:
+condition reacquisition, cleanup, scheduling and an already-entered native call
+can delay return. The prepared embedding API carries a deadline, not an Event;
+cancellation during its internal wait/native work is observed on return before
+another projection or serving body is admitted.
+
+This is partial boundary adoption, not a completed public tier switch. Remaining
+Unit C work includes maintenance-owner internal serving admission, rebuild and
+migration owners, ingest/import and EncodingGate cached references, MCP decisions
+and explicit parallel-child binding, and manager/config/CLI activation. Those
+paths must preserve maintenance owner -> serving lease -> Engine writer -> SQL
+writer order. Unbound selected direct initialization is not a serving contract.
+The separate writer-fence prerequisite establishes SQL writer ownership; a
+read-only selection comparison or `in_transaction` alone cannot prove it.
+
+Validation uses stdlib production-source stubs and in-memory journals, including
+partial projection, borrowed transactions, overrides, child controls, final-read
+cancellation/deadlines, replacement refusal and selected reconnect. A separate
+opt-in GPUBox test composes the real Engine/runtime/vector code with native
+sqlite-vec and synthetic encoders through CRUD, nested search and reconnect.
+Local checks do not load native models or file-backed databases. This checkpoint
+does not prove reduced unified-memory use, native MPS acceptance, or resolution
+of the original 26.24 GB Mac incident.

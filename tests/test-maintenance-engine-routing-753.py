@@ -16,7 +16,7 @@ import types
 import unittest
 import warnings
 import weakref
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -44,6 +44,29 @@ def stdlib_module(name: str, modules: dict) -> types.ModuleType:
 
 
 def load_engine(modules: dict) -> types.ModuleType:
+    modules["truememory.tier_switch.writer"] = stdlib_module("tier_switch/writer", modules)
+    serving_path = ROOT / "truememory/tier_switch/serving.py"
+    serving_source = ast.parse(serving_path.read_text(encoding="utf-8"))
+    serving_names = {"ServingLeaseError", "ServingLeaseTimeout", "ServingLeaseCancelled"}
+    serving_nodes = [node for node in serving_source.body
+                     if isinstance(node, ast.ClassDef) and node.name in serving_names]
+    serving_namespace = {}
+    exec(compile(ast.Module(body=serving_nodes, type_ignores=[]), str(serving_path), "exec"), serving_namespace)
+    runtime_path = ROOT / "truememory/tier_switch/runtime.py"
+    runtime_source = ast.parse(runtime_path.read_text(encoding="utf-8"))
+    runtime_names = {"TierRuntimeError", "ConnectionWriteLock", "_check", "_remaining", "_connection_read"}
+    runtime_nodes = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
+    runtime_nodes.extend(node for node in runtime_source.body
+                         if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in runtime_names)
+    runtime_namespace = {"threading": threading, "sqlite3": sqlite3, "time": time,
+                         "contextmanager": contextmanager,
+                         "serving": types.SimpleNamespace(**{name: serving_namespace[name] for name in serving_names})}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=runtime_nodes, type_ignores=[])),
+                 str(runtime_path), "exec"), runtime_namespace)
+    modules["truememory.tier_switch.runtime"] = types.SimpleNamespace(
+        **{name: runtime_namespace[name] for name in runtime_names},
+        serving_operation=lambda *args, **kwargs: nullcontext(types.SimpleNamespace(selection=None)),
+        current_operation=lambda conn: types.SimpleNamespace(selection=None))
     module = types.ModuleType("synthetic_routing_engine")
 
     def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
@@ -56,6 +79,7 @@ def load_engine(modules: dict) -> types.ModuleType:
     module.__dict__.update({"__builtins__": dict(vars(builtins), __import__=safe_import),
         "__file__": str(ROOT / "truememory/engine.py"), "Path": Path, "sqlite3": sqlite3,
         "threading": threading, "time": time, "os": os, "warnings": warnings,
+        "engine_operation": lambda function: function,
         "logger": logging.getLogger("synthetic-routing"), "MAX_CONTENT_LENGTH": 50_000,
         "_env_int": lambda name, default, **kwargs: default})
     source = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
@@ -597,7 +621,7 @@ class TestEngineRouting(RoutingFixture):
         changed = type("VectorPublicationChanged", (RuntimeError,), {})
 
         @contextmanager
-        def publication(*args):
+        def publication(*args, **kwargs):
             raise changed("synthetic model replacement")
             yield
 

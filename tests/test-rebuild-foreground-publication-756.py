@@ -25,7 +25,7 @@ class TestForegroundPublication(unittest.TestCase):
         original = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
         methods = [node for node in original.body if isinstance(node, ast.FunctionDef) and node.name in ("add", "update")]
         cls = ast.ClassDef(name="SyntheticEngine", bases=[], keywords=[], body=methods, decorator_list=[])
-        namespace = dict(__builtins__=self.vector.__dict__["__builtins__"],
+        namespace = dict(engine_operation=lambda function: function, __builtins__=self.vector.__dict__["__builtins__"],
                          logger=logging.getLogger(__name__), MAX_CONTENT_LENGTH=10000,
                          insert_message=self.modules["storage"].insert_message,
                          update_message=self.modules["storage"].update_message)

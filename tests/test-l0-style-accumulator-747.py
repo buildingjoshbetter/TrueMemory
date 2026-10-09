@@ -34,7 +34,8 @@ def load_stdlib_source(name: str) -> types.ModuleType:
     module = types.ModuleType("synthetic_style_" + name)
     module.__dict__["__builtins__"] = dict(vars(builtins), __import__=safe_import)
     source = ROOT / "truememory" / (name + ".py")
-    exec(compile(source.read_text(encoding="utf-8"), str(source), "exec"), module.__dict__)
+    with patch.dict(sys.modules, {module.__name__: module}):
+        exec(compile(source.read_text(encoding="utf-8"), str(source), "exec"), module.__dict__)
     return module
 
 
@@ -702,7 +703,8 @@ class StyleAccumulatorTests(unittest.TestCase):
         maintenance = types.ModuleType("synthetic_append_maintenance")
         modules = {"truememory.personality_style_vec": STYLE, "truememory.rebuild_source": rebuild,
                    "truememory.maintenance": maintenance, "truememory.storage": STORAGE,
-                   "truememory._platform": load_stdlib_source("_platform")}
+                   "truememory._platform": load_stdlib_source("_platform"),
+                   "truememory.tier_switch.writer": load_stdlib_source("tier_switch/writer")}
 
         def safe_import(name: str, globals: dict | None = None, locals: dict | None = None,
                         fromlist: tuple[str, ...] = (), level: int = 0) -> object:
@@ -718,7 +720,7 @@ class StyleAccumulatorTests(unittest.TestCase):
         tree = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
         engine_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
         add = next(node for node in engine_class.body if isinstance(node, ast.FunctionDef) and node.name == "add")
-        namespace = {"__builtins__": dict(vars(builtins), __import__=safe_import), "MAX_CONTENT_LENGTH": 50000,
+        namespace = {"engine_operation": lambda function: function, "__builtins__": dict(vars(builtins), __import__=safe_import), "MAX_CONTENT_LENGTH": 50000,
                      "insert_message": STORAGE.insert_message, "_update_style_vec": STYLE.update_entity_style_vector_incremental,
                      "logger": logging.getLogger("synthetic_style_engine")}
         exec(compile(ast.Module(body=[add], type_ignores=[]), "engine.py", "exec"), namespace)

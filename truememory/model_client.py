@@ -673,6 +673,59 @@ class PreparedEmbeddingProxy:
         return vectors
 
 
+def _check_serving_protocol(response: dict) -> None:
+    if type(response.get("protocol")) is not int or response["protocol"] != PROTOCOL_VERSION:
+        raise ProtocolMismatchError("Model server omitted the selected-serving protocol; restart it after upgrading")
+
+
+def _serving_reranker_name(value: object) -> str:
+    import re
+
+    if (type(value) is not str or len(value.encode("utf-8")) > 512
+            or re.fullmatch(r"[\w][\w.\-]*(/[\w][\w.\-]*)?", value) is None):
+        raise ValueError("Selected reranking requires an explicit model identity")
+    return value
+
+
+class CertifiedEmbeddingProxy(EmbeddingProxy):
+    """Built-in serving with a fresh identity receipt on every fast/main result.
+
+    Construction configures identity only; it does not contact the daemon or
+    prove model readiness. Custom targets use PreparedEmbeddingProxy instead.
+    """
+
+    def __init__(self, target: "EmbeddingTarget") -> None:
+        from truememory.embedding_target import EmbeddingTarget, EmbeddingTargetError
+
+        self.target = EmbeddingTarget.from_wire(target.to_wire())
+        if self.target.tier == "custom":
+            raise EmbeddingTargetError("Custom serving requires the prepared target protocol")
+        super().__init__(tier=self.target.model_id)
+
+    def encode(self, texts, timeout: float | None = None, **kwargs) -> np.ndarray:
+        from truememory.embedding_target import EmbeddingTarget, EmbeddingTargetError, check_target_vectors
+
+        if isinstance(texts, str):
+            texts = [texts]
+        texts = list(texts)
+        request = _batch_request({
+            "op": "embed", "texts": texts, "tier": self.target.model_id,
+            "expected_target": self.target.to_wire(),
+        }, kwargs)
+        response = _request_with_autostart(request, timeout=timeout)
+        _check_model_response(response, request)
+        _check_serving_protocol(response)
+        try:
+            effective = EmbeddingTarget.from_wire(response.get("target"))
+        except EmbeddingTargetError as exc:
+            raise ProtocolMismatchError("Model server omitted a valid serving target receipt") from exc
+        if effective != self.target:
+            raise ProtocolMismatchError("Model server returned a different serving target")
+        vectors = response["vectors"]
+        check_target_vectors(self.target, vectors, len(texts))
+        return vectors
+
+
 class RerankerProxy:
     """Drop-in replacement for CrossEncoder with .predict() method."""
 
@@ -693,6 +746,32 @@ class RerankerProxy:
         resp = _request_with_autostart(request, timeout=timeout)
         _check_model_response(resp, request)
         return resp["scores"]
+
+
+class CertifiedRerankerProxy(RerankerProxy):
+    """Explicit reranker receipt per response, without eager native readiness."""
+
+    def __init__(self, model_name: str) -> None:
+        super().__init__(model_name=_serving_reranker_name(model_name))
+
+    def predict(self, pairs, timeout: float | None = None, **kwargs) -> np.ndarray:
+        request = _batch_request({
+            "op": "rerank", "pairs": list(pairs), "model_name": self._model_name,
+            "expected_model_name": self._model_name,
+        }, kwargs)
+        response = _request_with_autostart(request, timeout=timeout)
+        _check_model_response(response, request)
+        _check_serving_protocol(response)
+        receipt = response.get("reranker")
+        if (type(receipt) is not dict or set(receipt) != {"version", "model_name"}
+                or type(receipt["version"]) is not int or receipt["version"] != 1
+                or type(receipt["model_name"]) is not str or receipt["model_name"] != self._model_name):
+            raise ProtocolMismatchError("Model server omitted the exact serving reranker receipt")
+        scores = response.get("scores")
+        if (not isinstance(scores, np.ndarray) or not scores.shape
+                or scores.shape[0] != len(request["pairs"])):
+            raise ProtocolMismatchError("Model server returned a different serving reranker result count")
+        return scores
 
 
 def use_model_server() -> bool:

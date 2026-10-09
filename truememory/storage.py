@@ -1515,13 +1515,15 @@ def insert_message(conn: sqlite3.Connection, msg: dict) -> int:
     return cursor.lastrowid
 
 
-def delete_message(conn: sqlite3.Connection, msg_id: int) -> bool:
+def delete_message(conn: sqlite3.Connection, msg_id: int, *, commit: bool = True) -> bool:
     """
     Delete a single message and its vector embedding.
 
     The FTS5 DELETE trigger automatically removes the full-text index entry.
     The vector embedding in ``vec_messages`` is also removed if the table
     exists.
+
+    ``commit=False`` leaves publication inside the caller's writer transaction.
 
     Args:
         conn:   Open database connection.
@@ -1612,11 +1614,12 @@ def delete_message(conn: sqlite3.Connection, msg_id: int) -> bool:
     cursor = conn.execute("DELETE FROM messages WHERE id = ?", (msg_id,))
     deleted = cursor.rowcount > 0
 
-    conn.commit()
+    if commit:
+        conn.commit()
     return deleted
 
 
-def update_message(conn: sqlite3.Connection, msg_id: int, **fields) -> bool:
+def update_message(conn: sqlite3.Connection, msg_id: int, *, commit: bool = True, **fields) -> bool:
     """
     Update fields on an existing message.
 
@@ -1626,6 +1629,8 @@ def update_message(conn: sqlite3.Connection, msg_id: int, **fields) -> bool:
 
     The AFTER UPDATE trigger on ``messages`` automatically keeps the
     FTS5 index in sync.
+
+    ``commit=False`` leaves the source update inside the caller's writer fence.
 
     Args:
         conn:    Open database connection.
@@ -1647,5 +1652,6 @@ def update_message(conn: sqlite3.Connection, msg_id: int, **fields) -> bool:
     cursor = conn.execute(f"UPDATE messages SET {set_clause} WHERE id = ?", values)
 
     # The AFTER UPDATE trigger on messages keeps FTS5 in sync automatically.
-    conn.commit()
+    if commit:
+        conn.commit()
     return cursor.rowcount > 0

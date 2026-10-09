@@ -41,6 +41,8 @@ import logging
 import sqlite3
 from collections import defaultdict
 
+from truememory.tier_switch.runtime import database_operation
+
 log = logging.getLogger(__name__)
 
 
@@ -123,6 +125,7 @@ def reciprocal_rank_fusion(
 _CANDIDATE_POOL = 200
 
 
+@database_operation
 def search_hybrid(
     conn: sqlite3.Connection,
     query: str,
