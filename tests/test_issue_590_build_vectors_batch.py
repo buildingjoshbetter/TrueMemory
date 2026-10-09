@@ -75,6 +75,7 @@ def _seed_messages(ms, n: int) -> None:
     m = ms._get_memory()
     # These focused tests own explicit rebuild maintenance.
     m._engine._has_consolidation = False
+    m._engine._has_style_vec = False
     for i in range(n):
         m.add(f"memory number {i}", user_id="test")
 

@@ -246,7 +246,6 @@ except (ImportError, ModuleNotFoundError):
 _HAS_STYLE_VEC = False
 try:
     from truememory.personality_style_vec import (
-        build_entity_style_vectors,
         update_entity_style_vector_incremental as _update_style_vec,
     )
     _HAS_STYLE_VEC = True
@@ -837,31 +836,44 @@ class TrueMemoryEngine:
 
     def _maybe_auto_consolidate(self) -> None:
         """Probe fixed metadata without waiting on foreground or model work."""
-        if not self._has_consolidation or self.conn is None:
+        if (not self._has_consolidation and not getattr(self, "_has_style_vec", False)) or self.conn is None:
             return
         if not self._write_lock.acquire(blocking=False):
             self._maintenance_pending_reason = "foreground_busy"
             return
         coordinator = None
         eligible = ()
+        style_eligible = False
         try:
             if self.conn is None:
                 return
             if self.conn.in_transaction:
                 self._maintenance_pending_reason = "pending_caller_commit"
                 return
-            from truememory.maintenance import engine_layer_specs, plan_layers
+            from truememory.maintenance import engine_layer_specs, observe_style, plan_layers
             coordinator = self._get_maintenance_coordinator()
-            eligible = plan_layers(self.conn, engine_layer_specs(self.conn, coordinator),
-                                   threshold=self._auto_consolidate_threshold)
-            self._maintenance_pending_reason = "eligible" if eligible else "awaiting_eligibility"
+            if getattr(self, "_has_style_vec", False):
+                observation = observe_style(self.conn, threshold=self._auto_consolidate_threshold)
+                style_eligible = observation.eligible
+                self._maintenance_pending_reason = observation.health["pending_reason"]
+            if self._has_consolidation:
+                eligible = plan_layers(self.conn, engine_layer_specs(self.conn, coordinator),
+                                       threshold=self._auto_consolidate_threshold)
+                if not getattr(self, "_has_style_vec", False):
+                    self._maintenance_pending_reason = "awaiting_eligibility"
+            if eligible or style_eligible:
+                self._maintenance_pending_reason = "eligible"
         except Exception as error:
             self._maintenance_pending_reason = type(error).__name__[:64]
         finally:
             self._write_lock.release()
-        if eligible and coordinator is not None:
+        if (eligible or style_eligible) and coordinator is not None:
             try:
-                coordinator.request_layers(threshold=self._auto_consolidate_threshold)
+                if style_eligible:
+                    coordinator.request_layers(threshold=self._auto_consolidate_threshold,
+                                               include_layers=bool(eligible), include_style=True)
+                else:
+                    coordinator.request_layers(threshold=self._auto_consolidate_threshold)
             except Exception as error:
                 self._maintenance_pending_reason = type(error).__name__[:64]
 
@@ -1062,7 +1074,7 @@ class TrueMemoryEngine:
         """Force one pass, preserving caller transactions and shared ownership."""
         from truememory.maintenance import (
             MaintenanceBusyError, format_maintenance_report, maintenance_busy_result,
-            maintenance_owner, run_engine_maintenance,
+            maintenance_observation, observe_style, run_engine_maintenance, _style_unready_result,
         )
         self._ensure_connection(_suppress_maintenance=True)
         with self._write_lock:
@@ -1071,19 +1083,37 @@ class TrueMemoryEngine:
             borrowed = self.conn.in_transaction
             if borrowed or coordinator.path is None:
                 try:
-                    report = run_engine_maintenance(self.conn, coordinator, force=True,
-                        threshold=self._auto_consolidate_threshold, prepare_extensions=False,
-                        allow_caller_transaction=borrowed)
+                    with maintenance_observation(coordinator, borrowed=borrowed) as observed:
+                        report = run_engine_maintenance(self.conn, coordinator, force=True,
+                            threshold=self._auto_consolidate_threshold, prepare_extensions=False,
+                            allow_caller_transaction=borrowed, include_style=getattr(self, "_has_style_vec", False))
+                        if not borrowed and self.conn.in_transaction:
+                            self.conn.rollback()
+                            raise RuntimeError("Maintenance work left an unfinished transaction")
+                        observed.append(report)
                 except MaintenanceBusyError:
                     return maintenance_busy_result()
                 self._apply_manual_maintenance_capabilities(report.results)
                 return format_maintenance_report(report)
+            foreground_style = None
+            if getattr(self, "_has_style_vec", False):
+                observation = observe_style(self.conn, threshold=self._auto_consolidate_threshold)
+                if observation.state is None:
+                    foreground_style = _style_unready_result(observation.health)
         try:
-            with maintenance_owner(coordinator.path):
+            with maintenance_observation(coordinator) as observed:
                 connection = create_db(coordinator.path)
                 try:
                     report = run_engine_maintenance(connection, coordinator, force=True,
-                                                   threshold=self._auto_consolidate_threshold)
+                        threshold=self._auto_consolidate_threshold,
+                        include_style=getattr(self, "_has_style_vec", False) and foreground_style is None,
+                        connection_owned=True)
+                    if foreground_style is not None:
+                        report = report._replace(style_result=foreground_style)
+                    if connection.in_transaction:
+                        connection.rollback()
+                        raise RuntimeError("Maintenance work left an unfinished transaction")
+                    observed.append(report)
                 finally:
                     connection.close()
         except MaintenanceBusyError:
@@ -1259,27 +1289,6 @@ class TrueMemoryEngine:
         # open() path behave identically.
         self._purge_legacy_entity_profile_summaries()
 
-        # Style vector hash migration: Python's hash() was replaced with a
-        # stable hashlib-based hash in v0.6.3. Existing style vectors were
-        # computed with the old non-deterministic hash and must be rebuilt.
-        if "entity_style_vectors" in tables and "metadata" in tables:
-            try:
-                row = self.conn.execute(
-                    "SELECT value FROM metadata WHERE key = 'style_vec_hash_version'"
-                ).fetchone()
-                if row is None or row[0] != "2":
-                    if _HAS_STYLE_VEC:
-                        from truememory.personality_style_vec import build_entity_style_vectors
-                        build_entity_style_vectors(self.conn)
-                        logger.info("Style vectors rebuilt with stable hash (one-time migration)")
-                    self.conn.execute(
-                        "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-                        ("style_vec_hash_version", "2"),
-                    )
-                    self.conn.commit()
-            except Exception:
-                logger.debug("Style vector migration failed", exc_info=True)
-
         # Load sqlite-vec extension if available.
         # upgrade DEBUG → WARNING and track failure in a
         # module-level state so ``truememory_stats.health`` can report
@@ -1366,6 +1375,7 @@ class TrueMemoryEngine:
             self.stats["message_count"] = 0
 
         self.ready = True
+        self._maybe_auto_consolidate()
         return self
 
     # ──────────────────────────────────────────────────────────────────────
@@ -1478,14 +1488,27 @@ class TrueMemoryEngine:
         # ── 4.5. Build entity style vectors (L0 char-n-gram) ─────────────
         if _HAS_STYLE_VEC:
             try:
-                t0 = time.time()
-                style_vecs = build_entity_style_vectors(self.conn)
-                stats["build_style_vectors"] = f"{len(style_vecs)} vectors in {time.time() - t0:.3f}s"
+                from truememory.maintenance import maintenance_observation, run_engine_maintenance
+                coordinator = self._get_maintenance_coordinator()
+                borrowed = self.conn.in_transaction
+                with maintenance_observation(coordinator, borrowed=borrowed) as observed:
+                    report = run_engine_maintenance(self.conn, coordinator, force=True, prepare_extensions=False,
+                        include_layers=False, include_style=True, allow_caller_transaction=borrowed)
+                    if not borrowed and self.conn.in_transaction:
+                        self.conn.rollback()
+                        raise RuntimeError("Style work left an unfinished transaction")
+                    observed.append(report)
+                result = report.style_result
+                if result.outcome in {"success", "success_empty"}:
+                    stats["build_style_vectors"] = f"{result.output_count} vectors in {result.elapsed_seconds:.3f}s"
+                else:
+                    stats["build_style_vectors"] = result.outcome.upper() + " (" + (result.error_category or "Pending") + ")"
+                if result.pending_caller_commit:
+                    stats["build_style_vectors"] += " (pending caller commit)"
                 self._has_style_vec = True
             except Exception as exc:
-                stats["build_style_vectors"] = f"ERROR: {exc}"
+                stats["build_style_vectors"] = "ERROR (" + type(exc).__name__[:64] + ")"
                 logger.debug("build_style_vectors failed", exc_info=True)
-                self._has_style_vec = False
         else:
             stats["build_style_vectors"] = "SKIPPED (personality_style_vec module not available)"
 
@@ -2515,6 +2538,17 @@ class TrueMemoryEngine:
         finally:
             self._write_lock.release()
 
+    def get_style_health(self) -> dict:
+        """Observe existing style coverage without connecting or scheduling."""
+        from truememory.maintenance import style_health
+        if not self._write_lock.acquire(blocking=False):
+            return style_health(pending_reason="foreground_busy")
+        try:
+            coordinator = self._maintenance_coordinator if self._maintenance_handle is self.conn else None
+            return style_health(self.conn, coordinator)
+        finally:
+            self._write_lock.release()
+
     def get_stats(self) -> dict:
         """Return ingestion and search statistics."""
         self._ensure_connection()
@@ -2543,6 +2577,7 @@ class TrueMemoryEngine:
             stats["maintenance"] = {"status": "pending", "pending_reason": "foreground_busy"}
 
         stats["clustering"] = self.get_clustering_health()
+        stats["maintenance"]["style"] = self.get_style_health()
 
         # Add live DB stats if connected.
         if self.conn:
