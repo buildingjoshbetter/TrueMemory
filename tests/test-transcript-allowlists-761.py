@@ -498,8 +498,7 @@ class TranscriptAdmissionTests(unittest.TestCase):
                         subprocess.list2cmdline([
                             r"C:\Program Files\Python\python.exe",
                             rf"C:\Synthetic Package\truememory\ingest\hooks\{stem}.py",
-                            "--user", "synthetic user",
-                        ]) if platform == "win32" else
+                        ]) + ' --user ";"' if platform == "win32" else
                         f"'/pkg with space/python3.10' '/pkg with space/truememory/ingest/hooks/{stem}.py' --user ';'"
                     )
                     for command in (
