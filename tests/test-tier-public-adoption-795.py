@@ -100,7 +100,7 @@ class Harness:
         self.job = types.SimpleNamespace(
             job_id="a" * 32,
             target=Target.capture("base"),
-            database_path=Path("/synthetic/store.db"),
+            database_path=Path("/synthetic/store.db").absolute(),
             tracker="canonical-v1",
             source_epoch="epoch",
             source_schema_signature="b" * 64,
@@ -796,7 +796,7 @@ class PublicAdoptionTests(unittest.TestCase):
             conn.execute(
                 "SELECT backup_path FROM rebuild_status WHERE id=?", (sid,)
             ).fetchone(),
-            ("/synthetic/backup",),
+            (str(Path("/synthetic/backup")),),
         )
         self.assertFalse(conn.in_transaction)
 
@@ -1173,7 +1173,7 @@ class PublicAdoptionTests(unittest.TestCase):
             module.main()
         factory.assert_called_once_with()
         manager.cancel.assert_called_once_with(
-            17, expected_job_id=h.job.job_id, db_path=Path("/synthetic/store.db")
+            17, expected_job_id=h.job.job_id, db_path=h.job.database_path
         )
         self.assertIn("Rebuild 17 cancelled", output.getvalue())
         self.assertIn("explicitly", output.getvalue())
@@ -1374,8 +1374,8 @@ class ActualLegacyConfigurationComposition(unittest.TestCase):
         self.os = os
         self.ns = runpy.run_path(str(ROOT / "tests/test-tier-public-boundaries-795.py"))
         self.boundary = self.ns["TestPublicBoundaries"]()
-        self.boundary.setUp()
         self.addCleanup(self.boundary.doCleanups)
+        self.boundary.setUp()
         self.conn, self.api = self.boundary.conn, self.boundary.api
         self.selected_marker_row = self.conn.execute("SELECT * FROM truememory_tier_selected_job_v1").fetchone()
         self.conn.execute("DELETE FROM truememory_tier_selected_job_v1")
@@ -1383,7 +1383,7 @@ class ActualLegacyConfigurationComposition(unittest.TestCase):
                               (("embed_model", "model2vec"), ("embed_dim", "256")))
         self.conn.commit()
         self.cfg = self.boundary.load_application("tier_config")
-        self.enterContext(patch.dict(os.environ, {"TRUEMEMORY_EMBED_MODEL": "edge"}))
+        self.ns["enter_context"](self, patch.dict(os.environ, {"TRUEMEMORY_EMBED_MODEL": "edge"}))
         definitions, namespace = self.ns["definitions"], self.boundary.namespace
         self.vector = definitions("vector_search.py", {
             "_resolve_model_name", "set_embedding_model", "get_embedding_dim", "resolve_tier",
@@ -1442,7 +1442,7 @@ class ActualLegacyConfigurationComposition(unittest.TestCase):
         handle = OwnedHandle()
         opener = Mock(return_value=handle)
         self.h.manager_module.sqlite3 = types.SimpleNamespace(connect=opener)
-        self.enterContext(patch.object(Path, "stat", return_value=types.SimpleNamespace()))
+        self.ns["enter_context"](self, patch.object(Path, "stat", return_value=types.SimpleNamespace()))
         return handle, opener
 
     def assert_no_persistent_mutation(self):

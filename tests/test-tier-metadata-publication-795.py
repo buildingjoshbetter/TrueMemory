@@ -14,8 +14,8 @@ BOUNDARIES = runpy.run_path(str(Path(__file__).with_name("test-tier-public-bound
 class TestForegroundMetadata(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = BOUNDARIES["TestPublicBoundaries"]()
-        self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
+        self.fixture.setUp()
         self.conn, self.runtime = self.fixture.conn, self.fixture.api
         self.writer = self.fixture.load_application("tier_switch.writer")
         self.vector = self.fixture.fixture.vector

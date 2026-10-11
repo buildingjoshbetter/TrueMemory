@@ -11,13 +11,14 @@ import unittest
 from unittest.mock import Mock, patch
 
 ACTIVE = runpy.run_path(str(Path(__file__).with_name("test-tier-active-initialization-795.py")))
+enter_context = ACTIVE["enter_context"]
 
 
 class TestWarmAdmission(unittest.TestCase):
     def setUp(self):
         self.active = ACTIVE["TestActiveInitialization"]()
-        self.active.setUp()
         self.addCleanup(self.active.doCleanups)
+        self.active.setUp()
         self.fixture = self.active.fixture
         self.api, self.maintenance = self.active.api, self.active.maintenance
         self.coordinator = self.active.coordinator
@@ -63,7 +64,7 @@ class TestWarmAdmission(unittest.TestCase):
             if action is not None:
                 action()
             return actual(error, deadline=deadline)
-        self.enterContext(patch.object(self.maintenance, "wait_for_automatic_owner", side_effect=wait))
+        enter_context(self, patch.object(self.maintenance, "wait_for_automatic_owner", side_effect=wait))
         return entered
 
     def test_schema_drift_waits_then_uses_normal_factory_without_stale_readiness(self):
@@ -182,7 +183,7 @@ class TestWarmAdmission(unittest.TestCase):
                 if not continue_launch.wait(3):
                     raise AssertionError("Synthetic launch barrier timed out")
             return actual()
-        self.enterContext(patch.object(self.coordinator, "_begin_observation", side_effect=observe))
+        enter_context(self, patch.object(self.coordinator, "_begin_observation", side_effect=observe))
         requester = threading.Thread(target=lambda: self.coordinator.request_layers(
             _initialization_receipt=self.active.first._reconnect_receipt))
         requester.start()
@@ -217,7 +218,7 @@ class TestWarmAdmission(unittest.TestCase):
             if not continue_release.wait(3):
                 raise AssertionError("Synthetic release barrier timed out")
             return actual(fd)
-        self.enterContext(patch.object(self.maintenance, "_release_owner", side_effect=release))
+        enter_context(self, patch.object(self.maintenance, "_release_owner", side_effect=release))
         self.active.release.set()
         self.assertTrue(at_release.wait(2))
         self.assertIsNone(self.active.record())

@@ -44,6 +44,16 @@ def server(monkeypatch, tmp_path):
 
     encoder = SyntheticEncoder()
     monkeypatch.setattr(vs, "get_model", lambda: encoder)
+    memory = ms._get_memory()
+    memory._engine._ensure_connection(_suppress_maintenance=True)
+    # The no-op contract requires coherent source identity even when this
+    # Python build cannot load the vector extension.
+    with memory._engine._write_lock:
+        memory._engine.conn.executemany(
+            "INSERT OR REPLACE INTO metadata(key,value) VALUES (?,?)",
+            (("embed_model", vs.EMBEDDING_MODEL), ("embed_dim", str(vs._embedding_dim))),
+        )
+        memory._engine.conn.commit()
     yield ms
     # Teardown: drop cached Memory and any model-level state mutated by
     # truememory_configure (which modifies vector_search globals via

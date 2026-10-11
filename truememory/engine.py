@@ -561,7 +561,8 @@ class TrueMemoryEngine:
     def _capture_reconnect_receipt(self, operation: object) -> None:
         """Remember only this Engine's completed legacy initialization, never a model."""
         self._reconnect_receipt = None
-        if self.conn.in_transaction or (not self._has_vectors and _HAS_VECTOR):
+        if self.conn.in_transaction or (not self._has_vectors and _HAS_VECTOR
+                and callable(getattr(self.conn, "enable_load_extension", None))):
             return
         from truememory.tier_switch.runtime import _legacy_key, TierRuntimeError
         from truememory import vector_search
@@ -615,6 +616,10 @@ class TrueMemoryEngine:
         candidate = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, check_same_thread=False)
         retained = False
         try:
+            # A receipt from a connection without extension loading must not
+            # suppress normal vector initialization on a newly capable handle.
+            if receipt[8] and not receipt[7] and callable(getattr(candidate, "enable_load_extension", None)):
+                return None
             candidate.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
             candidate.execute("PRAGMA foreign_keys=ON")
             candidate.execute("PRAGMA synchronous=NORMAL")

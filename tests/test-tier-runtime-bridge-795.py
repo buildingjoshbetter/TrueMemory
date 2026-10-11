@@ -32,8 +32,8 @@ class Cancelled(BaseException):
 class TestRuntimeBridge(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = JOURNAL["TestActivationJournal"]()
-        self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
+        self.fixture.setUp()
         self.conn = self.fixture.conn
         self.modules = self.fixture.modules
         self.gate = GATE["load"]()
@@ -900,8 +900,8 @@ class TestRuntimeBridge(unittest.TestCase):
 class TestRuntimeModels(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = PREPARED["TestPreparedTargets"]()
-        self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
+        self.fixture.setUp()
         self.vector = self.fixture.vector
         self.vector._frozen_embedding_target = None
         self.gate = GATE["load"]()

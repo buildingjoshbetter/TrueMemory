@@ -22,8 +22,8 @@ LEGACY = ("vec_messages", "vec_messages_sep")
 class TestActivationPolicy(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = BASE["TestActivationJournal"]()
-        self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
+        self.fixture.setUp()
         self.api = self.fixture.api
         self.conn = self.fixture.conn
         self.jobs = self.fixture.job_api
@@ -422,8 +422,8 @@ class TestIdentityErrorWire(unittest.TestCase):
     def setUp(self):
         fixtures = runpy.run_path(str(Path(__file__).with_name("test-tier-serving-receipt-795.py")))
         self.fixture = fixtures["TestServingReceipts"]()
-        self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
+        self.fixture.setUp()
 
     def test_identity_error_roundtrip_native_errors_still_generic(self):
         fixture = self.fixture

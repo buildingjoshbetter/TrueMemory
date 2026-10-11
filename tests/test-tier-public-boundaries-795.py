@@ -27,6 +27,12 @@ BRIDGE = runpy.run_path(str(Path(__file__).with_name("test-tier-runtime-bridge-7
 _REAL_PATH_RESOLVE = Path.resolve
 
 
+def enter_context(test_case: unittest.TestCase, context: contextlib.AbstractContextManager[object]) -> object:
+    result = type(context).__enter__(context)
+    test_case.addCleanup(type(context).__exit__, context, None, None, None)
+    return result
+
+
 def definitions(path: str, names: set[str], namespace: dict, *, methods: bool = False) -> types.ModuleType:
     if path == "maintenance.py" and "_acquire_owner" in names:
         names = names | {"_AutomaticAdmission", "_automatic_admission_locked"}
@@ -45,16 +51,51 @@ def definitions(path: str, names: set[str], namespace: dict, *, methods: bool = 
     return module
 
 
+class TestFixtureCompatibility(unittest.TestCase):
+    def test_context_cleanup_works_without_testcase_enter_context(self):
+        case = unittest.TestCase()
+        entered, exited = [], []
+        @contextlib.contextmanager
+        def context():
+            entered.append(True)
+            try:
+                yield "synthetic context"
+            finally:
+                exited.append(True)
+        result = enter_context(case, context())
+        self.assertEqual(result, "synthetic context")
+        self.assertEqual(entered, [True])
+        self.assertEqual(exited, [])
+        case.doCleanups()
+        self.assertEqual(exited, [True])
+
+    def test_nested_setup_failure_restores_global_path_stat(self):
+        warm = runpy.run_path(str(Path(__file__).with_name("test-tier-warm-admission-795.py")))
+        active = warm["ACTIVE"]["TestActiveInitialization"]
+        original = Path.stat
+        def fail_setup(case):
+            enter_context(case, patch.object(Path, "stat", return_value=types.SimpleNamespace()))
+            raise RuntimeError("synthetic partial setup")
+        case = warm["TestWarmAdmission"]()
+        with patch.object(active, "setUp", fail_setup):
+            try:
+                with self.assertRaisesRegex(RuntimeError, "synthetic partial setup"):
+                    case.setUp()
+            finally:
+                case.doCleanups()
+        self.assertIs(Path.stat, original)
+
+
 class TestPublicBoundaries(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = BRIDGE["TestRuntimeBridge"]()
-        self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
+        self.fixture.setUp()
         self.api, self.conn = self.fixture.api, self.fixture.conn
         self.modules = self.fixture.modules
         self.modules["maintenance"] = types.SimpleNamespace(
             maintenance_owner=lambda path: contextlib.nullcontext(), connection_database_path=lambda conn: None)
-        self.enterContext(patch.dict(sys.modules, {"truememory.tier_switch.runtime": self.api}))
+        enter_context(self, patch.dict(sys.modules, {"truememory.tier_switch.runtime": self.api}))
 
     def imports(self, name, globals=None, locals=None, fromlist=(), level=0):
         if name == "truememory.tier_switch.runtime":
@@ -291,7 +332,7 @@ class TestPublicBoundaries(unittest.TestCase):
     def load_application(self, name: str) -> types.ModuleType:
         module = types.ModuleType("synthetic_public_" + name.replace(".", "_"))
         module.__dict__["__builtins__"] = dict(vars(builtins), __import__=self.imports)
-        self.enterContext(patch.dict(sys.modules, {module.__name__: module}))
+        enter_context(self, patch.dict(sys.modules, {module.__name__: module}))
         path = ROOT / "truememory" / (name.replace(".", "/") + ".py")
         exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
         self.modules[name] = module
@@ -606,7 +647,7 @@ class TestPublicBoundaries(unittest.TestCase):
         class Busy(RuntimeError):
             pass
         self.modules["maintenance"].MaintenanceBusyError = Busy
-        self.enterContext(patch.dict(sys.modules, {"truememory.maintenance": self.modules["maintenance"]}))
+        enter_context(self, patch.dict(sys.modules, {"truememory.maintenance": self.modules["maintenance"]}))
         def imports(name, globals=None, locals=None, fromlist=(), level=0):
             if name == "sqlite_vec":
                 return types.SimpleNamespace(load=lambda conn: None)
@@ -874,7 +915,7 @@ class TestPublicBoundaries(unittest.TestCase):
         engine = self.fixture.lifecycle_engine("_open_connection_handle")
         engine.conn = None
         engine.db_path = Path("~synthetic-unexpanded/store.sqlite")
-        self.enterContext(patch.object(Path, "resolve", _REAL_PATH_RESOLVE))
+        enter_context(self, patch.object(Path, "resolve", _REAL_PATH_RESOLVE))
         expected = engine.db_path.resolve()
         acquired, created = [], []
 
@@ -1528,11 +1569,11 @@ class TestEngineReconnectReceipt(unittest.TestCase):
     real_memory_owner = TestPublicBoundaries.real_memory_owner
 
     def engine(self, *, vectors=False):
-        self.enterContext(patch.object(Path, "resolve", _REAL_PATH_RESOLVE))
+        enter_context(self, patch.object(Path, "resolve", _REAL_PATH_RESOLVE))
         self.stat = types.SimpleNamespace(st_dev=7, st_ino=11)
-        self.enterContext(patch.object(Path, "stat", return_value=self.stat))
-        self.enterContext(patch.object(Path, "mkdir"))
-        self.enterContext(patch.object(Path, "chmod"))
+        enter_context(self, patch.object(Path, "stat", return_value=self.stat))
+        enter_context(self, patch.object(Path, "mkdir"))
+        enter_context(self, patch.object(Path, "chmod"))
         self.modules["storage"] = definitions("storage.py", {"DatabaseOpenError", "_integrity_message", "_validate_db_path"},
             self.namespace(sqlite3=sqlite3, Path=Path, os=os, newest_backup=lambda path: None))
         namespace = self.namespace(sqlite3=sqlite3, Path=Path, logger=logging.getLogger("synthetic-reconnect"),
@@ -1549,7 +1590,7 @@ class TestEngineReconnectReceipt(unittest.TestCase):
         exec(compile(ast.fix_missing_locations(ast.Module(body=[future, cls], type_ignores=[])),
                      "actual-engine-reconnect", "exec"), namespace)
         engine = namespace["TrueMemoryEngine"]()
-        engine.conn, engine.db_path = self.conn, Path("/synthetic/reconnect.sqlite")
+        engine.conn, engine.db_path = self.conn, Path("/synthetic/reconnect.sqlite").absolute()
         engine._init_lock = threading.Lock()
         engine._write_lock = self.api.ConnectionWriteLock(engine)
         engine.ready = engine._runtime_initialized = True
@@ -1594,6 +1635,58 @@ class TestEngineReconnectReceipt(unittest.TestCase):
         with self.assertRaises(sqlite3.ProgrammingError):
             conn.execute("SELECT 1")
 
+    def test_extension_unavailable_fts_receipt_preserves_capability_and_source(self):
+        engine = self.engine()
+        self.engine_namespace["_HAS_VECTOR"] = True
+        self.conn.enable_load_extension = None
+        self.conn.execute("INSERT INTO messages(id,content) VALUES(883,'synthetic FTS source')")
+        self.conn.commit()
+        operation = types.SimpleNamespace(key=self.api._legacy_key(), _database=("file", str(engine.db_path)))
+        engine._capture_reconnect_receipt(operation)
+        self.assertIsNotNone(engine._reconnect_receipt)
+        self.assertEqual(engine._reconnect_receipt[7:9], (False, True))
+        candidate = self.candidate(engine)
+        candidate.enable_load_extension = None
+        owner = self.forbid_owner()
+        self.conn.close()
+        engine._open_connection_handle()
+        self.assertIs(engine.conn, candidate)
+        self.assertTrue(engine.ready)
+        self.assertTrue(engine._runtime_initialized)
+        self.assertFalse(engine._has_vectors)
+        self.assertFalse(candidate.in_transaction)
+        self.assertEqual(candidate.execute("SELECT content FROM messages WHERE id=883").fetchone()[0],
+                         "synthetic FTS source")
+        owner.assert_not_called()
+
+    def test_fts_receipt_cannot_skip_new_extension_capability(self):
+        engine = self.engine()
+        self.engine_namespace["_HAS_VECTOR"] = True
+        self.conn.enable_load_extension = None
+        operation = types.SimpleNamespace(key=self.api._legacy_key(), _database=("file", str(engine.db_path)))
+        engine._capture_reconnect_receipt(operation)
+        receipt = engine._reconnect_receipt
+        self.assertIsNotNone(receipt)
+        candidate = self.candidate(engine)
+        candidate.enable_load_extension = lambda enabled: None
+        self.assertIsNone(engine._reopen_initialized_connection(engine.db_path))
+        self.assert_closed(candidate)
+        self.assertIs(engine.conn, self.conn)
+        self.assertIs(engine._reconnect_receipt, receipt)
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_other_vector_initialization_failure_does_not_publish_fts_receipt(self):
+        engine = self.engine()
+        self.engine_namespace["_HAS_VECTOR"] = True
+        self.conn.enable_load_extension = lambda enabled: None
+        operation = types.SimpleNamespace(key=self.api._legacy_key(), _database=("file", str(engine.db_path)))
+        queries = []
+        self.conn.set_trace_callback(queries.append)
+        engine._capture_reconnect_receipt(operation)
+        self.assertIsNone(engine._reconnect_receipt)
+        self.assertEqual(queries, [])
+        self.assertFalse(self.conn.in_transaction)
+
     def test_closed_initialized_fts_handle_reopens_without_owner_or_schema_writes(self):
         engine = self.engine()
         self.conn.execute("INSERT INTO messages(id,content) VALUES(881,'synthetic prior source')")
@@ -1610,7 +1703,7 @@ class TestEngineReconnectReceipt(unittest.TestCase):
         self.assertFalse(engine._has_vectors)
         self.assertFalse(candidate.in_transaction)
         self.assertEqual(candidate.execute("SELECT content FROM messages WHERE id=881").fetchone()[0], "synthetic prior source")
-        self.connect.assert_called_once_with("file:///synthetic/reconnect.sqlite?mode=rw", uri=True, check_same_thread=False)
+        self.connect.assert_called_once_with(engine.db_path.as_uri() + "?mode=rw", uri=True, check_same_thread=False)
         self.assertIn("PRAGMA quick_check(1)", queries)
         self.assertIn("PRAGMA foreign_keys=ON", queries)
         self.assertFalse(any(q.lstrip().split(" ", 1)[0].upper() in {"INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP"} for q in queries))
@@ -1752,7 +1845,7 @@ class TestEngineReconnectReceipt(unittest.TestCase):
     def test_changed_file_after_candidate_validation_is_refused(self):
         engine = self.engine()
         candidate = self.candidate(engine)
-        self.enterContext(patch.object(Path, "stat", side_effect=[self.stat, types.SimpleNamespace(st_dev=7, st_ino=12)]))
+        enter_context(self, patch.object(Path, "stat", side_effect=[self.stat, types.SimpleNamespace(st_dev=7, st_ino=12)]))
         self.assertIsNone(engine._reopen_initialized_connection(engine.db_path))
         self.assert_closed(candidate)
 
@@ -1869,7 +1962,7 @@ class TestEngineReconnectReceipt(unittest.TestCase):
         with patch.object(self.api, "open_serving_connection", side_effect=opener), patch.object(Path, "exists", return_value=True):
             with self.assertRaises(Completed):
                 module.open(engine)
-        self.connect.assert_called_once_with("file:///synthetic/reconnect.sqlite?mode=rw", uri=True, check_same_thread=False)
+        self.connect.assert_called_once_with(engine.db_path.as_uri() + "?mode=rw", uri=True, check_same_thread=False)
         self.assertEqual(queries, ["PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=3000", "PRAGMA foreign_keys=ON",
                                    "PRAGMA synchronous=NORMAL", "PRAGMA cache_size=-64000", "PRAGMA mmap_size=268435456"])
         self.assertIs(engine.conn, self.conn)

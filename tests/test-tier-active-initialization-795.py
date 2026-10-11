@@ -19,13 +19,14 @@ from unittest.mock import Mock, patch
 
 BOUNDARIES = runpy.run_path(str(Path(__file__).with_name("test-tier-public-boundaries-795.py")))
 definitions = BOUNDARIES["definitions"]
+enter_context = BOUNDARIES["enter_context"]
 
 
 class TestActiveInitialization(unittest.TestCase):
     def setUp(self):
         self.fixture = BOUNDARIES["TestEngineReconnectReceipt"]()
-        self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
+        self.fixture.setUp()
         self.first = self.fixture.engine()
         self.api = self.fixture.api
         self.closed_fds = []
@@ -52,7 +53,7 @@ class TestActiveInitialization(unittest.TestCase):
         self.coordinator = self.maintenance.get_coordinator(self.first.db_path)
         self.fixture.engine_namespace["_HAS_HYBRID"] = True
         self.maintenance.run_engine_maintenance = self.work
-        self.fixture.enterContext(patch.object(Path, "exists", return_value=False))
+        enter_context(self.fixture, patch.object(Path, "exists", return_value=False))
         self.addCleanup(self.finish)
 
     def work(self, conn, coordinator, **kwargs):
@@ -85,6 +86,28 @@ class TestActiveInitialization(unittest.TestCase):
     def record(self):
         with self.maintenance._active_initialization_receipt(self.first.db_path) as value:
             return value
+
+    def test_extension_unavailable_fts_worker_retains_validated_automatic_admission(self):
+        self.fixture.engine_namespace["_HAS_VECTOR"] = True
+        self.fixture.conn.enable_load_extension = None
+        operation = types.SimpleNamespace(key=self.api._legacy_key(), _database=("file", str(self.first.db_path)))
+        self.first._capture_reconnect_receipt(operation)
+        self.assertIsNotNone(self.first._reconnect_receipt)
+        self.assertEqual(self.first._reconnect_receipt[7:9], (False, True))
+        self.start()
+        candidate = self.fixture.candidate(self.first)
+        candidate.enable_load_extension = None
+        engine = self.fresh()
+        engine._open_connection_handle()
+        self.assertIs(engine.conn, candidate)
+        self.assertTrue(engine.ready)
+        self.assertTrue(engine._runtime_initialized)
+        self.assertFalse(engine._has_vectors)
+        self.assertFalse(engine._has_hybrid)
+        self.assertEqual(engine._reconnect_receipt, self.first._reconnect_receipt)
+        self.assertEqual(self.maintenance._held_paths[self.first.db_path], 71)
+        self.assertEqual(self.coordinator.status[0], "running")
+        self.assertEqual(self.fixture.fixture.loads, [])
 
     def test_fresh_engine_adopts_only_validated_active_automatic_receipt(self):
         self.start()
