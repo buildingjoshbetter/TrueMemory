@@ -244,7 +244,7 @@ def test_uninstall_preserves_other_entries(tmp_path, monkeypatch):
         "hooks": {
             "sessionStart": [
                 {"command": "my-hook", "timeout": 5000},
-                {"command": "/path/to/truememory/hooks/session_start.py", "timeout": 10000},
+                {"command": "/usr/bin/python3 /path/to/truememory/ingest/hooks/session_start.py", "timeout": 10000},
             ]
         },
     }), encoding="utf-8")
@@ -416,16 +416,16 @@ def test_install_migrates_stale_user_prompt_submit(tmp_path, monkeypatch):
         "version": 1,
         "hooks": {
             "sessionStart": [
-                {"command": "/usr/bin/python3 /path/to/truememory/session_start.py", "timeout": 10000}
+                {"command": "/usr/bin/python3 /path/to/truememory/ingest/hooks/session_start.py", "timeout": 10000}
             ],
             "stop": [
-                {"command": "/usr/bin/python3 /path/to/truememory/stop.py", "timeout": 5000}
+                {"command": "/usr/bin/python3 /path/to/truememory/ingest/hooks/stop.py", "timeout": 5000}
             ],
             "userPromptSubmit": [
-                {"command": "/usr/bin/python3 /path/to/truememory/user_prompt_submit.py", "timeout": 5000}
+                {"command": "/usr/bin/python3 /path/to/truememory/ingest/hooks/user_prompt_submit.py", "timeout": 5000}
             ],
             "preCompact": [
-                {"command": "/usr/bin/python3 /path/to/truememory/compact.py", "timeout": 5000}
+                {"command": "/usr/bin/python3 /path/to/truememory/ingest/hooks/compact.py", "timeout": 5000}
             ],
         },
     }
@@ -460,13 +460,13 @@ def test_install_updates_stale_millisecond_timeouts(tmp_path, monkeypatch):
         "version": 1,
         "hooks": {
             "sessionStart": [
-                {"command": "/usr/bin/python3 /path/to/truememory/session_start.py", "timeout": 10000}
+                {"command": "/usr/bin/python3 /path/to/truememory/ingest/hooks/session_start.py", "timeout": 10000}
             ],
             "stop": [
-                {"command": "/usr/bin/python3 /path/to/truememory/stop.py", "timeout": 5000}
+                {"command": "/usr/bin/python3 /path/to/truememory/ingest/hooks/stop.py", "timeout": 5000}
             ],
             "preCompact": [
-                {"command": "/usr/bin/python3 /path/to/truememory/compact.py", "timeout": 5000}
+                {"command": "/usr/bin/python3 /path/to/truememory/ingest/hooks/compact.py", "timeout": 5000}
             ],
         },
     }
@@ -496,11 +496,11 @@ def test_install_preserves_non_truememory_hooks(tmp_path, monkeypatch):
         "version": 1,
         "hooks": {
             "userPromptSubmit": [
-                {"command": "/usr/bin/python3 /path/to/truememory/user_prompt_submit.py", "timeout": 5000},
+                {"command": "/usr/bin/python3 /path/to/truememory/ingest/hooks/user_prompt_submit.py", "timeout": 5000},
                 {"command": "/usr/local/bin/my-custom-linter", "timeout": 10},
             ],
             "sessionStart": [
-                {"command": "/usr/bin/python3 /path/to/truememory/session_start.py", "timeout": 10000}
+                {"command": "/usr/bin/python3 /path/to/truememory/ingest/hooks/session_start.py", "timeout": 10000}
             ],
         },
     }
