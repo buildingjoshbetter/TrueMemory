@@ -510,6 +510,40 @@ class TranscriptAdmissionTests(unittest.TestCase):
         self.assertEqual(len(groups), 1)
         self.assertIn("--host gemini --event SessionStart", groups[0]["hooks"][0]["command"])
 
+    def test_cursor_extraction_uses_native_conversation_identity(self) -> None:
+        os.environ["TRUEMEMORY_TRANSCRIPT_DIR"] = str(self.home / "synthetic-transcripts")
+        path = self.write(self.home / "synthetic-transcripts/session.jsonl", "synthetic text " * 30)
+        for module, argv in ((self.stop, ["stop.py", "--host", "cursor", "--event", "stop"]),
+                             (self.compact, ["compact.py", "--host", "cursor", "--event", "preCompact"])):
+            for conversation in ("synthetic-cursor-a", "synthetic-cursor-b"):
+                with self.subTest(module=module.__name__, conversation=conversation), \
+                        patch.object(self.compact, "save_snapshot") as snapshot, \
+                        patch.object(self.stop, "_run_background_ingestion", return_value=17) as spawn, \
+                        patch.object(sys, "argv", argv), \
+                        patch.object(sys, "stdin", io.StringIO(json.dumps({
+                            "transcript_path": str(path), "conversation_id": conversation,
+                        }))):
+                    module.main()
+                    self.assertEqual(spawn.call_args.args[1], conversation)
+                    if module is self.compact:
+                        self.assertEqual(snapshot.call_args.args[1], conversation)
+
+    def test_hook_identity_is_host_scoped_and_preserves_each_caller_default(self) -> None:
+        payload = {"conversation_id": "synthetic-native", "session_id": "synthetic-legacy", "host": "cursor"}
+        self.assertEqual(self.shared.hook_session_id(payload, "cursor"), "synthetic-native")
+        for host in ("claude", "codex", "gemini"):
+            self.assertEqual(self.shared.hook_session_id(payload, host), "synthetic-legacy")
+            self.assertEqual(self.shared.hook_session_id({"conversation_id": "synthetic-native"}, host), "unknown")
+        for malformed in (None, {}, [], 42, "", " ", "bad\0id"):
+            with self.subTest(malformed=malformed):
+                payload = {"conversation_id": malformed, "session_id": "synthetic-legacy"}
+                self.assertEqual(self.shared.hook_session_id(payload, "cursor"), "synthetic-legacy")
+                self.assertEqual(self.shared.hook_session_id({"conversation_id": malformed}, "cursor"), "unknown")
+                self.assertEqual(self.shared.hook_session_id({"conversation_id": malformed}, "cursor", default=""), "")
+        for malformed in (None, [], 42, "text"):
+            self.assertEqual(self.shared.hook_session_id(malformed, "cursor"), "unknown")
+        self.assertEqual(self.shared.hook_session_id(payload, "invalid", default=""), "")
+
 
 if __name__ == "__main__":
     unittest.main()

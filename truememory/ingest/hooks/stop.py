@@ -126,10 +126,10 @@ def main() -> None:
         if not isinstance(input_data, dict):
             return
         from truememory.ingest.hooks._shared import (
-            is_allowed_transcript, mark_session_extracted, transcript_input_path,
+            is_allowed_transcript, mark_session_extracted, transcript_input_path, hook_session_id,
         )
         transcript_path = transcript_input_path(input_data.get("transcript_path", ""))
-        session_id = _sanitize_session_id(input_data.get("session_id", ""))
+        session_id = _sanitize_session_id(hook_session_id(input_data, host=args.host))
         if is_allowed_transcript(transcript_path, host=args.host) and session_id != "unknown":
             try:
                 mark_session_extracted(session_id, transcript_path)
@@ -144,9 +144,9 @@ def main() -> None:
 
     if not isinstance(input_data, dict):
         return
-    from truememory.ingest.hooks._shared import is_allowed_transcript, transcript_input_path
+    from truememory.ingest.hooks._shared import is_allowed_transcript, transcript_input_path, hook_session_id
     transcript_path = transcript_input_path(input_data.get("transcript_path", ""))
-    session_id = _sanitize_session_id(input_data.get("session_id", "unknown"))
+    session_id = _sanitize_session_id(hook_session_id(input_data, host=args.host))
 
     if not transcript_path:
         return

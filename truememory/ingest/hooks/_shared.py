@@ -38,6 +38,19 @@ def normalize_transcript_host(host: object) -> str:
     return ""
 
 
+def hook_session_id(payload: object, host: str = "claude", *, default: str = "unknown") -> str:
+    """Read native identity using the trusted host, retaining caller fallback."""
+    host = normalize_transcript_host(host)
+    if not host or not isinstance(payload, dict):
+        return default
+    keys = ("conversation_id", "session_id") if host == "cursor" else ("session_id",)
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip() and "\0" not in value:
+            return value.strip()
+    return default
+
+
 def transcript_input_path(value: object) -> str:
     """Reject malformed source paths before any filesystem probe."""
     if not isinstance(value, str) or not value.strip() or "\0" in value:
