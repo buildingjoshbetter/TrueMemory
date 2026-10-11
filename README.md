@@ -31,11 +31,11 @@
 
 ## Why TrueMemory
 
-**It finds signal in the noise.** Your AI sees thousands of messages. TrueMemory figures out which ones actually matter and throws away the rest. No manual tagging, no prompt engineering. It just knows.
+**It finds signal in the noise.** Automatic capture extracts selected facts from conversation transcripts, then filters and deduplicates them before storage.
 
 **It gets sharper over time.** It's not a static database. It's a living memory that grows with you. It resolves contradictions when you change your mind, updates stale facts, and consolidates what it knows. The longer you use it, the better it gets.
 
-**It works without you thinking about it.** TrueMemory automatically captures memories from your conversations and automatically injects the right ones into your next session. You never have to store or search for anything manually. It just happens.
+**It works without you thinking about it.** Configured lifecycle hooks extract memories from your conversations and inject relevant stored memories into later sessions. This does not create a complete searchable transcript archive. See [input routes and coverage](docs/architecture.md#input-routes-and-coverage).
 
 **It's 100% local.** One SQLite file on your machine. Your memories never leave your device. No cloud, no API keys needed. Your data is yours. (Anonymous usage telemetry is the only exception — never memory content — and one env var turns it off. [Details](#faq).)
 
@@ -87,7 +87,7 @@ irm https://raw.githubusercontent.com/buildingjoshbetter/TrueMemory/main/install
 
 </details>
 
-That's it. TrueMemory remembers your conversations automatically from here. Need help? [Join our Discord](https://discord.gg/ZJ74JB2gVW).
+Configured hooks now capture selected memories from your conversations automatically. See [capture coverage](docs/architecture.md#input-routes-and-coverage). Need help? [Join our Discord](https://discord.gg/ZJ74JB2gVW).
 
 > If TrueMemory saves you time, [a ⭐ helps other devs find it](https://github.com/buildingjoshbetter/TrueMemory).
 
@@ -133,6 +133,8 @@ Same architecture, three tiers. All included in a single install. Switch anytime
 
 Tested across three major benchmarks with all systems sharing the same answer model (GPT-4.1-mini), judge (GPT-4o-mini, 3x majority vote), and scoring pipeline.
 
+The TrueMemory benchmark scripts ingest supplied message content after dataset-specific preprocessing, bypassing automatic transcript fact extraction. These results measure retrieval over that supplied corpus; they do not measure which details automatic capture retains. For example, the LoCoMo scripts resolve relative dates before ingestion. See [input routes and coverage](docs/architecture.md#input-routes-and-coverage).
+
 | Benchmark | What it tests | TrueMemory Pro |
 |-----------|--------------|:--------------:|
 | [LoCoMo](https://github.com/snap-research/locomo) | 1,540 questions across 10 conversations | **93.0%** |
@@ -163,7 +165,7 @@ All benchmarks use the same eval pipeline. Nothing is hidden. Full details: [LoC
   <strong>Claude Code</strong> · <strong>Claude CLI</strong> · <strong>Cursor</strong> · <strong>Codex CLI</strong> · <strong>Gemini CLI</strong> · <strong>Claude Desktop</strong>
 </p>
 
-Lifecycle hooks capture conversations automatically. No manual work needed. Your memories stay local in a single SQLite file.
+Configured lifecycle hooks extract selected facts from conversations into a local SQLite database. Ordinary search and Deep Search query stored memories, including any directly imported messages; they do not search external transcript archives.
 
 ---
 
