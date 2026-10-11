@@ -180,7 +180,8 @@ class CursorAdapter(CLIAdapter):
             else:
                 hooks.pop(stale, None)
 
-        # --- Migration: update existing TrueMemory hook timeouts ---
+        # Upgrade owned commands so existing installations select the native
+        # event contract instead of retaining the legacy Claude response.
         for event, info in _HOOK_EVENTS.items():
             event_list = hooks.get(event)
             if not isinstance(event_list, list):
@@ -189,9 +190,11 @@ class CursorAdapter(CLIAdapter):
                 if (
                     isinstance(entry, dict)
                     and _TRUEMEMORY_MARKER in entry.get("command", "").lower()
-                    and entry.get("timeout") != info["timeout"]
                 ):
                     entry["timeout"] = info["timeout"]
+                    entry["command"] = self._build_command(
+                        py, hooks_dir / info["script"], user_id, db_path, event=event,
+                    )
 
         for event, info in _HOOK_EVENTS.items():
             event_list = hooks.setdefault(event, [])
@@ -203,7 +206,7 @@ class CursorAdapter(CLIAdapter):
                 continue
 
             script_path = hooks_dir / info["script"]
-            cmd = self._build_command(py, script_path, user_id, db_path)
+            cmd = self._build_command(py, script_path, user_id, db_path, event=event)
             event_list.append({
                 "command": cmd,
                 "timeout": info["timeout"],
@@ -232,12 +235,16 @@ class CursorAdapter(CLIAdapter):
         script_path: Path,
         user_id: str = "",
         db_path: str = "",
+        event: str = "",
     ) -> str:
         parts: list[str] = [python_path, str(script_path)]
         if user_id:
             parts.extend(["--user", user_id])
         if db_path:
             parts.extend(["--db", db_path])
+        parts.extend(["--host", "cursor"])
+        if event:
+            parts.extend(["--event", event])
         if sys.platform == "win32":
             import subprocess as _sp
             return _sp.list2cmdline(parts)
