@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shlex
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -184,11 +185,13 @@ def load_adapter(source: Path, home: Path) -> Adapter:
                          and (node.module or "").startswith("truememory"))]
     base_source = ROOT / "truememory/hooks/adapters/base.py"
     base_tree = ast.parse(base_source.read_text(encoding="utf-8"))
-    atomic_node = next(node for node in base_tree.body
-                       if isinstance(node, ast.FunctionDef) and node.name == "atomic_write_text")
-    namespace: dict[str, object] = {"Path": Path, "os": os, "CLIAdapter": object,
+    shared_nodes = [node for node in base_tree.body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name in {"atomic_write_text", "is_owned_hook_command"}]
+    namespace: dict[str, object] = {"Path": Path, "os": os, "re": re, "shlex": shlex,
+                                    "sys": sys, "CLIAdapter": object,
                                     "__file__": str(source), "__name__": "synthetic_docs766"}
-    exec(compile(ast.Module(body=[atomic_node], type_ignores=[]), str(base_source), "exec"), namespace)
+    exec(compile(ast.Module(body=shared_nodes, type_ignores=[]), str(base_source), "exec"), namespace)
     with patch("pathlib.Path.home", return_value=home):
         exec(compile(tree, str(source), "exec"), namespace)
     if source.stem == "hermes":
@@ -213,10 +216,7 @@ def canonical(value: object) -> object:
 
 class ManualSetupParityTests(unittest.TestCase):
     def setUp(self) -> None:
-        fixture_root = Path(os.environ.get("TRUEMEMORY_DOCS766_FIXTURE_ROOT",
-                                          str(ROOT / ".work/fixtures/manual-integration-docs-766-v1")))
-        fixture_root.mkdir(parents=True, exist_ok=True)
-        self.case = Path(tempfile.mkdtemp(prefix=f"{self._testMethodName}-", dir=fixture_root))
+        self.case = Path(tempfile.mkdtemp(prefix="truememory-manual-docs-766-"))
         self.home = self.case / "adapter-home"
         self.home.mkdir()
         self.python = self.case / "bin/python"
