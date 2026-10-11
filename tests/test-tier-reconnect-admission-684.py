@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
+import gc
 import os
 from pathlib import Path
 import sqlite3
@@ -283,6 +284,7 @@ class TestReconnectAdmission(unittest.TestCase):
         return fixture
 
     def test_closed_handle_retries_exact_automatic_owner_outside_engine_locks(self) -> None:
+        self.assertTrue(gc.isenabled())
         fixture = self.fixture()
         origin = fixture.automatic_owner()
         fixture.runtime.open_engine_for_operation(fixture.engine)
@@ -296,6 +298,7 @@ class TestReconnectAdmission(unittest.TestCase):
         self.assertFalse(fixture.engine._runtime_initialized)
 
     def test_io_error_handle_retries_same_strict_automatic_owner(self) -> None:
+        self.assertTrue(gc.isenabled())
         fixture = self.fixture("io_error")
         origin = fixture.automatic_owner()
         fixture.runtime.open_engine_for_operation(fixture.engine)
