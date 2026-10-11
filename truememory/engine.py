@@ -500,7 +500,7 @@ class TrueMemoryEngine:
                         finally:
                             if not installed:
                                 candidate.close()
-            from truememory.maintenance import maintenance_owner
+            from truememory.maintenance import MaintenanceBusyError, maintenance_owner
             if str(path) != ":memory:":
                 path.parent.mkdir(parents=True, exist_ok=True)
                 try:
@@ -509,21 +509,30 @@ class TrueMemoryEngine:
                     pass
             # Keep same-Engine openers serialized, but never claim maintenance
             # ownership while holding the connection writer.
-            with maintenance_owner(None if str(path) == ":memory:" else path), \
-                    _connection_read(self.conn, self._write_lock, None, None, allow_closed=True):
-                reason = replacement_reason()
-                if reason is None:
-                    return
-                if reason == "io_error":
-                    self.conn.close()
-                self.conn = None
-                self._has_vectors = False
-                self.ready = False
-                self._runtime_initialized = False
-                self._runtime_vector_generation = None
-                self._runtime_vector_connection = None
-                self._reconnect_receipt = None
-                self.conn = _open_serving_connection_at_path(path, create_db)
+            poisoned = self.conn if reason in {"closed", "io_error"} else None
+            try:
+                with maintenance_owner(None if str(path) == ":memory:" else path), \
+                        _connection_read(self.conn, self._write_lock, None, None, allow_closed=True):
+                    reason = replacement_reason()
+                    if reason is None:
+                        return
+                    if reason == "io_error":
+                        self.conn.close()
+                    self.conn = None
+                    self._has_vectors = False
+                    self.ready = False
+                    self._runtime_initialized = False
+                    self._runtime_vector_generation = None
+                    self._runtime_vector_connection = None
+                    self._reconnect_receipt = None
+                    self.conn = _open_serving_connection_at_path(path, create_db)
+            except MaintenanceBusyError as error:
+                if poisoned is not None and self.conn is poisoned:
+                    # Public opening may retry this unusable handle only after
+                    # validating the exact automatic owner on the same error.
+                    error._reconnect_engine = self
+                    error._reconnect_handle = poisoned
+                raise
 
     @staticmethod
     def _reconnect_registry(conn: sqlite3.Connection) -> tuple | None:
