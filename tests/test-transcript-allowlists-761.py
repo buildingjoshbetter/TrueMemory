@@ -35,11 +35,12 @@ def source_module(name: str, relative_path: str, names: set[str] | None = None) 
         ]
     module = types.ModuleType(name)
     module.__file__ = str(ROOT / relative_path)
-    module.__dict__.update({
-        "Path": Path, "json": json, "os": os, "sys": sys,
-        "subprocess": subprocess, "argparse": argparse,
-        "log": logging.getLogger(name), "logging": logging,
-    })
+    if names is not None:
+        module.__dict__.update({
+            "Path": Path, "json": json, "os": os, "sys": sys,
+            "subprocess": subprocess, "argparse": argparse,
+            "log": logging.getLogger(name), "logging": logging,
+        })
     sys.modules[name] = module
     exec(compile(tree, module.__file__, "exec"), module.__dict__)
     return module
@@ -85,13 +86,10 @@ class TranscriptAdmissionTests(unittest.TestCase):
         core.register_spawned_pid = lambda pid: None
         core._load_cap_state = lambda: {"cap": 2}
         packages["truememory.hooks.core"] = core
-        base = types.ModuleType("truememory.hooks.adapters.base")
-        base.CLIAdapter = type("CLIAdapter", (), {})
-        base.atomic_write_text = lambda path, text: path.write_text(text, encoding="utf-8")
-        packages["truememory.hooks.adapters.base"] = base
         self.module_patch = patch.dict(sys.modules, packages)
         self.module_patch.start()
         self.addCleanup(self.module_patch.stop)
+        source_module("truememory.hooks.adapters.base", "truememory/hooks/adapters/base.py")
         self.shared = source_module(
             "truememory.ingest.hooks._shared", "truememory/ingest/hooks/_shared.py",
         )
@@ -365,7 +363,7 @@ class TranscriptAdmissionTests(unittest.TestCase):
         before = ('[[hooks.Stop]]\n[[hooks.Stop.hooks]]\n'
                   'type = "command"\ncommand = "external-helper"\n'
                   '[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\n'
-                  'type = "command"\ncommand = "python /truememory/session_start.py"\n'
+                  'type = "command"\ncommand = "python /truememory/ingest/hooks/session_start.py"\n'
                   'timeout = 10\n')
         self.write(module._CONFIG_PATH, before)
         adapter = module.CodexAdapter()
@@ -388,7 +386,7 @@ class TranscriptAdmissionTests(unittest.TestCase):
         module._CONFIG_PATH = self.home / ".gemini/settings.json"
         external = {"hooks": [{"type": "command", "command": "external-helper"}]}
         self.write(module._CONFIG_PATH, json.dumps({"hooks": {"SessionStart": [external,
-            {"command": "python /truememory/session_start.py", "timeout": 10000}]}}))
+            {"command": "python /truememory/ingest/hooks/session_start.py", "timeout": 10000}]}}))
         adapter = module.GeminiAdapter()
         adapter.install_hooks(python_path="/synthetic path/python", user_id="synthetic")
         first = module._CONFIG_PATH.read_text()
@@ -403,6 +401,114 @@ class TranscriptAdmissionTests(unittest.TestCase):
             self.assertEqual(parts[parts.index("--event") + 1], event)
         adapter.install_hooks(python_path="/synthetic path/python", user_id="synthetic")
         self.assertEqual(module._CONFIG_PATH.read_text(), first)
+
+    def test_codex_foreign_mentions_are_preserved_and_do_not_suppress_registration(self) -> None:
+        module = source_module("truememory.hooks.adapters.codex", "truememory/hooks/adapters/codex.py")
+        module._CONFIG_PATH = self.home / ".codex/config.toml"
+        foreign_commands = (
+            "/synthetic/foreign-policy --target truememory",
+            "/synthetic/foreign-policy --target /pkg/truememory/ingest/hooks/session_start.py",
+            "python /synthetic/foreign-policy.py --target truememory",
+            "python -c 'print(\"truememory\")'",
+            "echo python /pkg/truememory/ingest/hooks/session_start.py",
+            "/synthetic/foreign-policy # python /pkg/truememory/ingest/hooks/session_start.py",
+            "python /pkg/not-truememory/ingest/hooks/session_start.py",
+            "python /pkg/truememory/ingest/hooks/session_start.py && /synthetic/foreign-policy",
+            "python /pkg/truememory/session_start.py",
+            "python /pkg/truememory/hooks/session_start.py",
+        )
+        for foreign in foreign_commands:
+            with self.subTest(foreign=foreign):
+                command_line = 'command = ' + json.dumps(foreign) + '\n'
+                before = ('[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\n'
+                          'type = "command"\n' + command_line + 'timeout = 21\n')
+                self.write(module._CONFIG_PATH, before)
+                adapter = module.CodexAdapter()
+                adapter.install_hooks(python_path="/synthetic/python")
+                first = module._CONFIG_PATH.read_text()
+                self.assertIn(before, first)
+                commands = [hook["command"] for group in adapter._parse_existing_hooks(first)["SessionStart"]
+                            for hook in group["hooks"]]
+                self.assertIn(foreign, commands)
+                self.assertEqual(len(commands), 2)
+                adapter.install_hooks(python_path="/synthetic/python")
+                self.assertEqual(module._CONFIG_PATH.read_text(), first)
+
+    def test_gemini_foreign_mentions_are_preserved_and_do_not_suppress_registration(self) -> None:
+        module = source_module("truememory.hooks.adapters.gemini", "truememory/hooks/adapters/gemini.py")
+        module._CONFIG_PATH = self.home / ".gemini/settings.json"
+        foreign_commands = (
+            "/synthetic/foreign-policy --target truememory",
+            "/synthetic/foreign-policy --target /pkg/truememory/ingest/hooks/session_start.py",
+            "python /synthetic/foreign-policy.py --target truememory",
+            "python -c 'print(\"truememory\")'",
+            "echo python /pkg/truememory/ingest/hooks/session_start.py",
+            "/synthetic/foreign-policy # python /pkg/truememory/ingest/hooks/session_start.py",
+            "python /pkg/not-truememory/ingest/hooks/session_start.py",
+            "python /pkg/truememory/ingest/hooks/session_start.py && /synthetic/foreign-policy",
+            "python /pkg/truememory/session_start.py",
+            "python /pkg/truememory/hooks/session_start.py",
+        )
+        for foreign in foreign_commands:
+            for nested in (True, False):
+                with self.subTest(foreign=foreign, nested=nested):
+                    hook = {"command": foreign, "timeout": 21}
+                    definition = {"hooks": [hook]} if nested else hook
+                    self.write(module._CONFIG_PATH, json.dumps({"hooks": {"SessionStart": [definition]}}))
+                    adapter = module.GeminiAdapter()
+                    adapter.install_hooks(python_path="/synthetic/python")
+                    first = module._CONFIG_PATH.read_text()
+                    definitions = json.loads(first)["hooks"]["SessionStart"]
+                    self.assertEqual(definitions[0], definition)
+                    self.assertEqual(len(definitions), 2)
+                    adapter.install_hooks(python_path="/synthetic/python")
+                    self.assertEqual(module._CONFIG_PATH.read_text(), first)
+
+    def test_owned_hook_predicate_requires_actual_python_invocation(self) -> None:
+        predicate = sys.modules["truememory.hooks.adapters.base"].is_owned_hook_command
+        for stem in ("session_start", "user_prompt_submit", "stop", "compact"):
+            for command in (
+                f"python /pkg/truememory/ingest/hooks/{stem}.py",
+                f"'/pkg with space/python3.10' '/pkg with space/truememory/ingest/hooks/{stem}.py' --user ';'",
+                f"python -B -m truememory.ingest.hooks.{stem}",
+            ):
+                with self.subTest(command=command):
+                    self.assertTrue(predicate(command))
+        for command in (None, [], "", "python -c 'truememory.ingest.hooks.stop'",
+                        "python -m foreign --target truememory.ingest.hooks.stop",
+                        "foreign /pkg/truememory/ingest/hooks/stop.py", "python-policy /pkg/truememory/ingest/hooks/stop.py",
+                        "python /pkg/truememory/ingest/hooks/stop.py; foreign", "python /pkg/truememory/ingest/hooks/stop.py\nforeign",
+                        "python /pkg/truememory/ingest/hooks/stop.py > output", "python '/pkg/truememory/ingest/hooks/stop.py",
+                        "python \"$(foreign)/truememory/ingest/hooks/stop.py\"", "python /pkg/truememory/ingest/hooks/not-a-hook.py"):
+            with self.subTest(command=command):
+                self.assertFalse(predicate(command))
+        with patch.object(sys, "platform", "win32"):
+            command = subprocess.list2cmdline([
+                r"C:\Program Files\Python\python.exe",
+                r"C:\Synthetic Package\truememory\ingest\hooks\stop.py",
+                "--host", "codex", "--user", "synthetic user",
+            ])
+            self.assertTrue(predicate(command))
+            self.assertFalse(predicate(r"C:\foreign.exe --target truememory"))
+
+    def test_owned_module_invocations_are_upgraded_without_duplication(self) -> None:
+        codex = source_module("truememory.hooks.adapters.codex", "truememory/hooks/adapters/codex.py")
+        codex._CONFIG_PATH = self.home / ".codex/config.toml"
+        self.write(codex._CONFIG_PATH, '[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\n'
+                   'command = "python -m truememory.ingest.hooks.session_start"\n')
+        adapter = codex.CodexAdapter()
+        adapter.install_hooks(python_path="/synthetic/python")
+        groups = adapter._parse_existing_hooks(codex._CONFIG_PATH.read_text())["SessionStart"]
+        self.assertEqual(len(groups), 1)
+        self.assertIn("--host codex --event SessionStart", groups[0]["hooks"][0]["command"])
+        gemini = source_module("truememory.hooks.adapters.gemini", "truememory/hooks/adapters/gemini.py")
+        gemini._CONFIG_PATH = self.home / ".gemini/settings.json"
+        self.write(gemini._CONFIG_PATH, json.dumps({"hooks": {"SessionStart": [{"hooks": [
+            {"command": "python -m truememory.ingest.hooks.session_start"}]}]}}))
+        gemini.GeminiAdapter().install_hooks(python_path="/synthetic/python")
+        groups = json.loads(gemini._CONFIG_PATH.read_text())["hooks"]["SessionStart"]
+        self.assertEqual(len(groups), 1)
+        self.assertIn("--host gemini --event SessionStart", groups[0]["hooks"][0]["command"])
 
 
 if __name__ == "__main__":

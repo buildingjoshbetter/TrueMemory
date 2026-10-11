@@ -18,7 +18,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from truememory.hooks.adapters.base import CLIAdapter, atomic_write_text
+from truememory.hooks.adapters.base import CLIAdapter, atomic_write_text, is_owned_hook_command
 
 _GEMINI_DIR = Path.home() / ".gemini"
 _CONFIG_PATH = _GEMINI_DIR / "settings.json"
@@ -158,11 +158,11 @@ class GeminiAdapter(CLIAdapter):
                         if (
                             isinstance(hook, dict)
                             and isinstance(hook.get("command"), str)
-                            and _TRUEMEMORY_MARKER in hook["command"].lower()
+                            and is_owned_hook_command(hook["command"])
                         ):
                             hook["command"] = cmd
                 legacy_command = definition.get("command", "")
-                if isinstance(legacy_command, str) and _TRUEMEMORY_MARKER in legacy_command.lower():
+                if is_owned_hook_command(legacy_command):
                     definition.pop("command", None)
                     definition.pop("timeout", None)
                     definition["hooks"] = [{
@@ -299,11 +299,11 @@ class GeminiAdapter(CLIAdapter):
             for hc in inner_hooks:
                 if (
                     isinstance(hc, dict)
-                    and _TRUEMEMORY_MARKER in hc.get("command", "").lower()
+                    and is_owned_hook_command(hc.get("command", ""))
                 ):
                     return True
         # Legacy flat format fallback
-        if _TRUEMEMORY_MARKER in hook_def.get("command", "").lower():
+        if is_owned_hook_command(hook_def.get("command", "")):
             return True
         return False
 
