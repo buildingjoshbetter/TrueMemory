@@ -170,6 +170,8 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--user", default=os.environ.get("TRUEMEMORY_USER_ID", ""))
     p.add_argument("--db", default=os.environ.get("TRUEMEMORY_DB_PATH", ""))
+    p.add_argument("--host", choices=("claude", "codex", "gemini", "cursor"), default="claude")
+    p.add_argument("--event", default="SessionStart")
     p.add_argument("--scan-stale", action="store_true", help=argparse.SUPPRESS)
     args, _ = p.parse_known_args()
     return args
@@ -733,7 +735,7 @@ def main():
         _scan_stale_sessions()
         return
 
-    _run_maintenance_background()
+    _run_maintenance_background(args.host)
 
     try:
         input_data = json.load(sys.stdin)
