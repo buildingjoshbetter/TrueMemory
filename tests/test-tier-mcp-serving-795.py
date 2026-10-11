@@ -6,14 +6,16 @@ import builtins
 import json
 import logging
 import runpy
+import sqlite3
 import threading
+import time
 import types
 import unittest
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 GATE = runpy.run_path(str(ROOT / "truememory/tier_switch/serving.py"))
@@ -89,9 +91,30 @@ class TestMCPServing(unittest.TestCase):
 
         runtime = types.SimpleNamespace(serving_operation=serving_operation, raise_if_serving_rejection=reject)
 
+        maintenance_tree = ast.parse((ROOT / "truememory/maintenance.py").read_text(encoding="utf-8"))
+        maintenance_error = next(node for node in maintenance_tree.body
+                                 if isinstance(node, ast.ClassDef) and node.name == "MaintenanceBusyError")
+        maintenance_namespace = {}
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[maintenance_error], type_ignores=[])),
+                     "actual-maintenance-error", "exec"), maintenance_namespace)
+        storage_tree = ast.parse((ROOT / "truememory/storage.py").read_text(encoding="utf-8"))
+        budget = next(ast.literal_eval(node.value) for node in storage_tree.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "DEFAULT_BUSY_TIMEOUT_MS"
+                              for target in node.targets))
+        modules = {
+            "truememory.tier_switch.runtime": runtime,
+            "truememory.maintenance": types.SimpleNamespace(
+                MaintenanceBusyError=maintenance_namespace["MaintenanceBusyError"],
+                wait_for_automatic_owner=Mock(side_effect=AssertionError("Unexpected automatic owner wait in healthy MCP fixture"))),
+            "truememory.storage": types.SimpleNamespace(DEFAULT_BUSY_TIMEOUT_MS=budget),
+        }
+
         def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
-            if name == "truememory.tier_switch.runtime":
-                return runtime
+            if name in modules:
+                return modules[name]
+            if name.startswith("truememory") or name.split(".")[0] in {
+                    "numpy", "torch", "sqlite_vec", "model2vec", "sentence_transformers"}:
+                raise AssertionError("Unexpected native/application import in MCP fixture: " + name)
             return builtins.__import__(name, globals, locals, fromlist, level)
 
         runtime_tree = ast.parse((ROOT / "truememory/tier_switch/runtime.py").read_text(encoding="utf-8"))
@@ -99,11 +122,13 @@ class TestMCPServing(unittest.TestCase):
         context_definitions = [node for node in runtime_tree.body
                                if isinstance(node, ast.FunctionDef) and node.name in context_names]
         self.assertEqual({node.name for node in context_definitions}, context_names)
+        writer_class = next(node for node in runtime_tree.body
+                            if isinstance(node, ast.ClassDef) and node.name == "ConnectionWriteLock")
         context_namespace = dict(__builtins__=dict(vars(builtins), __import__=safe_import),
                                  contextmanager=contextmanager, serving_operation=serving_operation,
-                                 current_operation=lambda conn: None)
+                                 current_operation=lambda conn: None, time=time, threading=threading, sqlite3=sqlite3)
         future = ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)
-        exec(compile(ast.fix_missing_locations(ast.Module(body=[future, *context_definitions], type_ignores=[])),
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[future, writer_class, *context_definitions], type_ignores=[])),
                      "actual-public-context", "exec"), context_namespace)
         runtime.engine_serving_operation = context_namespace["engine_serving_operation"]
 
