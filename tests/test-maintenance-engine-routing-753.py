@@ -710,7 +710,9 @@ class TestEngineRouting(RoutingFixture):
             result = self.engine.consolidate()
             automatic.assert_not_called()
         self.assertEqual(set(result), set(MAINTENANCE._MAINTENANCE_RESULT_KEYS))
-        self.assertTrue(all("ERROR" not in value and "UNAVAILABLE" not in value for value in result.values()), result)
+        self.assertTrue(all("ERROR" not in value and "UNAVAILABLE" not in value
+                            for key, value in result.items() if key != "extract_preferences"), result)
+        self.assertEqual(result["extract_preferences"], "UNAVAILABLE (ScheduledPreferencesUnsupported)")
         self.assertIn("vector_generation_unverified", result["cluster_messages"])
         with self.assertRaises(sqlite3.ProgrammingError):
             seen[0].execute("SELECT 1")

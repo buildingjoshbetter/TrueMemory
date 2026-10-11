@@ -2427,6 +2427,9 @@ def all_layer_specs(conn: sqlite3.Connection) -> tuple[LayerSpec, ...]:
     ))
 
 
+SCHEDULED_PREFERENCES_UNAVAILABLE = "UNAVAILABLE (ScheduledPreferencesUnsupported)"
+
+
 class MaintenanceReport(NamedTuple):
     results: tuple[LayerResult, ...]
     preferences: str
@@ -2657,33 +2660,24 @@ def run_engine_maintenance(
         if cancel is not None and cancel.is_set():
             preferences = "CANCELLED"
         elif force or any(result.attempted for result in results):
-            started = time.monotonic()
-            try:
-                importlib.import_module("truememory.personality").extract_preferences(conn)
-            except (ImportError, AttributeError):
-                preferences = "UNAVAILABLE (DependencyMissing)"
-            except Exception as error:
-                preferences = "ERROR (" + type(error).__name__[:64] + ")"
-            else:
-                preferences = f"{time.monotonic() - started:.3f}s"
-            if conn.in_transaction and allow_caller_transaction:
-                preferences += " (pending caller commit)"
+            preferences = SCHEDULED_PREFERENCES_UNAVAILABLE
         return MaintenanceReport(results, preferences, style_result)
 
 
 def maintenance_report_status(report: MaintenanceReport, cancel: threading.Event | None = None) -> tuple[str, str | None]:
-    if cancel is not None and cancel.is_set():
+    if report.preferences == "CANCELLED" or cancel is not None and cancel.is_set():
         return "cancelled", "Cancelled"
     results = report.results + ((report.style_result,) if report.style_result is not None else ())
     for outcome in ("failed", "unavailable", "deferred", "abandoned"):
         for result in results:
             if result.outcome == outcome:
                 return outcome, result.error_category
-    if report.preferences.startswith(("ERROR", "UNAVAILABLE")):
+    preferences_unsupported = report.preferences == SCHEDULED_PREFERENCES_UNAVAILABLE
+    if report.preferences.startswith(("ERROR", "UNAVAILABLE")) and not preferences_unsupported:
         return "failed", "PreferencesUnavailable"
     if any(result.pending_caller_commit or result.outcome not in {"success", "success_empty", "current"} for result in results):
         return "pending", None
-    if any(result.coverage != "complete" for result in results):
+    if preferences_unsupported or any(result.coverage != "complete" for result in results):
         return "completed_with_limits", None
     return "success", None
 

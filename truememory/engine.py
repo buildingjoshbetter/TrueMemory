@@ -188,7 +188,6 @@ _HAS_PERSONALITY = False
 try:
     from truememory.personality import (
         build_entity_profiles,
-        extract_preferences,
         search_personality,
         PERSONALITY_ASPECTS,
         build_dunbar_hierarchy,
@@ -1842,7 +1841,7 @@ class TrueMemoryEngine:
             2. Load messages from JSON file
             3. Build vector embeddings (Model2Vec -> sqlite-vec)
             4. Build entity profiles (L0)
-            5. Extract preferences (L0)
+            5. Report unavailable scheduled preference refresh (L0)
             6. Build summaries (L5)
             7. Detect contradictions (L5)
             8. Build surprise index (predictive coding)
@@ -1852,7 +1851,7 @@ class TrueMemoryEngine:
         engine still works with FTS5 only.
 
         Returns:
-            Dict mapping step names to timing strings (or error messages).
+            Dict mapping step names to timing strings or explicit status messages.
         """
         from truememory.tier_switch.runtime import destructive_ingest_operation
         with destructive_ingest_operation(self):
@@ -1977,17 +1976,10 @@ class TrueMemoryEngine:
             else:
                 stats["build_style_vectors"] = "SKIPPED (personality_style_vec module not available)"
 
-            # ── 5. Extract preferences (L0) ───────────────────────────────────
+            # Scheduled preference maps have no persistence/refresh implementation.
             if _HAS_PERSONALITY:
-                try:
-                    t0 = time.time()
-                    extract_preferences(self.conn)
-                    stats["extract_preferences"] = f"{time.time() - t0:.3f}s"
-                except Exception as exc:
-                    from truememory.tier_switch.runtime import raise_if_serving_rejection
-                    raise_if_serving_rejection(exc)
-                    stats["extract_preferences"] = f"ERROR: {exc}"
-                    logger.debug("extract_preferences failed", exc_info=True)
+                from truememory.maintenance import SCHEDULED_PREFERENCES_UNAVAILABLE
+                stats["extract_preferences"] = SCHEDULED_PREFERENCES_UNAVAILABLE
             else:
                 stats["extract_preferences"] = "SKIPPED (personality module not available)"
 
