@@ -179,7 +179,9 @@ def search_hybrid(
             sep_tbl = _active_sep_table(conn)
             conn.execute(f"SELECT rowid FROM {sep_tbl} LIMIT 1").fetchone()
             _has_sep = True
-        except Exception:
+        except Exception as exc:
+            from truememory.tier_switch.runtime import raise_if_serving_rejection
+            raise_if_serving_rejection(exc)
             pass
     except ImportError:
         pass
@@ -209,7 +211,9 @@ def search_hybrid(
             sender_count = unique_senders_row[0] if unique_senders_row else 0
             if sender_count > 5:
                 sep_results = search_vector_separation(conn, query, limit=_CANDIDATE_POOL, _query_blob=_q_blob, include_directives=include_directives)
-        except Exception:
+        except Exception as exc:
+            from truememory.tier_switch.runtime import raise_if_serving_rejection
+            raise_if_serving_rejection(exc)
             pass
 
     # ------------------------------------------------------------------

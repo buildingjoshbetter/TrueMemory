@@ -169,6 +169,23 @@ def get_current_reranker_name() -> str:
     return get_reranker_name_for_tier(_active_tier)
 
 
+def apply_reranker_policy(tier: str, model_name: str, *, deadline: float | None = None,
+                          cancelled: threading.Event | None = None) -> None:
+    """Publish policy identity without loading an absent native model."""
+    global _model, _model_name, _model_certified, _active_tier, _frozen_reranker_id
+    from truememory.tier_switch.runtime import _reranker_id
+    from truememory.tier_switch.serving import exclusive_activation, _control
+    from truememory.model_client import CertifiedRerankerProxy, RerankerProxy
+    _reranker_id(model_name)
+    control = _control(None, deadline, cancelled)
+    with exclusive_activation(deadline=deadline, cancelled=cancelled), _reranker_load_lock(control):
+        if _model_name != model_name:
+            _model, _model_certified = None, False
+        elif isinstance(_model, RerankerProxy):
+            _model, _model_certified = CertifiedRerankerProxy(model_name), True
+        _model_name, _active_tier, _frozen_reranker_id = model_name, tier, model_name
+
+
 def apply_frozen_reranker(
     tier: str, model_name: str, *, deadline: float | None = None,
     cancelled: threading.Event | None = None,

@@ -22,13 +22,44 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_modules():
+    serving_source = ast.parse((ROOT / "truememory/tier_switch/serving.py").read_text(encoding="utf-8"))
+    serving_names = {"ServingLeaseError", "ServingLeaseTimeout", "ServingLeaseCancelled"}
+    serving_namespace = {}
+    exec(compile(ast.Module(body=[node for node in serving_source.body
+                                 if isinstance(node, ast.ClassDef) and node.name in serving_names],
+                            type_ignores=[]), "actual-serving-errors", "exec"), serving_namespace)
+    runtime_source = ast.parse((ROOT / "truememory/tier_switch/runtime.py").read_text(encoding="utf-8"))
+    runtime_names = {"TierRuntimeError", "raise_if_serving_rejection", "_read_selection", "_read_policy",
+                     "require_legacy_vector_mutation", "legacy_vector_mutation",
+                     "open_serving_connection", "_open_serving_connection_at_path", "_modules", "_legacy_key"}
+    runtime_namespace = {"__builtins__": dict(vars(builtins)), "sqlite3": sqlite3,
+                         "contextmanager": contextmanager, "serving": types.SimpleNamespace(
+        **{name: serving_namespace[name] for name in serving_names})}
+    runtime_nodes = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
+    runtime_nodes.extend(node for node in runtime_source.body
+                         if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in runtime_names)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=runtime_nodes, type_ignores=[])),
+                 "actual-runtime-guards", "exec"), runtime_namespace)
+
+    def legacy_operation(conn: sqlite3.Connection) -> types.SimpleNamespace:
+        vector = modules["vector_search"]
+        return types.SimpleNamespace(selection=None, policy=None,
+                                     tables=(vector._active_vec_table(conn), vector._active_sep_table(conn)),
+                                     key=runtime_namespace["_legacy_key"]())
+
     modules = {"tier_switch.runtime": types.SimpleNamespace(
-        serving_operation=lambda *args, **kwargs: nullcontext(types.SimpleNamespace(selection=None)),
-        current_operation=lambda conn: types.SimpleNamespace(selection=None), TierRuntimeError=RuntimeError)}
+        **{name: runtime_namespace[name] for name in runtime_names},
+        serving_operation=lambda conn, **kwargs: nullcontext(legacy_operation(conn)),
+        current_operation=legacy_operation),
+        "reranker": types.SimpleNamespace(get_current_reranker_name=lambda: "synthetic/reranker")}
 
     def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
         if name == "torch":
             raise ImportError("Native models are excluded from synthetic tests")
+        if name == "psutil":
+            return types.SimpleNamespace()
+        if name == "truememory":
+            return types.SimpleNamespace(vector_search=modules["vector_search"], reranker=modules["reranker"])
         if name.startswith("truememory."):
             short = name.removeprefix("truememory.")
             if short in modules:
@@ -36,20 +67,28 @@ def load_modules():
             raise AssertionError("Unexpected application import: " + name)
         return builtins.__import__(name, globals, locals, fromlist, level)
 
-    for name in ("storage", "_platform", "maintenance", "rebuild_source", "tier_switch.writer"):
+    runtime_namespace["__builtins__"]["__import__"] = safe_import
+    for name in ("storage", "_platform", "maintenance", "rebuild_source", "tier_switch.writer",
+                 "embedding_target", "tier_config", "tier_switch.cache", "tier_switch.job",
+                 "tier_switch.source", "tier_switch.activation"):
         module = types.ModuleType("synthetic_stream_" + name.replace(".", "_"))
         sys.modules[module.__name__] = module
         module.__dict__["__builtins__"] = dict(vars(builtins), __import__=safe_import)
         path = ROOT / "truememory" / (name.replace(".", "/") + ".py")
         exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
         modules[name] = module
+    activation = modules["tier_switch.activation"]
+    runtime_namespace.update(_guard_storage=activation._guard_storage, _state=activation._state,
+                             read_activation_state=activation.read_activation_state)
     vector = types.ModuleType("synthetic_stream_vector")
     vector.__dict__.update(
-        __builtins__=dict(vars(builtins), __import__=safe_import),
+        __builtins__=dict(vars(builtins), __import__=safe_import, Path=Path),
         database_operation=lambda function: function,
         contextmanager=contextmanager, closing=closing, Iterator=Iterator, replace=replace, datetime=datetime,
+        WriterCapture=modules["tier_switch.writer"].WriterCapture,
         sqlite3=sqlite3, logger=logging.getLogger(__name__), _lock=threading.Lock(),
         _model_generation=0, EMBEDDING_MODEL="synthetic-model", _embedding_dim=2,
+        resolve_tier=lambda: "edge",
         _BUILD_VECTORS_TXN_BATCH=100, _BUILD_STATE_KEY_PREFIX="vec_build_state:",
         _get_batch_size=lambda: 2, _flush_mps_cache=lambda: None,
         _active_vec_table=lambda conn: "vec_messages", _active_sep_table=lambda conn: "vec_messages_sep",
@@ -60,12 +99,15 @@ def load_modules():
                 "build_vectors", "build_separation_vectors", "_build_sep_text", "_ensure_metadata_table",
                 "_build_state_key", "_mark_build_in_progress", "_clear_build_in_progress",
                 "_build_in_progress", "_write_embedder_metadata_no_commit", "_write_embedder_metadata",
+                "_write_foreground_embedder_metadata_no_commit",
                 "_foreground_vector_publication", "_foreground_model_fence", "_validate_foreground_vector_target",
                 "VectorPublicationChanged", "embed_single"}
     tree = ast.parse((ROOT / "truememory/vector_search.py").read_text(encoding="utf-8"))
     body = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in selected]
     exec(compile(ast.Module(body=body, type_ignores=[]), "actual-vector-builders", "exec"), vector.__dict__)
     modules["vector_search"] = vector
+    runtime_namespace["sys"] = types.SimpleNamespace(
+        modules={"truememory." + name: module for name, module in modules.items()})
     return modules
 
 

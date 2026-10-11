@@ -152,6 +152,8 @@ def check_duplicate(
     try:
         results = memory.search_vectors(fact, limit=3) or []
     except Exception as e:
+        from truememory.tier_switch.runtime import raise_if_serving_rejection
+        raise_if_serving_rejection(e)
         log.warning("Dedup search failed: %s", e)
         return DedupDecision(action=DedupAction.ADD, fact=fact, reason="search failed, defaulting to add")
 

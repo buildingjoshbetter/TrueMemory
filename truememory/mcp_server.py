@@ -30,6 +30,9 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import TYPE_CHECKING
 
 try:
     import resource as _resource_mod
@@ -40,7 +43,12 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+from truememory.tier_switch.projection import CONFIG_WRITE_LOCK, ConfigFileLock
+
 log = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from truememory.tier_switch.runtime import RuntimeChild, ServingOperation
 
 # ---------------------------------------------------------------------------
 # Config management
@@ -58,7 +66,7 @@ _config_cache_mtime: float = 0.0
 _config_cache_time: float = 0.0
 
 # M7 (#504) — Serialize config writes from concurrent MCP handlers / tier-switch.
-_config_write_lock = threading.Lock()
+_config_write_lock = CONFIG_WRITE_LOCK
 
 # M-58 (#641) — Cross-process advisory lock for config writes. _config_write_lock
 # above only serializes threads inside ONE process; a separate `truememory-mcp`,
@@ -68,60 +76,11 @@ _config_write_lock = threading.Lock()
 _CONFIG_LOCK_PATH = _TRUEMEMORY_DIR / "config.json.lock"
 
 
-class _config_file_lock:
-    """Context manager taking a cross-process exclusive lock on config writes.
+class _config_file_lock(ConfigFileLock):
+    """Preserve the old best-effort entry point and injectable config paths."""
 
-    Reuses the same fcntl/msvcrt pattern as
-    ``tier_switch.manager.run_rebuild_sync`` (#641). Best-effort: if the lock
-    cannot be acquired (e.g. a filesystem without flock support) we proceed
-    anyway rather than fail the write — the in-process ``_config_write_lock``
-    plus the atomic ``os.replace`` still bound the damage. Held in BLOCKING mode
-    (LK_LOCK / LOCK_EX) so concurrent writers serialize instead of failing.
-    """
-
-    def __init__(self) -> None:
-        self._fd = None
-
-    def __enter__(self):
-        try:
-            _CONFIG_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-            self._fd = open(_CONFIG_LOCK_PATH, "w")
-            if os.name == "nt":
-                import msvcrt
-                msvcrt.locking(self._fd.fileno(), msvcrt.LK_LOCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(self._fd, fcntl.LOCK_EX)
-        except OSError:
-            # Could not open or lock — proceed unlocked (best effort).
-            if self._fd is not None:
-                try:
-                    self._fd.close()
-                except OSError:
-                    pass
-                self._fd = None
-        return self
-
-    def __exit__(self, *exc):
-        if self._fd is None:
-            return False
-        try:
-            if os.name == "nt":
-                import msvcrt
-                try:
-                    msvcrt.locking(self._fd.fileno(), msvcrt.LK_UNLCK, 1)
-                except OSError:
-                    pass
-            else:
-                import fcntl
-                fcntl.flock(self._fd, fcntl.LOCK_UN)
-        finally:
-            try:
-                self._fd.close()
-            except OSError:
-                pass
-            self._fd = None
-        return False
+    def __init__(self, *, strict: bool = False) -> None:
+        super().__init__(_CONFIG_LOCK_PATH, strict=strict)
 
 
 class _ConfigShapeError(ValueError):
@@ -732,7 +691,7 @@ def _get_deepsearch_llm_fn():
         return None
 
 
-def _resolve_deepsearch_llm():
+def _resolve_deepsearch_llm(served_tier: str | None = None):
     """Resolve the LLM function for deep search queries.
 
     Returns the deepsearch-specific override if configured, otherwise
@@ -742,7 +701,7 @@ def _resolve_deepsearch_llm():
     if ds_fn is not None:
         return ds_fn
     # Fall back to default behavior: Pro tier only
-    if _load_config().get("tier", "edge") == "pro":
+    if (served_tier if served_tier is not None else _load_config().get("tier", "edge")) == "pro":
         return _get_llm_fn()
     return None
 
@@ -835,6 +794,8 @@ def _set_reranker(model_name: str):
             f"ImportError: {e} — reinstall truememory to restore reranker support"
         )
     except Exception as e:
+        from truememory.tier_switch.runtime import raise_if_serving_rejection
+        raise_if_serving_rejection(e)
         _record_reranker_error(f"{type(e).__name__}: {e}")
 
 
@@ -990,33 +951,67 @@ def _build_health_payload() -> dict:
     }
 
 
-def _parallel_search(queries, user_id, internal_limit, llm_fn, output_limit):
+@contextmanager
+def _search_operation(*, reranker_id: str | None = None) -> Iterator[tuple[Memory, ServingOperation]]:
+    """Pin database policy before choosing reranking, HyDE or child searches."""
+    from truememory.tier_switch.runtime import engine_serving_operation
+
+    memory = _get_memory()
+    with engine_serving_operation(memory._engine, reranker_override=reranker_id) as operation:
+        yield memory, operation
+
+
+def _parallel_search(queries, user_id, internal_limit, llm_fn, output_limit, *,
+                     memory: Memory | None = None, operation: ServingOperation | None = None):
     """Run multiple agentic searches in parallel, merge and deduplicate."""
-    db_path = _get_memory()._engine.db_path
+    if operation is None:
+        with _search_operation() as (memory, operation):
+            return _parallel_search(queries, user_id, internal_limit, llm_fn, output_limit,
+                                    memory=memory, operation=operation)
+    if memory is None:
+        raise ValueError("Parallel serving requires its admitted Memory instance")
+    db_path = memory._engine.db_path
+    opening_lock = threading.Lock()
 
-    def _run_query(q):
-        # context manager ensures the sqlite connection is
-        # closed even if `KeyboardInterrupt` lands between construction
-        # and entry into the old explicit `try:` block. `Memory.__exit__`
-        # already handles close; this form is just interrupt-safe.
-        with Memory(path=db_path) as thread_m:
-            return thread_m.search_deep(
-                q, user_id=user_id, limit=internal_limit, llm_fn=llm_fn,
-            )
+    def _run_query(q: str, reservation: RuntimeChild) -> list[dict]:
+        try:
+            with Memory(path=db_path) as thread_m:
+                # Legacy handle creation owns nonblocking maintenance admission.
+                with opening_lock:
+                    thread_m._engine._open_connection_handle()
+                with reservation.join(conn=thread_m._engine.conn):
+                    return thread_m.search_deep(
+                        q, user_id=user_id, limit=internal_limit, llm_fn=llm_fn,
+                    )
+        finally:
+            reservation.close()
 
-    with ThreadPoolExecutor(max_workers=min(len(queries), 5)) as pool:
-        futures = [pool.submit(_run_query, q) for q in queries]
-        merged = []
-        seen_ids = set()
-        for f in futures:
-            try:
-                for r in f.result(timeout=60):
-                    rid = r.get("id")
-                    if rid not in seen_ids:
-                        merged.append(r)
-                        seen_ids.add(rid)
-            except Exception as e:
-                log.debug("parallel search query failed: %s", e)
+    reservations = []
+    merged = []
+    seen_ids = set()
+    try:
+        with ThreadPoolExecutor(max_workers=min(len(queries), 5)) as pool:
+            futures = []
+            for q in queries:
+                child = operation.fork_child()
+                reservations.append(child)
+                futures.append(pool.submit(_run_query, q, child))
+            for f in futures:
+                try:
+                    for r in f.result(timeout=60):
+                        rid = r.get("id")
+                        if rid not in seen_ids:
+                            merged.append(r)
+                            seen_ids.add(rid)
+                except Exception as e:
+                    from truememory.tier_switch.runtime import raise_if_serving_rejection
+                    raise_if_serving_rejection(e)
+                    log.debug("parallel search query failed: %s", e)
+    finally:
+        # Executor shutdown has joined running children before releasing any
+        # reservation whose task was never submitted or admitted.
+        for child in reservations:
+            child.close()
 
     merged.sort(key=lambda x: -x.get("score", 0))
     return merged[:output_limit]
@@ -1145,23 +1140,24 @@ def truememory_search(
         return json.dumps([])
     _touch_search_time()
     limit = max(1, min(limit, 200))
-    _set_reranker(_current_reranker())
-    llm_fn = _get_llm_fn() if _load_config().get("tier", "edge") == "pro" else None
     uid = user_id or None
     if not query_list:
         return json.dumps([])
     if len(query_list) > 10:
         query_list = query_list[:10]
 
-    if len(query_list) == 1:
-        m = _get_memory()
-        results = m.search_deep(
-            query_list[0], user_id=uid, limit=_SEARCH_INTERNAL_LIMIT, llm_fn=llm_fn,
-        )
-        return json.dumps(results[:limit], indent=2)
+    with _search_operation() as (m, operation):
+        _set_reranker(operation.reranker_id)
+        llm_fn = _get_llm_fn() if operation.tier == "pro" else None
+        if len(query_list) == 1:
+            results = m.search_deep(
+                query_list[0], user_id=uid, limit=_SEARCH_INTERNAL_LIMIT, llm_fn=llm_fn,
+            )
+            return json.dumps(results[:limit], indent=2)
 
-    results = _parallel_search(query_list, uid, _SEARCH_INTERNAL_LIMIT, llm_fn, limit)
-    return json.dumps(results, indent=2)
+        results = _parallel_search(query_list, uid, _SEARCH_INTERNAL_LIMIT, llm_fn, limit,
+                                   memory=m, operation=operation)
+        return json.dumps(results, indent=2)
 
 
 @mcp.tool(meta={"anthropic/alwaysLoad": True})
@@ -1196,23 +1192,24 @@ def truememory_search_deep(
         return json.dumps([])
     _touch_search_time()
     limit = max(1, min(limit, 200))
-    _set_reranker(_DEEP_RERANKER)
-    llm_fn = _resolve_deepsearch_llm()
     uid = user_id or None
     if not query_list:
         return json.dumps([])
     if len(query_list) > 10:
         query_list = query_list[:10]
 
-    if len(query_list) == 1:
-        m = _get_memory()
-        results = m.search_deep(
-            query_list[0], user_id=uid, limit=_DEEP_INTERNAL_LIMIT, llm_fn=llm_fn,
-        )
-        return json.dumps(results[:limit], indent=2)
+    with _search_operation(reranker_id=_DEEP_RERANKER) as (m, operation):
+        _set_reranker(operation.reranker_id)
+        llm_fn = _resolve_deepsearch_llm(operation.tier)
+        if len(query_list) == 1:
+            results = m.search_deep(
+                query_list[0], user_id=uid, limit=_DEEP_INTERNAL_LIMIT, llm_fn=llm_fn,
+            )
+            return json.dumps(results[:limit], indent=2)
 
-    results = _parallel_search(query_list, uid, _DEEP_INTERNAL_LIMIT, llm_fn, limit)
-    return json.dumps(results, indent=2)
+        results = _parallel_search(query_list, uid, _DEEP_INTERNAL_LIMIT, llm_fn, limit,
+                                   memory=m, operation=operation)
+        return json.dumps(results, indent=2)
 
 
 @mcp.tool()
@@ -1339,7 +1336,7 @@ def truememory_configure(
             "max" = every exchange evaluated regardless of depth.
             Empty string = no change (preserves current setting).
     """
-    global _memory
+    global _config_cache, _memory
     tier = tier.lower().strip()
     if tier not in ("edge", "base", "pro", "custom"):
         return json.dumps({"error": "tier must be 'edge', 'base', 'pro', or 'custom'"})
@@ -1379,6 +1376,7 @@ def truememory_configure(
 
     # Save to persistent config (tier change deferred to _finalize_rebuild)
     config = _load_config()
+    old_config = config.copy()
     old_tier = config.get("tier", "edge")
 
     # Store API key if provided
@@ -1407,12 +1405,20 @@ def truememory_configure(
     except Exception:
         pass
 
-    # Always persist the tier selection — even on first run with no api_key
-    # or email.  Without this, Edge tier on first run (old_tier defaults to
-    # "edge", so old_tier == tier, skipping the tier-switch block) was never
-    # written to config.json, leaving setup_required=True forever (#497).
-    config["tier"] = tier
-    _save_config(config)
+    from truememory.tier_switch.projection import patch_config_fields
+    fields = {key: value for key, value in config.items()
+              if key not in {"tier", "tier_activation_generation"}
+              and (key not in old_config or old_config[key] != value)}
+    config = patch_config_fields(fields, config_path=_CONFIG_PATH, lock_path=_CONFIG_LOCK_PATH)
+    # Completing the default Edge onboarding changes no serving model space.
+    if tier == "edge" and "tier" not in old_config:
+        from truememory.tier_switch.projection import _read_config, _write_config
+        with _config_file_lock(strict=True), _config_write_lock:
+            fresh = _read_config(_CONFIG_PATH)
+            if "tier" not in fresh:
+                fresh["tier"] = "edge"
+                _write_config(_CONFIG_PATH, fresh)
+        _config_cache = None
 
     # Issue #645 (M-35): search_intensity is part of the recall cache key
     # (it changes both the memory limit and the payload budget). A config
@@ -1438,58 +1444,38 @@ def truememory_configure(
         # Clear stored LLM errors for the provider we just re-keyed
         _clear_llm_error(api_provider)
 
-    # Apply model change — temporarily allow downloads for tier switch
-    # (the new model may not be cached yet).
     rebuild_error: str | None = None
     rebuild_action: str | None = None
     rebuild_status_id: int = 0
-    os.environ.pop("HF_HUB_OFFLINE", None)
-    os.environ.pop("TRANSFORMERS_OFFLINE", None)
+    switch_status = "configured"
+    from truememory.tier_switch.manager import RebuildManager
+    from truememory.tier_switch.cache import get_transition_action
+    manager = RebuildManager.get_instance()
+    rebuild_action = get_transition_action(old_tier, tier)
     try:
-        os.environ["TRUEMEMORY_EMBED_MODEL"] = tier
-        from truememory.vector_search import set_embedding_model
-        set_embedding_model(tier)
-
-        from truememory.reranker import set_active_tier as _set_active_tier
-        _set_active_tier(tier)
-        _set_reranker(_current_reranker())
-
-        # Tier-switch: determine transition action and handle accordingly.
-        # Base↔Pro = instant (same embedding model). Cross-group = async rebuild.
-        if old_tier != tier:
-            try:
-                from truememory.tier_switch.cache import (
-                    get_transition_action,
-                )
-                action = get_transition_action(old_tier, tier)
-                rebuild_action = action
-
-                if action == "config_only":
-                    # Base↔Pro share the same embedding space (qwen3_256), so
-                    # there is nothing to re-embed. The tier selection must
-                    # still be persisted here: unlike the delta_or_full path
-                    # (where RebuildManager writes the tier only once the new
-                    # vectors exist), config_only has no rebuild step, so
-                    # without this write the tier change is lost on restart and
-                    # the runtime/config tiers diverge.
-                    config["tier"] = tier
-                    _save_config(config)
-
-                elif action == "delta_or_full":
-                    from truememory.tier_switch.manager import RebuildManager
-                    manager = RebuildManager.get_instance()
-                    rebuild_status_id = manager.start_rebuild(
-                        target_tier=tier,
-                    )
-            except Exception as e:
-                rebuild_error = f"{type(e).__name__}: {e}"
-                log.exception("truememory_configure tier-switch failed")
-            finally:
-                with _memory_lock:
-                    _memory = None
+        rebuild_status_id = manager.start_rebuild(target_tier=tier, db_path=Path(_DB_PATH),
+                                                  config_path=_CONFIG_PATH, config_lock_path=_CONFIG_LOCK_PATH)
+        if rebuild_status_id:
+            switch_status = "building"
+        elif manager._last_outcome == "activation_pending":
+            switch_status = "activation_pending"
+        elif manager._last_outcome == "preparing":
+            switch_status = "preparing"
+    except Exception as error:
+        rebuild_error = type(error).__name__ + ": " + str(error)
+        switch_status = "activation_pending" if manager._last_outcome == "activation_pending" else "switch_failed"
+        log.exception("truememory_configure tier activation did not complete")
     finally:
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        # Existing users of the object retain their reference and serving lease.
+        # A subsequent request must reopen and reconcile the committed journal.
+        with _memory_lock:
+            _memory = None
+    _config_cache = None
+    effective_config = _load_config()
+    served_tier = getattr(manager, "_served_tier", effective_config.get("tier", old_tier))
+    effective_tier = served_tier or old_tier
 
     _tier_descriptions = {
         "edge": "Edge: Model2Vec embeddings (8M params), MiniLM reranker",
@@ -1498,11 +1484,14 @@ def truememory_configure(
         "custom": "Custom: user-provided embedding model + reranker via TRUEMEMORY_CUSTOM_* env vars",
     }
     result = {
-        "status": "configured",
+        "status": switch_status,
         "tier": tier,
-        "description": _tier_descriptions.get(tier, f"Tier: {tier}"),
+        "requested_tier": tier,
+        "served_tier": served_tier,
+        "description": (_tier_descriptions.get(effective_tier, f"Tier: {effective_tier}")
+                        if served_tier is not None else "Serving state awaits authoritative readback."),
     }
-    if rebuild_action == "config_only":
+    if rebuild_action == "config_only" and rebuild_error is None and switch_status == "configured":
         result["note"] = "Tier switched instantly (same embedding model)."
     elif rebuild_status_id:
         result["note"] = (
@@ -1510,12 +1499,13 @@ def truememory_configure(
             f"Query progress with truememory_status({rebuild_status_id})."
         )
         result["status_id"] = rebuild_status_id
+    elif switch_status == "preparing":
+        result["note"] = "Tier preparation is in progress; no rebuild status ID has been allocated yet."
     if rebuild_error is not None:
         result["rebuild_error"] = rebuild_error
         result["warning"] = (
-            "Tier switch succeeded but memory re-embedding failed. Re-run "
-            "truememory_configure() to retry, or delete ~/.truememory/memories.db "
-            "to start fresh."
+            "Tier activation is incomplete. The committed serving decision remains authoritative; "
+            "check rebuild status and retry reconciliation."
         )
     if api_key:
         result["api_key_saved"] = f"{api_provider} key stored"
@@ -1535,7 +1525,7 @@ def truememory_configure(
         or config.get("openrouter_api_key")
         or config.get("openai_api_key")
     )
-    if tier != "pro":
+    if effective_tier != "pro":
         result["hyde_search"] = "disabled (HyDE is Pro-only)"
     elif has_key:
         result["hyde_search"] = "enabled"
@@ -1547,9 +1537,17 @@ def truememory_configure(
     _onboarded = Path.home() / ".truememory" / ".onboarded"
     try:
         _onboarded.parent.mkdir(parents=True, exist_ok=True)
-        _onboarded.write_text(f"tier={tier}\n", encoding="utf-8")
+        _onboarded.write_text(f"tier={effective_tier}\n", encoding="utf-8")
     except OSError:
         pass
+
+    if switch_status != "configured":
+        result["next_steps"] = (
+            "Configuration is saved. Start a new session to admit the requested tier; runtime readiness remains unconfirmed."
+            if getattr(manager, "_last_action", None) == "onboarding" else
+            "The requested tier is not ready. Existing serving state remains guarded until certified activation completes."
+        )
+        return json.dumps(result, indent=2)
 
     # Onboarding: usage examples and next steps
     result["next_steps"] = (
@@ -1774,19 +1772,17 @@ def _preload_models():
 
     def _load_embedding_model_and_db():
         try:
-            from truememory.vector_search import get_model
-            get_model()
-        except Exception:
-            pass
-        try:
-            _get_memory()
+            with _search_operation():
+                from truememory.vector_search import get_model
+                get_model()
         except Exception:
             pass
 
     def _load_reranker():
         try:
-            from truememory.reranker import get_reranker
-            get_reranker(model_name=_current_reranker())
+            with _search_operation() as (_, operation):
+                from truememory.reranker import get_reranker
+                get_reranker(model_name=operation.reranker_id)
         except Exception:
             pass
 
