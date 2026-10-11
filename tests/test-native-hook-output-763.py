@@ -13,6 +13,7 @@ import io
 import json
 import os
 import shlex
+import subprocess
 import sys
 import types
 import unittest
@@ -23,6 +24,7 @@ from unittest.mock import patch
 TEST_ROOT = Path(__file__).resolve().parent.parent
 SOURCE_ROOT = Path(os.environ.get("TRUEMEMORY_HOOK_CONTRACT_SOURCE_ROOT", str(TEST_ROOT)))
 HOOK_DIR = SOURCE_ROOT / "truememory" / "ingest" / "hooks"
+HELPER_ROOT = Path(os.environ.get("TRUEMEMORY_HOOK_CONTRACT_HELPER_ROOT", str(TEST_ROOT)))
 _OUTPUT_PATH = TEST_ROOT / "truememory" / "ingest" / "hooks" / "output.py"
 _SPEC = importlib.util.spec_from_file_location("synthetic_hook_output_763", _OUTPUT_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
@@ -37,6 +39,35 @@ NATIVE_EVENTS = (
     ("codex", "SessionStart"),
     ("codex", "UserPromptSubmit"),
 )
+
+
+def read_source(source: Path) -> str:
+    commit = os.environ.get("TRUEMEMORY_HOOK_CONTRACT_SOURCE_COMMIT", "")
+    if not commit:
+        return source.read_text(encoding="utf-8")
+    relative = source.relative_to(SOURCE_ROOT)
+    return subprocess.run(
+        ["git", "show", f"{commit}:{relative}"], cwd=SOURCE_ROOT,
+        capture_output=True, text=True, check=True,
+    ).stdout
+
+
+def load_shared_helpers() -> dict[str, object]:
+    namespace: dict[str, object] = {"Path": Path, "re": __import__("re"), "sys": sys, "shlex": shlex}
+    for path, functions in (
+        ("truememory/hooks/adapters/base.py", {"is_owned_hook_command"}),
+        ("truememory/ingest/hooks/_shared.py", {"normalize_transcript_host", "hook_session_id"}),
+    ):
+        source = HELPER_ROOT / path
+        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in functions]
+        if {node.name for node in selected} != functions:
+            raise AssertionError("Required peer helper is absent; compose #761 before package execution")
+        exec(compile(ast.Module(body=selected, type_ignores=[]), str(source), "exec"), namespace)
+    return namespace
+
+
+SHARED_HELPERS = load_shared_helpers()
 
 
 def decode_fixture(host: str, event: str, response: str) -> str | None:
@@ -84,7 +115,7 @@ class RecordingStream(io.StringIO):
 
 def load_functions(script: str, names: set[str]) -> dict[str, object]:
     source = HOOK_DIR / script
-    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    tree = ast.parse(read_source(source), filename=str(source))
     selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
     if {node.name for node in selected} != names:
         raise AssertionError("Missing production function requested by fixture")
@@ -102,6 +133,9 @@ class HookHarness:
         self.markers: set[str] = set()
         self.flush_at_mark: list[bool] = []
         self.calls: list[tuple[str, object]] = []
+        self.buffer_sessions: list[str] = []
+        self.counter_sessions: list[str] = []
+        self.store_sessions: list[str] = []
         self.first_run = False
         self.recall_context = SYNTHETIC_CONTEXT
         self.notice = ""
@@ -110,6 +144,7 @@ class HookHarness:
         self.stream = RecordingStream()
         self.shared = types.ModuleType("truememory.ingest.hooks._shared")
         self.shared.mark_recall_injected = self.mark  # type: ignore[attr-defined]
+        self.shared.hook_session_id = SHARED_HELPERS["hook_session_id"]  # type: ignore[attr-defined]
         self.shared.consume_recall_injected = self.consume  # type: ignore[attr-defined]
         self.shared.is_allowed_transcript = self.admit  # type: ignore[attr-defined]
         self.shared.should_extract_session = lambda *_a: True  # type: ignore[attr-defined]
@@ -139,6 +174,18 @@ class HookHarness:
         self.calls.append(("spawn", (args, transcript_host)))
         return 21
 
+    def buffer(self, session: str, _prompt: str) -> None:
+        self.buffer_sessions.append(session)
+        self.calls.append(("buffer", None))
+
+    def count(self, session: str) -> int:
+        self.counter_sessions.append(session)
+        return 5
+
+    def store(self, _prompt: str, session: str, *_args: object) -> None:
+        self.store_sessions.append(session)
+        self.calls.append(("store", None))
+
     def run(
         self, script: str, host: str, event: str, *, failure: str = "",
         payload: dict[str, object] | None = None,
@@ -155,11 +202,11 @@ class HookHarness:
             "recall_memories": lambda *_a, **_k: self.recall_context,
             "_check_for_update": lambda: self.notice, "_check_email_needed": lambda: "",
             "log": types.SimpleNamespace(error=lambda *_a: self.calls.append(("hook-error", None))),
-            "buffer_message": lambda *_a: self.calls.append(("buffer", None)),
+            "buffer_message": self.buffer,
             "_prune_old_buffers": lambda: None, "_try_capture_email": lambda *_a: None,
             "_get_intensity_config": lambda: (self.intensity, "standard"),
-            "_increment_prompt_count": lambda *_a: 5,
-            "_try_per_exchange_store": lambda *_a: self.calls.append(("store", None)),
+            "_increment_prompt_count": self.count,
+            "_try_per_exchange_store": self.store,
             "_try_auto_recall": self.auto_recall, "_try_proactive_recall": self.proactive_recall,
         })
         data = payload if payload is not None else {"session_id": "synthetic-session", "prompt": "Recall synthetic color"}
@@ -299,6 +346,40 @@ class TestNativeOutput(unittest.TestCase):
         response = harness.run("session_start.py", "codex", "SessionStart", payload=data)
         self.assertEqual(decode_fixture("codex", "SessionStart", response), SYNTHETIC_CONTEXT)
 
+    def test_cursor_native_conversations_have_distinct_capture_and_markers(self) -> None:
+        harness = HookHarness()
+        conversations = ["synthetic-conversation-a", "synthetic-conversation-b"]
+        for conversation in conversations:
+            data = {"conversation_id": conversation, "prompt": "synthetic capture prompt"}
+            response = harness.run("session_start.py", "cursor", "sessionStart", payload=data)
+            self.assertEqual(decode_fixture("cursor", "sessionStart", response), SYNTHETIC_CONTEXT)
+            self.assertEqual(harness.run("user_prompt_submit.py", "cursor", "beforeSubmitPrompt", payload=data), "")
+        self.assertEqual(harness.buffer_sessions, conversations)
+        self.assertEqual(harness.counter_sessions, conversations)
+        self.assertEqual(harness.store_sessions, conversations)
+        self.assertEqual(harness.markers, set(conversations))
+        self.assertEqual(harness.flush_at_mark, [True, True])
+
+    def test_cursor_identity_precedence_and_other_hosts_session_id(self) -> None:
+        for host, event in (("cursor", "beforeSubmitPrompt"), ("claude", "UserPromptSubmit"), ("codex", "UserPromptSubmit"), ("gemini", "BeforeAgent")):
+            with self.subTest(host=host):
+                harness = HookHarness()
+                data = {"session_id": "synthetic-session", "conversation_id": "synthetic-conversation", "host": "cursor", "prompt": "synthetic capture prompt"}
+                harness.run("user_prompt_submit.py", host, event, payload=data)
+                expected = "synthetic-conversation" if host == "cursor" else "synthetic-session"
+                self.assertEqual(harness.buffer_sessions, [expected])
+                self.assertEqual(harness.counter_sessions, [expected])
+                self.assertEqual(harness.store_sessions, [expected])
+
+    def test_legacy_missing_session_fallback_and_no_start_marker(self) -> None:
+        harness = HookHarness()
+        data = {"prompt": "synthetic capture prompt"}
+        response = harness.run("session_start.py", "claude", "SessionStart", payload=data)
+        self.assertEqual(decode_fixture("claude", "SessionStart", response), SYNTHETIC_CONTEXT)
+        self.assertEqual(harness.markers, set())
+        harness.run("user_prompt_submit.py", "claude", "UserPromptSubmit", payload=data)
+        self.assertEqual(harness.buffer_sessions, ["unknown"])
+
     def test_cli_trusted_identity_defaults_and_overrides(self) -> None:
         for script, default in (("session_start.py", "SessionStart"), ("user_prompt_submit.py", "UserPromptSubmit")):
             parser = cast(Callable[[], argparse.Namespace], load_functions(script, {"_parse_args"})["_parse_args"])
@@ -370,7 +451,7 @@ class VirtualPath:
 class TestCursorInstallation(unittest.TestCase):
     def test_fresh_and_upgrade_install_native_identity_preserve_other_hooks(self) -> None:
         source = SOURCE_ROOT / "truememory" / "hooks" / "adapters" / "cursor.py"
-        tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+        tree = ast.parse(read_source(source), filename=str(source))
         owned = {"_HOOK_EVENTS", "_STALE_EVENTS", "_TRUEMEMORY_MARKER", "_CURSOR_DIR", "_MCP_CONFIG", "_HOOK_CONFIG"}
         selected = [node for node in tree.body if (isinstance(node, ast.Assign) and all(isinstance(target, ast.Name) and target.id in owned for target in node.targets)) or (isinstance(node, ast.ClassDef) and node.name == "CursorAdapter")]
         namespace: dict[str, object] = {
@@ -378,25 +459,26 @@ class TestCursorInstallation(unittest.TestCase):
             "json": json, "shlex": shlex, "sys": sys, "shutil": types.SimpleNamespace(),
             "__file__": "/synthetic/truememory/hooks/adapters/cursor.py",
             "atomic_write_text": lambda path, text: VirtualPath.files.__setitem__(str(path), text),
+            "is_owned_hook_command": SHARED_HELPERS["is_owned_hook_command"],
         }
         exec(compile(ast.Module(body=selected, type_ignores=[]), str(source), "exec"), namespace)
         adapter_type = cast(type, namespace["CursorAdapter"])
         config_path = str(namespace["_HOOK_CONFIG"])
-        third_party = {"command": "synthetic unrelated hook", "timeout": 17, "custom": "preserve"}
+        third_party = {"command": "/synthetic/foreign-policy --target truememory", "timeout": 17, "custom": "preserve"}
         for upgraded in (False, True):
             with self.subTest(upgraded=upgraded):
                 VirtualPath.files = {}
                 existing = {"version": 1, "custom": "preserve", "hooks": {"sessionStart": [third_party.copy()]}}
                 if upgraded:
-                    existing["hooks"]["sessionStart"].append({"command": "python /synthetic/truememory/session_start.py", "timeout": 1, "custom": "owned metadata"})
+                    existing["hooks"]["sessionStart"].append({"command": "python /synthetic/truememory/ingest/hooks/session_start.py", "timeout": 1, "custom": "owned metadata"})
                 VirtualPath.files[config_path] = json.dumps(existing)
                 adapter = adapter_type()
-                adapter.install_hooks(python_path="/synthetic/python path", user_id="synthetic user", db_path="/synthetic/db path")
+                adapter.install_hooks(python_path="/synthetic/python path/python3", user_id="synthetic user", db_path="/synthetic/db path")
                 data = json.loads(VirtualPath.files[config_path])
                 self.assertEqual(data["hooks"]["sessionStart"][0], third_party)
                 self.assertEqual(data["custom"], "preserve")
                 for event in ("sessionStart", "stop", "beforeSubmitPrompt", "preCompact"):
-                    commands = [entry for entry in data["hooks"][event] if "truememory" in entry["command"]]
+                    commands = [entry for entry in data["hooks"][event] if cast(Callable[[object], bool], SHARED_HELPERS["is_owned_hook_command"])(entry["command"])]
                     self.assertEqual(len(commands), 1)
                     parts = shlex.split(commands[0]["command"])
                     self.assertIn("--host", parts)
@@ -408,7 +490,7 @@ class TestCursorInstallation(unittest.TestCase):
                 if upgraded:
                     self.assertEqual(data["hooks"]["sessionStart"][1]["custom"], "owned metadata")
                 first = VirtualPath.files[config_path]
-                adapter.install_hooks(python_path="/synthetic/python path", user_id="synthetic user", db_path="/synthetic/db path")
+                adapter.install_hooks(python_path="/synthetic/python path/python3", user_id="synthetic user", db_path="/synthetic/db path")
                 self.assertEqual(VirtualPath.files[config_path], first)
 
 

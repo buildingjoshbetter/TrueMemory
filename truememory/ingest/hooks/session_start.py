@@ -779,7 +779,8 @@ def main():
             # recall portion was non-empty — an empty/failed recall must not
             # suppress the first prompt's targeted recall.
             if recall_injected:
-                session_id = input_data.get("session_id", "")
+                from truememory.ingest.hooks._shared import hook_session_id
+                session_id = hook_session_id(input_data, args.host, default="")
                 if session_id:
                     from truememory.ingest.hooks._shared import mark_recall_injected
                     mark_recall_injected(session_id)

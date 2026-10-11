@@ -13,7 +13,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from truememory.hooks.adapters.base import CLIAdapter, atomic_write_text
+from truememory.hooks.adapters.base import CLIAdapter, atomic_write_text, is_owned_hook_command
 
 _CURSOR_DIR = Path.home() / ".cursor"
 _MCP_CONFIG = _CURSOR_DIR / "mcp.json"
@@ -172,7 +172,7 @@ class CursorAdapter(CLIAdapter):
                 h for h in stale_list
                 if not (
                     isinstance(h, dict)
-                    and _TRUEMEMORY_MARKER in h.get("command", "").lower()
+                    and is_owned_hook_command(h.get("command"))
                 )
             ]
             if cleaned:
@@ -189,7 +189,7 @@ class CursorAdapter(CLIAdapter):
             for entry in event_list:
                 if (
                     isinstance(entry, dict)
-                    and _TRUEMEMORY_MARKER in entry.get("command", "").lower()
+                    and is_owned_hook_command(entry.get("command"))
                 ):
                     entry["timeout"] = info["timeout"]
                     entry["command"] = self._build_command(
@@ -280,7 +280,7 @@ class CursorAdapter(CLIAdapter):
     def _event_has_truememory(entries: list) -> bool:
         return any(
             isinstance(h, dict)
-            and _TRUEMEMORY_MARKER in h.get("command", "").lower()
+            and is_owned_hook_command(h.get("command"))
             for h in entries
         )
 
@@ -316,7 +316,7 @@ class CursorAdapter(CLIAdapter):
                 h for h in entries
                 if not (
                     isinstance(h, dict)
-                    and _TRUEMEMORY_MARKER in h.get("command", "").lower()
+                    and is_owned_hook_command(h.get("command"))
                 )
             ]
             if cleaned:
