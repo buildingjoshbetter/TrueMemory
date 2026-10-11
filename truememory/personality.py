@@ -8,8 +8,8 @@ treats ``"What kind of person is Jordan?"`` as a keyword lookup — which
 returns nothing useful.
 
 This module pre-computes entity profiles (communication style, topics,
-relationships, traits, preferences) so that personality questions can be
-answered from structured data rather than raw message search alone.
+relationships and traits). Preference questions use query-time retrieval;
+scheduled preference-map persistence and refresh are not implemented.
 
 Personality categories handled:
     - General character (``"What kind of person is X?"``)
@@ -597,7 +597,9 @@ def extract_preferences(conn: sqlite3.Connection,
     Returns:
         Dict with keys ``food``, ``activities``, ``people``, ``routines``,
         ``fears``, ``values``.  Each value is a list of extracted snippets
-        or structured data.
+        or structured data. With no entity, returns an empty dict without
+        reading messages. Results are returned only, never persisted; this
+        helper is not a scheduled preference refresh.
     """
     if entity is None:
         return {}

@@ -16,14 +16,13 @@ class TestConsolidationGaps(_ROUTING["RoutingFixture"]):
         self.assertIn("3 clusters", result["cluster_messages"])
         self.assertEqual(self.conn.execute("SELECT count(*) FROM cluster_centroids").fetchone()[0], 3)
 
-    def test_preferences_runs_on_the_worker_connection(self):
+    def test_scheduled_preferences_report_unavailable_without_extraction(self):
         function = self.modules["truememory.personality"].extract_preferences
         with patch.object(self.modules["truememory.personality"], "extract_preferences", wraps=function) as preference:
             result = self.engine.consolidate()
         self.assertIn("extract_preferences", result)
-        self.assertNotIn("ERROR", result["extract_preferences"])
-        preference.assert_called_once()
-        self.assertIsNot(preference.call_args.args[0], self.conn)
+        self.assertEqual(result["extract_preferences"], "UNAVAILABLE (ScheduledPreferencesUnsupported)")
+        preference.assert_not_called()
 
     def test_missing_vector_index_reports_unavailable_without_skipping_siblings(self):
         self.conn.execute("DROP TABLE vec_messages_edge")

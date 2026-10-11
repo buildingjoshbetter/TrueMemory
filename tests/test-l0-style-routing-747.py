@@ -1039,13 +1039,20 @@ class InMemoryRouting(unittest.TestCase):
         token = coordinator._begin_observation()
         coordinator._finish_observation(token, MAINTENANCE.MaintenanceReport((), "SKIPPED"), "failed", "PriorFailure")
         conn.execute("INSERT INTO sentinel VALUES ('caller')")
+        personality = types.SimpleNamespace(extract_preferences=lambda _conn: None)
         importer = types.SimpleNamespace(import_module=lambda name: STYLE if name == "truememory.personality_style_vec"
-                                         else types.SimpleNamespace(extract_preferences=lambda _conn: None))
+                                         else personality)
         with patch.object(MAINTENANCE, "engine_layer_specs", public_specs), patch.object(MAINTENANCE, "importlib", importer), \
-             patch.object(MAINTENANCE, "_installed_dependency", return_value=None):
+             patch.object(MAINTENANCE, "_installed_dependency", return_value=None), \
+             patch.object(personality, "extract_preferences",
+                          side_effect=AssertionError("unsupported preference work")) as preferences:
             result = engine.consolidate()
+        preferences.assert_not_called()
         self.assertEqual(len(result), 9)
-        self.assertTrue(all("pending caller commit" in value for value in result.values()))
+        self.assertEqual(set(result), set(MAINTENANCE._MAINTENANCE_RESULT_KEYS))
+        self.assertTrue(all("pending caller commit" in result[key]
+                            for key in MAINTENANCE._MAINTENANCE_RESULT_KEYS if key != "extract_preferences"), result)
+        self.assertEqual(result["extract_preferences"], "UNAVAILABLE (ScheduledPreferencesUnsupported)")
         self.assertEqual(coordinator.status, ("failed", "PriorFailure"))
         self.assertEqual(engine.get_style_health()["last_error"], "PriorFailure")
         conn.rollback()
