@@ -54,11 +54,24 @@ def fts_engine(tmp_path, monkeypatch):
     conn.close()
 
     eng = TrueMemoryEngine(db_path)
-    eng.open(rebuild_vectors=False)
-    # Force the bare path: no cross-encoder rerank, no salience filtering.
-    eng._has_reranker = False
-    eng._has_salience = False
-    return eng
+    coordinator = None
+    try:
+        eng.open(rebuild_vectors=False)
+        coordinator = eng._maintenance_coordinator
+        # Force the bare path: no cross-encoder rerank, no salience filtering.
+        eng._has_reranker = False
+        eng._has_salience = False
+        yield eng
+    finally:
+        try:
+            if coordinator is None:
+                coordinator = eng._maintenance_coordinator
+            if coordinator is not None:
+                coordinator.cancel()
+                if not coordinator.wait(10):
+                    raise RuntimeError("Fixture-owned maintenance worker did not finish")
+        finally:
+            eng.close()
 
 
 # Query that _has_personality_intent() recognizes (matches "favorite food").
