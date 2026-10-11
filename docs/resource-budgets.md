@@ -1169,7 +1169,13 @@ references and registry state. Daemon threads do not guarantee completion when
 the process exits; durable abandoned-attempt recovery remains necessary.
 
 Explicit `consolidate()` forces one pass with the same eight result keys plus
-the existing nonpersisted preference extraction result. A busy owner produces
+`extract_preferences`, which reports `UNAVAILABLE (ScheduledPreferencesUnsupported)`.
+Scheduled preference maps have no persistence or refresh implementation; this
+stage does no extraction, source read or write. Otherwise complete maintenance
+reports `completed_with_limits`. Cancellation, layer failures or deferrals, and
+pending caller writes retain precedence. Bulk `ingest()` reports the same
+preference limitation. Entity-scoped extraction remains a return-only helper,
+and query-time preference retrieval remains available. A busy owner produces
 nine explicit `BUSY` entries and does not queue a hidden forced pass. A file
 call without an existing transaction uses a dedicated connection. An existing
 caller transaction uses the original connection's protected savepoints and

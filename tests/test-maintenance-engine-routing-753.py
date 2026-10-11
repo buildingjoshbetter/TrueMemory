@@ -710,7 +710,9 @@ class TestEngineRouting(RoutingFixture):
             result = self.engine.consolidate()
             automatic.assert_not_called()
         self.assertEqual(set(result), set(MAINTENANCE._MAINTENANCE_RESULT_KEYS))
-        self.assertTrue(all("ERROR" not in value and "UNAVAILABLE" not in value for value in result.values()), result)
+        self.assertTrue(all("ERROR" not in value and "UNAVAILABLE" not in value
+                            for key, value in result.items() if key != "extract_preferences"), result)
+        self.assertEqual(result["extract_preferences"], "UNAVAILABLE (ScheduledPreferencesUnsupported)")
         self.assertIn("vector_generation_unverified", result["cluster_messages"])
         with self.assertRaises(sqlite3.ProgrammingError):
             seen[0].execute("SELECT 1")
@@ -732,9 +734,15 @@ class TestEngineRouting(RoutingFixture):
 
     def test_borrowed_manual_preserves_caller_writes_and_rollback(self) -> None:
         self.add(1, commit=False)
-        with patch.object(self.engine_module, "create_db", side_effect=AssertionError("new handle")):
+        with patch.object(self.engine_module, "create_db", side_effect=AssertionError("new handle")), \
+             patch.object(self.modules["truememory.personality"], "extract_preferences",
+                          side_effect=AssertionError("unsupported preference work")) as preferences:
             result = self.engine.consolidate()
-        self.assertTrue(all("pending caller commit" in value for value in result.values()), result)
+        preferences.assert_not_called()
+        self.assertEqual(set(result), set(MAINTENANCE._MAINTENANCE_RESULT_KEYS))
+        self.assertTrue(all("pending caller commit" in result[key]
+                            for key in MAINTENANCE._MAINTENANCE_RESULT_KEYS if key != "extract_preferences"), result)
+        self.assertEqual(result["extract_preferences"], "UNAVAILABLE (ScheduledPreferencesUnsupported)")
         self.assertTrue(self.conn.in_transaction)
         self.conn.rollback()
         self.assertEqual(self.conn.execute("SELECT count(*) FROM messages").fetchone()[0], 0)

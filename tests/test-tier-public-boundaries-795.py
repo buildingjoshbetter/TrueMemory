@@ -42,7 +42,10 @@ def definitions(path: str, names: set[str], namespace: dict, *, methods: bool = 
         cls = next(node for node in tree.body if isinstance(node, ast.ClassDef))
         nodes = [node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name in names]
     else:
-        nodes = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names]
+        nodes = [node for node in tree.body
+                 if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names
+                 or isinstance(node, ast.Assign) and len(node.targets) == 1
+                 and isinstance(node.targets[0], ast.Name) and node.targets[0].id in names]
     future = ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)
     module = types.ModuleType("synthetic_public_" + path.replace("/", "_").replace(".", "_"))
     module.__dict__.update(namespace)
@@ -717,7 +720,8 @@ class TestPublicBoundaries(unittest.TestCase):
     def maintenance_runner(self, *, owner=None, run_layers=None):
         owner = owner or (lambda path: contextlib.nullcontext())
         module = definitions("maintenance.py", {
-            "LayerResult", "MaintenanceReport", "_maintenance_embedding_scope", "_maintenance_completion", "run_engine_maintenance",
+            "LayerResult", "MaintenanceReport", "SCHEDULED_PREFERENCES_UNAVAILABLE",
+            "_maintenance_embedding_scope", "_maintenance_completion", "run_engine_maintenance",
         }, self.namespace(
             NamedTuple=__import__("typing").NamedTuple, contextmanager=contextlib.contextmanager,
             maintenance_owner=owner, connection_database_path=lambda conn: None,
