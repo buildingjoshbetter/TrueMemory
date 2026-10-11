@@ -491,22 +491,31 @@ class TranscriptAdmissionTests(unittest.TestCase):
 
     def test_owned_hook_predicate_requires_actual_python_invocation(self) -> None:
         predicate = sys.modules["truememory.hooks.adapters.base"].is_owned_hook_command
-        for stem in ("session_start", "user_prompt_submit", "stop", "compact"):
-            for command in (
-                f"python /pkg/truememory/ingest/hooks/{stem}.py",
-                f"'/pkg with space/python3.10' '/pkg with space/truememory/ingest/hooks/{stem}.py' --user ';'",
-                f"python -B -m truememory.ingest.hooks.{stem}",
-            ):
-                with self.subTest(command=command):
-                    self.assertTrue(predicate(command))
-        for command in (None, [], "", "python -c 'truememory.ingest.hooks.stop'",
-                        "python -m foreign --target truememory.ingest.hooks.stop",
-                        "foreign /pkg/truememory/ingest/hooks/stop.py", "python-policy /pkg/truememory/ingest/hooks/stop.py",
-                        "python /pkg/truememory/ingest/hooks/stop.py; foreign", "python /pkg/truememory/ingest/hooks/stop.py\nforeign",
-                        "python /pkg/truememory/ingest/hooks/stop.py > output", "python '/pkg/truememory/ingest/hooks/stop.py",
-                        "python \"$(foreign)/truememory/ingest/hooks/stop.py\"", "python /pkg/truememory/ingest/hooks/not-a-hook.py"):
-            with self.subTest(command=command):
-                self.assertFalse(predicate(command))
+        for platform in ("linux", "win32"):
+            with patch.object(sys, "platform", platform):
+                for stem in ("session_start", "user_prompt_submit", "stop", "compact"):
+                    quoted_command = (
+                        subprocess.list2cmdline([
+                            r"C:\Program Files\Python\python.exe",
+                            rf"C:\Synthetic Package\truememory\ingest\hooks\{stem}.py",
+                        ]) + ' --user ";"' if platform == "win32" else
+                        f"'/pkg with space/python3.10' '/pkg with space/truememory/ingest/hooks/{stem}.py' --user ';'"
+                    )
+                    for command in (
+                        f"python /pkg/truememory/ingest/hooks/{stem}.py",
+                        quoted_command,
+                        f"python -B -m truememory.ingest.hooks.{stem}",
+                    ):
+                        with self.subTest(platform=platform, command=command):
+                            self.assertTrue(predicate(command))
+                for command in (None, [], "", "python -c 'truememory.ingest.hooks.stop'",
+                                "python -m foreign --target truememory.ingest.hooks.stop",
+                                "foreign /pkg/truememory/ingest/hooks/stop.py", "python-policy /pkg/truememory/ingest/hooks/stop.py",
+                                "python /pkg/truememory/ingest/hooks/stop.py; foreign", "python /pkg/truememory/ingest/hooks/stop.py\nforeign",
+                                "python /pkg/truememory/ingest/hooks/stop.py > output", "python '/pkg/truememory/ingest/hooks/stop.py",
+                                "python \"$(foreign)/truememory/ingest/hooks/stop.py\"", "python /pkg/truememory/ingest/hooks/not-a-hook.py"):
+                    with self.subTest(platform=platform, command=command):
+                        self.assertFalse(predicate(command))
         with patch.object(sys, "platform", "win32"):
             command = subprocess.list2cmdline([
                 r"C:\Program Files\Python\python.exe",
