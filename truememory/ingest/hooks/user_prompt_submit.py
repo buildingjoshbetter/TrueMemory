@@ -32,6 +32,7 @@ from pathlib import Path
 
 from truememory._platform import _env_int
 from truememory._sanitize import sanitize_injection_content
+from truememory.ingest.hooks.output import HOOK_HOSTS, emit_context, supports_context
 
 # Optional: fcntl isn't available on Windows, so we gracefully degrade
 try:
@@ -83,13 +84,13 @@ def _word_overlap(a: str, b: str) -> float:
 def _parse_args() -> argparse.Namespace:
     """Parse command-line overrides the installer threads through.
 
-    The trusted host selects transcript admission; event retains installer context.
+    The trusted host/event select recall output and transcript admission.
     ``parse_known_args`` keeps the existing forward-compatible flags.
     """
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--user", default=os.environ.get("TRUEMEMORY_USER_ID", ""))
     p.add_argument("--db", default=os.environ.get("TRUEMEMORY_DB_PATH", ""))
-    p.add_argument("--host", choices=("claude", "codex", "gemini", "cursor"), default="claude")
+    p.add_argument("--host", choices=HOOK_HOSTS, default="claude")
     p.add_argument("--event", default="UserPromptSubmit")
     args, _ = p.parse_known_args()
     return args
@@ -800,6 +801,11 @@ def main():
     except Exception:
         pass  # Never crash the hook
 
+    # Capture still runs on Cursor, whose beforeSubmitPrompt response cannot
+    # inject context. Avoid searching for recall that the host cannot receive.
+    if not supports_context(args.host, args.event):
+        return
+
     # Issue #561 / #636 (M-41): consume the one-shot SessionStart recall marker
     # exactly ONCE per prompt. Both the proactive and auto-recall paths used to
     # call consume_recall_injected() independently — the proactive path consumed
@@ -835,7 +841,7 @@ def main():
         )
 
     if recall_context:
-        print(json.dumps({"additionalContext": recall_context}))
+        emit_context(recall_context, host=args.host, event=args.event)
 
 
 def buffer_message(session_id: str, prompt: str):

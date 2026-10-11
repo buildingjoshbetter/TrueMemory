@@ -30,6 +30,7 @@ from pathlib import Path
 from truememory import _platform
 from truememory._platform import _env_int
 from truememory._sanitize import sanitize_injection_content
+from truememory.ingest.hooks.output import HOOK_HOSTS, emit_context
 
 try:
     import fcntl
@@ -170,7 +171,7 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--user", default=os.environ.get("TRUEMEMORY_USER_ID", ""))
     p.add_argument("--db", default=os.environ.get("TRUEMEMORY_DB_PATH", ""))
-    p.add_argument("--host", choices=("claude", "codex", "gemini", "cursor"), default="claude")
+    p.add_argument("--host", choices=HOOK_HOSTS, default="claude")
     p.add_argument("--event", default="SessionStart")
     p.add_argument("--scan-stale", action="store_true", help=argparse.SUPPRESS)
     args, _ = p.parse_known_args()
@@ -771,16 +772,15 @@ def main():
         if email_notice:
             context = (context or "") + "\n\n" + email_notice
 
-        if context:
-            output = {"additionalContext": context}
-            print(json.dumps(output))
+        if context and emit_context(context, host=args.host, event=args.event):
             # Mark recall as injected so the first UserPromptSubmit can skip
             # its redundant per-message auto-recall (issue #561). Written only
-            # after the context has actually been emitted, and only when the
+            # after the supported response has been flushed, and only when the
             # recall portion was non-empty — an empty/failed recall must not
             # suppress the first prompt's targeted recall.
             if recall_injected:
-                session_id = input_data.get("session_id", "")
+                from truememory.ingest.hooks._shared import hook_session_id
+                session_id = hook_session_id(input_data, args.host, default="")
                 if session_id:
                     from truememory.ingest.hooks._shared import mark_recall_injected
                     mark_recall_injected(session_id)
