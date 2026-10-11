@@ -96,8 +96,15 @@ class TestPublicBoundaries(unittest.TestCase):
         self.fixture.setUp()
         self.api, self.conn = self.fixture.api, self.fixture.conn
         self.modules = self.fixture.modules
+        maintenance = definitions("maintenance.py", {"MaintenanceBusyError"}, self.namespace())
         self.modules["maintenance"] = types.SimpleNamespace(
+            MaintenanceBusyError=maintenance.MaintenanceBusyError,
+            wait_for_automatic_owner=Mock(side_effect=AssertionError("Unexpected automatic owner wait in healthy fixture")),
             maintenance_owner=lambda path: contextlib.nullcontext(), connection_database_path=lambda conn: None)
+        storage = ast.parse((ROOT / "truememory/storage.py").read_text(encoding="utf-8"))
+        self.modules["storage"].DEFAULT_BUSY_TIMEOUT_MS = next(
+            ast.literal_eval(node.value) for node in storage.body if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "DEFAULT_BUSY_TIMEOUT_MS" for target in node.targets))
         enter_context(self, patch.dict(sys.modules, {"truememory.tier_switch.runtime": self.api}))
 
     def imports(self, name, globals=None, locals=None, fromlist=(), level=0):
