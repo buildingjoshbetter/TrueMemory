@@ -534,12 +534,26 @@ def database_operation(function: Callable[P, R]) -> Callable[P, R]:
 
 def open_engine_for_operation(engine: object) -> None:
     """Bound fresh public admission without waiting inside an admitted call."""
-    if engine.conn is not None:
-        engine._open_connection_handle()
-        return
     from truememory.maintenance import MaintenanceBusyError, wait_for_automatic_owner
     from truememory.storage import DEFAULT_BUSY_TIMEOUT_MS
     deadline = time.monotonic() + DEFAULT_BUSY_TIMEOUT_MS / 1000
+
+    def retry_allowed(error: MaintenanceBusyError) -> bool:
+        cached = getattr(error, "_reconnect_engine", None)
+        if cached is None:
+            return engine.conn is None
+        return (cached is engine and engine.conn is not None
+                and getattr(error, "_reconnect_handle", None) is engine.conn)
+
+    failure = None
+    if engine.conn is not None:
+        try:
+            engine._open_connection_handle()
+            return
+        except MaintenanceBusyError as error:
+            if getattr(error, "_reconnect_engine", None) is not engine or not retry_allowed(error):
+                raise
+            failure = error
 
     def outside_admission() -> None:
         lock = engine._write_lock
@@ -554,21 +568,24 @@ def open_engine_for_operation(engine: object) -> None:
 
     if isinstance(engine._write_lock, ConnectionWriteLock) and engine._write_lock.owned_by_current_thread():
         raise MaintenanceBusyError("Fresh public opening requires an unbound writer")
-    failure = None
     while True:
         if failure is not None:
             outside_admission()
             if time.monotonic() >= deadline:
+                raise failure
+            if not retry_allowed(failure):
+                raise failure
+            wait_for_automatic_owner(failure, deadline=deadline)
+            outside_admission()
+            if not retry_allowed(failure):
                 raise failure
         try:
             engine._open_connection_handle()
             return
         except MaintenanceBusyError as error:
             failure = error
-            if engine.conn is not None:
+            if not retry_allowed(error):
                 raise
-            outside_admission()
-            wait_for_automatic_owner(error, deadline=deadline)
 
 
 def _legacy_initialization_is_local(conn: sqlite3.Connection, operation: ServingOperation) -> bool:
