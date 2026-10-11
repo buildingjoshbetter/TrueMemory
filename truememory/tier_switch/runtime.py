@@ -537,6 +537,8 @@ def open_engine_for_operation(engine: object) -> None:
     from truememory.maintenance import MaintenanceBusyError, wait_for_automatic_owner
     from truememory.storage import DEFAULT_BUSY_TIMEOUT_MS
     deadline = time.monotonic() + DEFAULT_BUSY_TIMEOUT_MS / 1000
+    if isinstance(engine._write_lock, ConnectionWriteLock) and engine._write_lock.owned_by_current_thread():
+        raise MaintenanceBusyError("Fresh public opening requires an unbound writer")
 
     def retry_allowed(error: MaintenanceBusyError) -> bool:
         cached = getattr(error, "_reconnect_engine", None)
@@ -566,8 +568,6 @@ def open_engine_for_operation(engine: object) -> None:
         if owned or admitted:
             raise MaintenanceBusyError("Fresh public opening requires an unbound caller")
 
-    if isinstance(engine._write_lock, ConnectionWriteLock) and engine._write_lock.owned_by_current_thread():
-        raise MaintenanceBusyError("Fresh public opening requires an unbound writer")
     while True:
         if failure is not None:
             outside_admission()

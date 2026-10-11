@@ -16,6 +16,7 @@ from typing import NamedTuple
 import unittest
 import uuid
 import weakref
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -108,7 +109,7 @@ class SyntheticPath:
 class Handle:
     def __init__(self, reason: str | None = None) -> None:
         self.reason = reason
-        self.in_transaction = False
+        self._in_transaction = False
         self.probes = 0
         self.closes = 0
 
@@ -127,9 +128,23 @@ class Handle:
         self.reason = "closed"
         self.closes += 1
 
+    @property
+    def in_transaction(self) -> bool:
+        if self.reason == "closed":
+            raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
+        return self._in_transaction
+
+    @in_transaction.setter
+    def in_transaction(self, borrowed: bool) -> None:
+        self._in_transaction = borrowed
+
+
+class SyntheticEngine:
+    pass
+
 
 class Fixture:
-    def __init__(self, reason: str | None = "closed") -> None:
+    def __init__(self, reason: str | None = "closed", *, actual_lock: bool = False) -> None:
         self.clock = Clock()
         self.path = SyntheticPath()
         self.scope_depth = 0
@@ -151,7 +166,8 @@ class Fixture:
         self.reopened: tuple[Handle, bool] | None = None
         self.gate_error = type("ServingLeaseError", (RuntimeError,), {})
         self.runtime_error = type("TierRuntimeError", (RuntimeError,), {})
-        self.engine = types.SimpleNamespace(
+        self.engine = SyntheticEngine()
+        self.engine.__dict__.update(
             conn=self.handle, db_path=self.path, _write_lock=Writer(), _init_lock=object(),
             _reconnect_receipt=None, ready=True, _runtime_initialized=True, _has_vectors=True,
             _runtime_vector_generation="synthetic-generation", _runtime_vector_connection=self.handle,
@@ -201,6 +217,18 @@ class Fixture:
         })
         self.runtime._connection_read = connection_read
         self.runtime._open_serving_connection_at_path = factory
+        if actual_lock:
+            locks = definitions("tier_switch/runtime.py", {
+                "ConnectionWriteLock", "_connection_read", "_check", "_remaining",
+            }, {
+                "threading": threading, "sqlite3": sqlite3, "time": self.clock,
+                "contextmanager": contextmanager, "TierRuntimeError": self.runtime_error,
+                "serving": self.runtime.serving,
+            })
+            self.runtime.ConnectionWriteLock = locks.ConnectionWriteLock
+            self.runtime._connection_read = locks._connection_read
+            self.engine._write_lock = locks.ConnectionWriteLock(self.engine)
+            self.engine._init_lock = threading.Lock()
         self.storage = types.ModuleType("truememory.storage")
         storage_tree = ast.parse(source("storage.py"))
         self.storage.DEFAULT_BUSY_TIMEOUT_MS = next(
@@ -278,8 +306,8 @@ class Fixture:
 
 
 class TestReconnectAdmission(unittest.TestCase):
-    def fixture(self, reason: str | None = "closed") -> Fixture:
-        fixture = Fixture(reason)
+    def fixture(self, reason: str | None = "closed", *, actual_lock: bool = False) -> Fixture:
+        fixture = Fixture(reason, actual_lock=actual_lock)
         self.addCleanup(fixture.close)
         return fixture
 
@@ -642,6 +670,76 @@ class TestReconnectAdmission(unittest.TestCase):
         self.assertEqual(fixture.wait_scopes, [])
         self.assertEqual(fixture.factory_calls, 0)
         self.assertEqual(fixture.open_calls, 1)
+
+    def test_poisoned_current_writer_refuses_before_actual_nonreentrant_acquire(self) -> None:
+        self.assertTrue(gc.isenabled())
+        for reason in ("closed", "io_error"):
+            with self.subTest(reason=reason):
+                fixture = self.fixture(reason, actual_lock=True)
+                origin = fixture.automatic_owner()
+                lock = fixture.engine._write_lock
+                with lock:
+                    with patch.object(lock, "acquire", side_effect=AssertionError("Nonreentrant writer reacquired")) as acquired:
+                        with self.assertRaises(fixture.maintenance.MaintenanceBusyError):
+                            fixture.runtime.open_engine_for_operation(fixture.engine)
+                        acquired.assert_not_called()
+                    self.assertTrue(lock.owned_by_current_thread())
+                    self.assertIs(fixture.engine.conn, fixture.handle)
+                    self.assertEqual(fixture.open_calls, 0)
+                    self.assertEqual(origin.released.waits, [])
+                    self.assertEqual(fixture.wait_scopes, [])
+                    self.assertEqual(fixture.factory_calls, 0)
+
+    def test_healthy_unowned_actual_writer_reuses_handle_inside_nested_admission(self) -> None:
+        for admitted in (False, True):
+            with self.subTest(admitted=admitted):
+                fixture = self.fixture(None, actual_lock=True)
+                fixture.admitted = admitted
+                fixture.local.operation = object() if admitted else None
+                origin = fixture.automatic_owner()
+                fixture.runtime.open_engine_for_operation(fixture.engine)
+                self.assertIs(fixture.engine.conn, fixture.handle)
+                self.assertEqual(fixture.handle.probes, 1)
+                self.assertEqual(fixture.open_calls, 1)
+                self.assertEqual(fixture.factory_calls, 0)
+                self.assertEqual(origin.released.waits, [])
+                self.assertFalse(fixture.engine._write_lock.locked())
+                self.assertTrue(fixture.engine.ready)
+
+    def test_healthy_borrowed_actual_writer_preserves_unowned_caller_transaction(self) -> None:
+        for admitted in (False, True):
+            with self.subTest(admitted=admitted):
+                fixture = self.fixture(None, actual_lock=True)
+                fixture.handle.in_transaction = True
+                fixture.admitted = admitted
+                fixture.local.operation = object() if admitted else None
+                origin = fixture.automatic_owner()
+                fixture.runtime.open_engine_for_operation(fixture.engine)
+                self.assertTrue(fixture.handle.in_transaction)
+                self.assertIs(fixture.engine.conn, fixture.handle)
+                self.assertEqual(fixture.handle.probes, 1)
+                self.assertEqual(fixture.open_calls, 1)
+                self.assertEqual(fixture.factory_calls, 0)
+                self.assertEqual(origin.released.waits, [])
+                self.assertFalse(fixture.engine._write_lock.locked())
+
+    def test_current_actual_writer_refuses_before_healthy_or_borrowed_opening(self) -> None:
+        for borrowed in (False, True):
+            with self.subTest(borrowed=borrowed):
+                fixture = self.fixture(None, actual_lock=True)
+                fixture.handle.in_transaction = borrowed
+                lock = fixture.engine._write_lock
+                with lock:
+                    with patch.object(lock, "acquire", side_effect=AssertionError("Owned writer reacquired")) as acquired:
+                        with self.assertRaises(fixture.maintenance.MaintenanceBusyError):
+                            fixture.runtime.open_engine_for_operation(fixture.engine)
+                        acquired.assert_not_called()
+                    self.assertTrue(lock.owned_by_current_thread())
+                    self.assertEqual(fixture.handle.in_transaction, borrowed)
+                    self.assertEqual(fixture.handle.probes, 0)
+                    self.assertEqual(fixture.open_calls, 0)
+                    self.assertEqual(fixture.factory_calls, 0)
+                    self.assertEqual(fixture.wait_scopes, [])
 
 
 if __name__ == "__main__":
