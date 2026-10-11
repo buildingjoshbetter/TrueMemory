@@ -96,7 +96,7 @@ class TestPublicBoundaries(unittest.TestCase):
         self.fixture.setUp()
         self.api, self.conn = self.fixture.api, self.fixture.conn
         self.modules = self.fixture.modules
-        maintenance = definitions("maintenance.py", {"MaintenanceBusyError"}, self.namespace())
+        maintenance = definitions("maintenance.py", {"MaintenanceBusyError"}, {})
         self.modules["maintenance"] = types.SimpleNamespace(
             MaintenanceBusyError=maintenance.MaintenanceBusyError,
             wait_for_automatic_owner=Mock(side_effect=AssertionError("Unexpected automatic owner wait in healthy fixture")),
