@@ -158,6 +158,7 @@ class CodexAdapter(CLIAdapter):
 
         # Migrate any legacy [[hooks]] blocks before appending new ones
         existing_text = self._remove_legacy_hook_blocks(existing_text)
+        existing_text = self._refresh_hook_commands(existing_text, py, hooks_dir, user_id, db_path)
 
         existing_hooks = self._parse_existing_hooks(existing_text)
 
@@ -167,7 +168,7 @@ class CodexAdapter(CLIAdapter):
                 continue
 
             script_path = hooks_dir / info["script"]
-            cmd = self._build_command(py, script_path, user_id, db_path)
+            cmd = self._build_command(py, script_path, user_id, db_path, event=event)
 
             lines_to_append.append("")
             lines_to_append.append(f"[[hooks.{event}]]")
@@ -223,8 +224,11 @@ class CodexAdapter(CLIAdapter):
         script_path: Path,
         user_id: str = "",
         db_path: str = "",
+        event: str = "",
     ) -> str:
-        parts: list[str] = [python_path, str(script_path)]
+        parts: list[str] = [python_path, str(script_path), "--host", "codex"]
+        if event:
+            parts.extend(["--event", event])
         if user_id:
             parts.extend(["--user", user_id])
         if db_path:
@@ -233,6 +237,33 @@ class CodexAdapter(CLIAdapter):
             import subprocess as _sp
             return _sp.list2cmdline(parts)
         return " ".join(shlex.quote(p) for p in parts)
+
+    def _refresh_hook_commands(
+        self, text: str, python_path: str, hooks_dir: Path, user_id: str, db_path: str,
+    ) -> str:
+        """Upgrade owned command lines while retaining other TOML fields/hooks."""
+        event = ""
+        lines: list[str] = []
+        for line in text.splitlines(keepends=True):
+            header = re.match(r'^\s*\[\[hooks\.(\w+)\.hooks\]\]\s*$', line)
+            if header:
+                event = header.group(1)
+            elif line.lstrip().startswith("["):
+                event = ""
+            if (
+                event in _HOOK_EVENTS
+                and re.match(r'^\s*command\s*=', line)
+                and _TRUEMEMORY_MARKER in line.lower()
+            ):
+                cmd = self._build_command(
+                    python_path, hooks_dir / _HOOK_EVENTS[event]["script"],
+                    user_id, db_path, event=event,
+                )
+                indent = line[:len(line) - len(line.lstrip())]
+                ending = "\n" if line.endswith("\n") else ""
+                line = f'{indent}command = "{_toml_escape(cmd)}"{ending}'
+            lines.append(line)
+        return "".join(lines)
 
     @staticmethod
     def _parse_existing_hooks(toml_text: str) -> dict:

@@ -31,39 +31,104 @@ log = logging.getLogger(__name__)
 # compact hook only; it is hoisted here so stop.py and the SessionStart
 # backlog drain share the same check.
 
-def _transcript_roots() -> list[Path]:
-    """Directories a ``transcript_path`` is allowed to live under.
+def normalize_transcript_host(host: object) -> str:
+    """Validate the installed command identity; never infer it from stdin."""
+    if isinstance(host, str) and host in ("claude", "codex", "gemini", "cursor"):
+        return host
+    return ""
 
-    Defaults to Claude Code's ``~/.claude/projects``. An explicit
-    ``TRUEMEMORY_TRANSCRIPT_DIR`` override (tests / non-default installs) is
-    honored when set.
+
+def transcript_input_path(value: object) -> str:
+    """Reject malformed source paths before any filesystem probe."""
+    if not isinstance(value, str) or not value.strip() or "\0" in value:
+        return ""
+    return value
+
+
+def _transcript_roots(host: str = "claude", transcript_path: str = "") -> list[Path]:
+    """Native transcript roots scoped to the trusted installed host.
+
+    Gemini's tmp directory also contains non-transcript state. Derive only
+    the candidate's single-workspace ``chats`` subtree after canonical
+    containment, without enumerating workspace directories.
     """
-    roots = [Path.home() / ".claude" / "projects"]
+    host = normalize_transcript_host(host)
+    if not host:
+        return []
+    roots: list[Path] = []
+    if host == "claude":
+        roots.append(Path.home() / ".claude" / "projects")
+    elif host == "codex":
+        codex_home = os.environ.get("CODEX_HOME", "")
+        roots.append((Path(codex_home) if codex_home else Path.home() / ".codex") / "sessions")
+    elif host == "gemini" and transcript_input_path(transcript_path):
+        gemini_home = os.environ.get("GEMINI_CLI_HOME", "")
+        home = Path(gemini_home) if gemini_home else Path.home()
+        runtime = home / ".gemini"
+        if os.environ.get("SANDBOX") == "sandbox-exec":
+            runtime = home / ".cache" / ".gemini"
+        try:
+            temp_root = (runtime / "tmp").resolve()
+            relative = Path(transcript_path).resolve().relative_to(temp_root)
+            if len(relative.parts) >= 3 and relative.parts[1] == "chats":
+                roots.append(temp_root / relative.parts[0] / "chats")
+        except (OSError, ValueError, RuntimeError):
+            pass
     override = os.environ.get("TRUEMEMORY_TRANSCRIPT_DIR", "")
     if override:
-        roots.insert(0, Path(override))
+        try:
+            override_root = Path(override).resolve()
+            # A directory override cannot turn the allowlist into all of home.
+            if not Path.home().resolve().is_relative_to(override_root):
+                roots.insert(0, override_root)
+        except (OSError, ValueError, RuntimeError):
+            pass
     return roots
 
 
-def is_allowed_transcript(transcript_path: str) -> bool:
+def is_allowed_transcript(transcript_path: str, host: str = "claude") -> bool:
     """Return True only if *transcript_path* resolves inside a transcripts root.
 
     Resolves symlinks (``.resolve()``) and requires containment, so neither a
     ``..`` escape nor a symlink whose target is outside the root passes.
     """
-    if not transcript_path:
+    transcript_path = transcript_input_path(transcript_path)
+    if not transcript_path or not normalize_transcript_host(host):
         return False
     try:
-        resolved = Path(transcript_path).resolve()
-    except (OSError, ValueError):
+        source = Path(transcript_path)
+        if ".." in source.parts:
+            return False
+        resolved = source.resolve()
+        # Non-strict resolution can leave cyclic/dangling links unresolved
+        # on newer Python versions. Such paths have no canonical admission.
+        if resolved.is_symlink() or any(parent.is_symlink() for parent in resolved.parents):
+            return False
+    except (OSError, ValueError, RuntimeError):
         return False
-    for root in _transcript_roots():
+    for root in _transcript_roots(host, str(resolved)):
         try:
-            if resolved.is_relative_to(root.resolve()):
+            if resolved != root.resolve() and resolved.is_relative_to(root.resolve()):
                 return True
-        except (OSError, ValueError):
+        except (OSError, ValueError, RuntimeError):
             continue
     return False
+
+
+def backlog_transcript_source(data: object, host: str = "claude") -> tuple[str, str] | None:
+    """Validate marker shape/source without letting markers select another host."""
+    active_host = normalize_transcript_host(host)
+    if not active_host or not isinstance(data, dict):
+        return None
+    marker_host = normalize_transcript_host(data.get("transcript_host", "claude"))
+    transcript = transcript_input_path(data.get("transcript_path", ""))
+    if marker_host != active_host or not is_allowed_transcript(transcript, host=active_host):
+        return None
+    for key in ("session_id", "user_id", "db_path"):
+        value = data.get(key, "")
+        if not isinstance(value, str) or "\0" in value:
+            return None
+    return transcript, _safe_session_id(data.get("session_id", ""))
 
 
 EXTRACTED_DIR = Path.home() / ".truememory" / "extracted"
@@ -118,6 +183,8 @@ def get_recall_deadline() -> float | None:
 
 def _safe_session_id(session_id: str) -> str:
     """Sanitize session_id to prevent path traversal."""
+    if not isinstance(session_id, str):
+        return ""
     return "".join(c for c in session_id if c.isalnum() or c in "-_")[:64]
 
 
@@ -344,6 +411,8 @@ def record_stale_processing_pid(processing_path: Path, pid: int) -> None:
     """Write the spawned PID into a .processing file for liveness checks."""
     try:
         data = json.loads(processing_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return
         data["claimed_pid"] = pid
         _atomic_write_text(processing_path, json.dumps(data))
     except (OSError, json.JSONDecodeError):
@@ -418,7 +487,13 @@ def cleanup_stale_processing(backlog_dir: Path) -> None:
                 continue
             try:
                 data = json.loads(stale.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    _quarantine_marker(stale)
+                    continue
                 pid = data.get("claimed_pid", 0)
+                if not isinstance(pid, int) or isinstance(pid, bool) or pid < 0:
+                    _quarantine_marker(stale)
+                    continue
                 if pid and _pid_is_alive(pid):
                     continue
             except (json.JSONDecodeError, OSError):

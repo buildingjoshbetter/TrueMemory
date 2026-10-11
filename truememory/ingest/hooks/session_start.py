@@ -231,7 +231,7 @@ def _check_email_needed() -> str:
     return ""
 
 
-def _drain_backlog() -> None:
+def _drain_backlog(host: str = "claude") -> None:
     """Process queued sessions from the backlog directory.
 
     Uses the flock-based spawn gate from core to prevent the avalanche
@@ -252,17 +252,25 @@ def _drain_backlog() -> None:
         mark_session_extracted,
         _quarantine_marker,
         is_allowed_transcript,
+        backlog_transcript_source,
+        normalize_transcript_host,
     )
+    host = normalize_transcript_host(host)
+    if not host:
+        return
     cleanup_stale_processing(BACKLOG_DIR)
 
     try:
-        markers = sorted(BACKLOG_DIR.glob("*.json"))[:_DRAIN_CAP]
+        markers = sorted(BACKLOG_DIR.glob("*.json"))
     except Exception:
         return
 
     from truememory.hooks.core import spawn_gate, register_spawned_pid
 
+    drained = 0
     for marker_path in markers:
+        if drained >= _DRAIN_CAP:
+            return
         claimed_path = marker_path.with_suffix(".processing")
         try:
             marker_path.rename(claimed_path)
@@ -287,16 +295,24 @@ def _drain_backlog() -> None:
             continue
 
         try:
-            transcript = data.get("transcript_path", "")
-            if not transcript or not Path(transcript).exists():
-                claimed_path.unlink(missing_ok=True)
-                continue
             # M-90: a backlog marker's transcript_path is attacker-influenceable;
             # confirm containment in an allowed transcripts root before parsing
             # (parse_transcript's plaintext fallback would read any readable file).
-            if not is_allowed_transcript(transcript):
-                log.warning("Drain: transcript_path %r outside allowed roots; dropping marker", transcript)
-                claimed_path.unlink(missing_ok=True)
+            if (
+                isinstance(data, dict)
+                and normalize_transcript_host(data.get("transcript_host", "claude"))
+                and data.get("transcript_host", "claude") != host
+            ):
+                claimed_path.rename(marker_path)
+                continue
+            source = backlog_transcript_source(data, host=host)
+            if source is None:
+                log.warning("Drain: rejected backlog transcript source for host=%s", host)
+                _quarantine_marker(claimed_path)
+                continue
+            transcript, session_id = source
+            if not is_allowed_transcript(transcript, host=host) or not Path(transcript).is_file():
+                _quarantine_marker(claimed_path)
                 continue
 
             if not check_extraction_budget():
@@ -323,8 +339,8 @@ def _drain_backlog() -> None:
                 cmd = [
                     sys.executable, "-m", "truememory.ingest.cli",
                     "ingest", transcript,
+                    "--transcript-host", host,
                 ]
-                session_id = data.get("session_id", "")
                 if session_id:
                     cmd.extend(["--session", session_id])
                 if data.get("user_id"):
@@ -334,7 +350,7 @@ def _drain_backlog() -> None:
                 from truememory.ingest.hooks._shared import _safe_session_id
                 _log_dir = Path.home() / ".truememory" / "logs"
                 _log_dir.mkdir(parents=True, exist_ok=True)
-                _safe_sid = _safe_session_id(data.get('session_id', 'unknown')) or 'unknown'
+                _safe_sid = _safe_session_id(session_id) or 'unknown'
                 _log_file = open(
                     _log_dir / f"{_safe_sid}.log",
                     "a", encoding="utf-8",
@@ -347,6 +363,7 @@ def _drain_backlog() -> None:
                         stdin=subprocess.DEVNULL,
                         **_platform.spawn_kwargs(),
                     )
+                    drained += 1
                 finally:
                     _log_file.close()
                 register_spawned_pid(proc.pid)
@@ -624,7 +641,7 @@ def _scan_stale_sessions() -> None:
             pass
 
 
-def _run_maintenance_background() -> None:
+def _run_maintenance_background(host: str = "claude") -> None:
     """Spawn backlog drain + stale-session scan in a detached subprocess.
 
     Uses ``Popen(start_new_session=True)`` so the child survives hook exit
@@ -637,6 +654,10 @@ def _run_maintenance_background() -> None:
     # storm). The flag was previously set but never read.
     if os.environ.get("TRUEMEMORY_MAINTENANCE_CHILD") == "1":
         return
+    from truememory.ingest.hooks._shared import normalize_transcript_host
+    host = normalize_transcript_host(host)
+    if not host:
+        return
 
     import subprocess
 
@@ -646,8 +667,8 @@ def _run_maintenance_background() -> None:
 
     script = (
         "from truememory.ingest.hooks.session_start import _drain_backlog, _scan_stale_sessions; "
-        "_drain_backlog(); "
-        "_scan_stale_sessions()"
+        f"_drain_backlog({host!r}); "
+        + ("_scan_stale_sessions()" if host == "claude" else "")
     )
 
     try:
