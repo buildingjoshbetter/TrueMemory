@@ -14,11 +14,12 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Protocol, cast
 from unittest.mock import patch
 
@@ -110,6 +111,11 @@ def yaml_subset(text: str) -> dict[str, object]:
     def scalar(value: str) -> object:
         if re.fullmatch(r"[0-9]+", value):
             return int(value)
+        if value.startswith('"'):
+            decoded = json.loads(value)
+            if not isinstance(decoded, str):
+                raise ValueError(f"Expected YAML string: {value!r}")
+            return decoded
         if not value or any(token in value for token in ("&", "*", "{", "[", "#", "\"", "'")):
             raise ValueError(f"Unsupported YAML scalar: {value!r}")
         return value
@@ -201,15 +207,24 @@ def load_adapter(source: Path, home: Path) -> Adapter:
     return adapter_class()
 
 
+def command_tokens(command: str) -> list[str]:
+    parts = shlex.split(command, posix=sys.platform != "win32")
+    if sys.platform == "win32":
+        return [part[1:-1] if part.startswith('"') and part.endswith('"') else part
+                for part in parts]
+    return parts
+
+
 def canonical(value: object) -> object:
     if isinstance(value, list):
         return [canonical(item) for item in value]
     if isinstance(value, dict):
         result = {key: canonical(item) for key, item in value.items()}
         command = value.get("command")
-        if isinstance(command, str) and "ingest/hooks/" in command:
-            parts = shlex.split(command)
-            result["command"] = ["PYTHON", Path(parts[1]).name, *parts[2:]]
+        if isinstance(command, str) and "ingest/hooks/" in command.replace("\\", "/"):
+            parts = command_tokens(command)
+            script = PureWindowsPath(parts[1]) if sys.platform == "win32" else Path(parts[1])
+            result["command"] = ["PYTHON", script.name, *parts[2:]]
         return result
     return value
 
@@ -225,8 +240,34 @@ class ManualSetupParityTests(unittest.TestCase):
         self.python.chmod(0o700)
 
     def document(self, host: str) -> str:
-        return (ROOT / f"docs/setup-{host}.md").read_text(encoding="utf-8").replace(
-            "/path/to/python", str(self.python)).replace("/path/to/truememory", str(ROOT / "truememory"))
+        text = (ROOT / f"docs/setup-{host}.md").read_text(encoding="utf-8")
+
+        def substitute(value: str) -> str:
+            if value == "/path/to/python":
+                return str(self.python)
+            if value.startswith("/path/to/python "):
+                parts = shlex.split(value)
+                parts = [str(self.python) if part == "/path/to/python" else
+                         str(ROOT / "truememory" / part.removeprefix("/path/to/truememory/"))
+                         if part.startswith("/path/to/truememory/") else part for part in parts]
+                return (subprocess.list2cmdline(parts) if sys.platform == "win32" else
+                        " ".join(shlex.quote(part) for part in parts))
+            return value
+
+        def config_block(match: re.Match[str]) -> str:
+            language, content = match.group(1), match.group(2)
+            if language == "yaml":
+                content = re.sub(r"(?m)^(\s*(?:- )?command: )(/path/to/python[^\n]*)$",
+                                 lambda line: line.group(1) + json.dumps(substitute(line.group(2))),
+                                 content)
+            else:
+                content = re.sub(r'"(?:\\.|[^"\\])*"',
+                                 lambda scalar: json.dumps(substitute(json.loads(scalar.group()))),
+                                 content)
+            return f"```{language}\n{content}```"
+
+        return re.sub(r"^```(json|toml|yaml)\n(.*?)^```", config_block, text,
+                      flags=re.MULTILINE | re.DOTALL)
 
     def install(self, host: str, paths: dict[str, str]) -> Adapter:
         for relative, text in paths.items():
@@ -264,7 +305,7 @@ class ManualSetupParityTests(unittest.TestCase):
         for event, (script, timeout) in EVENTS[host].items():
             entry = entries[event]
             self.assertEqual(entry["timeout"], timeout)
-            tokens = shlex.split(cast(str, entry["command"]))
+            tokens = command_tokens(cast(str, entry["command"]))
             self.assertEqual(tokens[:2], [str(self.python), str(ROOT / "truememory/ingest/hooks" / script)])
             if host in {"codex", "cursor", "gemini"}:
                 self.assertEqual(tokens[2:], ["--host", host, "--event", event])
