@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import types
+from typing import Iterator
 import unittest
 from unittest.mock import patch
 
@@ -44,6 +45,21 @@ def source_module(name: str, relative_path: str, names: set[str] | None = None) 
     sys.modules[name] = module
     exec(compile(tree, module.__file__, "exec"), module.__dict__)
     return module
+
+
+@contextmanager
+def scoped_module_bindings(packages: dict[str, types.ModuleType], owned: set[str]) -> Iterator[None]:
+    missing = object()
+    saved = {name: sys.modules.get(name, missing) for name in owned}
+    sys.modules.update(packages)
+    try:
+        yield
+    finally:
+        for name, previous in saved.items():
+            if previous is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
 
 
 @contextmanager
@@ -86,9 +102,16 @@ class TranscriptAdmissionTests(unittest.TestCase):
         core.register_spawned_pid = lambda pid: None
         core._load_cap_state = lambda: {"cap": 2}
         packages["truememory.hooks.core"] = core
-        self.module_patch = patch.dict(sys.modules, packages)
-        self.module_patch.start()
-        self.addCleanup(self.module_patch.stop)
+        owned = set(packages) | {
+            "truememory.hooks.adapters.base", "truememory.hooks.adapters.codex",
+            "truememory.hooks.adapters.gemini", "truememory.ingest.hooks._shared",
+            "truememory.ingest.hooks.stop", "truememory.ingest.hooks.compact",
+            "truememory.ingest.hooks.session_start", "truememory.ingest.cli",
+            "truememory.ingest.transcript",
+        }
+        self.module_bindings = scoped_module_bindings(packages, owned)
+        self.module_bindings.__enter__()
+        self.addCleanup(self.module_bindings.__exit__, None, None, None)
         source_module("truememory.hooks.adapters.base", "truememory/hooks/adapters/base.py")
         self.shared = source_module(
             "truememory.ingest.hooks._shared", "truememory/ingest/hooks/_shared.py",
@@ -111,7 +134,7 @@ class TranscriptAdmissionTests(unittest.TestCase):
         self.session_start._DRAIN_CAP = 3
         self.session_start._platform = platform
         self.cli = source_module("truememory.ingest.cli", "truememory/ingest/cli.py", {"_cascade_next"})
-        self.parser = source_module("synthetic_transcript_parser_761", "truememory/ingest/transcript.py")
+        self.parser = source_module("truememory.ingest.transcript", "truememory/ingest/transcript.py")
 
     def write(self, path: Path, text: str = "synthetic conversation") -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -278,7 +301,9 @@ class TranscriptAdmissionTests(unittest.TestCase):
                 self.stop.main()
 
     def test_compact_correct_host_snapshot_and_background_admission(self) -> None:
-        path = self.write(self.native_path("gemini"), "synthetic text " * 30)
+        path = self.write(self.native_path("gemini"), json.dumps([
+            {"role": "user", "content": "synthetic turn"} for _ in range(5)
+        ]))
         with patch.object(self.compact, "save_snapshot") as snapshot, \
                 patch.object(self.stop, "_run_background_ingestion", return_value=17) as spawn, \
                 patch.object(sys, "argv", ["compact.py", "--host", "gemini", "--event", "PreCompress"]), \
@@ -512,7 +537,9 @@ class TranscriptAdmissionTests(unittest.TestCase):
 
     def test_cursor_extraction_uses_native_conversation_identity(self) -> None:
         os.environ["TRUEMEMORY_TRANSCRIPT_DIR"] = str(self.home / "synthetic-transcripts")
-        path = self.write(self.home / "synthetic-transcripts/session.jsonl", "synthetic text " * 30)
+        path = self.write(self.home / "synthetic-transcripts/session.jsonl", json.dumps([
+            {"role": "user", "content": "synthetic turn"} for _ in range(5)
+        ]))
         for module, argv in ((self.stop, ["stop.py", "--host", "cursor", "--event", "stop"]),
                              (self.compact, ["compact.py", "--host", "cursor", "--event", "preCompact"])):
             for conversation in ("synthetic-cursor-a", "synthetic-cursor-b"):
@@ -543,6 +570,26 @@ class TranscriptAdmissionTests(unittest.TestCase):
         for malformed in (None, [], 42, "text"):
             self.assertEqual(self.shared.hook_session_id(malformed, "cursor"), "unknown")
         self.assertEqual(self.shared.hook_session_id(payload, "invalid", default=""), "")
+
+    def test_module_binding_scope_retains_unrelated_imports_and_restores_owned_keys(self) -> None:
+        owned = "synthetic_owned_module_761"
+        unrelated = "synthetic_later_import_761"
+        previous = types.ModuleType(owned)
+        replacement = types.ModuleType(owned)
+        imported = types.ModuleType(unrelated)
+        with scoped_module_bindings({owned: previous}, {owned, unrelated}):
+            with scoped_module_bindings({owned: replacement}, {owned}):
+                sys.modules[unrelated] = imported
+                self.assertIs(sys.modules[owned], replacement)
+            self.assertIs(sys.modules[owned], previous)
+            self.assertIs(sys.modules[unrelated], imported)
+
+    def test_spawn_fixtures_require_five_real_user_turns(self) -> None:
+        path = self.native_path("gemini")
+        self.write(path, json.dumps([{"role": "user", "content": "synthetic turn"}]))
+        self.assertFalse(self.stop._has_enough_messages(str(path), 5))
+        self.write(path, json.dumps([{"role": "user", "content": "synthetic turn"} for _ in range(5)]))
+        self.assertTrue(self.stop._has_enough_messages(str(path), 5))
 
 
 if __name__ == "__main__":
