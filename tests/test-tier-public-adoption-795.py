@@ -1148,6 +1148,7 @@ class PublicAdoptionTests(unittest.TestCase):
 
     def test_cancel_cli_dispatch_uses_only_exact_supplied_identity(self):
         h = self.h
+        supplied_db = "/synthetic/store.db"
         manager = types.SimpleNamespace(
             cancel=Mock(return_value={"status": "cancelled", "job_id": h.job.job_id})
         )
@@ -1165,7 +1166,7 @@ class PublicAdoptionTests(unittest.TestCase):
                     "--job-id",
                     h.job.job_id,
                     "--db",
-                    "/synthetic/store.db",
+                    supplied_db,
                 ],
             ),
             contextlib.redirect_stdout(output),
@@ -1173,7 +1174,7 @@ class PublicAdoptionTests(unittest.TestCase):
             module.main()
         factory.assert_called_once_with()
         manager.cancel.assert_called_once_with(
-            17, expected_job_id=h.job.job_id, db_path=h.job.database_path
+            17, expected_job_id=h.job.job_id, db_path=Path(supplied_db)
         )
         self.assertIn("Rebuild 17 cancelled", output.getvalue())
         self.assertIn("explicitly", output.getvalue())
