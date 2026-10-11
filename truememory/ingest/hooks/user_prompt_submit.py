@@ -83,15 +83,14 @@ def _word_overlap(a: str, b: str) -> float:
 def _parse_args() -> argparse.Namespace:
     """Parse command-line overrides the installer threads through.
 
-    UserPromptSubmit doesn't actually use ``--user`` or ``--db`` — it only
-    writes a per-session diagnostic buffer — but the installer passes the
-    same flags to every hook for consistency, so we must accept them here
-    without erroring out. ``parse_known_args`` ensures forward compat with
-    future flags.
+    The trusted host selects transcript admission; event retains installer context.
+    ``parse_known_args`` keeps the existing forward-compatible flags.
     """
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--user", default=os.environ.get("TRUEMEMORY_USER_ID", ""))
     p.add_argument("--db", default=os.environ.get("TRUEMEMORY_DB_PATH", ""))
+    p.add_argument("--host", choices=("claude", "codex", "gemini", "cursor"), default="claude")
+    p.add_argument("--event", default="UserPromptSubmit")
     args, _ = p.parse_known_args()
     return args
 
@@ -737,7 +736,8 @@ def main():
         return
 
     prompt = input_data.get("prompt", "").strip()
-    session_id = input_data.get("session_id", "unknown")
+    from truememory.ingest.hooks._shared import hook_session_id
+    session_id = hook_session_id(input_data, args.host)
 
     if not prompt or len(prompt) < 3:
         # A too-short first prompt is still the session's first prompt:
@@ -765,10 +765,16 @@ def main():
     prompt_count = _increment_prompt_count(session_id)
 
     transcript_path = input_data.get("transcript_path", "")
-    if transcript_path and Path(transcript_path).exists():
+    if transcript_path:
         try:
-            from truememory.ingest.hooks._shared import should_extract_session, mark_session_extracted
-            if should_extract_session(session_id, transcript_path):
+            from truememory.ingest.hooks._shared import (
+                is_allowed_transcript, should_extract_session, mark_session_extracted,
+            )
+            if (
+                is_allowed_transcript(transcript_path, host=args.host)
+                and Path(transcript_path).is_file()
+                and should_extract_session(session_id, transcript_path)
+            ):
                 from truememory.ingest.hooks.stop import (
                     _has_enough_messages, _run_background_ingestion,
                     TRACE_DIR, LOG_DIR,
@@ -778,6 +784,7 @@ def main():
                 if _has_enough_messages(transcript_path, 10):
                     spawned_pid = _run_background_ingestion(
                         transcript_path, session_id, args.user, args.db,
+                        transcript_host=args.host,
                     )
                     # Only mark extracted on a real spawn; pid==0 means the
                     # session was queued to the backlog and must stay eligible

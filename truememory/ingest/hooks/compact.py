@@ -33,16 +33,16 @@ log = logging.getLogger(__name__)
 # (hoisted so stop.py and the SessionStart backlog drain share the same guard).
 # These thin shims keep the original names working for callers/tests.
 
-def _transcript_roots() -> list[Path]:
+def _transcript_roots(host: str = "claude", transcript_path: str = "") -> list[Path]:
     """Shim — see ``_shared._transcript_roots``."""
     from truememory.ingest.hooks._shared import _transcript_roots as _shared_roots
-    return _shared_roots()
+    return _shared_roots(host, transcript_path)
 
 
-def _is_allowed_transcript(transcript_path: str) -> bool:
+def _is_allowed_transcript(transcript_path: str, host: str = "claude") -> bool:
     """Shim — delegates to the shared M-90 guard (``_shared.is_allowed_transcript``)."""
     from truememory.ingest.hooks._shared import is_allowed_transcript
-    return is_allowed_transcript(transcript_path)
+    return is_allowed_transcript(transcript_path, host=host)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -54,11 +54,13 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--user", default=os.environ.get("TRUEMEMORY_USER_ID", ""))
     p.add_argument("--db", default=os.environ.get("TRUEMEMORY_DB_PATH", ""))
+    p.add_argument("--host", choices=("claude", "codex", "gemini", "cursor"), default="claude")
+    p.add_argument("--event", default="PreCompact")
     args, _ = p.parse_known_args()
     return args
 
 
-def main():
+def main() -> None:
     if os.environ.get("TRUEMEMORY_EXTRACTION"):
         return
 
@@ -69,11 +71,11 @@ def main():
     except (json.JSONDecodeError, EOFError):
         input_data = {}
 
-    # M-95: stdin fields may be non-strings (e.g. an int session_id) from a
-    # misbehaving / hostile caller. Coerce to str before any str/Path op so the
-    # hook never crashes with TypeError.
-    transcript_path = str(input_data.get("transcript_path", "") or "")
-    session_id = str(input_data.get("session_id", "unknown") or "unknown")
+    if not isinstance(input_data, dict):
+        return
+    from truememory.ingest.hooks._shared import transcript_input_path, hook_session_id
+    transcript_path = transcript_input_path(input_data.get("transcript_path", ""))
+    session_id = hook_session_id(input_data, host=args.host)
 
     # Sanitize session_id to prevent injection (consistent with user_prompt_submit.py)
     safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64]
@@ -81,13 +83,15 @@ def main():
         safe_id = "unknown"
     session_id = safe_id
 
-    if not transcript_path or not Path(transcript_path).exists():
+    if not transcript_path:
         return
 
     # M-90: reject transcript paths outside the expected transcripts root so an
     # attacker-chosen arbitrary file is never read into the memory store.
-    if not _is_allowed_transcript(transcript_path):
-        log.warning("Rejecting transcript_path outside transcripts root: %r", transcript_path)
+    if not _is_allowed_transcript(transcript_path, host=args.host):
+        log.warning("Compact transcript source rejected for host=%s", args.host)
+        return
+    if not Path(transcript_path).is_file():
         return
 
     try:
@@ -108,6 +112,7 @@ def main():
                 spawned_pid = _run_background_ingestion(
                     transcript_path, session_id,
                     user_id=args.user, db_path=args.db,
+                    transcript_host=args.host,
                 )
                 # Only mark extracted on a real spawn; pid==0 means the session
                 # was queued to the backlog (spawn cap / Popen failure) and must

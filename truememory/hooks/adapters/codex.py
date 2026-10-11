@@ -10,13 +10,14 @@ Codex CLI uses:
 from __future__ import annotations
 
 import logging
+import json
 import re
 import shlex
 import shutil
 import sys
 from pathlib import Path
 
-from truememory.hooks.adapters.base import CLIAdapter, atomic_write_text
+from truememory.hooks.adapters.base import CLIAdapter, atomic_write_text, is_owned_hook_command
 
 log = logging.getLogger(__name__)
 
@@ -158,6 +159,7 @@ class CodexAdapter(CLIAdapter):
 
         # Migrate any legacy [[hooks]] blocks before appending new ones
         existing_text = self._remove_legacy_hook_blocks(existing_text)
+        existing_text = self._refresh_hook_commands(existing_text, py, hooks_dir, user_id, db_path)
 
         existing_hooks = self._parse_existing_hooks(existing_text)
 
@@ -167,7 +169,7 @@ class CodexAdapter(CLIAdapter):
                 continue
 
             script_path = hooks_dir / info["script"]
-            cmd = self._build_command(py, script_path, user_id, db_path)
+            cmd = self._build_command(py, script_path, user_id, db_path, event=event)
 
             lines_to_append.append("")
             lines_to_append.append(f"[[hooks.{event}]]")
@@ -223,8 +225,11 @@ class CodexAdapter(CLIAdapter):
         script_path: Path,
         user_id: str = "",
         db_path: str = "",
+        event: str = "",
     ) -> str:
-        parts: list[str] = [python_path, str(script_path)]
+        parts: list[str] = [python_path, str(script_path), "--host", "codex"]
+        if event:
+            parts.extend(["--event", event])
         if user_id:
             parts.extend(["--user", user_id])
         if db_path:
@@ -233,6 +238,52 @@ class CodexAdapter(CLIAdapter):
             import subprocess as _sp
             return _sp.list2cmdline(parts)
         return " ".join(shlex.quote(p) for p in parts)
+
+    def _refresh_hook_commands(
+        self, text: str, python_path: str, hooks_dir: Path, user_id: str, db_path: str,
+    ) -> str:
+        """Upgrade owned command lines while retaining other TOML fields/hooks."""
+        event = ""
+        lines: list[str] = []
+        for line in text.splitlines(keepends=True):
+            header = re.match(r'^\s*\[\[hooks\.(\w+)\.hooks\]\]\s*$', line)
+            if header:
+                event = header.group(1)
+            elif line.lstrip().startswith("["):
+                event = ""
+            if (
+                event in _HOOK_EVENTS
+                and re.match(r'^\s*command\s*=', line)
+                and is_owned_hook_command(self._hook_command_value(line))
+            ):
+                cmd = self._build_command(
+                    python_path, hooks_dir / _HOOK_EVENTS[event]["script"],
+                    user_id, db_path, event=event,
+                )
+                indent = line[:len(line) - len(line.lstrip())]
+                ending = "\n" if line.endswith("\n") else ""
+                line = f'{indent}command = "{_toml_escape(cmd)}"{ending}'
+            lines.append(line)
+        return "".join(lines)
+
+    @staticmethod
+    def _hook_command_value(line: str) -> str | None:
+        """Decode the generated one-line TOML string without reading comments."""
+        match = re.match(r'^\s*command\s*=\s*(.*)$', line)
+        if match is None:
+            return None
+        value = match.group(1).strip()
+        if value.startswith("'"):
+            literal = re.fullmatch(r"'([^']*)'\s*(?:#.*)?", value)
+            return literal.group(1) if literal else None
+        try:
+            command, end = json.JSONDecoder().raw_decode(value)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        tail = value[end:].strip()
+        if isinstance(command, str) and (not tail or tail.startswith("#")):
+            return command
+        return None
 
     @staticmethod
     def _parse_existing_hooks(toml_text: str) -> dict:
@@ -315,7 +366,7 @@ class CodexAdapter(CLIAdapter):
             for hook_entry in mg.get("hooks", []):
                 handler = hook_entry if isinstance(hook_entry, dict) else {}
                 cmd = handler.get("command", "")
-                if _TRUEMEMORY_MARKER in cmd.lower():
+                if is_owned_hook_command(cmd):
                     return True
         return False
 
@@ -340,7 +391,7 @@ class CodexAdapter(CLIAdapter):
             for mg in matcher_groups:
                 for hook_entry in mg.get("hooks", []):
                     handler = hook_entry if isinstance(hook_entry, dict) else {}
-                    if _TRUEMEMORY_MARKER in handler.get("command", "").lower():
+                    if is_owned_hook_command(handler.get("command", "")):
                         return True
         return False
 
@@ -410,8 +461,7 @@ class CodexAdapter(CLIAdapter):
                     block_lines.append(lines[i])
                     i += 1
 
-                block_text = "".join(block_lines)
-                if _TRUEMEMORY_MARKER not in block_text.lower():
+                if not any(is_owned_hook_command(CodexAdapter._hook_command_value(line)) for line in block_lines):
                     cleaned.extend(block_lines)
                 continue
 
@@ -441,8 +491,7 @@ class CodexAdapter(CLIAdapter):
                     block_lines.append(lines[i])
                     i += 1
 
-                block_text = "".join(block_lines)
-                if _TRUEMEMORY_MARKER not in block_text.lower():
+                if not any(is_owned_hook_command(CodexAdapter._hook_command_value(line)) for line in block_lines):
                     cleaned.extend(block_lines)
                 continue
 

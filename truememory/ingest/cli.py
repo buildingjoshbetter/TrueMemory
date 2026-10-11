@@ -44,6 +44,8 @@ def main():
     p_ingest.add_argument("--provider", default="auto", help="LLM provider (auto/ollama/claude_cli/openrouter/anthropic)")
     p_ingest.add_argument("--model", default="", help="LLM model name")
     p_ingest.add_argument("--session", default="", help="Session identifier to tag this ingestion trace with")
+    p_ingest.add_argument("--transcript-host", choices=("claude", "codex", "gemini", "cursor"),
+                          default="claude", help=argparse.SUPPRESS)
     p_ingest.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
 
     # --- install command ---
@@ -301,10 +303,10 @@ def _run_ingest(args):
             args.session, e,
         )
 
-    _cascade_next()
+    _cascade_next(getattr(args, "transcript_host", "claude"))
 
 
-def _cascade_next() -> None:
+def _cascade_next(host: str = "claude") -> None:
     """Spawn the next backlog ingest process if work remains and slots are free.
 
     This creates a self-sustaining chain: each ingest process spawns the
@@ -328,7 +330,12 @@ def _cascade_next() -> None:
         record_stale_processing_pid,
         mark_session_extracted,
         _quarantine_marker,
+        backlog_transcript_source,
+        normalize_transcript_host,
     )
+    host = normalize_transcript_host(host)
+    if not host:
+        return
     cleanup_stale_processing(backlog_dir)
 
     try:
@@ -344,7 +351,7 @@ def _cascade_next() -> None:
     except ImportError:
         return
 
-    for marker_path in markers[:1]:
+    for marker_path in markers:
         claimed_path = marker_path.with_suffix(".processing")
         try:
             marker_path.rename(claimed_path)
@@ -368,9 +375,20 @@ def _cascade_next() -> None:
             continue
 
         try:
-            transcript = data.get("transcript_path", "")
-            if not transcript or not Path(transcript).exists():
-                claimed_path.unlink(missing_ok=True)
+            if (
+                isinstance(data, dict)
+                and normalize_transcript_host(data.get("transcript_host", "claude"))
+                and data.get("transcript_host", "claude") != host
+            ):
+                claimed_path.rename(marker_path)
+                continue
+            source = backlog_transcript_source(data, host=host)
+            if source is None:
+                _quarantine_marker(claimed_path)
+                continue
+            transcript, session_id = source
+            if not Path(transcript).is_file():
+                _quarantine_marker(claimed_path)
                 continue
 
             if not check_extraction_budget():
@@ -393,8 +411,8 @@ def _cascade_next() -> None:
                 cmd = [
                     sys.executable, "-m", "truememory.ingest.cli",
                     "ingest", transcript,
+                    "--transcript-host", host,
                 ]
-                session_id = data.get("session_id", "")
                 if session_id:
                     cmd.extend(["--session", session_id])
                 if data.get("user_id"):
@@ -422,8 +440,9 @@ def _cascade_next() -> None:
             # the session if the spawned worker exits non-zero.
             logging.getLogger(__name__).info(
                 "Cascade: spawned next ingest for session %s (PID %d)",
-                data.get("session_id", "?"), proc.pid,
+                session_id, proc.pid,
             )
+            return
         except Exception:
             try:
                 claimed_path.rename(marker_path)
