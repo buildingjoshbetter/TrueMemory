@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -89,6 +90,17 @@ def main():
     p_upgrade.add_argument("tier", choices=["edge", "base", "pro"], help="Target tier")
     p_upgrade.add_argument("--force", action="store_true", help="Re-embed even if tier is unchanged")
 
+    p_cancel = sub.add_parser(
+        "cancel-rebuild", help="Cancel one explicitly identified interrupted tier rebuild",
+        description=("Read truememory_status(status_id) for the matching rebuild.id and rebuild.job_id. "
+                     "This command cancels only that marker. Retry upgrade-tier explicitly afterward."),
+    )
+    p_cancel.add_argument("--status-id", required=True, type=_positive_rebuild_status_id,
+                          help="Exact positive rebuild.id returned by truememory_status")
+    p_cancel.add_argument("--job-id", required=True, type=_rebuild_job_id,
+                          help="Exact matching 32-character lowercase hexadecimal rebuild.job_id")
+    p_cancel.add_argument("--db", default=None, help="Path to the same truememory database")
+
     # --- migrate-memory command ---
     p_migrate = sub.add_parser("migrate-memory", help="Migrate MEMORY.md facts into TrueMemory")
     p_migrate.add_argument("--path", default=None, help="Path to MEMORY.md (auto-detected if not specified)")
@@ -119,10 +131,51 @@ def main():
         _run_setup(args)
     elif args.command == "upgrade-tier":
         _run_upgrade_tier(args)
+    elif args.command == "cancel-rebuild":
+        _run_cancel_rebuild(args)
     elif args.command == "migrate-memory":
         _run_migrate_memory(args)
     else:
         parser.print_help()
+
+
+def _positive_rebuild_status_id(value: str) -> int:
+    if (type(value) is not str or re.fullmatch(r"[1-9][0-9]{0,18}", value) is None
+            or int(value) > 9223372036854775807):
+        raise argparse.ArgumentTypeError("status ID must be an exact positive SQLite integer")
+    return int(value)
+
+
+def _rebuild_job_id(value: str) -> str:
+    if type(value) is not str or re.fullmatch(r"[0-9a-f]{32}", value) is None:
+        raise argparse.ArgumentTypeError("job ID must be exactly 32 lowercase hexadecimal characters")
+    return value
+
+
+def _run_cancel_rebuild(args: argparse.Namespace) -> None:
+    """Cancel one explicit marker; do not discover, retry, or rebuild anything."""
+    try:
+        if type(args.status_id) is not int or not 1 <= args.status_id <= 9223372036854775807:
+            raise argparse.ArgumentTypeError("status ID must be an exact positive SQLite integer")
+        job_id = _rebuild_job_id(args.job_id)
+    except argparse.ArgumentTypeError as error:
+        print(f"Invalid rebuild identity: {error}", file=sys.stderr)
+        raise SystemExit(2) from error
+
+    from truememory.tier_switch.manager import RebuildManager
+    manager = RebuildManager()
+    try:
+        result = manager.cancel(args.status_id, expected_job_id=job_id,
+                                db_path=Path(args.db) if args.db is not None else None)
+    except Exception as error:
+        print(f"Rebuild cancellation refused: {error}", file=sys.stderr)
+        print("Read truememory_status(status_id) again and use its matching rebuild.id and rebuild.job_id.", file=sys.stderr)
+        raise SystemExit(1) from error
+    if result.get("status") != "cancelled" or result.get("job_id") != job_id:
+        print("No matching interrupted rebuild was cancelled. Read truememory_status(status_id) again.", file=sys.stderr)
+        raise SystemExit(1)
+    print(f"Rebuild {args.status_id} cancelled (job_id={job_id}).")
+    print("Retry the original upgrade-tier request explicitly to resume the eligible inactive prefix.")
 
 
 def _run_ingest(args):
@@ -564,6 +617,55 @@ def _setup_cli_integrations(args: argparse.Namespace, config: dict) -> list[str]
     return failures
 
 
+def _setup_model_readiness(tier: str, existing_tier: str) -> list[str]:
+    """Switch through certification, then exercise the admitted serving identity."""
+    from truememory.maintenance import maintenance_owner
+    from truememory.tier_switch.manager import RebuildManager, _get_db_path, _open_db
+    from truememory.tier_switch.runtime import serving_operation
+
+    failures: list[str] = []
+    manager = RebuildManager()
+    try:
+        if not manager.run_rebuild_sync(tier):
+            return ["tier activation"]
+    except Exception as error:
+        print(f"Tier activation remains incomplete: {error}", file=sys.stderr)
+        return ["tier activation"]
+    if manager._last_action == "config_only" or {tier, existing_tier} == {"base", "pro"}:
+        return failures
+    try:
+        with maintenance_owner(_get_db_path()):
+            conn = _open_db(initialize=True)
+            try:
+                with serving_operation(conn) as operation:
+                    if operation.tier != tier:
+                        raise RuntimeError("Requested setup tier is not the admitted serving tier")
+                    try:
+                        from truememory.vector_search import _encode_with_mps_fallback, get_model
+                        _encode_with_mps_fallback(get_model(), ["TrueMemory setup readiness check."], show_progress_bar=False)
+                        if tier in ("base", "pro"):
+                            print("  \033[32mQwen3-Embedding-0.6B @ 256d Matryoshka ready\033[0m")
+                        else:
+                            print("  \033[32mpotion-base-8M (256-dim) ready\033[0m")
+                    except Exception as error:
+                        failures.append("embedding model")
+                        print(f"Embedding model readiness check failed: {error}", file=sys.stderr)
+                    try:
+                        from truememory.reranker import get_reranker
+                        get_reranker().predict([("TrueMemory setup readiness check.", "TrueMemory setup readiness check.")],
+                                               show_progress_bar=False)
+                        print("  \033[32mCross-encoder reranker ready\033[0m")
+                    except Exception as error:
+                        failures.append("reranker")
+                        print(f"Reranker readiness check failed: {error}", file=sys.stderr)
+            finally:
+                conn.close()
+    except Exception as error:
+        failures.append("serving admission")
+        print(f"Serving readiness admission failed: {error}", file=sys.stderr)
+    return failures
+
+
 def _run_setup(args):
     """Interactive first-time setup wizard for TrueMemory."""
     print(_SAURON_BANNER)
@@ -591,39 +693,7 @@ def _run_setup(args):
             print(f"  \033[33m⚠ Invalid choice '{choice}', defaulting to Edge tier.\033[0m")
             tier = "edge"
 
-    # Exercise one synthetic input so a lazy model-server proxy is not mistaken
-    # for a successful download/load. No user memories are read by this check.
-    model_failures: list[str] = []
-    print()
-    print("  \033[1mDownloading embedding model...\033[0m")
-    try:
-        os.environ["TRUEMEMORY_EMBED_MODEL"] = tier
-        from truememory.vector_search import _encode_with_mps_fallback, set_embedding_model, get_model
-        set_embedding_model(tier)
-        _encode_with_mps_fallback(
-            get_model(), ["TrueMemory setup readiness check."], show_progress_bar=False,
-        )
-        if tier in ("base", "pro"):
-            print("  \033[32m✓ Qwen3-Embedding-0.6B @ 256d Matryoshka ready\033[0m")
-        else:
-            print("  \033[32m✓ potion-base-8M (256-dim) ready\033[0m")
-    except Exception as e:
-        model_failures.append("embedding model")
-        print(f"  Embedding model readiness check failed: {e}", file=sys.stderr)
-
-    # Verify the selected tier's reranker, including the model-server path.
-    try:
-        from truememory.reranker import get_reranker, set_active_tier
-        set_active_tier(tier)
-        print("  Downloading reranker model...")
-        get_reranker().predict(
-            [("TrueMemory setup readiness check.", "TrueMemory setup readiness check.")],
-            show_progress_bar=False,
-        )
-        print("  \033[32m✓ Cross-encoder reranker ready\033[0m")
-    except Exception as e:
-        model_failures.append("reranker")
-        print(f"  Reranker readiness check failed: {e}", file=sys.stderr)
+    model_failures = _setup_model_readiness(tier, existing_tier)
 
     # ── Step 2: API key for HyDE / deep search ───────────────────────
     print()
@@ -694,14 +764,22 @@ def _run_setup(args):
             from getpass import getpass as _getpass
             api_key = _getpass(f"  {prompt_text}: ").strip()
 
-    # ── Save config ───────────────────────────────────────────────────
-    config["tier"] = tier
+    # Independent settings cannot publish a requested tier before certification.
+    from truememory.tier_switch.projection import (
+        CONFIG_WRITE_LOCK, ConfigFileLock, _read_config, _write_config, patch_config_fields,
+    )
+    fields = {}
     if llm_provider:
-        config["llm_provider"] = llm_provider
+        fields["llm_provider"] = llm_provider
     if api_key_field and api_key:
-        config[api_key_field] = api_key
-
-    _save_truememory_config(config)
+        fields[api_key_field] = api_key
+    config = patch_config_fields(fields, config_path=_TRUEMEMORY_CONFIG_PATH)
+    if tier == "edge" and not existing_tier:
+        with ConfigFileLock(_TRUEMEMORY_CONFIG_PATH.with_name("config.json.lock"), strict=True), CONFIG_WRITE_LOCK:
+            config = _read_config(_TRUEMEMORY_CONFIG_PATH)
+            if "tier" not in config:
+                config["tier"] = "edge"
+                _write_config(_TRUEMEMORY_CONFIG_PATH, config)
     print()
     print(f"  \033[32m✓ Config saved to {_TRUEMEMORY_CONFIG_PATH}\033[0m")
 
@@ -741,75 +819,27 @@ def _run_upgrade_tier(args):
     """Switch embedding tier and re-embed all memories with the new model."""
     tier = args.tier.lower().strip()
     config = _load_truememory_config()
-    old_tier = config.get("tier", "edge")
+    from truememory.tier_switch.manager import RebuildManager
 
-    if tier == old_tier and not args.force:
-        print(f"Already on {tier} tier. Use --force to re-embed anyway.")
-        return
+    def progress_callback(processed, total, metrics):
+        pct = 100.0 * processed / max(1, total)
+        print(f"\r  Re-embedding: {pct:.0f}% ({processed}/{total})", end="", flush=True)
 
-    from truememory.tier_switch.cache import get_transition_action
-
-    action = get_transition_action(old_tier, tier, force=args.force)
-
-    if action == "noop":
-        print(f"Already on {tier} tier.")
-        return
-
-    if action == "config_only":
-        config["tier"] = tier
-        _save_truememory_config(config)
-        os.environ["TRUEMEMORY_EMBED_MODEL"] = tier
-        from truememory.vector_search import set_embedding_model
-        set_embedding_model(tier)
-        from truememory.reranker import set_active_tier
-        set_active_tier(tier)
-        print(f"\033[32m✓ Switched to {tier} instantly (same embedding model)\033[0m")
-        return
-
-    print(f"Switching from {old_tier} to {tier}...")
-
-    os.environ.pop("HF_HUB_OFFLINE", None)
-    os.environ.pop("TRANSFORMERS_OFFLINE", None)
+    manager = RebuildManager()
     try:
-        os.environ["TRUEMEMORY_EMBED_MODEL"] = tier
-        from truememory.vector_search import set_embedding_model
-        set_embedding_model(tier)
-
-        from truememory.reranker import set_active_tier
-        set_active_tier(tier)
-
-        from truememory.tier_switch.manager import RebuildManager
-
-        def progress_callback(processed, total, metrics):
-            pct = metrics.get("progress_pct", 0)
-            eta = metrics.get("eta_seconds", 0)
-            bs = metrics.get("batch_size", 0)
-            ram = metrics.get("ram_pct", 0)
-            print(
-                f"\r  Re-embedding: {pct:.0f}% ({processed}/{total}) "
-                f"| ETA {eta:.0f}s | BS={bs} | RAM={ram:.0f}%",
-                end="", flush=True,
-            )
-
-        manager = RebuildManager()
-        success = manager.run_rebuild_sync(
-            target_tier=tier,
-            force=args.force,
-            progress_callback=progress_callback,
-        )
-
-        if success:
-            print(f"\n  \033[32m✓ Tier switched to {tier}\033[0m")
-        else:
-            print("\n  \033[31m✗ Rebuild failed. Run again to retry.\033[0m")
-            sys.exit(1)
-    except Exception as e:
-        print(f"\n\033[31mError during tier switch: {e}\033[0m", file=sys.stderr)
-        print("Config was saved. Re-run to retry, or use truememory-ingest setup.")
-        sys.exit(1)
-    finally:
-        os.environ["HF_HUB_OFFLINE"] = "1"
-        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        success = manager.run_rebuild_sync(target_tier=tier, force=args.force, progress_callback=progress_callback)
+    except Exception as error:
+        state = "activation pending" if manager._last_outcome == "activation_pending" else "switch incomplete"
+        print(f"Tier {state}: {error}", file=sys.stderr)
+        print("Read truememory_status() for rebuild.id and its matching rebuild.job_id. "
+              "For interrupted work, use truememory-ingest cancel-rebuild --status-id ID --job-id JOB_ID, "
+              "then retry the original request explicitly.", file=sys.stderr)
+        raise SystemExit(1) from error
+    if not success:
+        print("Tier activation is incomplete. Read truememory_status() before retrying. "
+              "Use its matching rebuild.id and rebuild.job_id with cancel-rebuild only for interrupted work.", file=sys.stderr)
+        raise SystemExit(1)
+    config = _load_truememory_config()
 
     _tier_descriptions = {
         "edge": "Edge — 89.6% LoCoMo, Model2Vec + MiniLM",

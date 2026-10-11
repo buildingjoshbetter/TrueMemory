@@ -1,6 +1,7 @@
 """Transactional maintenance revisions on synthetic SQLite databases only."""
 
 import builtins
+import sys
 import sqlite3
 import tempfile
 import types
@@ -14,19 +15,57 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def load_primitives() -> tuple[types.ModuleType, types.ModuleType]:
     modules = {}
-    for name in ("storage", "_platform", "maintenance"):
-        module = types.ModuleType(f"synthetic_maintenance_{name}")
+    tier_switch = types.ModuleType("synthetic_maintenance_tier_switch")
 
-        def safe_import(name: str, globals: dict | None = None, locals: dict | None = None,
-                        fromlist: tuple[str, ...] = (), level: int = 0) -> object:
-            if name in ("truememory.storage", "truememory._platform"):
-                return modules[name.rsplit(".", 1)[1]]
-            return builtins.__import__(name, globals, locals, fromlist, level)
+    def unavailable_model(*args: object, **kwargs: object) -> object:
+        raise AssertionError("Maintenance fixtures must not construct or encode models")
 
+    vector = types.SimpleNamespace(
+        EMBEDDING_MODEL="synthetic-model", _embedding_dim=2, _model=None,
+        _frozen_embedding_target=None, _runtime_policy_tier=None,
+        resolve_tier=lambda: "edge", _active_vec_table=lambda conn: "vec_messages",
+        _active_sep_table=lambda conn: "vec_messages_sep", get_model=unavailable_model,
+    )
+    reranker = types.SimpleNamespace(
+        get_current_reranker_name=lambda: "synthetic/reranker", get_reranker=unavailable_model,
+    )
+
+    def safe_import(name: str, globals: dict | None = None, locals: dict | None = None,
+                    fromlist: tuple[str, ...] = (), level: int = 0) -> object:
+        if name == "truememory":
+            return types.SimpleNamespace(vector_search=modules.get("vector_search", vector),
+                                         reranker=modules.get("reranker", reranker))
+        if name == "truememory.tier_switch":
+            return tier_switch
+        if name.startswith("truememory."):
+            short = name.removeprefix("truememory.")
+            if short in modules:
+                return modules[short]
+            raise AssertionError("Unexpected application import: " + name)
+        if name == "psutil":
+            return types.SimpleNamespace()
+        if name.split(".")[0] in {"torch", "numpy", "sqlite_vec", "hdbscan", "model2vec", "sentence_transformers"}:
+            raise AssertionError("Unexpected native import: " + name)
+        return builtins.__import__(name, globals, locals, fromlist, level)
+
+    for name in ("storage", "_platform", "maintenance", "embedding_target", "tier_config",
+                 "tier_switch.cache", "rebuild_source", "tier_switch.job", "tier_switch.source",
+                 "tier_switch.activation", "tier_switch.serving", "tier_switch.runtime", "tier_switch.writer"):
+        module = types.ModuleType("synthetic_maintenance_" + name.replace(".", "_"))
         module.__dict__["__builtins__"] = dict(vars(builtins), __import__=safe_import)
-        path = ROOT / "truememory" / f"{name}.py"
-        exec(compile(path.read_text(), str(path), "exec"), module.__dict__)
+        path = ROOT / "truememory" / (name.replace(".", "/") + ".py")
+        # Dataclasses inspect only their own explicitly named synthetic module.
+        with patch.dict(sys.modules, {module.__name__: module}):
+            exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
         modules[name] = module
+        if name.startswith("tier_switch."):
+            setattr(tier_switch, name.rsplit(".", 1)[1], module)
+    # Keep model identity injection local to this fixture graph, never sys.modules.
+    modules["vector_search"], modules["reranker"] = vector, reranker
+    modules["tier_switch.runtime"].sys = types.SimpleNamespace(
+        modules={"truememory." + name: module for name, module in modules.items()})
+    modules["maintenance"]._fixture_modules = modules
+    modules["tier_switch.runtime"]._fixture_modules = modules
     return modules["storage"], modules["maintenance"]
 
 

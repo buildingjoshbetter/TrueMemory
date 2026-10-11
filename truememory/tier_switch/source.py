@@ -228,6 +228,74 @@ def _parse_receipt(raw: str, manifest: RebuildManifest, schema: str) -> tuple[st
         raise TierSourceUntrusted("Malformed or incompatible tier pair receipt") from error
 
 
+@dataclass(frozen=True)
+class TierSourceProgress:
+    generation: str
+    processed: int
+    total: int
+    outputs: int
+    cursor: int | None
+    complete: bool
+    tracker: str
+    source_epoch: str
+    source_schema_signature: str
+
+
+def read_tier_progress(conn: sqlite3.Connection, *, model_id: str, dimension: int,
+                       targets: tuple[str, str]) -> TierSourceProgress | None:
+    """Read bounded receipt scalars, not source coverage or current completion.
+
+    A caller may own one read snapshot for journal, selected marker and these
+    counters, then compare their exact target/tracker/epoch/schema identities.
+    This neither audits vectors nor checks current source freshness. The
+    manifest's complete flag certifies only its captured range.
+    """
+    _identity(model_id, dimension, targets)
+
+    def read() -> TierSourceProgress | None:
+        guarded = ("metadata", *targets)
+        marks = ",".join("?" for _ in guarded)
+        if conn.execute(
+            f"SELECT 1 FROM temp.sqlite_master WHERE name COLLATE NOCASE IN ({marks}) LIMIT 1", guarded,
+        ).fetchone():
+            raise TierSourceUntrusted("TEMP shadows invalidate progress identity")
+        raw = _metadata(conn, manifest_key(targets))
+        receipt = _metadata(conn, _receipt_key(targets))
+        if raw is None and receipt is None:
+            return None
+        if raw is None or receipt is None:
+            raise TierSourceUntrusted("Progress requires its paired receipt")
+        manifest = _parse_manifest(raw, model_id, dimension, targets)
+        try:
+            value = json.loads(receipt, object_pairs_hook=_unique_object)
+            schema = value["schema"]
+            if type(schema) is not str or not _HEX.fullmatch(schema):
+                raise ValueError("receipt schema")
+        except (ValueError, TypeError, KeyError, RecursionError) as error:
+            raise TierSourceUntrusted("Malformed progress receipt") from error
+        _parse_receipt(receipt, manifest, schema)
+        return TierSourceProgress(manifest.generation, manifest.consumed, manifest.total,
+                                  manifest.outputs, manifest.cursor, manifest.complete,
+                                  manifest.source.tracker, manifest.source.revision.epoch,
+                                  manifest.source.schema_signature)
+
+    if conn.in_transaction:
+        return read()
+    conn.execute("BEGIN")
+    try:
+        result = read()
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+            if conn.in_transaction:
+                raise TierSourceUntrusted("Progress rollback is uncertain")
+        raise
+    conn.rollback()
+    if conn.in_transaction:
+        raise TierSourceUntrusted("Progress snapshot did not close")
+    return result
+
+
 def _chain(digest: str, row_id: int, completion: bytes, separation: bytes) -> str:
     return hashlib.sha256(bytes.fromhex(digest) + struct.pack(">qQQ", row_id, len(completion), len(separation))
                           + completion + separation).hexdigest()

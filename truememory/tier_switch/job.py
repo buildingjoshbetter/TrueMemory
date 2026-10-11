@@ -184,6 +184,71 @@ class TierJobSelectionError(TierJobIdentityError):
     """The durable selected job is unavailable or does not match this request."""
 
 
+@dataclass(frozen=True)
+class SelectedJobMarker:
+    job_id: str
+    target: EmbeddingTarget
+    tracker: str
+    source_epoch: str
+    source_schema_signature: str
+    state: str
+
+
+def _marker_in_snapshot(conn: sqlite3.Connection) -> SelectedJobMarker | None:
+    if conn.execute("SELECT 1 FROM temp.sqlite_master LIMIT 1").fetchone() is not None:
+        raise TierJobSelectionError("TEMP objects make selected marker identity ambiguous")
+    shape = conn.execute(
+        "SELECT typeof(sql), length(CAST(sql AS BLOB)) FROM main.sqlite_master "
+        "WHERE name=? COLLATE NOCASE", (_SELECTION_TABLE,),
+    ).fetchone()
+    if shape is None:
+        return None
+    if shape[0] != "text" or not 1 <= shape[1] <= 8192:
+        raise TierJobSelectionError("Selected job schema exceeds its protocol bounds")
+    _selection_schema(conn)
+    row = _selection_row(conn)
+    return None if row is None else SelectedJobMarker(
+        row[0], EmbeddingTarget(row[1], row[2], row[3], row[4]), row[5], row[6], row[7], row[8],
+    )
+
+
+def read_selected_job_marker(conn: sqlite3.Connection) -> SelectedJobMarker | None:
+    """Bounded marker read; borrow a caller snapshot without ending it.
+
+    This is not a reopened-file identity certificate or permission to resume a
+    disappeared worker. Terminal IDs permit explicit normal job replacement.
+    """
+    if conn.in_transaction:
+        return _marker_in_snapshot(conn)
+    with _selection_transaction(conn, write=False):
+        return _marker_in_snapshot(conn)
+
+
+def _cancel_policy_job_in_writer(
+    conn: sqlite3.Connection, *, job_id: str, target: EmbeddingTarget, tracker: str,
+    source_epoch: str, source_schema_signature: str,
+) -> None:
+    """Cancel only the exact superseded intent's marker; caller owns writer.
+
+    Maintenance/stable-path ownership and writer acquisition are caller duties.
+    No source read, file observation, DELETE, native call, commit or rollback.
+    """
+    if not conn.in_transaction:
+        raise TierJobSelectionError("Policy supersession requires writer ownership")
+    row = _marker_in_snapshot(conn)
+    if row is None or (row.job_id, row.target, row.tracker, row.source_epoch, row.source_schema_signature) != (
+        job_id, target, tracker, source_epoch, source_schema_signature,
+    ):
+        raise TierJobSelectionError("Superseded activation job changed")
+    if row.state == "selected":
+        changed = conn.execute(
+            f"UPDATE main.{_SELECTION_TABLE} SET state='cancelled' "
+            "WHERE singleton=1 AND job_id=? AND state='selected'", (job_id,),
+        ).rowcount
+        if changed != 1:
+            raise TierJobSelectionError("Superseded activation job changed during cancellation")
+
+
 def _selection_values(job: TierJob) -> tuple[str | int, ...]:
     values = (job.job_id, job.target.tier, job.target.model_id, job.target.dimension,
               job.target.tier_group, job.tracker, job.source_epoch, job.source_schema_signature)

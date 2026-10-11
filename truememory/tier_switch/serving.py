@@ -217,6 +217,12 @@ class ServingGate:
     def _writer_thread(self) -> threading.Thread | None:
         return next(iter(self._writers.values()), None)
 
+    def current_thread_admitted(self) -> bool:
+        """Inspect nesting without waiting behind another gate operation."""
+        with self._locked(blocking=False):
+            thread = threading.current_thread()
+            return self._thread_reader(thread) is not None or self._writer_thread() is thread
+
     def _check_key(self, key: SelectionKey) -> None:
         current = next((reader.key for reader in self._readers.values()), None)
         if current is None:
@@ -425,3 +431,8 @@ def exclusive_activation(
 ) -> AbstractContextManager[None]:
     """Drain process-wide operations before a caller's activation work."""
     return _DEFAULT_GATE.exclusive_activation(timeout=timeout, deadline=deadline, cancelled=cancelled)
+
+
+def current_thread_admitted() -> bool:
+    """Report a reader/exclusive scope on this thread, or refuse a busy gate."""
+    return _DEFAULT_GATE.current_thread_admitted()

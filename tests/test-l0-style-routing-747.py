@@ -42,8 +42,8 @@ class InMemoryRouting(unittest.TestCase):
         return conn
 
     def engine(self, conn: sqlite3.Connection) -> object:
-        modules = {"truememory.storage": STORAGE, "truememory.maintenance": MAINTENANCE,
-                   "truememory.personality_style_vec": STYLE}
+        modules = MAINTENANCE._fixture_modules
+        modules["truememory.personality_style_vec"] = STYLE
         modules["truememory.rebuild_source"] = ROUTING["stdlib_module"]("rebuild_source", modules)
         module = ROUTING["load_engine"](modules)
         module._HAS_STYLE_VEC = True
@@ -1007,17 +1007,28 @@ class InMemoryRouting(unittest.TestCase):
 
     def test_deprecated_open_schedules_without_synchronous_style_build_or_hash_claim(self) -> None:
         conn = self.connection()
+        probe = self.connection()
         engine = self.engine(conn)
         module = engine._engine_test_module
         engine.db_path = (ROOT / "synthetic-existing-not-created.sqlite")
-        with patch.object(Path, "exists", return_value=True), \
-             patch.object(module.sqlite3, "connect", return_value=conn), \
+        exists = Path.exists
+        closed_owners = []
+        owner_os = types.SimpleNamespace(getpid=os.getpid, fspath=os.fspath, close=closed_owners.append)
+        with patch.object(Path, "exists", lambda path: True if path == engine.db_path else exists(path)), \
+             patch.object(module.sqlite3, "connect", side_effect=[probe, conn]) as opened, \
+             patch.object(MAINTENANCE, "try_file_lock", return_value=719), \
+             patch.object(MAINTENANCE, "os", owner_os), \
              patch.object(engine, "_purge_legacy_entity_profile_summaries"), \
              patch.object(engine, "_maybe_auto_consolidate") as planned, \
              patch.object(STYLE, "_compute_entity_style_vectors", side_effect=AssertionError):
             with self.assertWarns(DeprecationWarning):
                 self.assertIs(engine.open(rebuild_vectors=False), engine)
         planned.assert_called_once()
+        self.assertIs(engine.conn, conn)
+        self.assertEqual(opened.call_count, 2)
+        self.assertEqual(closed_owners, [719])
+        with self.assertRaises(sqlite3.ProgrammingError):
+            probe.execute("SELECT 1")
         self.assertIsNone(conn.execute("SELECT value FROM metadata WHERE key='style_vec_hash_version'").fetchone())
         self.assertIsNone(self.checkpoint(conn))
 
@@ -1273,7 +1284,7 @@ class CoordinatorRouting(unittest.TestCase):
         successor.assert_called_once_with(MAINTENANCE.MaintenanceRequest(2, 30, True, False))
 
     def test_late_worker_cleanup_cannot_replace_newer_manual_failure(self) -> None:
-        coordinator = MAINTENANCE.MaintenanceCoordinator(None)
+        coordinator = MAINTENANCE.MaintenanceCoordinator(ROOT / "synthetic-worker-cleanup-not-created.sqlite")
         conn = self.connection()
         events = []
         class Connection:
@@ -1283,7 +1294,9 @@ class CoordinatorRouting(unittest.TestCase):
                 events.append("close")
                 token = coordinator._begin_observation()
                 coordinator._finish_observation(token, None, "failed", "NewerFailure")
-        with patch.object(MAINTENANCE, "create_db", return_value=Connection()), \
+        exists = Path.exists
+        with patch.object(Path, "exists", lambda path: False if path == coordinator.path else exists(path)), \
+             patch.object(MAINTENANCE, "create_db", return_value=Connection()), \
              patch.object(MAINTENANCE, "_release_owner", side_effect=lambda _fd: events.append("release")):
             coordinator._run(123, lambda *_args: MAINTENANCE.MaintenanceReport((), "SKIPPED"))
         self.assertEqual(events, ["close", "release"])
@@ -1292,7 +1305,7 @@ class CoordinatorRouting(unittest.TestCase):
     def test_setup_and_close_failures_retain_report_and_release_after_cleanup(self) -> None:
         for boundary in ("setup", "close"):
             with self.subTest(boundary=boundary):
-                coordinator = MAINTENANCE.MaintenanceCoordinator(None)
+                coordinator = MAINTENANCE.MaintenanceCoordinator(ROOT / "synthetic-worker-failure-not-created.sqlite")
                 old = MAINTENANCE.MaintenanceReport((), "SKIPPED")
                 coordinator._last_report = old
                 conn = self.connection()
@@ -1303,7 +1316,9 @@ class CoordinatorRouting(unittest.TestCase):
                     def close(self) -> None:
                         events.append("close")
                         raise sqlite3.OperationalError("synthetic close")
-                with patch.object(MAINTENANCE, "create_db", side_effect=RuntimeError("synthetic setup") if boundary == "setup" else None,
+                exists = Path.exists
+                with patch.object(Path, "exists", lambda path: False if path == coordinator.path else exists(path)), \
+                     patch.object(MAINTENANCE, "create_db", side_effect=RuntimeError("synthetic setup") if boundary == "setup" else None,
                                   return_value=Connection()), \
                      patch.object(MAINTENANCE, "_release_owner", side_effect=lambda _fd: events.append("release")):
                     coordinator._run(123, lambda *_args: MAINTENANCE.MaintenanceReport((), "SKIPPED new"))

@@ -67,6 +67,10 @@ class ProtocolMismatchError(ConnectionError):
     """Raised when the server speaks an incompatible/foreign protocol."""
 
 
+class ServingIdentityMismatchError(ProtocolMismatchError):
+    """A selected request was rejected for effective identity or shape drift."""
+
+
 class ModelServerBusyError(RuntimeError):
     """Capacity rejection: do not restart the daemon or load another model."""
 
@@ -591,6 +595,8 @@ def _batch_request(request: dict, kwargs: dict) -> dict:
 
 
 def _check_model_response(response: dict, request: dict) -> None:
+    if response.get("error_code") == "serving_identity_mismatch":
+        raise ServingIdentityMismatchError("Model server rejected the selected serving identity")
     if response.get("ok"):
         return
     if response.get("error_code") == "server_busy":

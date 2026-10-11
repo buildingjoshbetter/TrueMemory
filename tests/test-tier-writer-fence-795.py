@@ -126,9 +126,46 @@ class TestWriterFence(unittest.TestCase):
         self.target = self.modules["embedding_target"].EmbeddingTarget("custom", "synthetic/encoder", 2, "custom")
         self.generation = 0
         self.addCleanup(patch.stopall)
-        # No operation is admitted by the fixture unless a test explicitly
-        # installs the runtime accessor contract. Never import the real bridge.
-        patch.dict(sys.modules, {"truememory.tier_switch.runtime": types.SimpleNamespace(current_operation=lambda conn: None)}).start()
+        # Keep the fixture's unbound operation contract, but classify actual
+        # publication/admission failures with the production helper.
+        serving_path = ROOT / "truememory/tier_switch/serving.py"
+        serving_tree = ast.parse(serving_path.read_text(encoding="utf-8"))
+        serving_names = {"ServingLeaseError", "ServingLeaseTimeout", "ServingLeaseCancelled"}
+        serving_namespace = {}
+        exec(compile(ast.Module(body=[node for node in serving_tree.body
+                                     if isinstance(node, ast.ClassDef) and node.name in serving_names],
+                                type_ignores=[]), str(serving_path), "exec"), serving_namespace)
+        runtime_path = ROOT / "truememory/tier_switch/runtime.py"
+        runtime_tree = ast.parse(runtime_path.read_text(encoding="utf-8"))
+        runtime_names = {"TierRuntimeError", "raise_if_serving_rejection"}
+        runtime_namespace = {
+            "sys": types.SimpleNamespace(modules={"truememory." + name: module
+                                                   for name, module in self.modules.items()}),
+            "serving": types.SimpleNamespace(**{name: serving_namespace[name] for name in serving_names}),
+        }
+        runtime_nodes = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
+        runtime_nodes.extend(node for node in runtime_tree.body
+                             if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in runtime_names)
+        exec(compile(ast.fix_missing_locations(ast.Module(body=runtime_nodes, type_ignores=[])),
+                     str(runtime_path), "exec"), runtime_namespace)
+        runtime = self.modules["tier_switch.runtime"]
+        for name in runtime_names:
+            setattr(runtime, name, runtime_namespace[name])
+        key = "truememory.tier_switch.runtime"
+        missing = object()
+        previous = sys.modules.get(key, missing)
+        sys.modules[key] = types.SimpleNamespace(
+            current_operation=lambda conn: None,
+            **{name: runtime_namespace[name] for name in runtime_names},
+        )
+
+        def restore_runtime():
+            if previous is missing:
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = previous
+
+        self.addCleanup(restore_runtime)
 
     def connect(self, uri: str | None = None):
         conn = sqlite3.connect(uri or ":memory:", uri=uri is not None, factory=Connection)
@@ -187,7 +224,7 @@ class TestWriterFence(unittest.TestCase):
             isinstance(t, ast.Name) and t.id in {"_ALLOWED_TABLES", "_ALLOWED_COLUMNS", "_ALL_VEC_TABLES", "_SQLITE_IN_CHUNK"}
             for t in n.targets
         )]
-        helpers = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in {"_delete_in_chunks", "_resolve_vec_tables"}]
+        helpers = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in {"_delete_in_chunks", "_resolve_vec_tables", "_validate_add_content", "_validate_delete_user"}]
         namespace = dict(__builtins__=self.vector.__dict__["__builtins__"], logger=logging.getLogger(__name__),
                          MAX_CONTENT_LENGTH=10000, sqlite3=sqlite3, engine_operation=lambda function: function,
                          insert_message=self.modules["storage"].insert_message,

@@ -40,6 +40,45 @@ class TierActivationError(RuntimeError):
     """Selection cannot be certified; no runtime/config success is implied."""
 
 
+@dataclass(frozen=True)
+class ConfigGuard:
+    tier_present: bool
+    tier: str
+    generation: str | None
+
+    def __post_init__(self) -> None:
+        if (type(self.tier_present) is not bool or type(self.tier) is not str
+                or self.tier not in {"edge", "base", "pro", "custom"}
+                or (not self.tier_present and self.tier != "edge")
+                or (self.generation is not None and not _hex(self.generation, 32))):
+            raise TierActivationError("Invalid expected config identity")
+
+
+@dataclass(frozen=True)
+class LegacyTierPolicy:
+    generation: str
+    intent_id: str
+    target: EmbeddingTarget
+    reranker_id: str
+    tables: tuple[str, str]
+    config_acknowledged: bool = False
+
+    def __post_init__(self) -> None:
+        _policy_identity(self.target, self.reranker_id, self.tables)
+        if (not _hex(self.generation, 32) or not _hex(self.intent_id, 32)
+                or type(self.config_acknowledged) is not bool):
+            raise TierActivationError("Invalid legacy serving policy")
+
+
+def _policy_identity(target: EmbeddingTarget, reranker_id: str, tables: tuple[str, str]) -> None:
+    if (type(target) is not EmbeddingTarget or target.tier not in {"base", "pro"}
+            or target.identity != ("qwen3_256", 256, "basepro")
+            or type(reranker_id) is not str or reranker_id != "Alibaba-NLP/gte-reranker-modernbert-base"
+            or type(tables) is not tuple or len(tables) != 2 or any(type(name) is not str for name in tables)
+            or tables not in {target.tables, ("vec_messages", "vec_messages_sep")}):
+        raise TierActivationError("Policy-only publication requires the unchanged base/pro embedding space")
+
+
 def _hex(value: object, size: int) -> bool:
     return type(value) is str and re.fullmatch(r"[0-9a-f]{" + str(size) + "}", value) is not None
 
@@ -76,6 +115,9 @@ class ActivationIntent:
     source_epoch: str
     source_schema_signature: str
     state: str = "staged"
+    expected_config: ConfigGuard | None = None
+    status_id: int | None = None
+    previous_policy: LegacyTierPolicy | None = None
 
     def __post_init__(self) -> None:
         _identity(self.target, self.reranker_id, self.job_id, self.tracker,
@@ -84,6 +126,37 @@ class ActivationIntent:
                 or (self.expected_generation is not None and not _hex(self.expected_generation, 32))
                 or type(self.state) is not str or self.state not in {"staged", "db_selected", "config_acknowledged"}):
             raise TierActivationError("Invalid activation intent")
+        if (self.expected_config is not None and type(self.expected_config) is not ConfigGuard
+                or self.status_id is not None and (type(self.status_id) is not int or not 1 <= self.status_id < 2**63)
+                or self.previous_policy is not None and type(self.previous_policy) is not LegacyTierPolicy
+                or self.expected_config is None and (self.status_id is not None or self.previous_policy is not None)
+                or self.previous_policy is not None and self.expected_generation is not None):
+            raise TierActivationError("Invalid activation projection evidence")
+
+
+@dataclass(frozen=True)
+class PolicyIntent:
+    intent_id: str
+    expected_generation: str | None
+    expected_intent_id: str | None
+    target: EmbeddingTarget
+    reranker_id: str
+    expected_config: ConfigGuard
+    result_generation: str
+    tables: tuple[str, str]
+    state: str = "db_selected"
+
+    def __post_init__(self) -> None:
+        _policy_identity(self.target, self.reranker_id, self.tables)
+        if (not _hex(self.intent_id, 32) or not _hex(self.result_generation, 32)
+                or self.expected_generation is not None and not _hex(self.expected_generation, 32)
+                or self.expected_intent_id is not None and not _hex(self.expected_intent_id, 32)
+                or self.result_generation == self.expected_generation
+                or self.intent_id == self.expected_intent_id
+                or type(self.expected_config) is not ConfigGuard
+                or self.expected_config.tier not in {"base", "pro"}
+                or type(self.state) is not str or self.state not in {"db_selected", "config_acknowledged"}):
+            raise TierActivationError("Invalid policy activation intent")
 
 
 @dataclass(frozen=True)
@@ -122,13 +195,52 @@ class TierSelection:
 @dataclass(frozen=True)
 class ActivationState:
     selection: TierSelection | None
-    intent: ActivationIntent | None
+    intent: ActivationIntent | PolicyIntent | None
+    legacy_policy: LegacyTierPolicy | None = None
 
 
-def _dump(record: ActivationIntent | TierSelection) -> str:
+def _config_wire(value: ConfigGuard) -> dict:
+    return dict(asdict(value), version=1)
+
+
+def _parse_config(value: object) -> ConfigGuard:
+    if (type(value) is not dict or set(value) != {"version", "tier_present", "tier", "generation"}
+            or type(value["version"]) is not int or value["version"] != 1):
+        raise TierActivationError("Unsupported expected config descriptor")
+    return ConfigGuard(value["tier_present"], value["tier"], value["generation"])
+
+
+def _policy_wire(value: LegacyTierPolicy) -> dict:
+    return dict(asdict(value), version=1, target=value.target.to_wire())
+
+
+def _parse_policy(value: object) -> LegacyTierPolicy:
+    if (type(value) is not dict or set(value) != set(LegacyTierPolicy.__dataclass_fields__) | {"version"}
+            or type(value["version"]) is not int or value["version"] != 1
+            or type(value["tables"]) is not list or len(value["tables"]) != 2):
+        raise TierActivationError("Unsupported previous legacy policy")
+    return LegacyTierPolicy(value["generation"], value["intent_id"], EmbeddingTarget.from_wire(value["target"]),
+                            value["reranker_id"], tuple(value["tables"]), value["config_acknowledged"])
+
+
+def _dump(record: ActivationIntent | TierSelection | PolicyIntent) -> str:
     value = asdict(record)
     value["target"] = record.target.to_wire()
-    raw = json.dumps(dict(value, version=1), sort_keys=True, separators=(",", ":"), allow_nan=False)
+    version = 1
+    if type(record) is ActivationIntent:
+        if record.expected_config is None:
+            for field in ("expected_config", "status_id", "previous_policy"):
+                value.pop(field)
+        else:
+            version = 2
+            value["kind"] = "rebuild"
+            value["expected_config"] = _config_wire(record.expected_config)
+            value["previous_policy"] = None if record.previous_policy is None else _policy_wire(record.previous_policy)
+    elif type(record) is PolicyIntent:
+        version = 2
+        value["kind"] = "policy"
+        value["expected_config"] = _config_wire(record.expected_config)
+    raw = json.dumps(dict(value, version=version), sort_keys=True, separators=(",", ":"), allow_nan=False)
     if len(raw.encode("utf-8")) > _MAX_RECORD_BYTES:
         raise TierActivationError("Activation record exceeds protocol bounds")
     return raw
@@ -141,14 +253,32 @@ def _unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return value
 
 
-def _parse(raw: str, kind: type[ActivationIntent] | type[TierSelection]) -> ActivationIntent | TierSelection:
+def _parse(raw: str, kind: type[ActivationIntent] | type[TierSelection]) -> ActivationIntent | TierSelection | PolicyIntent:
     try:
         value = json.loads(raw, object_pairs_hook=_unique)
-        if (type(value) is not dict or set(value) != set(kind.__dataclass_fields__) | {"version"}
-                or type(value["version"]) is not int or value.pop("version") != 1):
+        if type(value) is not dict or type(value.get("version")) is not int:
             raise TierActivationError("Unsupported activation record schema")
+        version = value.pop("version")
+        expected = set(kind.__dataclass_fields__)
+        if kind is ActivationIntent and version == 1:
+            expected -= {"expected_config", "status_id", "previous_policy"}
+        elif kind is ActivationIntent and version == 2:
+            discriminator = value.pop("kind", None)
+            if discriminator == "policy":
+                kind = PolicyIntent
+            elif discriminator != "rebuild":
+                raise TierActivationError("Unsupported activation intent kind")
+            expected = set(kind.__dataclass_fields__)
+        elif version != 1:
+            raise TierActivationError("Unsupported activation record version")
+        if set(value) != expected:
+            raise TierActivationError("Unsupported activation record fields")
+        if version == 2:
+            value["expected_config"] = _parse_config(value["expected_config"])
+            if kind is ActivationIntent and value["previous_policy"] is not None:
+                value["previous_policy"] = _parse_policy(value["previous_policy"])
         value["target"] = EmbeddingTarget.from_wire(value["target"])
-        if kind is TierSelection:
+        if kind in (TierSelection, PolicyIntent):
             if type(value["tables"]) is not list or len(value["tables"]) != 2:
                 raise TierActivationError("Invalid selected table pair")
             value["tables"] = tuple(value["tables"])
@@ -186,8 +316,8 @@ def _guard_storage(conn: sqlite3.Connection) -> None:
             raise TierActivationError("Activation storage has unsupported side effects")
 
 
-def _guard_pair(conn: sqlite3.Connection, target: EmbeddingTarget) -> None:
-    for name in target.tables:
+def _guard_pair(conn: sqlite3.Connection, target: EmbeddingTarget, *, tables: tuple[str, str] | None = None) -> None:
+    for name in target.tables if tables is None else tables:
         declaration = (
             r"CREATE\s+VIRTUAL\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
             + r'(?:"' + name + r'"|`' + name + r'`|\[' + name + r'\]|' + name + r')'
@@ -199,7 +329,7 @@ def _guard_pair(conn: sqlite3.Connection, target: EmbeddingTarget) -> None:
 
 
 def _read(conn: sqlite3.Connection, key: str, kind: type[ActivationIntent] | type[TierSelection]
-          ) -> ActivationIntent | TierSelection | None:
+          ) -> ActivationIntent | TierSelection | PolicyIntent | None:
     shape = conn.execute(
         "SELECT typeof(value), length(CAST(value AS BLOB)) FROM main.metadata WHERE key=?", (key,),
     ).fetchone()
@@ -249,10 +379,31 @@ def _state(conn: sqlite3.Connection) -> ActivationState:
     selected, intent = _read(conn, _SELECTED, TierSelection), _read(conn, _INTENT, ActivationIntent)
     if selected is not None and intent is None:
         raise TierActivationError("Selected record has no activation intent")
+    if type(intent) is PolicyIntent:
+        acknowledged = intent.state == "config_acknowledged"
+        if selected is None:
+            if intent.expected_generation is not None:
+                raise TierActivationError("Certified policy lost its selection")
+            return ActivationState(None, intent, LegacyTierPolicy(
+                intent.result_generation, intent.intent_id, intent.target, intent.reranker_id,
+                intent.tables, acknowledged,
+            ))
+        if ((selected.generation, selected.intent_id, selected.target, selected.reranker_id,
+                selected.tables, selected.config_acknowledged)
+                != (intent.result_generation, intent.intent_id, intent.target, intent.reranker_id,
+                    intent.tables, acknowledged) or intent.expected_generation is None):
+            raise TierActivationError("Certified policy and selected record disagree")
+        return ActivationState(selected, intent)
     if intent is not None and intent.state == "staged":
         _expected(selected, intent.expected_generation)
         if selected is not None and not selected.config_acknowledged:
             raise TierActivationError("Pending config selection cannot have a new staged intent")
+        if intent.previous_policy is not None and (
+            not intent.previous_policy.config_acknowledged
+            or intent.expected_config.tier != intent.previous_policy.target.tier
+            or intent.expected_config.generation != intent.previous_policy.generation
+        ):
+            raise TierActivationError("Staged intent has incoherent prior legacy policy evidence")
     if intent is not None and intent.state != "staged":
         if (selected is None or selected.intent_id != intent.intent_id
                 or selected.target != intent.target or selected.reranker_id != intent.reranker_id
@@ -260,7 +411,7 @@ def _state(conn: sqlite3.Connection) -> ActivationState:
                 != (intent.job_id, intent.tracker, intent.source_epoch, intent.source_schema_signature)
                 or selected.config_acknowledged != (intent.state == "config_acknowledged")):
             raise TierActivationError("Selected record and activation result disagree")
-    return ActivationState(selected, intent)
+    return ActivationState(selected, intent, intent.previous_policy if intent is not None and intent.state == "staged" else None)
 
 
 def read_activation_state(conn: sqlite3.Connection) -> ActivationState:
@@ -282,7 +433,9 @@ def _expected(selection: TierSelection | None, generation: str | None) -> None:
 
 
 def stage_activation_intent(conn: sqlite3.Connection, job: TierJob, *,
-                            expected_generation: str | None, reranker_id: str) -> ActivationIntent:
+                            expected_generation: str | None, reranker_id: str,
+                            expected_config: ConfigGuard | None = None,
+                            status_id: int | None = None) -> ActivationIntent:
     """Commit intent before source planning; identical current intent is idempotent.
 
     None expects absent selection and permits only a later certified target. It
@@ -291,7 +444,8 @@ def stage_activation_intent(conn: sqlite3.Connection, job: TierJob, *,
     replaced its marker. Conflicting intent for a live job is refused.
     """
     intent = ActivationIntent(uuid.uuid4().hex, expected_generation, job.target, reranker_id,
-                              job.job_id, job.tracker, job.source_epoch, job.source_schema_signature)
+                              job.job_id, job.tracker, job.source_epoch, job.source_schema_signature,
+                              expected_config=expected_config, status_id=status_id)
     with _transaction(conn, write=True):
         _guard_storage(conn)
         check_selected_tier_job_in_writer(conn, job)
@@ -299,7 +453,17 @@ def stage_activation_intent(conn: sqlite3.Connection, job: TierJob, *,
         _expected(state.selection, expected_generation)
         if state.selection is not None and not state.selection.config_acknowledged:
             raise TierActivationError("Current selection awaits config acknowledgement")
-        if state.intent is not None and state.intent.job_id == job.job_id:
+        if expected_config is not None and state.selection is not None and (
+            expected_config.tier != state.selection.target.tier or expected_config.generation != state.selection.generation
+        ):
+            raise TierActivationError("Prior config does not identify the selected generation")
+        if state.legacy_policy is not None:
+            if (not state.legacy_policy.config_acknowledged or expected_config is None
+                    or expected_config.tier != state.legacy_policy.target.tier
+                    or expected_config.generation != state.legacy_policy.generation):
+                raise TierActivationError("Legacy policy requires acknowledged, guarded activation")
+            intent = replace(intent, previous_policy=state.legacy_policy)
+        if type(state.intent) is ActivationIntent and state.intent.job_id == job.job_id:
             if state.intent == replace(intent, intent_id=state.intent.intent_id):
                 return state.intent
             raise TierActivationError("A conflicting intent already owns this live job")
@@ -381,3 +545,94 @@ def acknowledge_config(conn: sqlite3.Connection, *, generation: str) -> TierSele
         _put(conn, _SELECTED, _dump(selected))
         _put(conn, _INTENT, _dump(replace(state.intent, state="config_acknowledged")))
     return selected
+
+
+def _guard_legacy_policy_pair(conn: sqlite3.Connection, target: EmbeddingTarget, tables: tuple[str, str],
+                              *, certified: bool = False) -> None:
+    _guard_pair(conn, target, tables=tables)
+    for key, value in (("embed_model", target.model_id), ("embed_dim", str(target.dimension))):
+        row = conn.execute("SELECT typeof(value)='text' AND value=? FROM main.metadata WHERE key=?", (value, key)).fetchone()
+        if row is None or row[0] != 1:
+            raise TierActivationError("Legacy embedding metadata is not coherent with base/pro")
+    model_match = "model_name='qwen3_256'" if certified else "model_name IN ('qwen3_256','Qwen3-Embedding-0.6B')"
+    row = conn.execute(
+        "SELECT vec_table=? AND sep_table=? AND typeof(embedding_dim)='integer' AND embedding_dim=? "
+        f"AND {model_match} FROM main.vector_cache_registry WHERE tier_group='basepro'", (*tables, target.dimension),
+    ).fetchone()
+    if (row is None and (certified or tables != ("vec_messages", "vec_messages_sep"))) or (row is not None and row[0] != 1):
+        raise TierActivationError("Serving pair disagrees with its registry")
+
+
+
+def commit_config_only_transition(
+    conn: sqlite3.Connection, *, expected_selection_generation: str | None,
+    expected_intent_id: str | None, target: EmbeddingTarget, reranker_id: str,
+    expected_config: ConfigGuard, legacy_pair: tuple[str, str] | None = None,
+) -> TierSelection | LegacyTierPolicy:
+    """Publish only base/pro policy, without a corpus read or vector certificate.
+
+    Caller owns stable-path maintenance and exclusive serving. A legacy pair
+    must be its coherently observed serving pair, never inferred from counts.
+    Existing certificates are historical provenance, not recertified coverage.
+    """
+    from truememory.tier_switch.job import _cancel_policy_job_in_writer, read_selected_job_marker
+
+    if type(expected_config) is not ConfigGuard or expected_config.tier not in {"base", "pro"}:
+        raise TierActivationError("Policy transition requires actual prior config evidence")
+    if expected_intent_id is not None and not _hex(expected_intent_id, 32):
+        raise TierActivationError("Invalid expected prior activation intent")
+    with _transaction(conn, write=True):
+        _guard_storage(conn)
+        state = _state(conn)
+        _expected(state.selection, expected_selection_generation)
+        if (state.intent.intent_id if state.intent is not None else None) != expected_intent_id:
+            raise TierActivationError("Prior activation intent changed")
+        previous = state.selection or state.legacy_policy
+        if previous is not None and not previous.config_acknowledged:
+            raise TierActivationError("Prior serving policy awaits config acknowledgement")
+        tables = state.selection.tables if state.selection is not None else legacy_pair
+        _policy_identity(target, reranker_id, tables)
+        if target.tier == expected_config.tier:
+            raise TierActivationError("Policy-only transition must change base/pro public tier")
+        if previous is not None and (
+            previous.target.tier != expected_config.tier or previous.generation != expected_config.generation
+            or previous.target.identity != target.identity
+            or previous.tables != tables or previous.reranker_id != reranker_id
+        ):
+            raise TierActivationError("Policy-only transition would change the serving embedding space")
+        _guard_legacy_policy_pair(conn, target, tables, certified=state.selection is not None)
+        if type(state.intent) is ActivationIntent and state.intent.state == "staged":
+            _cancel_policy_job_in_writer(
+                conn, job_id=state.intent.job_id, target=state.intent.target, tracker=state.intent.tracker,
+                source_epoch=state.intent.source_epoch, source_schema_signature=state.intent.source_schema_signature,
+            )
+        else:
+            marker = read_selected_job_marker(conn)
+            if marker is not None and marker.state == "selected":
+                raise TierActivationError("An unrelated selected job cannot be superseded")
+        intent = PolicyIntent(uuid.uuid4().hex, expected_selection_generation, expected_intent_id,
+                              target, reranker_id, expected_config, uuid.uuid4().hex, tables)
+        if state.selection is not None:
+            result = replace(state.selection, generation=intent.result_generation, intent_id=intent.intent_id,
+                             target=target, config_acknowledged=False)
+            _put(conn, _SELECTED, _dump(result))
+        else:
+            result = LegacyTierPolicy(intent.result_generation, intent.intent_id, target, reranker_id, tables)
+        _put(conn, _INTENT, _dump(intent))
+    return result
+
+
+def acknowledge_policy_config(conn: sqlite3.Connection, *, generation: str) -> LegacyTierPolicy:
+    """Acknowledge only this legacy policy's config mirror, never native state."""
+    if not _hex(generation, 32):
+        raise TierActivationError("A concrete policy generation is required")
+    with _transaction(conn, write=True):
+        _guard_storage(conn)
+        state = _state(conn)
+        if type(state.intent) is not PolicyIntent or state.legacy_policy is None or state.legacy_policy.generation != generation:
+            raise TierActivationError("Legacy policy generation changed")
+        if state.legacy_policy.config_acknowledged:
+            return state.legacy_policy
+        _put(conn, _INTENT, _dump(replace(state.intent, state="config_acknowledged")))
+        result = replace(state.legacy_policy, config_acknowledged=True)
+    return result

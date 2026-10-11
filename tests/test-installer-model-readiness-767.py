@@ -3,15 +3,18 @@ from __future__ import annotations
 
 import argparse
 import ast
+import builtins
 import contextlib
 import io
 import itertools
 import os
+import runpy
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from unittest.mock import patch
@@ -229,15 +232,18 @@ class TestSelectedTierSetupReadiness(unittest.TestCase):
     def run_setup(
         self, tier: str, failures: set[str], fail_on_load: bool = False,
         *, cli: str = "", integration_outcomes: dict[str, bool] | None = None,
+        manager_action: str = "noop",
     ) -> tuple[int, str, str, list[dict], list[str]]:
         # Execute both real setup functions while replacing filesystem, adapter
         # installation, and model boundaries. Package __init__ is never imported.
         source = ast.parse((ROOT / "truememory" / "ingest" / "cli.py").read_text(encoding="utf-8"))
         functions = [node for node in source.body if isinstance(node, ast.FunctionDef)
-                     and node.name in ("_setup_cli_integrations", "_run_setup")]
+                     and node.name in ("_setup_cli_integrations", "_setup_model_readiness", "_run_setup")]
         program = ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[]))
         saved: list[dict] = []
         calls: list[str] = []
+        config_path = Path("synthetic-setup/config.json")
+        config_state = {"tier": tier, "user_id": "synthetic-user"}
 
         class SyntheticModel:
             def encode(self, texts: list[str], **_kwargs: object) -> list[list[float]]:
@@ -290,21 +296,88 @@ class TestSelectedTierSetupReadiness(unittest.TestCase):
         hooks_cli.install_cli = install_cli
         namespace = {
             "argparse": argparse, "os": os, "sys": sys, "_SAURON_BANNER": "synthetic banner",
-            "_load_truememory_config": lambda: {"tier": tier, "user_id": "synthetic-user"},
+            "_load_truememory_config": lambda: config_state.copy(),
             "_save_truememory_config": lambda config: saved.append(dict(config)),
-            "_TRUEMEMORY_CONFIG_PATH": "synthetic-config.json",
+            "_TRUEMEMORY_CONFIG_PATH": config_path,
         }
+        bridge = runpy.run_path(str(ROOT / "tests/test-tier-runtime-bridge-795.py"))
+        fixture = bridge["TestRuntimeBridge"]()
+        fixture.setUp()
+        fixture.vector.resolve_tier = lambda: tier
+        fixture.vector.get_model = vectors.get_model
+        fixture.vector._encode_with_mps_fallback = vectors._encode_with_mps_fallback
+        fixture.reranker.get_reranker = reranker.get_reranker
+        primitives = runpy.run_path(str(ROOT / "tests/test-maintenance-source-revision-753.py"))
+        maintenance = primitives["MAINTENANCE"]
+
+        class SyntheticManager:
+            _last_action = manager_action
+
+            def run_rebuild_sync(self, requested_tier: str) -> bool:
+                self_check.assertEqual(requested_tier, tier)
+                vectors.set_embedding_model(requested_tier)
+                reranker.set_active_tier(requested_tier)
+                return True
+
+        modules = {
+            "truememory.vector_search": fixture.vector, "truememory.reranker": fixture.reranker,
+            "truememory.maintenance": maintenance,
+            "truememory.tier_switch.runtime": fixture.api,
+            "truememory.tier_switch.manager": types.SimpleNamespace(
+                RebuildManager=SyntheticManager, _get_db_path=lambda: None, _open_db=lambda **kwargs: fixture.conn),
+            "truememory.hooks.registry": registry, "truememory.hooks.cli": hooks_cli,
+        }
+
+        def synthetic_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name in modules:
+                return modules[name]
+            if name.startswith("truememory") or name in {"torch", "numpy", "sqlite_vec", "sentence_transformers"}:
+                raise AssertionError("Unexpected setup dependency: " + name)
+            return builtins.__import__(name, globals, locals, fromlist, level)
+
+        namespace["__builtins__"] = dict(vars(builtins), __import__=synthetic_import)
+        projection = types.ModuleType("synthetic_setup_projection")
+        projection.__dict__["__builtins__"] = namespace["__builtins__"]
+        projection_path = ROOT / "truememory/tier_switch/projection.py"
+        exec(compile(projection_path.read_text(encoding="utf-8"), str(projection_path), "exec"), projection.__dict__)
+        config_file_lock = threading.Lock()
+
+        @contextlib.contextmanager
+        def locked_config(path: Path, *, strict: bool = False):
+            self_check.assertEqual(path, config_path.with_name("config.json.lock"))
+            self_check.assertTrue(strict)
+            with config_file_lock:
+                yield
+
+        def read_config(path: Path) -> dict:
+            self_check.assertEqual(path, config_path)
+            self_check.assertTrue(config_file_lock.locked())
+            self_check.assertTrue(projection.CONFIG_WRITE_LOCK.locked())
+            return config_state.copy()
+
+        def write_config(path: Path, config: dict) -> None:
+            self_check.assertEqual(path, config_path)
+            self_check.assertTrue(config_file_lock.locked())
+            self_check.assertTrue(projection.CONFIG_WRITE_LOCK.locked())
+            config_state.clear()
+            config_state.update(config)
+            saved.append(config_state.copy())
+
+        projection.ConfigFileLock = locked_config
+        projection._read_config = read_config
+        projection._write_config = write_config
+        modules["truememory.tier_switch.projection"] = projection
         exec(compile(program, "synthetic-cli-setup", "exec"), namespace)
         stdout, stderr = io.StringIO(), io.StringIO()
         exit_code = 0
-        with patch.dict(os.environ, {}, clear=True), patch.dict(sys.modules, {
-            "truememory": package, "truememory.vector_search": vectors, "truememory.reranker": reranker,
-            "truememory.hooks": hooks, "truememory.hooks.registry": registry, "truememory.hooks.cli": hooks_cli,
-        }), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            try:
-                namespace["_run_setup"](argparse.Namespace(non_interactive=True, cli=cli))
-            except SystemExit as exc:
-                exit_code = int(exc.code)
+        try:
+            with patch.dict(os.environ, {}, clear=True), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                try:
+                    namespace["_run_setup"](argparse.Namespace(non_interactive=True, cli=cli))
+                except SystemExit as exc:
+                    exit_code = int(exc.code)
+        finally:
+            fixture.doCleanups()
         return exit_code, stdout.getvalue(), stderr.getvalue(), saved, calls
 
     def test_selected_models_fail_truthfully_and_retain_configuration(self) -> None:
@@ -368,6 +441,18 @@ class TestSelectedTierSetupReadiness(unittest.TestCase):
         self.assertEqual(saved[0]["tier"], "edge")
         self.assertIn("install-cli-claude", calls)
         self.assertNotIn("install-cli-unknown", calls)
+
+    def test_config_only_setup_reports_no_unperformed_model_readiness(self) -> None:
+        code, output, error, saved, calls = self.run_setup("pro", set(), manager_action="config_only")
+        self.assertEqual(code, 0)
+        self.assertEqual(error, "")
+        self.assertEqual(saved, [{"tier": "pro", "user_id": "synthetic-user"}])
+        self.assertNotIn("encode", calls)
+        self.assertNotIn("predict", calls)
+        self.assertNotIn("load-embed", calls)
+        self.assertNotIn("load-rerank", calls)
+        self.assertNotIn("Matryoshka ready", output)
+        self.assertNotIn("Cross-encoder reranker ready", output)
 
 
 if __name__ == "__main__":

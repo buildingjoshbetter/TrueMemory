@@ -93,6 +93,12 @@ class _ResultTooLarge(ValueError):
     """The complete float32 result cannot fit the existing response frame."""
 
 
+class _ServingIdentityMismatch(ValueError):
+    """Explicit selected identity rejection, distinct from native availability."""
+
+    serving_identity_mismatch = True
+
+
 class _ProcessMemoryRefused(RuntimeError):
     """Current process memory cannot admit another model stage."""
 
@@ -932,12 +938,12 @@ class ModelServer:
 
         if (type(value) is not str or len(value.encode("utf-8")) > 512
                 or re.fullmatch(r"[\w][\w.\-]*(/[\w][\w.\-]*)?", value) is None):
-            raise ValueError("Selected reranking requires an explicit model identity")
+            raise _ServingIdentityMismatch("Selected reranking requires an explicit model identity")
         return value
 
     def _check_serving_reranker(self, model: object, expected: str | None) -> None:
         if expected is not None and (self._reranker is not model or self._reranker_name != expected):
-            raise ValueError("Effective reranker does not match the serving target")
+            raise _ServingIdentityMismatch("Effective reranker does not match the serving target")
 
     def _handle_fast_embed(
         self, texts: list, tier: str, deadline: _RequestDeadline | None = None,
@@ -1219,7 +1225,7 @@ class ModelServer:
             if "expected_model_name" in request:
                 expected_name = self._serving_reranker_name(request["expected_model_name"])
                 if model_name != expected_name:
-                    raise ValueError("Selected reranking requires its explicit model identity")
+                    raise _ServingIdentityMismatch("Selected reranking requires its explicit model identity")
             try:
                 batch_limit = _batch_limit(request.get("batch_size", _RERANK_BATCH_LIMIT),
                                            _RERANK_BATCH_LIMIT)
@@ -1535,7 +1541,16 @@ class ModelServer:
         except Exception as error:
             try:
                 conn.settimeout(self._REJECT_TIMEOUT)
-                self._send_response(conn, {"ok": False, "error": str(error)})
+                failure = {"ok": False, "error": str(error)}
+                identity_error = getattr(type(error), "serving_identity_mismatch", False) is True
+                if isinstance(request, dict) and (
+                    "expected_target" in request or request.get("op") in ("prepare_embed_target_v1", "embed_target_v1")
+                ):
+                    from truememory.embedding_target import EmbeddingTargetError
+                    identity_error = identity_error or isinstance(error, EmbeddingTargetError)
+                if identity_error:
+                    failure["error_code"] = "serving_identity_mismatch"
+                self._send_response(conn, failure)
             except Exception:
                 # The connection is already failing. Keep serialization errors
                 # inside this boundary so their tracebacks do not retain input.

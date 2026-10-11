@@ -1,5 +1,6 @@
 """Private style maintenance with stdlib source and synthetic in-memory SQLite."""
 
+import ast
 import builtins
 import json
 import runpy
@@ -30,10 +31,45 @@ def load_maintenance() -> types.ModuleType:
             raise AssertionError("Non-stdlib import forbidden: " + name)
         return builtins.__import__(name, globals, locals, fromlist, level)
 
-    module = types.ModuleType("synthetic_style_maintenance")
-    module.__dict__["__builtins__"] = dict(vars(builtins), __import__=safe_import)
-    source = ROOT / "truememory/maintenance.py"
-    exec(compile(source.read_text(encoding="utf-8"), str(source), "exec"), module.__dict__)
+    def load_source(name: str) -> types.ModuleType:
+        loaded = types.ModuleType("synthetic_style_boundary_" + name.replace("/", "_"))
+        loaded.__dict__["__builtins__"] = dict(vars(builtins), __import__=safe_import)
+        source = ROOT / "truememory" / (name + ".py")
+        missing = object()
+        previous = sys.modules.get(loaded.__name__, missing)
+        sys.modules[loaded.__name__] = loaded
+        try:
+            exec(compile(source.read_text(encoding="utf-8"), str(source), "exec"), loaded.__dict__)
+        finally:
+            if previous is missing:
+                sys.modules.pop(loaded.__name__, None)
+            else:
+                sys.modules[loaded.__name__] = previous
+        modules["truememory." + name.replace("/", ".")] = loaded
+        return loaded
+
+    module = load_source("maintenance")
+    modules["psutil"] = types.SimpleNamespace()
+    for name in ("rebuild_source", "embedding_target", "tier_config", "tier_switch/cache",
+                 "tier_switch/job", "tier_switch/source", "tier_switch/activation", "tier_switch/serving",
+                 "tier_switch/writer"):
+        load_source(name)
+    modules["truememory.tier_switch"] = types.SimpleNamespace(serving=modules["truememory.tier_switch.serving"])
+    vector = types.ModuleType("synthetic_style_vector_identity")
+    vector.__dict__.update(__builtins__=dict(vars(builtins), __import__=safe_import), sqlite3=sqlite3,
+        EMBEDDING_MODEL="model2vec", _embedding_dim=256, _model=None, _lock=threading.Lock(),
+        _frozen_embedding_target=None, _runtime_policy_tier=None, resolve_tier=lambda: "edge",
+        _cfg_get_model_group=modules["truememory.tier_config"].get_model_group)
+    tree = ast.parse((ROOT / "truememory/vector_search.py").read_text(encoding="utf-8"))
+    resolvers = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                 and node.name in {"_active_tier_group", "_active_vec_table", "_active_sep_table"}]
+    exec(compile(ast.Module(body=resolvers, type_ignores=[]), "actual-style-vector-resolvers", "exec"), vector.__dict__)
+    modules["truememory.vector_search"] = vector
+    modules["truememory"] = types.SimpleNamespace(vector_search=vector,
+        reranker=types.SimpleNamespace(_model=None, get_current_reranker_name=lambda: "synthetic/reranker"))
+    runtime = load_source("tier_switch/runtime")
+    runtime.sys = types.SimpleNamespace(modules=modules)
+    module._fixture_modules = modules
 
     def import_module(name: str) -> types.ModuleType:
         if name != "truememory.personality_style_vec":

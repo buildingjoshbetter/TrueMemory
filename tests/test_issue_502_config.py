@@ -36,6 +36,7 @@ def server(monkeypatch, tmp_path):
 
     monkeypatch.setattr(ms, "_TRUEMEMORY_DIR", home / ".truememory")
     monkeypatch.setattr(ms, "_CONFIG_PATH", home / ".truememory" / "config.json")
+    monkeypatch.setattr(ms, "_CONFIG_LOCK_PATH", ms._CONFIG_PATH.with_name("config.json.lock"))
     monkeypatch.setattr(ms, "_DB_PATH", str(db_path))
     monkeypatch.setattr(ms, "_memory", None)
     # Reset config cache so each test starts clean
@@ -59,9 +60,15 @@ def _no_op_model(server, monkeypatch):
     import truememory.vector_search as vs
     import truememory.reranker as rr
 
-    monkeypatch.setattr(vs, "set_embedding_model", lambda tier: None)
-    monkeypatch.setattr(rr, "set_active_tier", lambda tier: None)
-    monkeypatch.setattr(server, "_set_reranker", lambda name: None)
+    def forbidden_model_load(*args, **kwargs):
+        raise AssertionError("Configuration must preserve lazy model slots")
+
+    monkeypatch.setattr(vs, "_model", None)
+    monkeypatch.setattr(rr, "_model", None)
+    monkeypatch.setattr(vs, "get_model", forbidden_model_load)
+    monkeypatch.setattr(vs, "_load_frozen_embedding_target", forbidden_model_load)
+    monkeypatch.setattr(rr, "get_reranker", forbidden_model_load)
+    monkeypatch.setattr(server, "_set_reranker", forbidden_model_load)
 
 
 # -----------------------------------------------------------------------
