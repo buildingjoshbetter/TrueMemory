@@ -86,7 +86,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # ---------- step 3: install truememory as a uv tool ----------
-Say "installing $PKG_SPEC (~3-5 min on first run, downloads all tier models)..."
+Say "installing $PKG_SPEC (~3-5 min on first run)..."
 & uv tool uninstall truememory *> $null
 if ($LASTEXITCODE -gt 1) {
     Warn "uv tool uninstall returned $LASTEXITCODE — proceeding, but result may be partial"
@@ -118,6 +118,8 @@ if ($uvToolDir) {
 }
 
 # ---------- step 4: auto-configure Claude ----------
+$setupStatus = "skipped"
+$hookStatus = "skipped"
 if ($env:TRUEMEMORY_SKIP_SETUP -eq "1") {
     Say "skipping Claude setup (TRUEMEMORY_SKIP_SETUP=1)"
 } elseif (-not $toolPython) {
@@ -126,41 +128,52 @@ if ($env:TRUEMEMORY_SKIP_SETUP -eq "1") {
 } else {
     Say "configuring Claude Code / Claude Desktop..."
     & $toolPython -m truememory.mcp_server --setup
-    if ($LASTEXITCODE -ne 0) {
+    if ($LASTEXITCODE -eq 0) { $setupStatus = "command succeeded" }
+    else {
+        $setupStatus = "failed"
         Warn "auto-setup returned non-zero (re-run: python -m truememory.mcp_server --setup)"
     }
 
     Say "installing hooks and CLAUDE.md instructions..."
     & $toolPython -m truememory.ingest.cli install
-    if ($LASTEXITCODE -ne 0) {
+    if ($LASTEXITCODE -eq 0) { $hookStatus = "command succeeded" }
+    else {
+        $hookStatus = "failed"
         Warn "hook install returned non-zero (re-run: python -m truememory.ingest.cli install)"
     }
 }
 
 # ---------- step 5: pre-download models for all tiers ----------
-Say "pre-downloading models for all tiers (Edge + Base + Pro)..."
-Say "  this takes 2-5 min but means tier switching just works afterward."
-if (Test-Path $toolPython) {
-    Say "  [1/3] Edge reranker (MiniLM-L-6-v2, ~22MB)..."
-    & $toolPython -c "from sentence_transformers import CrossEncoder; CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')"
-    if ($LASTEXITCODE -eq 0) { Ok "  [1/3] Edge reranker ready" }
-    else { Warn "  [1/3] Edge reranker download failed (search still works without it)" }
-
-    Say "  [2/3] Base/Pro embedder (Qwen3-Embedding-0.6B, ~1.2GB)..."
-    & $toolPython -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('Qwen/Qwen3-Embedding-0.6B', truncate_dim=256)"
-    if ($LASTEXITCODE -eq 0) { Ok "  [2/3] Base/Pro embedder ready" }
-    else { Warn "  [2/3] Base/Pro embedder download failed (you can retry later or use Edge tier)" }
-
-    Say "  [3/3] Base/Pro reranker (gte-modernbert, ~600MB)..."
-    & $toolPython -c "from sentence_transformers import CrossEncoder; CrossEncoder('Alibaba-NLP/gte-reranker-modernbert-base')"
-    if ($LASTEXITCODE -eq 0) { Ok "  [3/3] Base/Pro reranker ready" }
-    else { Warn "  [3/3] Base/Pro reranker download failed (you can retry later or use Edge tier)" }
-
-    Ok "all models pre-downloaded — tier switching is instant."
+Say "pre-downloading the Edge reranker and Base/Pro models..."
+Say "  this can take 2-5 min; uncached models require network access."
+$modelChecks = @(
+    @{ Label = "Edge reranker"; Status = "not checked"; Code = "from sentence_transformers import CrossEncoder; CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')" },
+    @{ Label = "Base/Pro embedder"; Status = "not checked"; Code = "from sentence_transformers import SentenceTransformer; SentenceTransformer('Qwen/Qwen3-Embedding-0.6B', truncate_dim=256)" },
+    @{ Label = "Base/Pro reranker"; Status = "not checked"; Code = "from sentence_transformers import CrossEncoder; CrossEncoder('Alibaba-NLP/gte-reranker-modernbert-base')" }
+)
+if ($toolPython -and (Test-Path -LiteralPath $toolPython)) {
+    foreach ($modelCheck in $modelChecks) {
+        Say "  Pre-downloading $($modelCheck.Label)..."
+        $modelCheck.Status = "failed"
+        try {
+            & $toolPython -c $modelCheck.Code
+            if ($LASTEXITCODE -eq 0) { $modelCheck.Status = "ready" }
+        } catch {
+            Warn "  $($modelCheck.Label) could not be loaded: $_"
+        }
+        if ($modelCheck.Status -eq "ready") {
+            Ok "  $($modelCheck.Label) ready"
+        } else {
+            Warn "  $($modelCheck.Label) pre-download failed"
+            Warn "Retry this model only: & (Join-Path (uv tool dir) 'truememory\Scripts\python.exe') -c `"$($modelCheck.Code)`""
+        }
+    }
 } else {
     Warn "could not locate tool Python at $toolPython — skipping model pre-download"
-    Warn "models will download on first use instead"
+    Warn "Model readiness is unverified. Locate the tool environment with: uv tool dir"
+    Warn "After locating its Python, run: python -m truememory.ingest.cli setup"
 }
+$modelReadyCount = @($modelChecks | Where-Object { $_.Status -eq "ready" }).Count
 
 # ---------- done ----------
 Write-Host ""
@@ -174,10 +187,31 @@ Write-Host @"
                                   a sauron company
 "@ -ForegroundColor Green
 
-$installedVer = & $toolPython -c "from importlib.metadata import version; print(version('truememory'))" 2>$null
+$installedVer = $null
+if ($toolPython) {
+    try {
+        $installedVer = & $toolPython -c "from importlib.metadata import version; print(version('truememory'))" 2>$null
+    } catch {
+        $installedVer = $null
+    }
+}
 if (-not $installedVer) { $installedVer = "unknown" }
 Write-Host ""
-Ok "TrueMemory v$installedVer installed successfully."
+Ok "TrueMemory v$installedVer package installed."
+Say "Claude registration: $setupStatus"
+Say "Hooks: $hookStatus"
+Say "Model pre-download checks: $modelReadyCount/3 succeeded."
+foreach ($modelCheck in $modelChecks) {
+    Say "  $($modelCheck.Label): $($modelCheck.Status)"
+}
+if ($modelReadyCount -eq 3) {
+    Ok "All three requested model pre-download checks passed."
+} else {
+    Warn "Model readiness incomplete; package installation is retained. Retry the failed or skipped checks before relying on those models."
+}
+Say "The Edge embedder was not checked by this pre-download step."
+Say "Registration and hook command success do not verify runtime operation."
+Say "Changing embedding models can still require re-embedding stored memories."
 Write-Host ""
 Write-Host "  First time? Start a new Claude session and type:" -ForegroundColor Green
 Write-Host ""

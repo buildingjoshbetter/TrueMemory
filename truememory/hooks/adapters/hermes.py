@@ -4,7 +4,7 @@ Hermes Agent (Nous Research) uses:
 - ~/.hermes/config.yaml for both MCP server registration (mcp_servers: key)
   and shell hook registration (hooks: key)
 - Shell hooks are list-of-dicts under each event name with command/matcher/timeout
-- Same JSON stdin/stdout wire protocol as Claude Code for shell hooks
+- Native session_id plus extra content on stdin; top-level context on stdout
 - 19 valid hook events defined in hermes_cli/plugins.py VALID_HOOKS
 
 Hook config format (from hermes-agent source — agent/shell_hooks.py):
@@ -24,6 +24,7 @@ Valid events: pre_tool_call, post_tool_call, transform_terminal_output,
 from __future__ import annotations
 
 import logging
+import re
 import shlex
 import shutil
 import sys
@@ -36,39 +37,89 @@ log = logging.getLogger(__name__)
 _HERMES_DIR = Path.home() / ".hermes"
 _CONFIG = _HERMES_DIR / "config.yaml"
 
-# Map TrueMemory hook scripts to Hermes hook events.
-# Hermes uses a single config.yaml for both mcp_servers and hooks.
-#
-# NOTE on pre_llm_call -> user_prompt_submit.py:
-#   Hermes fires pre_llm_call on every LLM API call, including continuation
-#   and retry calls — not just on new user prompts.  user_prompt_submit.py is
-#   designed to be idempotent (buffers are append-only, recall is read-only,
-#   extraction is guarded by should_extract_session), so repeated invocations
-#   are harmless but wasteful.  Hermes does not expose a dedicated
-#   "user_prompt_submitted" event; pre_llm_call is the closest approximation.
-#   The script exits early if stdin provides no prompt or a prompt < 3 chars,
-#   which naturally filters most continuation/retry calls where the prompt
-#   field is empty.
+# Pinned Hermes main and v0.21.6 emit pre/post once per user turn.
+# The fixed wrapper translates native content without transcript admission.
 _HOOK_ENTRIES = {
     "on_session_start": {
-        "script": "session_start.py",
+        "script": "hermes.py",
         "timeout": 30,
     },
     "on_session_end": {
-        "script": "stop.py",
+        "script": "hermes.py",
         "timeout": 30,
     },
     "pre_llm_call": {
-        "script": "user_prompt_submit.py",
+        "script": "hermes.py",
         "timeout": 10,
     },
+    "post_llm_call": {
+        "script": "hermes.py",
+        "timeout": 30,
+    },
     "on_session_finalize": {
-        "script": "compact.py",
+        "script": "hermes.py",
         "timeout": 15,
     },
 }
 
-_TRUEMEMORY_MARKER = "truememory"
+_LEGACY_SCRIPTS = {"on_session_start": "session_start.py", "on_session_end": "stop.py",
+                   "pre_llm_call": "user_prompt_submit.py", "on_session_finalize": "compact.py"}
+
+
+def _owned_command(command: object, event: str) -> bool:
+    """Only replace a simple Python invocation of this installed event hook."""
+    if not isinstance(command, str) or any(char in command for char in ("\0", "\n", "\r")):
+        return False
+    try:
+        lexer = shlex.shlex(command, posix=False, punctuation_chars=";&|<>()`")
+        lexer.whitespace_split = True
+        for token in lexer:
+            if token and all(char in ";&|<>()`" for char in token):
+                return False
+            if not token.startswith("'") and any(part in token for part in ("$(", "${", "`")):
+                return False
+        tokens = shlex.split(command, comments=False, posix=sys.platform != "win32")
+    except ValueError:
+        return False
+    if sys.platform == "win32":
+        tokens = [token[1:-1] if token.startswith('"') and token.endswith('"') else token
+                  for token in tokens]
+    if len(tokens) < 2 or re.fullmatch(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?",
+                                     tokens[0].replace("\\", "/").rsplit("/", 1)[-1], re.I) is None:
+        return False
+    index = 1
+    while index < len(tokens) and tokens[index] in {"-B", "-u", "-E", "-I", "-s", "-S", "-O", "-OO"}:
+        index += 1
+    if index >= len(tokens):
+        return False
+    script = tokens[index]
+    index += 1
+    if script == "-m":
+        if index >= len(tokens):
+            return False
+        module = tokens[index]
+        index += 1
+        prefix = "truememory.ingest.hooks."
+        script_name = module.removeprefix(prefix) + ".py" if module.startswith(prefix) else ""
+    else:
+        hook_dir = Path(__file__).parent.parent.parent / "ingest" / "hooks"
+        candidates = {str(hook_dir / name): name for name in
+                      {"hermes.py", *_LEGACY_SCRIPTS.values()}}
+        script_name = candidates.get(script, "")
+    native = script_name == "hermes.py"
+    if not native and script_name != _LEGACY_SCRIPTS.get(event):
+        return False
+    flags: dict[str, str] = {}
+    rest = tokens[index:]
+    if len(rest) % 2:
+        return False
+    for flag, value in zip(rest[::2], rest[1::2]):
+        if flag not in {"--user", "--db", "--host", "--event"} or flag in flags:
+            return False
+        flags[flag] = value
+    if native:
+        return event in _HOOK_ENTRIES and flags.get("--event") == event and "--host" not in flags
+    return flags.get("--host", "claude") == "claude" and "--event" not in flags
 
 
 def _yaml_safe_load(text: str) -> dict:
@@ -94,6 +145,11 @@ class HermesAdapter(CLIAdapter):
     @property
     def has_hooks(self) -> bool:
         return True
+
+    @property
+    def has_session_start(self) -> bool:
+        # Hermes discards observer output; first-turn recall uses pre_llm_call.
+        return False
 
     @property
     def name(self) -> str:
@@ -168,22 +224,14 @@ class HermesAdapter(CLIAdapter):
 
         for event, info in _HOOK_ENTRIES.items():
             script_path = hooks_dir / info["script"]
-            cmd = self._build_command(py, script_path, user_id, db_path)
+            cmd = self._build_command(py, script_path, user_id, db_path, event=event)
 
             # Ensure the event key is a list
             event_list = hooks.setdefault(event, [])
             if not isinstance(event_list, list):
-                event_list = []
-                hooks[event] = event_list
-
-            # Skip if a truememory command is already registered for this event
-            already = any(
-                isinstance(entry, dict)
-                and _TRUEMEMORY_MARKER in entry.get("command", "").lower()
-                for entry in event_list
-            )
-            if already:
-                continue
+                raise ValueError(f"Hermes {event} hooks must be a list")
+            event_list[:] = [entry for entry in event_list
+                             if not (isinstance(entry, dict) and _owned_command(entry.get("command"), event))]
 
             entry: dict = {"command": cmd}
             if info.get("timeout"):
@@ -217,8 +265,12 @@ class HermesAdapter(CLIAdapter):
         script_path: Path,
         user_id: str = "",
         db_path: str = "",
+        *,
+        event: str = "",
     ) -> str:
         parts: list[str] = [python_path, str(script_path)]
+        if event:
+            parts.extend(["--event", event])
         if user_id:
             parts.extend(["--user", user_id])
         if db_path:
@@ -252,7 +304,7 @@ class HermesAdapter(CLIAdapter):
                 for entry in entries:
                     if (
                         isinstance(entry, dict)
-                        and _TRUEMEMORY_MARKER in entry.get("command", "").lower()
+                        and _owned_command(entry.get("command"), _event)
                     ):
                         return True
             return False
@@ -289,7 +341,7 @@ class HermesAdapter(CLIAdapter):
                     entry for entry in entries
                     if not (
                         isinstance(entry, dict)
-                        and _TRUEMEMORY_MARKER in entry.get("command", "").lower()
+                        and _owned_command(entry.get("command"), event)
                     )
                 ]
                 if len(cleaned) != len(entries):

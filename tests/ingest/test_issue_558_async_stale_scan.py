@@ -70,7 +70,7 @@ class TestMainDoesNotCallScanDirectly:
         _scan_stale_sessions (synchronous)."""
         calls = {"maintenance": 0, "scan": 0}
 
-        monkeypatch.setattr(ss, "_run_maintenance_background", lambda: calls.__setitem__("maintenance", calls["maintenance"] + 1))
+        monkeypatch.setattr(ss, "_run_maintenance_background", lambda host="claude": calls.__setitem__("maintenance", calls["maintenance"] + 1))
         monkeypatch.setattr(ss, "_scan_stale_sessions", lambda: calls.__setitem__("scan", calls["scan"] + 1))
         monkeypatch.setattr(ss, "_drain_backlog", lambda: None)
         monkeypatch.setattr(ss, "_is_first_run", lambda: True)

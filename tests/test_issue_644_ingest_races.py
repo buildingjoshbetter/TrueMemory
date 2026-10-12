@@ -174,6 +174,7 @@ def test_queue_to_backlog_refuses_to_clobber_live_claim(monkeypatch, tmp_path):
     claim with a fresh ``.json`` (POSIX rename-overwrite race / M-15).
     """
     from truememory.ingest.hooks import stop as stop_mod
+    monkeypatch.setenv("TRUEMEMORY_TRANSCRIPT_DIR", str(tmp_path))
 
     backlog = tmp_path / "backlog"
     backlog.mkdir(parents=True)

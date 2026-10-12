@@ -8,8 +8,8 @@ treats ``"What kind of person is Jordan?"`` as a keyword lookup — which
 returns nothing useful.
 
 This module pre-computes entity profiles (communication style, topics,
-relationships, traits, preferences) so that personality questions can be
-answered from structured data rather than raw message search alone.
+relationships and traits). Preference questions use query-time retrieval;
+scheduled preference-map persistence and refresh are not implemented.
 
 Personality categories handled:
     - General character (``"What kind of person is X?"``)
@@ -24,14 +24,22 @@ Python standard library.
 """
 
 import contextlib
+import hashlib
 import json
 import re
 import sqlite3
+import struct
+import uuid
 import warnings
 from collections import defaultdict
+from collections.abc import Iterable, Iterator
 from datetime import datetime, timezone
 
 from truememory.fts_search import _build_safe_fts_query, _fts_search
+from truememory.personality_style_vec import (
+    _l0_directive_filter, _l0_source_schema, _l0_transaction, _l0_validate_source,
+)
+from truememory.storage import _dunbar_ownership_ready, _initialize_dunbar_ownership
 
 
 # ---------------------------------------------------------------------------
@@ -142,20 +150,16 @@ PERSONALITY_ASPECTS = {
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _get_all_messages(conn: sqlite3.Connection) -> list[dict]:
-    """Fetch all messages ordered by timestamp."""
-    rows = conn.execute(
-        "SELECT id, content, sender, recipient, timestamp, category, modality "
-        "FROM messages ORDER BY timestamp"
-    ).fetchall()
-    return [
-        {
-            "id": r[0], "content": r[1], "sender": r[2],
-            "recipient": r[3], "timestamp": r[4],
-            "category": r[5], "modality": r[6],
-        }
-        for r in rows
-    ]
+_PROFILE_SOURCE_COLUMNS = (
+    "id", "content", "sender", "recipient", "timestamp", "category", "modality",
+)
+
+
+def _profile_source_query(schema: tuple[tuple, ...]) -> str:
+    return (
+        "SELECT id, content, sender, recipient, timestamp, category, modality, "
+        f"{_l0_directive_filter(schema)} AS ordinary FROM messages ORDER BY timestamp"
+    )
 
 
 def _get_messages_by_sender(conn: sqlite3.Connection, sender: str,
@@ -438,32 +442,7 @@ def _warnings_ctx():
         yield
 
 
-def build_entity_profiles(conn: sqlite3.Connection) -> dict:
-    """
-    Analyze all messages and build personality profiles for key entities.
-
-    For each entity (sender), extracts:
-
-    - **message_count**: total messages sent.
-    - **topics**: frequent themes (startup, health, food, etc.).
-    - **communication_style**: average message length, emoji usage,
-      formality level, and typical greeting.
-    - **relationships**: who they message most and approximate topic focus
-      per recipient.
-    - **traits**: personality descriptors inferred from content analysis.
-
-    Results are stored in the ``entity_profiles`` table and also returned
-    as a dict keyed by entity name.
-
-    Args:
-        conn: Open database connection (from :func:`truememory.storage.create_db`).
-
-    Returns:
-        ``{entity: profile_dict}`` for every sender who has at least one
-        message in the database.
-    """
-    all_msgs = _get_all_messages(conn)
-
+def _compute_entity_profiles(all_msgs: list[dict]) -> dict[str, dict]:
     # Group messages by sender (normalized to lowercase for case-insensitive matching)
     by_sender: dict[str, list[dict]] = defaultdict(list)
     for msg in all_msgs:
@@ -534,25 +513,72 @@ def build_entity_profiles(conn: sqlite3.Connection) -> dict:
         }
         profiles[sender] = profile
 
-        # Store in database
-        now = datetime.now(timezone.utc).isoformat()
-        conn.execute(
-            """INSERT OR REPLACE INTO entity_profiles
+    return profiles
+
+
+def build_entity_profiles(conn: sqlite3.Connection) -> dict:
+    """
+    Analyze all messages and build personality profiles for key entities.
+
+    For each entity (sender), extracts:
+
+    - **message_count**: total messages sent.
+    - **topics**: frequent themes (startup, health, food, etc.).
+    - **communication_style**: average message length, emoji usage,
+      formality level, and typical greeting.
+    - **relationships**: who they message most and approximate topic focus
+      per recipient.
+    - **traits**: personality descriptors inferred from content analysis.
+
+    Results are stored in the ``entity_profiles`` table and also returned
+    as a dict keyed by entity name.
+
+    Args:
+        conn: Open database connection (from :func:`truememory.storage.create_db`).
+
+    Returns:
+        ``{entity: profile_dict}`` for every sender who has at least one
+        ordinary message in the database.
+
+    CPU computation precedes the builder's write transaction. Publication
+    checks the exact source and atomically replaces the table, including
+    obsolete entities. Changed source raises ``sqlite3.OperationalError``.
+    Existing caller transactions are preserved.
+    """
+    with _l0_transaction(conn):
+        source_token = _l0_tracked_source(conn)
+        schema = _l0_source_schema(conn)
+        query = _profile_source_query(schema)
+        source_rows = [tuple(row) for row in conn.execute(query)]
+    # Filtering via the directive index can reorder timestamp ties. Keep the
+    # original scan order and remove ineligible rows before computation.
+    all_msgs = [dict(zip(_PROFILE_SOURCE_COLUMNS, row[:-1])) for row in source_rows if row[-1]]
+    profiles = _compute_entity_profiles(all_msgs)
+    now = datetime.now(timezone.utc).isoformat()
+    stored_rows = [
+        (
+            sender, profile["message_count"], json.dumps(profile["traits"]),
+            json.dumps(profile["communication_style"]), json.dumps(profile["topics"]),
+            json.dumps(profile["relationships"]), now,
+        )
+        for sender, profile in profiles.items()
+    ]
+    with _l0_transaction(conn, write=True):
+        _l0_validate_source(conn, schema, query, source_rows)
+        if _l0_tracked_source(conn) != source_token:
+            raise ProfileRebuildRequired("Profile source revision changed during computation")
+        if source_token is not None:
+            _prepare_profile_certificate(conn)
+        conn.execute("DELETE FROM entity_profiles")
+        conn.executemany(
+            """INSERT INTO entity_profiles
                (entity, message_count, traits, communication_style,
                 topics, relationships, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                sender,
-                len(messages),
-                json.dumps(traits),
-                json.dumps(comm_style),
-                json.dumps(topics),
-                json.dumps(relationships),
-                now,
-            ),
+            stored_rows,
         )
-
-    conn.commit()
+        if source_token is not None:
+            _write_profile_certificate(conn, source_token)
     return profiles
 
 
@@ -578,7 +604,9 @@ def extract_preferences(conn: sqlite3.Connection,
     Returns:
         Dict with keys ``food``, ``activities``, ``people``, ``routines``,
         ``fears``, ``values``.  Each value is a list of extracted snippets
-        or structured data.
+        or structured data. With no entity, returns an empty dict without
+        reading messages. Results are returned only, never persisted; this
+        helper is not a scheduled preference refresh.
     """
     if entity is None:
         return {}
@@ -907,6 +935,172 @@ def search_personality(conn: sqlite3.Connection, query: str,
     return results[:limit]
 
 
+_PROFILE_TOKEN_KEY = "entity_profile_source_v1"
+_PROFILE_OUTPUT_TRIGGERS = {
+    "truememory_profile_output_" + operation.lower():
+        "CREATE TRIGGER truememory_profile_output_" + operation.lower()
+        + " AFTER " + operation + " ON entity_profiles BEGIN "
+        + "UPDATE metadata SET value='unverified' WHERE key='" + _PROFILE_TOKEN_KEY + "'; END"
+    for operation in ("INSERT", "UPDATE", "DELETE")
+}
+
+
+class ProfileRebuildRequired(sqlite3.OperationalError):
+    """A retained generation cannot be read or extended until full repair."""
+
+
+_PROFILE_SOURCE_TRIGGER_SHA256 = {
+    "messages_maintenance_ai": "b75f5431c0ce50627341f9afa36b4ad8920a56a561e19f42b3c6fd5d6a08c778",
+    "messages_maintenance_au": "e9626141915f0588897aaf24c97e184e0aeb47f8c3f1eb712c346638a9287749",
+    "messages_maintenance_unique_au": "3d8c28d2a9351bfaeed175dc6d058abaa77b7f0b64ab6b0c9e0e6999660fea1b",
+    "messages_maintenance_ad": "5d0f978eddd7fbad96c49b0c95942ea1d69526ed102bd0afb8229eb195263c0e",
+}
+
+
+def _profile_utf8_size(value: str) -> int:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise ProfileRebuildRequired("Profile proof text is not UTF-8") from error
+
+
+def _l0_tracked_source(conn: sqlite3.Connection) -> tuple | None:
+    """Return a canonical source proof or preserve a genuinely untracked schema."""
+    if conn.execute("SELECT 1 FROM main.sqlite_master WHERE type='table' "
+                    "AND name='maintenance_source_state'").fetchone() is None:
+        return None
+    if conn.execute("SELECT 1 FROM temp.sqlite_master WHERE type IN ('table','view') "
+                    "AND lower(name) IN ('messages','maintenance_source_state','metadata') LIMIT 1").fetchone():
+        raise ProfileRebuildRequired("L0 source tracking is shadowed")
+    row = conn.execute("SELECT epoch,revision,insert_count,correction_count,max_seen_message_id,"
+                       "nonappend_revision,tracking_ready FROM main.maintenance_source_state WHERE singleton=1").fetchone()
+    if (row is None or row[6] != 1 or not isinstance(row[0], str) or not row[0]
+            or _profile_utf8_size(row[0]) > 256
+            or any(type(value) is not int or value < 0 for value in row[1:6])
+            or row[1] != row[2] + row[3] or row[5] > row[1]):
+        raise ProfileRebuildRequired("L0 source revision is unavailable")
+    schema = list(conn.execute("PRAGMA main.table_xinfo(messages)"))
+    identifiers = [column for column in schema if column[5]]
+    definition = conn.execute("SELECT sql FROM main.sqlite_master WHERE type='table' AND name='messages'").fetchone()
+    if (len(identifiers) != 1 or identifiers[0][1:3] != ('id', 'INTEGER')
+            or definition is None or 'WITHOUT ROWID' in ' '.join(definition[0].upper().split())):
+        raise ProfileRebuildRequired("L0 source identity is unavailable")
+    expected = _PROFILE_SOURCE_TRIGGER_SHA256
+    names = tuple(expected)
+    installed = {name: hashlib.sha256(' '.join(sql.strip().rstrip(';').split()).encode()).hexdigest()
+                 for name, sql in conn.execute("SELECT name,sql FROM main.sqlite_master WHERE type='trigger' "
+                                               "AND name IN (?,?,?,?)", names)}
+    if installed != expected or conn.execute("SELECT 1 FROM temp.sqlite_master WHERE type='trigger' "
+                                             "AND (lower(tbl_name)='messages' OR name IN (?,?,?,?)) LIMIT 1", names).fetchone():
+        raise ProfileRebuildRequired("L0 source triggers are unavailable")
+    return tuple(row[:6])
+
+
+def _profile_trigger_proof(conn: sqlite3.Connection, *, prepare: bool = False) -> bool:
+    names = tuple(_PROFILE_OUTPUT_TRIGGERS)
+    if conn.execute("SELECT 1 FROM temp.sqlite_master WHERE type IN ('table','view') "
+                    "AND lower(name) IN ('entity_profiles','metadata') LIMIT 1").fetchone():
+        raise ProfileRebuildRequired("Profile tables are shadowed")
+    installed = {name: " ".join(sql.strip().rstrip(';').split()) for name, sql in conn.execute(
+        "SELECT name,sql FROM main.sqlite_master WHERE type='trigger' AND name IN (?,?,?)", names)}
+    expected = {name: " ".join(sql.split()) for name, sql in _PROFILE_OUTPUT_TRIGGERS.items()}
+    if conn.execute("SELECT 1 FROM main.sqlite_master WHERE type='trigger' "
+                    "AND lower(tbl_name) IN ('entity_profiles','metadata') AND name NOT IN (?,?,?) LIMIT 1", names).fetchone():
+        raise ProfileRebuildRequired("Profile output triggers are unsupported")
+    if conn.execute("SELECT 1 FROM temp.sqlite_master WHERE type='trigger' "
+                    "AND (lower(tbl_name) IN ('entity_profiles','metadata') OR name IN (?,?,?)) LIMIT 1", names).fetchone():
+        raise ProfileRebuildRequired("Profile output triggers are shadowed")
+    if any(sql != expected[name] for name, sql in installed.items()):
+        raise ProfileRebuildRequired("Profile ownership definition changed")
+    if prepare:
+        for name, sql in _PROFILE_OUTPUT_TRIGGERS.items():
+            if name not in installed:
+                conn.execute(sql)
+        return True
+    return installed == expected
+
+
+def _prepare_profile_certificate(conn: sqlite3.Connection) -> None:
+    _profile_trigger_proof(conn, prepare=True)
+
+
+def _write_profile_certificate(conn: sqlite3.Connection, source: tuple) -> None:
+    value = json.dumps({"schema_version": 1, "coverage": "complete", "source": list(source)},
+                       sort_keys=True, separators=(",", ":"), allow_nan=False)
+    conn.execute("INSERT INTO main.metadata(key,value) VALUES(?,?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (_PROFILE_TOKEN_KEY, value))
+
+
+def _profile_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ProfileRebuildRequired("Profile source token has duplicate keys")
+        result[key] = value
+    return result
+
+
+def _profile_read_state(conn: sqlite3.Connection) -> tuple[tuple | None, tuple | None]:
+    source = _l0_tracked_source(conn)
+    names = tuple(_PROFILE_OUTPUT_TRIGGERS)
+    enrolled = conn.execute("SELECT 1 FROM main.sqlite_master WHERE type='trigger' "
+                            "AND name IN (?,?,?) LIMIT 1", names).fetchone() is not None
+    metadata = conn.execute("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='metadata'").fetchone()
+    row = conn.execute("SELECT value FROM main.metadata WHERE key=?", (_PROFILE_TOKEN_KEY,)).fetchone() if metadata else None
+    if not enrolled and row is None:
+        if source is not None and (source[3] or source[5]):
+            raise ProfileRebuildRequired("Uncertified profiles have correction history")
+        return source, None
+    if source is None or row is None or not _profile_trigger_proof(conn):
+        raise ProfileRebuildRequired("Profile source proof is unavailable")
+    value = row[0]
+    if not isinstance(value, str) or _profile_utf8_size(value) > 2048:
+        raise ProfileRebuildRequired("Profile source token is unsupported")
+    try:
+        token = json.loads(value, object_pairs_hook=_profile_json_object)
+    except json.JSONDecodeError as error:
+        raise ProfileRebuildRequired("Profile source token is invalid") from error
+    if (not isinstance(token, dict) or set(token) != {"schema_version", "coverage", "source"}
+            or type(token["schema_version"]) is not int or token["schema_version"] != 1
+            or token["coverage"] != "complete" or not isinstance(token["source"], list)
+            or len(token["source"]) != 6):
+        raise ProfileRebuildRequired("Profile source token is unsupported")
+    previous = tuple(token["source"])
+    if (not isinstance(previous[0], str) or previous[0] != source[0]
+            or any(type(value) is not int or value < 0 for value in previous[1:])
+            or previous[1] != previous[2] + previous[3] or previous[5] > previous[1]
+            or previous[1] > source[1] or previous[2] > source[2] or previous[4] > source[4]
+            or previous[3] != source[3] or source[5] > previous[1]):
+        raise ProfileRebuildRequired("Profile generation requires correction repair")
+    return source, previous
+
+
+@contextlib.contextmanager
+def _profile_append_guard(conn: sqlite3.Connection, sender: str, content: str,
+                          recipient: str) -> Iterator[None]:
+    source, previous = _profile_read_state(conn)
+    if source is None:
+        yield
+        return
+    with _l0_transaction(conn, write=True):
+        source, previous = _profile_read_state(conn)
+        if previous is not None:
+            if (source[1] != previous[1] + 1 or source[2] != previous[2] + 1
+                    or source[4] <= previous[4]):
+                raise ProfileRebuildRequired("Profile append lacks one exact source occurrence")
+            row = conn.execute("SELECT content,sender,recipient,directive FROM main.messages WHERE id=?",
+                               (source[4],)).fetchone()
+            if (row is None or row[0] != content or not isinstance(row[1], str)
+                    or row[1].lower() != sender.lower() or not isinstance(row[2], str)
+                    or row[2].lower() != recipient.lower() or row[3] not in (0, None)):
+                raise ProfileRebuildRequired("Profile append source fields do not match")
+        yield
+        if _l0_tracked_source(conn) != source:
+            raise ProfileRebuildRequired("Profile append source changed")
+        if previous is not None:
+            _write_profile_certificate(conn, source)
+
+
 def update_entity_profile_incremental(
     conn: sqlite3.Connection, sender: str, message: str,
     recipient: str = "",
@@ -927,130 +1121,131 @@ def update_entity_profile_incremental(
     if not sender or not message:
         return
 
-    # Normalize entity name to lowercase for case-insensitive matching (#467)
-    sender = sender.lower()
+    with _profile_append_guard(conn, sender, message, recipient):
+        # Normalize entity name to lowercase for case-insensitive matching (#467)
+        sender = sender.lower()
 
-    # ── Read existing profile (if any) ────────────────────────────────
-    existing = get_entity_profile(conn, sender)
+        # ── Read existing profile (if any) ────────────────────────────────
+        existing = get_entity_profile(conn, sender)
 
-    if existing:
-        msg_count = existing["message_count"] + 1
-        old_topics = existing.get("topics") or []
-        old_traits = existing.get("traits") or []
-        old_style = existing.get("communication_style") or {}
-        old_rels = existing.get("relationships") or {}
-    else:
-        msg_count = 1
-        old_topics = []
-        old_traits = []
-        old_style = {}
-        old_rels = {}
+        if existing:
+            msg_count = existing["message_count"] + 1
+            old_topics = existing.get("topics") or []
+            old_traits = existing.get("traits") or []
+            old_style = existing.get("communication_style") or {}
+            old_rels = existing.get("relationships") or {}
+        else:
+            msg_count = 1
+            old_topics = []
+            old_traits = []
+            old_style = {}
+            old_rels = {}
 
-    # ── Communication style (rolling average) ─────────────────────────
-    old_avg = old_style.get("avg_length", 0.0)
-    old_count = msg_count - 1
-    new_avg = ((old_avg * old_count) + len(message)) / msg_count
+        # ── Communication style (rolling average) ─────────────────────────
+        old_avg = old_style.get("avg_length", 0.0)
+        old_count = msg_count - 1
+        new_avg = ((old_avg * old_count) + len(message)) / msg_count
 
-    uses_emoji = old_style.get("uses_emoji", False) or _detect_emoji(message)
+        uses_emoji = old_style.get("uses_emoji", False) or _detect_emoji(message)
 
-    msg_dict = {"content": message}
-    if msg_count == 1:
-        formality = _assess_formality([msg_dict])
-    else:
-        formality = old_style.get("formality", "mixed")
+        msg_dict = {"content": message}
+        if msg_count == 1:
+            formality = _assess_formality([msg_dict])
+        else:
+            formality = old_style.get("formality", "mixed")
 
-    comm_style = {
-        "avg_length": round(new_avg, 1),
-        "uses_emoji": uses_emoji,
-        "formality": formality,
-        "typical_greeting": old_style.get("typical_greeting", ""),
-    }
+        comm_style = {
+            "avg_length": round(new_avg, 1),
+            "uses_emoji": uses_emoji,
+            "formality": formality,
+            "typical_greeting": old_style.get("typical_greeting", ""),
+        }
 
-    # ── Topics (single-message extraction, threshold=1) ─────────────
-    # _extract_topics requires >= 2 hits per cluster which is too strict
-    # for a single message.  Inline a threshold-1 scan instead.
-    lower = message.lower()
-    words = set(lower.split())
-    _topic_clusters = {
-        "startup/business": {"startup", "company", "founded", "revenue",
-                             "funding", "investor", "pitch", "valuation",
-                             "mrr", "arr", "series", "seed", "raise"},
-        "technology": {"code", "deploy", "database", "api", "backend",
-                       "frontend", "server", "aws", "cloud", "repo",
-                       "kubernetes", "docker", "github", "python", "go",
-                       "rewrite", "migrate", "typescript", "javascript"},
-        "health/fitness": {"gym", "run", "running", "workout", "health",
-                           "marathon", "sleep", "meditation", "therapy",
-                           "doctor", "weight"},
-        "relationships": {"dating", "anniversary", "valentine", "proposal",
-                          "ring", "wedding", "girlfriend", "boyfriend",
-                          "partner"},
-        "food/dining": {"restaurant", "coffee", "tacos", "sushi", "dinner",
-                        "lunch", "breakfast", "eat", "cook", "bar"},
-        "finance": {"salary", "savings", "money", "bank", "mortgage",
-                    "house", "rent", "401k", "investment", "budget"},
-        "career": {"job", "quit", "hired", "hiring", "employee",
-                   "cofounder", "cto", "ceo", "role", "interview"},
-        "pets": {"dog", "puppy", "vet", "pet", "shelter"},
-        "entertainment": {"show", "movie", "netflix", "watch", "concert",
-                          "festival", "book", "game"},
-        "family": {"mom", "dad", "sister", "brother", "parents", "family",
-                   "birthday"},
-    }
-    new_topics = [t for t, kws in _topic_clusters.items() if words & kws]
-    topics = list(dict.fromkeys(old_topics + new_topics))
-
-    # ── Traits (single-message extraction, threshold=1) ───────────────
-    _trait_indicators = {
-        "ambitious": {"goal", "growth", "scale", "expand", "raise",
-                      "million", "revenue", "build", "launch", "grind"},
-        "anxious": {"worried", "anxious", "stress", "panic", "scared",
-                    "nervous", "overwhelmed"},
-        "caring": {"love", "miss", "proud", "care", "support"},
-        "analytical": {"data", "metrics", "numbers", "analysis",
-                       "measure", "accuracy", "benchmark"},
-        "health-conscious": {"gym", "workout", "run", "meditation",
-                             "sleep", "diet", "healthy", "fitness"},
-        "technical": {"code", "deploy", "api", "database", "server",
-                      "algorithm", "architecture", "framework", "debug"},
-        "entrepreneurial": {"startup", "founder", "company", "pitch",
-                            "investor", "equity", "valuation"},
-    }
-    new_traits = [
-        tr for tr, inds in _trait_indicators.items()
-        if any(ind in lower for ind in inds)
-    ]
-    traits = list(dict.fromkeys(old_traits + new_traits))
-
-    # ── Relationships ─────────────────────────────────────────────────
-    if recipient:
-        recipient_key = recipient.lower()
-        rel = old_rels.get(recipient_key, {"message_count": 0, "primary_topic": "general"})
-        rel["message_count"] = rel.get("message_count", 0) + 1
+        # ── Topics (single-message extraction, threshold=1) ─────────────
+        # _extract_topics requires >= 2 hits per cluster which is too strict
+        # for a single message.  Inline a threshold-1 scan instead.
         lower = message.lower()
-        if any(w in lower for w in ("code", "deploy", "api", "database", "bug", "server")):
-            rel["primary_topic"] = "technical"
-        elif any(w in lower for w in ("worried", "anxious", "scared", "stress")):
-            rel["primary_topic"] = "emotional"
-        elif any(w in lower for w in ("dinner", "drinks", "hang out", "watch")):
-            rel["primary_topic"] = "social"
-        elif any(w in lower for w in ("revenue", "investor", "pricing", "customer")):
-            rel["primary_topic"] = "business"
-        old_rels[recipient_key] = rel
+        words = set(lower.split())
+        _topic_clusters = {
+            "startup/business": {"startup", "company", "founded", "revenue",
+                                 "funding", "investor", "pitch", "valuation",
+                                 "mrr", "arr", "series", "seed", "raise"},
+            "technology": {"code", "deploy", "database", "api", "backend",
+                           "frontend", "server", "aws", "cloud", "repo",
+                           "kubernetes", "docker", "github", "python", "go",
+                           "rewrite", "migrate", "typescript", "javascript"},
+            "health/fitness": {"gym", "run", "running", "workout", "health",
+                               "marathon", "sleep", "meditation", "therapy",
+                               "doctor", "weight"},
+            "relationships": {"dating", "anniversary", "valentine", "proposal",
+                              "ring", "wedding", "girlfriend", "boyfriend",
+                              "partner"},
+            "food/dining": {"restaurant", "coffee", "tacos", "sushi", "dinner",
+                            "lunch", "breakfast", "eat", "cook", "bar"},
+            "finance": {"salary", "savings", "money", "bank", "mortgage",
+                        "house", "rent", "401k", "investment", "budget"},
+            "career": {"job", "quit", "hired", "hiring", "employee",
+                       "cofounder", "cto", "ceo", "role", "interview"},
+            "pets": {"dog", "puppy", "vet", "pet", "shelter"},
+            "entertainment": {"show", "movie", "netflix", "watch", "concert",
+                              "festival", "book", "game"},
+            "family": {"mom", "dad", "sister", "brother", "parents", "family",
+                       "birthday"},
+        }
+        new_topics = [t for t, kws in _topic_clusters.items() if words & kws]
+        topics = list(dict.fromkeys(old_topics + new_topics))
 
-    # ── Store ─────────────────────────────────────────────────────────
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        """INSERT OR REPLACE INTO entity_profiles
+        # ── Traits (single-message extraction, threshold=1) ───────────────
+        _trait_indicators = {
+            "ambitious": {"goal", "growth", "scale", "expand", "raise",
+                          "million", "revenue", "build", "launch", "grind"},
+            "anxious": {"worried", "anxious", "stress", "panic", "scared",
+                        "nervous", "overwhelmed"},
+            "caring": {"love", "miss", "proud", "care", "support"},
+            "analytical": {"data", "metrics", "numbers", "analysis",
+                           "measure", "accuracy", "benchmark"},
+            "health-conscious": {"gym", "workout", "run", "meditation",
+                                 "sleep", "diet", "healthy", "fitness"},
+            "technical": {"code", "deploy", "api", "database", "server",
+                          "algorithm", "architecture", "framework", "debug"},
+            "entrepreneurial": {"startup", "founder", "company", "pitch",
+                                "investor", "equity", "valuation"},
+        }
+        new_traits = [
+            tr for tr, inds in _trait_indicators.items()
+            if any(ind in lower for ind in inds)
+        ]
+        traits = list(dict.fromkeys(old_traits + new_traits))
+
+        # ── Relationships ─────────────────────────────────────────────────
+        if recipient:
+            recipient_key = recipient.lower()
+            rel = old_rels.get(recipient_key, {"message_count": 0, "primary_topic": "general"})
+            rel["message_count"] = rel.get("message_count", 0) + 1
+            lower = message.lower()
+            if any(w in lower for w in ("code", "deploy", "api", "database", "bug", "server")):
+                rel["primary_topic"] = "technical"
+            elif any(w in lower for w in ("worried", "anxious", "scared", "stress")):
+                rel["primary_topic"] = "emotional"
+            elif any(w in lower for w in ("dinner", "drinks", "hang out", "watch")):
+                rel["primary_topic"] = "social"
+            elif any(w in lower for w in ("revenue", "investor", "pricing", "customer")):
+                rel["primary_topic"] = "business"
+            old_rels[recipient_key] = rel
+
+        # ── Store ─────────────────────────────────────────────────────────
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """INSERT OR REPLACE INTO entity_profiles
            (entity, message_count, traits, communication_style,
             topics, relationships, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (
-            sender, msg_count,
-            json.dumps(traits), json.dumps(comm_style),
-            json.dumps(topics), json.dumps(old_rels), now,
-        ),
-    )
+            (
+                sender, msg_count,
+                json.dumps(traits), json.dumps(comm_style),
+                json.dumps(topics), json.dumps(old_rels), now,
+            ),
+        )
 
 
 def get_entity_profile(conn: sqlite3.Connection,
@@ -1068,12 +1263,24 @@ def get_entity_profile(conn: sqlite3.Connection,
         ``updated_at``.  Returns ``None`` if no profile exists for the
         entity.
     """
-    row = conn.execute(
-        "SELECT entity, message_count, traits, communication_style, "
-        "       topics, relationships, updated_at "
-        "FROM entity_profiles WHERE LOWER(entity) = LOWER(?)",
-        (entity,),
-    ).fetchone()
+    owned = not conn.in_transaction
+    try:
+        if owned:
+            conn.execute("BEGIN")
+        try:
+            _profile_read_state(conn)
+            row = conn.execute(
+                "SELECT entity, message_count, traits, communication_style, "
+                "       topics, relationships, updated_at "
+                "FROM entity_profiles WHERE LOWER(entity) = LOWER(?)",
+                (entity,),
+            ).fetchone()
+
+        finally:
+            if owned and conn.in_transaction:
+                conn.rollback()
+    except sqlite3.OperationalError:
+        return None
 
     if not row:
         return None
@@ -1239,42 +1446,107 @@ def resolve_entity(conn, name_query, context=""):
     return name_query  # Return original if no match found
 
 
-def build_dunbar_hierarchy(conn, primary_entity=None):
-    """
-    Classify contacts by interaction frequency/recency into Dunbar layers:
-    - intimate (5): closest, most frequent
-    - close (15): regular interaction
-    - friend (50): moderate interaction
-    - acquaintance (150+): occasional
+_DUNBAR_RELATIONSHIP_COLUMNS = (
+    "id,entity_a,entity_b,relationship_type,strength,dunbar_layer,last_interaction"
+)
 
-    Stores in entity_relationships table.
-    """
-    if primary_entity is None:
-        return {}
 
-    primary_entity = primary_entity.lower()
+@contextlib.contextmanager
+def _dunbar_transaction(conn: sqlite3.Connection, *, write: bool = False) -> Iterator[None]:
+    owned = not conn.in_transaction
+    conn.execute(("BEGIN IMMEDIATE" if write else "BEGIN") if owned else "SAVEPOINT truememory_dunbar")
+    completed = False
+    try:
+        if write and not owned:
+            conn.execute("UPDATE entity_relationships SET id=id WHERE 0")
+        yield
+        conn.execute("COMMIT" if owned else "RELEASE truememory_dunbar")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO truememory_dunbar")
+                conn.execute("RELEASE truememory_dunbar")
 
-    # Count messages per contact
-    rows = conn.execute(
-        """
-        SELECT LOWER(name) as name, COUNT(*) as cnt, MAX(ts) as last_ts FROM (
-            SELECT recipient as name, timestamp as ts FROM messages WHERE LOWER(sender) = ? AND recipient != ''
-            UNION ALL
-            SELECT sender as name, timestamp as ts FROM messages WHERE LOWER(recipient) = ? AND sender != ''
-        ) GROUP BY LOWER(name) ORDER BY cnt DESC
-        """,
-        (primary_entity, primary_entity)
-    ).fetchall()
 
-    if not rows:
-        return {}
+def _dunbar_fingerprint(rows: Iterable[tuple]) -> bytes:
+    digest = hashlib.sha256()
+    for row in rows:
+        digest.update(struct.pack(">Q", len(row)))
+        for value in row:
+            if value is None:
+                tag, data = b"n", b""
+            elif isinstance(value, bytes):
+                tag, data = b"b", value
+            elif isinstance(value, str):
+                tag, data = b"s", value.encode("utf-8")
+            elif isinstance(value, int):
+                tag, data = b"i", str(value).encode("ascii")
+            elif isinstance(value, float):
+                tag, data = b"f", struct.pack(">d", value)
+            else:
+                raise TypeError("Unsupported SQLite value in Dunbar source")
+            digest.update(tag + struct.pack(">Q", len(data)))
+            digest.update(data)
+    return digest.digest()
 
-    # Clear existing relationships for this entity
-    conn.execute(
-        "DELETE FROM entity_relationships WHERE entity_a = ?",
-        (primary_entity,)
+
+def _dunbar_has_ledger(conn: sqlite3.Connection) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dunbar_generated_relationships'"
+    ).fetchone() is not None
+
+
+def _dunbar_snapshot(conn: sqlite3.Connection) -> tuple[bytes, ...]:
+    schema = conn.execute(
+        "SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name IN "
+        "('messages','entity_relationships','dunbar_generated_relationships') ORDER BY type,name"
     )
+    schema_hash = _dunbar_fingerprint(schema)
+    source_hash = _dunbar_fingerprint(conn.execute(
+        "SELECT id,sender,recipient,timestamp FROM messages ORDER BY id"
+    ))
+    relationship_hash = _dunbar_fingerprint(conn.execute(
+        f"SELECT {_DUNBAR_RELATIONSHIP_COLUMNS} FROM entity_relationships ORDER BY id"
+    ))
+    ledger_hash = _dunbar_fingerprint(conn.execute(
+        "SELECT relationship_id,generation,row_fingerprint FROM dunbar_generated_relationships "
+        "ORDER BY relationship_id"
+    )) if _dunbar_has_ledger(conn) else b""
+    return schema_hash, source_hash, relationship_hash, ledger_hash
 
+
+def _dunbar_owned_rows(conn: sqlite3.Connection) -> Iterator[tuple[int, bool]]:
+    tracked = _dunbar_ownership_ready(conn)
+    columns = ",".join("r." + name for name in _DUNBAR_RELATIONSHIP_COLUMNS.split(","))
+    for row in conn.execute(
+        f"SELECT g.relationship_id,g.row_fingerprint,{columns} "
+        "FROM dunbar_generated_relationships g LEFT JOIN entity_relationships r "
+        "ON r.id=g.relationship_id ORDER BY g.relationship_id"
+    ):
+        yield row[0], tracked and row[2] is not None and _dunbar_fingerprint((row[2:],)) == row[1]
+
+
+def read_dunbar_coverage(conn: sqlite3.Connection) -> dict[str, int | str]:
+    """Describe row ownership in one snapshot, without claiming source freshness."""
+    with _dunbar_transaction(conn):
+        tracked = _dunbar_ownership_ready(conn)
+        owned = dict(_dunbar_owned_rows(conn)) if _dunbar_has_ledger(conn) else {}
+        managed = sum(owned.values())
+        unowned_contacts = sum(
+            not owned.get(row[0], False) for row in conn.execute(
+                "SELECT id FROM entity_relationships WHERE relationship_type='contact'"
+            )
+        )
+        invalid = len(owned) - managed
+        status = "partial" if unowned_contacts or invalid else ("managed_only" if tracked else "untracked")
+        return {"status": status, "managed_rows": managed,
+                "unowned_contacts": unowned_contacts, "invalid_ownership": invalid}
+
+
+def _compute_dunbar_hierarchy(rows: list[tuple]) -> dict[str, dict]:
     max_count = rows[0][1] if rows else 1
     hierarchy = {}
 
@@ -1299,12 +1571,47 @@ def build_dunbar_hierarchy(conn, primary_entity=None):
             "strength": round(freq_score, 3),
         }
 
-        conn.execute(
-            "INSERT INTO entity_relationships "
-            "(entity_a, entity_b, relationship_type, strength, dunbar_layer, last_interaction) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (primary_entity, name, "contact", round(freq_score, 3), layer, last_ts or "")
-        )
+    return hierarchy
 
-    conn.commit()
+
+def build_dunbar_hierarchy(conn: sqlite3.Connection, primary_entity: str | None = None) -> dict[str, dict]:
+    """Publish one Dunbar generation, preserving unowned and changed relationships.
+
+    Empty input or no primary retires only verified generated rows. A caller's
+    transaction retains its final commit, including an additive ledger migration.
+    """
+    primary = primary_entity.lower() if primary_entity is not None else None
+    with _dunbar_transaction(conn):
+        snapshot = _dunbar_snapshot(conn)
+        rows = conn.execute("""
+            SELECT LOWER(name) as name, COUNT(*) as cnt, MAX(ts) as last_ts FROM (
+                SELECT recipient as name, timestamp as ts FROM messages WHERE LOWER(sender) = ? AND recipient != ''
+                UNION ALL
+                SELECT sender as name, timestamp as ts FROM messages WHERE LOWER(recipient) = ? AND sender != ''
+            ) GROUP BY LOWER(name) ORDER BY cnt DESC
+            """, (primary, primary)).fetchall() if primary is not None else []
+    hierarchy = _compute_dunbar_hierarchy(rows)
+
+    with _dunbar_transaction(conn, write=True):
+        if _dunbar_snapshot(conn) != snapshot:
+            raise sqlite3.OperationalError("Dunbar source or ownership changed during computation")
+        _initialize_dunbar_ownership(conn)
+        # Materialize IDs before deleting from either side of the ledger join.
+        verified_ids = [row_id for row_id, verified in _dunbar_owned_rows(conn) if verified]
+        conn.executemany("DELETE FROM entity_relationships WHERE id=?", ((row_id,) for row_id in verified_ids))
+        conn.execute("DELETE FROM dunbar_generated_relationships")
+        generation = uuid.uuid4().hex
+        for name, data in hierarchy.items():
+            cursor = conn.execute(
+                "INSERT INTO entity_relationships "
+                "(entity_a,entity_b,relationship_type,strength,dunbar_layer,last_interaction) VALUES (?,?,?,?,?,?)",
+                (primary, name, "contact", data["strength"], data["dunbar_layer"], data["last_interaction"]),
+            )
+            persisted = conn.execute(
+                f"SELECT {_DUNBAR_RELATIONSHIP_COLUMNS} FROM entity_relationships WHERE id=?", (cursor.lastrowid,),
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO dunbar_generated_relationships(relationship_id,generation,row_fingerprint) VALUES (?,?,?)",
+                (cursor.lastrowid, generation, _dunbar_fingerprint((persisted,))),
+            )
     return hierarchy

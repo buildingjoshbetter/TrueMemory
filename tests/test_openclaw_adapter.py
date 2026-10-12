@@ -160,6 +160,7 @@ def test_install_hooks_creates_plugin(tmp_path, monkeypatch):
     from truememory.hooks.adapters import openclaw as oc_mod
     plugins_dir = tmp_path / "plugins"
     monkeypatch.setattr(oc_mod, "_PLUGINS_DIR", plugins_dir)
+    monkeypatch.setattr(oc_mod, "_CONFIG_PATH", tmp_path / "openclaw.json")
     from truememory.hooks.adapters.openclaw import OpenClawAdapter
     OpenClawAdapter().install_hooks(python_path="/usr/bin/python3")
 
@@ -186,16 +187,19 @@ def test_install_hooks_uses_register_api(tmp_path, monkeypatch):
     from truememory.hooks.adapters import openclaw as oc_mod
     plugins_dir = tmp_path / "plugins"
     monkeypatch.setattr(oc_mod, "_PLUGINS_DIR", plugins_dir)
+    monkeypatch.setattr(oc_mod, "_CONFIG_PATH", tmp_path / "openclaw.json")
     from truememory.hooks.adapters.openclaw import OpenClawAdapter
     OpenClawAdapter().install_hooks(python_path="/usr/bin/python3")
 
     js_content = (plugins_dir / "truememory" / "index.js").read_text(encoding="utf-8")
     # Should use register(api) pattern
     assert "register(api)" in js_content
-    assert 'api.on("session_start"' in js_content
-    assert 'api.on("session_end"' in js_content
-    assert 'api.on("before_tool_call"' in js_content
-    assert 'api.on("before_compaction"' in js_content
+    assert 'api.on("before_prompt_build"' in js_content
+    assert "session_start.py" not in js_content
+    assert "stop.py" not in js_content
+    assert "compact.py" not in js_content
+    assert "spawnSync" not in js_content
+    assert "prependContext" in js_content
     # Should NOT use old fabricated activate(ctx) pattern
     assert "activate(ctx)" not in js_content
     assert "ctx.onSessionStart" not in js_content
@@ -210,6 +214,7 @@ def test_install_hooks_package_json_esm(tmp_path, monkeypatch):
     from truememory.hooks.adapters import openclaw as oc_mod
     plugins_dir = tmp_path / "plugins"
     monkeypatch.setattr(oc_mod, "_PLUGINS_DIR", plugins_dir)
+    monkeypatch.setattr(oc_mod, "_CONFIG_PATH", tmp_path / "openclaw.json")
     from truememory.hooks.adapters.openclaw import OpenClawAdapter
     OpenClawAdapter().install_hooks(python_path="/usr/bin/python3")
 
@@ -223,6 +228,7 @@ def test_install_hooks_idempotent(tmp_path, monkeypatch):
     from truememory.hooks.adapters import openclaw as oc_mod
     plugins_dir = tmp_path / "plugins"
     monkeypatch.setattr(oc_mod, "_PLUGINS_DIR", plugins_dir)
+    monkeypatch.setattr(oc_mod, "_CONFIG_PATH", tmp_path / "openclaw.json")
     from truememory.hooks.adapters.openclaw import OpenClawAdapter
     adapter = OpenClawAdapter()
     adapter.install_hooks(python_path="/usr/bin/python3")

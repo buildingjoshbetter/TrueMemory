@@ -39,6 +39,7 @@ def fts_engine(tmp_path, monkeypatch):
     monkeypatch.delenv("TRUEMEMORY_ALPHA_SURPRISE", raising=False)
 
     from truememory.engine import TrueMemoryEngine
+    from truememory.maintenance import canonical_database_path
     from truememory.storage import create_db
 
     db_path = tmp_path / "i630.db"
@@ -54,11 +55,27 @@ def fts_engine(tmp_path, monkeypatch):
     conn.close()
 
     eng = TrueMemoryEngine(db_path)
-    eng.open(rebuild_vectors=False)
-    # Force the bare path: no cross-encoder rerank, no salience filtering.
-    eng._has_reranker = False
-    eng._has_salience = False
-    return eng
+    coordinator = None
+    try:
+        eng.open(rebuild_vectors=False)
+        coordinator = eng._maintenance_coordinator
+        # Force the bare path: no cross-encoder rerank, no salience filtering.
+        eng._has_reranker = False
+        eng._has_salience = False
+        yield eng
+    finally:
+        try:
+            if coordinator is None:
+                coordinator = eng._maintenance_coordinator
+            if coordinator is not None:
+                fixture_path = canonical_database_path(db_path)
+                if fixture_path is None or canonical_database_path(coordinator.path) != fixture_path:
+                    raise RuntimeError("Fixture maintenance coordinator belongs to a different database")
+                coordinator.cancel()
+                if not coordinator.wait(10):
+                    raise RuntimeError("Fixture-owned maintenance worker did not finish")
+        finally:
+            eng.close()
 
 
 # Query that _has_personality_intent() recognizes (matches "favorite food").

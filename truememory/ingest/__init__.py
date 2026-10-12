@@ -50,6 +50,8 @@ def ingest(
     gate_threshold: float = 0.30,
     llm_config: LLMConfig | None = None,
     session_id: str = "",
+    *,
+    require_complete: bool = False,
 ) -> IngestionResult:
     """
     Ingest a conversation transcript into TrueMemory.
@@ -76,6 +78,8 @@ def ingest(
         gate_threshold=gate_threshold,
         llm_config=llm_config,
     )
+    if require_complete:
+        return pipeline.ingest_transcript(transcript_path, session_id=session_id, require_complete=True)
     return pipeline.ingest_transcript(transcript_path, session_id=session_id)
 
 

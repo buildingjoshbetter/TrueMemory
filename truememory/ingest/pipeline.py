@@ -31,6 +31,7 @@ import os
 import re
 import sqlite3
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,6 +40,10 @@ from truememory.ingest.extractor import extract_facts, ExtractedFact, extract_fa
 from truememory.ingest.encoding_gate import EncodingGate
 from truememory.ingest.dedup import check_duplicate, DedupAction
 from truememory.ingest.models import LLMConfig, auto_detect
+from truememory.ingest.provenance import (
+    ProvenanceError, SourceSegment, fact_metadata, gate_observation,
+    merge_metadata, source_context, source_timestamp,
+)
 
 log = logging.getLogger(__name__)
 
@@ -343,6 +348,24 @@ class IngestionResult:
     facts_skipped_dedup: int = 0 # Blocked by dedup
     elapsed_seconds: float = 0.0
     trace: list[dict] = field(default_factory=list)  # Per-fact decision log
+    facts_provenance_updated: int = 0  # Metadata-only writes after dedup SKIP
+    coverage: dict | None = None  # Observed rich outcomes, never inferred from counters
+
+
+@contextlib.contextmanager
+def _invalidate_recall_after_batch(result: IngestionResult) -> Iterator[None]:
+    """Invalidate confirmed writes even when a later fact aborts the batch."""
+    try:
+        yield
+    finally:
+        if result.facts_stored or result.facts_updated or result.facts_provenance_updated:
+            try:
+                from truememory.ingest.hooks._shared import invalidate_recall_cache
+                invalidate_recall_cache()
+            except Exception as exc:
+                # A cache failure must not replay committed facts or replace
+                # the exception that interrupted the remaining ingestion.
+                log.warning("Recall cache invalidation failed after committed ingestion (%s)", type(exc).__name__)
 
 
 class IngestionPipeline:
@@ -387,6 +410,7 @@ class IngestionPipeline:
         _set_busy_timeout(memory)
 
         self.memory = memory
+        self._record_source_provenance = True
         self.user_id = user_id
         self.use_llm_dedup = use_llm_dedup
 
@@ -416,6 +440,8 @@ class IngestionPipeline:
         self,
         transcript_path: str | Path,
         session_id: str = "",
+        *,
+        require_complete: bool = False,
     ) -> IngestionResult:
         """
         Ingest a full conversation transcript.
@@ -438,7 +464,24 @@ class IngestionPipeline:
 
         # 1. Parse transcript
         log.info("Parsing transcript: %s", transcript_path)
-        messages = parse_transcript(transcript_path)
+        if require_complete:
+            from truememory.ingest.transcript import parse_transcript_outcome
+            parsed = parse_transcript_outcome(transcript_path)
+            messages = parsed.messages
+            version = parsed.file_version
+            result.coverage = {
+                "parser_status": parsed.status,
+                "parser_errors": list(getattr(parsed, "error_categories", ())),
+                "malformed_records": getattr(parsed, "malformed_records", 0),
+                "unrecognized_records": getattr(parsed, "unrecognized_records", 0),
+                "stable": version is not None and version.stable,
+                "source_version": {"sha256": version.sha256, "byte_count": version.byte_count} if version else None,
+                "extractor_status": "unobserved",
+                "extractor_calls": 0,
+                "provenance_observed": getattr(self, "_record_source_provenance", False) is True,
+            }
+        else:
+            messages = parse_transcript(transcript_path)
         if not messages:
             log.info("Empty transcript, nothing to ingest")
             result.elapsed_seconds = time.time() - start
@@ -446,6 +489,17 @@ class IngestionPipeline:
 
         # Filter to conversation messages only (skip tool calls)
         conversation = format_for_extraction(messages)
+        context = None
+        if getattr(self, "_record_source_provenance", False):
+            segments = []
+            offset = 0
+            for index, message in enumerate(messages):
+                formatted = format_for_extraction([message])
+                if not formatted:
+                    continue
+                segments.append(SourceSegment(offset, offset + len(formatted), index, message.role, message.timestamp))
+                offset += len(formatted) + 2
+            context = source_context(conversation, session_id, tuple(segments))
         if len(conversation.strip()) < 50:
             log.info("Transcript too short for extraction (%d chars)", len(conversation))
             result.elapsed_seconds = time.time() - start
@@ -454,9 +508,19 @@ class IngestionPipeline:
         # 2. Extract facts
         log.info("Extracting facts from %d messages (%d chars)", len(messages), len(conversation))
         if self.llm_config:
-            facts = extract_facts(conversation, self.llm_config)
+            if require_complete:
+                from truememory.ingest.extractor import extract_facts_outcome
+                extracted = extract_facts_outcome(conversation, self.llm_config)
+                facts = extracted.facts
+                result.coverage["extractor_status"] = extracted.status
+                result.coverage["extractor_calls"] = 1
+                result.coverage["extractor_errors"] = list(getattr(extracted, "error_categories", ()))
+            else:
+                facts = extract_facts(conversation, self.llm_config)
         else:
             facts = extract_facts_simple(conversation)
+            if require_complete:
+                result.coverage["extractor_status"] = "heuristic"
         result.facts_extracted = len(facts)
         log.info("Extracted %d candidate facts", len(facts))
 
@@ -465,117 +529,138 @@ class IngestionPipeline:
             return result
 
         # 3-5. Process each fact through gate and dedup
-        for fact in facts:
-            trace_entry = {
-                "fact": fact.content,
-                "category": fact.category,
-                "confidence": fact.confidence,
-            }
+        with _invalidate_recall_after_batch(result):
+            for fact in facts:
+                from truememory.tier_switch.runtime import fact_operation
+                with fact_operation(self.memory):
+                    trace_entry = {
+                        "fact": fact.content,
+                        "category": fact.category,
+                        "confidence": fact.confidence,
+                    }
 
-            # 3. Encoding gate
-            if self.gate_enabled:
-                decision = self.gate.evaluate(fact.content, fact.category)
-            else:
-                from truememory.ingest.encoding_gate import EncodingDecision
-                decision = EncodingDecision(
-                    should_encode=True, encoding_score=1.0,
-                    novelty=1.0, salience=1.0, prediction_error=1.0,
-                    reason="gate disabled",
-                )
-            trace_entry["gate"] = {
-                "passed": decision.should_encode,
-                "score": decision.encoding_score,
-                "novelty": decision.novelty,
-                "salience": decision.salience,
-                "prediction_error": decision.prediction_error,
-                "reason": decision.reason,
-            }
-
-            if not decision.should_encode:
-                result.facts_skipped_gate += 1
-                trace_entry["action"] = "skipped_gate"
-                result.trace.append(trace_entry)
-                log.debug("Gate blocked: %s — %s", _safe_log(fact.content[:50]), decision.reason)
-                continue
-
-            result.facts_encoded += 1
-
-            # 4-5. Deduplication + storage (atomic critical section).
-            #
-            # Holding the process-level lock around BOTH the dedup search
-            # and the subsequent add/update prevents a TOCTOU race where
-            # process A checks "no duplicate" for fact X, process B writes
-            # fact Y (semantically equal), then A writes X as new. Without
-            # this lock, concurrent Stop hooks from overlapping Claude Code
-            # sessions accumulate near-duplicate memories.
-            with _dedup_store_lock():
-                dedup = check_duplicate(
-                    fact.content,
-                    self.memory,
-                    user_id=self.user_id,
-                    config=self.llm_config if self.use_llm_dedup else None,
-                    category=fact.category,
-                )
-                trace_entry["dedup"] = {
-                    "action": dedup.action.value,
-                    "reason": dedup.reason,
-                    "existing_id": dedup.existing_id,
-                }
-
-                # We catch sqlite3.OperationalError around the storage calls
-                # so a transient DB lock or "unable to open database file"
-                # condition doesn't abort the whole transcript with a stack
-                # trace. The pipeline continues with the remaining facts;
-                # each failed fact is flagged in the trace as
-                # ``storage_failed`` so operators can diagnose what got
-                # dropped. See Bug #2 in EDGE_CASE_REPORT.md.
-                if dedup.action == DedupAction.ADD:
-                    try:
-                        self._store_fact(dedup.fact, fact, session_id)
-                    except sqlite3.OperationalError as e:
-                        log.error(
-                            "Storage failed for fact (db=%s): %s — fact=%r",
-                            getattr(self.memory, "db_path", "<unknown>"),
-                            e,
-                            _safe_log(dedup.fact[:120]),
-                        )
-                        trace_entry["action"] = "storage_failed"
-                        trace_entry["storage_error"] = {
-                            "reason": "db locked" if "locked" in str(e).lower() else str(e),
-                            "exception": type(e).__name__,
-                        }
+                    # 3. Encoding gate
+                    if self.gate_enabled:
+                        decision = self.gate.evaluate(fact.content, fact.category)
                     else:
-                        result.facts_stored += 1
-                        trace_entry["action"] = "stored"
-                        log.info("Stored: %s", _safe_log(dedup.fact[:80]))
-
-                elif dedup.action == DedupAction.UPDATE:
-                    try:
-                        self._update_fact(dedup.existing_id, dedup.fact, fact, session_id)
-                    except sqlite3.OperationalError as e:
-                        log.error(
-                            "Update failed for memory id=%s (db=%s): %s — fact=%r",
-                            dedup.existing_id,
-                            getattr(self.memory, "db_path", "<unknown>"),
-                            e,
-                            _safe_log(dedup.fact[:120]),
+                        from truememory.ingest.encoding_gate import EncodingDecision
+                        decision = EncodingDecision(
+                            should_encode=True, encoding_score=1.0,
+                            novelty=1.0, salience=1.0, prediction_error=1.0,
+                            reason="gate disabled",
                         )
-                        trace_entry["action"] = "storage_failed"
-                        trace_entry["storage_error"] = {
-                            "reason": "db locked" if "locked" in str(e).lower() else str(e),
-                            "exception": type(e).__name__,
+                    trace_entry["gate"] = {
+                        "passed": decision.should_encode,
+                        "score": decision.encoding_score,
+                        "novelty": decision.novelty,
+                        "salience": decision.salience,
+                        "prediction_error": decision.prediction_error,
+                        "reason": decision.reason,
+                    }
+
+                    if not decision.should_encode:
+                        result.facts_skipped_gate += 1
+                        trace_entry["action"] = "skipped_gate"
+                        result.trace.append(trace_entry)
+                        log.debug("Gate blocked: %s — %s", _safe_log(fact.content[:50]), decision.reason)
+                        continue
+
+                    result.facts_encoded += 1
+
+                    # 4-5. Deduplication + storage (atomic critical section).
+                    #
+                    # Holding the process-level lock around BOTH the dedup search
+                    # and the subsequent add/update prevents a TOCTOU race where
+                    # process A checks "no duplicate" for fact X, process B writes
+                    # fact Y (semantically equal), then A writes X as new. Without
+                    # this lock, concurrent Stop hooks from overlapping Claude Code
+                    # sessions accumulate near-duplicate memories.
+                    with _dedup_store_lock():
+                        dedup = check_duplicate(
+                            fact.content,
+                            self.memory,
+                            user_id=self.user_id,
+                            config=self.llm_config if self.use_llm_dedup else None,
+                            category=fact.category,
+                        )
+                        trace_entry["dedup"] = {
+                            "action": dedup.action.value,
+                            "reason": dedup.reason,
+                            "existing_id": dedup.existing_id,
                         }
-                    else:
-                        result.facts_updated += 1
-                        trace_entry["action"] = "updated"
-                        log.info("Updated [%s]: %s", dedup.existing_id, _safe_log(dedup.fact[:80]))
 
-                elif dedup.action == DedupAction.SKIP:
-                    result.facts_skipped_dedup += 1
-                    trace_entry["action"] = "skipped_dedup"
-                    log.debug("Dedup skipped: %s — %s", _safe_log(fact.content[:50]), dedup.reason)
+                        # We catch sqlite3.OperationalError around the storage calls
+                        # so a transient DB lock or "unable to open database file"
+                        # condition doesn't abort the whole transcript with a stack
+                        # trace. The pipeline continues with the remaining facts;
+                        # each failed fact is flagged in the trace as
+                        # ``storage_failed`` so operators can diagnose what got
+                        # dropped. See Bug #2 in EDGE_CASE_REPORT.md.
+                        if dedup.action == DedupAction.ADD:
+                            try:
+                                metadata = fact_metadata(context, fact, gate_observation(self.gate, decision, self.gate_enabled), datetime.datetime.now(datetime.timezone.utc).isoformat()) if context is not None else None
+                                if context is None:
+                                    self._store_fact(dedup.fact, fact, session_id)
+                                else:
+                                    self._store_fact(dedup.fact, fact, session_id, metadata=metadata)
+                            except sqlite3.OperationalError as e:
+                                log.error(
+                                    "Storage failed for fact (db=%s): %s — fact=%r",
+                                    getattr(self.memory, "db_path", "<unknown>"),
+                                    e,
+                                    _safe_log(dedup.fact[:120]),
+                                )
+                                trace_entry["action"] = "storage_failed"
+                                trace_entry["storage_error"] = {
+                                    "reason": "db locked" if "locked" in str(e).lower() else str(e),
+                                    "exception": type(e).__name__,
+                                }
+                            else:
+                                result.facts_stored += 1
+                                trace_entry["action"] = "stored"
+                                log.info("Stored: %s", _safe_log(dedup.fact[:80]))
 
-            result.trace.append(trace_entry)
+                        elif dedup.action == DedupAction.UPDATE:
+                            try:
+                                metadata = fact_metadata(context, fact, gate_observation(self.gate, decision, self.gate_enabled), datetime.datetime.now(datetime.timezone.utc).isoformat()) if context is not None else None
+                                if context is None:
+                                    self._update_fact(dedup.existing_id, dedup.fact, fact, session_id)
+                                else:
+                                    self._update_fact(dedup.existing_id, dedup.fact, fact, session_id, metadata=metadata)
+                            except sqlite3.OperationalError as e:
+                                log.error(
+                                    "Update failed for memory id=%s (db=%s): %s — fact=%r",
+                                    dedup.existing_id,
+                                    getattr(self.memory, "db_path", "<unknown>"),
+                                    e,
+                                    _safe_log(dedup.fact[:120]),
+                                )
+                                trace_entry["action"] = "storage_failed"
+                                trace_entry["storage_error"] = {
+                                    "reason": "db locked" if "locked" in str(e).lower() else str(e),
+                                    "exception": type(e).__name__,
+                                }
+                            else:
+                                result.facts_updated += 1
+                                trace_entry["action"] = "updated"
+                                log.info("Updated [%s]: %s", dedup.existing_id, _safe_log(dedup.fact[:80]))
+
+                        elif dedup.action == DedupAction.SKIP:
+                            try:
+                                metadata = fact_metadata(context, fact, gate_observation(self.gate, decision, self.gate_enabled), datetime.datetime.now(datetime.timezone.utc).isoformat()) if context is not None else None
+                                changed = self._merge_fact_provenance(dedup.existing_id, metadata) if context is not None else False
+                            except sqlite3.OperationalError as exc:
+                                trace_entry["action"] = "storage_failed"
+                                trace_entry["storage_error"] = {"reason": "provenance write failed", "exception": type(exc).__name__}
+                                log.error("Dedup provenance write failed (%s)", type(exc).__name__)
+                            else:
+                                result.facts_skipped_dedup += 1
+                                result.facts_provenance_updated += int(changed)
+                                trace_entry["action"] = "skipped_dedup"
+                                trace_entry["provenance_updated"] = changed
+                                log.debug("Dedup skipped: %s — %s", _safe_log(fact.content[:50]), dedup.reason)
+
+                    result.trace.append(trace_entry)
 
         result.elapsed_seconds = round(time.time() - start, 2)
         log.info(
@@ -585,17 +670,6 @@ class IngestionPipeline:
             result.facts_skipped_gate, result.facts_skipped_dedup,
             result.elapsed_seconds,
         )
-        # Issue #645 (M-64): the engine.add fast path bypasses
-        # client.Memory.add (which invalidates), so a full transcript could
-        # store fresh facts without ever dropping the recall cache — the next
-        # session would inject stale recall for the rest of the TTL. Invalidate
-        # once after the batch commits if anything was written.
-        if result.facts_stored or result.facts_updated:
-            try:
-                from truememory.ingest.hooks._shared import invalidate_recall_cache
-                invalidate_recall_cache()
-            except Exception:
-                pass
         return result
 
     def ingest_text(self, text: str, session_id: str = "") -> IngestionResult:
@@ -614,6 +688,7 @@ class IngestionPipeline:
         if len(text.strip()) < 50:
             result.elapsed_seconds = time.time() - start
             return result
+        context = source_context(text, session_id) if getattr(self, "_record_source_provenance", False) else None
 
         # Extract facts
         if self.llm_config:
@@ -626,56 +701,202 @@ class IngestionPipeline:
             result.elapsed_seconds = time.time() - start
             return result
 
-        for fact in facts:
-            if self.gate_enabled:
-                decision = self.gate.evaluate(fact.content, fact.category)
-            else:
-                from truememory.ingest.encoding_gate import EncodingDecision
-                decision = EncodingDecision(
-                    should_encode=True, encoding_score=1.0,
-                    novelty=1.0, salience=1.0, prediction_error=1.0,
-                    reason="gate disabled",
-                )
-            if not decision.should_encode:
-                result.facts_skipped_gate += 1
-                continue
-            result.facts_encoded += 1
-
-            # Hold the process-level lock across the dedup-then-store pair
-            # so concurrent ingest callers don't race and produce duplicates.
-            with _dedup_store_lock():
-                dedup = check_duplicate(
-                    fact.content,
-                    self.memory,
-                    user_id=self.user_id,
-                    config=self.llm_config if self.use_llm_dedup else None,
-                    category=fact.category,
-                )
-
-                if dedup.action == DedupAction.ADD:
-                    try:
-                        self._store_fact(dedup.fact, fact, session_id)
-                    except sqlite3.OperationalError as e:
-                        log.error("Storage failed in ingest_text: %s — fact=%r", e, _safe_log(dedup.fact[:120]))
-                        continue
-                    result.facts_stored += 1
-                elif dedup.action == DedupAction.UPDATE:
-                    try:
-                        self._update_fact(dedup.existing_id, dedup.fact, fact, session_id)
-                    except sqlite3.OperationalError as e:
-                        log.error(
-                            "Update failed in ingest_text for memory id=%s: %s — fact=%r",
-                            dedup.existing_id, e, _safe_log(dedup.fact[:120]),
+        with _invalidate_recall_after_batch(result):
+            for fact in facts:
+                from truememory.tier_switch.runtime import fact_operation
+                with fact_operation(self.memory):
+                    if self.gate_enabled:
+                        decision = self.gate.evaluate(fact.content, fact.category)
+                    else:
+                        from truememory.ingest.encoding_gate import EncodingDecision
+                        decision = EncodingDecision(
+                            should_encode=True, encoding_score=1.0,
+                            novelty=1.0, salience=1.0, prediction_error=1.0,
+                            reason="gate disabled",
                         )
+                    if not decision.should_encode:
+                        result.facts_skipped_gate += 1
                         continue
-                    result.facts_updated += 1
-                else:
-                    result.facts_skipped_dedup += 1
+                    result.facts_encoded += 1
+
+                    # Hold the process-level lock across the dedup-then-store pair
+                    # so concurrent ingest callers don't race and produce duplicates.
+                    with _dedup_store_lock():
+                        dedup = check_duplicate(
+                            fact.content,
+                            self.memory,
+                            user_id=self.user_id,
+                            config=self.llm_config if self.use_llm_dedup else None,
+                            category=fact.category,
+                        )
+
+                        if dedup.action == DedupAction.ADD:
+                            try:
+                                metadata = fact_metadata(context, fact, gate_observation(self.gate, decision, self.gate_enabled), datetime.datetime.now(datetime.timezone.utc).isoformat()) if context is not None else None
+                                if context is None:
+                                    self._store_fact(dedup.fact, fact, session_id)
+                                else:
+                                    self._store_fact(dedup.fact, fact, session_id, metadata=metadata)
+                            except sqlite3.OperationalError as e:
+                                log.error("Storage failed in ingest_text: %s — fact=%r", e, _safe_log(dedup.fact[:120]))
+                                result.trace.append({"action": "storage_failed", "storage_error": {"reason": "source write failed", "exception": type(e).__name__}})
+                                continue
+                            result.facts_stored += 1
+                        elif dedup.action == DedupAction.UPDATE:
+                            try:
+                                metadata = fact_metadata(context, fact, gate_observation(self.gate, decision, self.gate_enabled), datetime.datetime.now(datetime.timezone.utc).isoformat()) if context is not None else None
+                                if context is None:
+                                    self._update_fact(dedup.existing_id, dedup.fact, fact, session_id)
+                                else:
+                                    self._update_fact(dedup.existing_id, dedup.fact, fact, session_id, metadata=metadata)
+                            except sqlite3.OperationalError as e:
+                                log.error(
+                                    "Update failed in ingest_text for memory id=%s: %s — fact=%r",
+                                    dedup.existing_id, e, _safe_log(dedup.fact[:120]),
+                                )
+                                result.trace.append({"action": "storage_failed", "storage_error": {"reason": "source write failed", "exception": type(e).__name__}})
+                                continue
+                            result.facts_updated += 1
+                        else:
+                            try:
+                                metadata = fact_metadata(context, fact, gate_observation(self.gate, decision, self.gate_enabled), datetime.datetime.now(datetime.timezone.utc).isoformat()) if context is not None else None
+                                changed = self._merge_fact_provenance(dedup.existing_id, metadata) if context is not None else False
+                            except sqlite3.OperationalError as exc:
+                                result.trace.append({"action": "storage_failed", "storage_error": {"reason": "provenance write failed", "exception": type(exc).__name__}})
+                                continue
+                            result.facts_skipped_dedup += 1
+                            result.facts_provenance_updated += int(changed)
 
         result.elapsed_seconds = round(time.time() - start, 2)
         return result
 
     def _store_fact(
+        self,
+        content: str,
+        fact: ExtractedFact,
+        session_id: str,
+        *,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        """Store source time and provenance together, without a lossy fallback."""
+        if not getattr(self, "_record_source_provenance", False):
+            self._store_legacy_fact(content, fact, session_id)
+            return
+        if metadata is None:
+            metadata = fact_metadata(source_context(content, session_id), fact, {}, datetime.datetime.now(datetime.timezone.utc).isoformat())
+
+        # Encode category tag inline so it survives to storage
+        # Format: "[category] content" — recognizable by humans and LLMs
+        tagged_content = f"[{fact.category}] {content}" if fact.category and fact.category != "general" else content
+
+        engine = getattr(self.memory, "_engine", None)
+        if engine is not None and hasattr(engine, "add"):
+            try:
+                stored = engine.add(
+                    content=tagged_content,
+                    sender=self.user_id or "",
+                    timestamp=source_timestamp(metadata),
+                    category=fact.category or "",
+                    metadata=metadata,
+                )
+                if getattr(self, "_record_source_provenance", False) is True and (
+                    type(stored) is not dict or type(stored.get("id")) is not int or stored["id"] <= 0
+                    or stored.get("content") != tagged_content or stored.get("sender") != (self.user_id or "")
+                    or stored.get("timestamp") != source_timestamp(metadata)
+                    or stored.get("category") != (fact.category or "") or stored.get("metadata") != metadata
+                ):
+                    raise ProvenanceError("source-aware engine add acknowledgement unavailable")
+                return
+            except sqlite3.OperationalError:
+                # Real DB failure (locked, unwritable, etc.) — propagate so
+                # the pipeline loop records it in the trace.
+                raise
+            except Exception as e:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(e)
+                raise ProvenanceError("engine could not preserve source provenance") from e
+
+        # An older client stamps ingestion time and cannot preserve unknown or
+        # backfilled source time. Refuse that write before it can lose evidence.
+        raise ProvenanceError("source-aware engine add capability unavailable")
+
+    def _update_fact(
+        self,
+        existing_id: int | None,
+        new_content: str,
+        fact: ExtractedFact,
+        session_id: str,
+        *,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        """Merge immutable citations in the same source write as the content."""
+        if not getattr(self, "_record_source_provenance", False):
+            self._update_legacy_fact(existing_id, new_content, fact, session_id)
+            return
+        if metadata is None:
+            metadata = fact_metadata(source_context(new_content, session_id), fact, {}, datetime.datetime.now(datetime.timezone.utc).isoformat())
+        if existing_id is not None:
+            engine = getattr(self.memory, "_engine", None)
+            getter = getattr(engine, "get", None)
+            updater = getattr(engine, "update", None)
+            if not callable(getter) or not callable(updater):
+                raise ProvenanceError("source-aware engine update capability unavailable")
+            try:
+                import inspect
+                if ("_source_snapshot" not in inspect.signature(getter).parameters
+                        or "_expected_source" not in inspect.signature(updater).parameters):
+                    raise ProvenanceError("source-fenced engine update capability unavailable")
+                existing = getter(existing_id, _source_snapshot=True)
+                if existing is not None:
+                    merged, _ = merge_metadata(existing.get("metadata", {}), metadata)
+                    result = updater(existing_id, content=new_content, metadata=merged,
+                                     timestamp=source_timestamp(merged), _expected_source=existing)
+                    if result is not None:
+                        log.debug("Updated memory %d with: %s", existing_id, _safe_log(new_content[:60]))
+                        return
+            except sqlite3.OperationalError:
+                # DB lock / "unable to open" — propagate so the pipeline
+                # loop records a storage_failed entry (Bug #2).
+                raise
+            except Exception as e:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(e)
+                raise ProvenanceError("engine could not preserve merged source provenance") from e
+
+        self._store_fact(new_content, fact, session_id, metadata=metadata)
+
+    def _merge_fact_provenance(self, existing_id: int | None, metadata: dict[str, object]) -> bool:
+        """Append a citation on SKIP without changing content or its primary vector."""
+        if existing_id is None:
+            raise ProvenanceError("dedup source target identifier unavailable")
+        engine = getattr(self.memory, "_engine", None)
+        getter, updater = getattr(engine, "get", None), getattr(engine, "update", None)
+        if not callable(getter) or not callable(updater):
+            raise ProvenanceError("source-aware engine update capability unavailable")
+        try:
+            import inspect
+            if ("_source_snapshot" not in inspect.signature(getter).parameters
+                    or "_expected_source" not in inspect.signature(updater).parameters):
+                raise ProvenanceError("source-fenced engine update capability unavailable")
+            existing = getter(existing_id, _source_snapshot=True)
+            if existing is None:
+                raise ProvenanceError("dedup source target no longer exists")
+            merged, changed = merge_metadata(existing.get("metadata", {}), metadata)
+            if not changed:
+                return False
+            if updater(existing_id, metadata=merged, timestamp=source_timestamp(merged),
+                       _expected_source=existing) is None:
+                raise ProvenanceError("dedup source target no longer exists")
+            return True
+        except sqlite3.OperationalError:
+            raise
+        except Exception as exc:
+            from truememory.tier_switch.runtime import raise_if_serving_rejection
+            raise_if_serving_rejection(exc)
+            raise ProvenanceError("engine could not preserve dedup source provenance") from exc
+
+
+    def _store_legacy_fact(
         self,
         content: str,
         fact: ExtractedFact,
@@ -719,6 +940,8 @@ class IngestionPipeline:
                 # the pipeline loop records it in the trace.
                 raise
             except Exception as e:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(e)
                 # Signature mismatch or other recoverable error — fall back
                 # to the client-level API.
                 log.warning("Engine-level add failed: %s, falling back to client", e)
@@ -729,7 +952,7 @@ class IngestionPipeline:
             user_id=self.user_id or None,
         )
 
-    def _update_fact(
+    def _update_legacy_fact(
         self,
         existing_id: int | None,
         new_content: str,
@@ -753,10 +976,12 @@ class IngestionPipeline:
                 # loop records a storage_failed entry (Bug #2).
                 raise
             except Exception as e:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(e)
                 log.warning("Failed to update memory %d: %s, storing as new", existing_id, e)
 
         # Fallback: store as new if update fails or isn't available
-        self._store_fact(new_content, fact, session_id)
+        self._store_legacy_fact(new_content, fact, session_id)
 
 
 def save_trace(result: IngestionResult, output_path: str | Path) -> bool:
@@ -774,6 +999,7 @@ def save_trace(result: IngestionResult, output_path: str | Path) -> bool:
             "facts_encoded": result.facts_encoded,
             "facts_stored": result.facts_stored,
             "facts_updated": result.facts_updated,
+            "facts_provenance_updated": result.facts_provenance_updated,
             "facts_skipped_gate": result.facts_skipped_gate,
             "facts_skipped_dedup": result.facts_skipped_dedup,
             "elapsed_seconds": result.elapsed_seconds,

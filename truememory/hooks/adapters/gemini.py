@@ -18,7 +18,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from truememory.hooks.adapters.base import CLIAdapter, atomic_write_text
+from truememory.hooks.adapters.base import CLIAdapter, atomic_write_text, is_owned_hook_command
 
 _GEMINI_DIR = Path.home() / ".gemini"
 _CONFIG_PATH = _GEMINI_DIR / "settings.json"
@@ -147,11 +147,30 @@ class GeminiAdapter(CLIAdapter):
                 event_list = []
                 hooks[event] = event_list
 
+            script_path = hooks_dir / info["script"]
+            cmd = self._build_command(py, script_path, user_id, db_path, event=event)
+            for definition in event_list:
+                if not isinstance(definition, dict):
+                    continue
+                inner_hooks = definition.get("hooks", [])
+                if isinstance(inner_hooks, list):
+                    for hook in inner_hooks:
+                        if (
+                            isinstance(hook, dict)
+                            and isinstance(hook.get("command"), str)
+                            and is_owned_hook_command(hook["command"])
+                        ):
+                            hook["command"] = cmd
+                legacy_command = definition.get("command", "")
+                if is_owned_hook_command(legacy_command):
+                    definition.pop("command", None)
+                    definition.pop("timeout", None)
+                    definition["hooks"] = [{
+                        "type": "command", "command": cmd,
+                        "name": f"truememory-{event.lower()}", "timeout": info["timeout"],
+                    }]
             if self._event_has_truememory(event_list):
                 continue
-
-            script_path = hooks_dir / info["script"]
-            cmd = self._build_command(py, script_path, user_id, db_path)
             event_list.append({
                 "hooks": [{
                     "type": "command",
@@ -208,8 +227,11 @@ class GeminiAdapter(CLIAdapter):
         script_path: Path,
         user_id: str = "",
         db_path: str = "",
+        event: str = "",
     ) -> str:
-        parts: list[str] = [python_path, str(script_path)]
+        parts: list[str] = [python_path, str(script_path), "--host", "gemini"]
+        if event:
+            parts.extend(["--event", event])
         if user_id:
             parts.extend(["--user", user_id])
         if db_path:
@@ -277,11 +299,11 @@ class GeminiAdapter(CLIAdapter):
             for hc in inner_hooks:
                 if (
                     isinstance(hc, dict)
-                    and _TRUEMEMORY_MARKER in hc.get("command", "").lower()
+                    and is_owned_hook_command(hc.get("command", ""))
                 ):
                     return True
         # Legacy flat format fallback
-        if _TRUEMEMORY_MARKER in hook_def.get("command", "").lower():
+        if is_owned_hook_command(hook_def.get("command", "")):
             return True
         return False
 
