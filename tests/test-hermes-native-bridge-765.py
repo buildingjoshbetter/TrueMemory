@@ -74,6 +74,7 @@ class HermesNativeBridgeControls(unittest.TestCase):
         cls.fixture_root = Path(explicit) if explicit else Path(tempfile.mkdtemp(prefix="hermes765-"))
         if explicit:
             cls.fixture_root.mkdir(parents=True, exist_ok=False)
+        cls.fixture_root = cls.fixture_root.resolve(strict=True)
 
     def setUp(self) -> None:
         self.case = self.fixture_root / self._testMethodName
