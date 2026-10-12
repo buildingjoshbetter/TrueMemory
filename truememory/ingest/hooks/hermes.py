@@ -158,7 +158,14 @@ def _read_owned(path: Path, limit: int = MAX_STATE_BYTES) -> dict[str, object]:
         before = os.fstat(stream.fileno())
         raw = stream.read(limit + 1)
         after = os.fstat(stream.fileno())
-    final = path.lstat()
+    if os.name == "nt":
+        final_fd = _open_owned(path, os.O_RDONLY)
+        try:
+            final = os.fstat(final_fd)
+        finally:
+            os.close(final_fd)
+    else:
+        final = path.lstat()
     _check_stat(final)
     def version(value: os.stat_result) -> tuple[int, int, int, int, int]:
         return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)

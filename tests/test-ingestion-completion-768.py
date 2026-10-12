@@ -229,7 +229,7 @@ class InertCompletionControls(unittest.TestCase):
 
     def test_automatic_maintenance_failure_never_falls_back_to_legacy_cleanup(self) -> None:
         source = ROOT / "truememory/ingest/hooks/session_start.py"
-        node = next(node for node in ast.parse(source.read_text()).body
+        node = next(node for node in ast.parse(source.read_text(encoding="utf-8")).body
                     if isinstance(node, ast.FunctionDef) and node.name == "_drain_backlog")
         namespace = {"os": os, "log": logging.getLogger(__name__)}
         exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), str(source), "exec"), namespace)
@@ -348,7 +348,7 @@ class InertPipelineCompletionControls(unittest.TestCase):
     def setUp(self) -> None:
         source = ROOT / "truememory/ingest/pipeline.py"
         names = {"IngestionResult", "_invalidate_recall_after_batch", "IngestionPipeline"}
-        nodes = [node for node in ast.parse(source.read_text()).body if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in names]
+        nodes = [node for node in ast.parse(source.read_text(encoding="utf-8")).body if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in names]
         action = enum.Enum("DedupAction", ["ADD", "UPDATE", "SKIP"])
         self.namespace = {"dataclass": dataclass, "field": field, "contextlib": contextlib, "Iterator": object,
             "time": time, "datetime": datetime, "sqlite3": sqlite3, "Path": Path, "os": os,
@@ -524,7 +524,7 @@ class FilesystemCompletionControls(unittest.TestCase):
                     self.assertFalse(COMPLETION.record_receipt(capture, result(extractor="partial")))
         with patch.object(COMPLETION.time, "time", return_value=10000):
             self.assertEqual(COMPLETION.reserve_inline_attempt(capture), 0)
-        state = json.loads((capture.directory / "state.json").read_text())["captures"][capture.key]
+        state = json.loads((capture.directory / "state.json").read_text(encoding="utf-8"))["captures"][capture.key]
         self.assertEqual(state["status"], "exhausted")
         self.assertEqual(len(state["outcomes"]), 5)
         self.assertEqual(capture.path.read_bytes(), self.data)
@@ -540,7 +540,7 @@ class FilesystemCompletionControls(unittest.TestCase):
                     self.assertFalse(second)
                 raise RuntimeError("synthetic commit ambiguity")
         self.assertFalse(COMPLETION.has_receipt(capture))
-        state = json.loads((capture.directory / "state.json").read_text())["captures"][capture.key]
+        state = json.loads((capture.directory / "state.json").read_text(encoding="utf-8"))["captures"][capture.key]
         self.assertEqual(state["outcomes"][0]["category"], "worker_unproven")
         self.assertEqual(capture.path.read_bytes(), self.data)
 

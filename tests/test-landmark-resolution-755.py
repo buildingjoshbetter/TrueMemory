@@ -27,7 +27,7 @@ def load_functions(name: str, selected: set[str], namespace: dict) -> types.Modu
     path = ROOT / "truememory" / (name + ".py")
     module = types.ModuleType("synthetic_landmark755_" + name)
     module.__dict__.update(namespace)
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     body = []
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in selected:
@@ -43,11 +43,11 @@ def load_functions(name: str, selected: set[str], namespace: dict) -> types.Modu
 
 
 STORAGE = types.ModuleType("synthetic_landmark755_storage")
-exec(compile((ROOT / "truememory/storage.py").read_text(), "storage.py", "exec"), STORAGE.__dict__)
+exec(compile((ROOT / "truememory/storage.py").read_text(encoding="utf-8"), "storage.py", "exec"), STORAGE.__dict__)
 TEMPORAL = types.ModuleType("synthetic_landmark755_temporal")
 TEMPORAL._row_to_dict = STORAGE._row_to_dict
 TEMPORAL.select_message_cols = STORAGE.select_message_cols
-tree = ast.parse((ROOT / "truememory/temporal.py").read_text())
+tree = ast.parse((ROOT / "truememory/temporal.py").read_text(encoding="utf-8"))
 tree.body = [node for node in tree.body if not (
     isinstance(node, ast.ImportFrom) and node.module == "truememory.storage"
 )]
@@ -507,7 +507,7 @@ class LandmarkControls(unittest.TestCase):
 
 class BoundaryControls(unittest.TestCase):
     def test_original_parser_and_landmark_writer_ast_unchanged(self) -> None:
-        current = (ROOT / "truememory/temporal.py").read_text()
+        current = (ROOT / "truememory/temporal.py").read_text(encoding="utf-8")
         baseline_hashes = {
             "detect_temporal_intent": "2a752baf88d85db0eb61b91c087284c4e02dd3d4b89dece12bc5bf9e04ded287",
             "detect_landmark_events": "d3bbd201a06107765f0b80448f5cec8d2dde800d54f20e84cd442c137b91fe9c",
@@ -566,7 +566,7 @@ class BoundaryControls(unittest.TestCase):
                 self.assertEqual(len(json.loads(function("after Demo Day | before Launch", include_temporal_resolution=True))["temporal_resolutions"]), 2)
 
     def test_tools_count_and_empty_query_unchanged_by_default(self) -> None:
-        source = (ROOT / "truememory/mcp_server.py").read_text()
+        source = (ROOT / "truememory/mcp_server.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         tools = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name.startswith("truememory_")]
         self.assertEqual(len(tools), 11)
@@ -575,7 +575,7 @@ class BoundaryControls(unittest.TestCase):
         self.assertEqual(json.loads(functions.truememory_search_deep("", include_temporal_resolution=True))["results"], [])
 
     def test_engine_source_all_consumers_and_post_clean_diagnostics(self) -> None:
-        tree = ast.parse((ROOT / "truememory/engine.py").read_text())
+        tree = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
         engine = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
         methods = {node.name: node for node in engine.body if isinstance(node, ast.FunctionDef)}
         search_calls = [node for node in ast.walk(methods["search"]) if isinstance(node, ast.Call)]

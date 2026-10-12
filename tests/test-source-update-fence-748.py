@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def functions(relative: str, names: set[str], namespace: dict[str, object]) -> None:
     path = ROOT / relative
     nodes = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
-    nodes.extend(node for node in ast.parse(path.read_text()).body
+    nodes.extend(node for node in ast.parse(path.read_text(encoding="utf-8")).body
                  if isinstance(node, ast.FunctionDef) and node.name in names)
     if {node.name for node in nodes if isinstance(node, ast.FunctionDef)} != names:
         raise AssertionError("Missing actual source functions")
@@ -105,7 +105,7 @@ class SourceUpdateFenceTests(unittest.TestCase):
             writer.__name__: writer, vector.__name__: vector, runtime.__name__: runtime})
         self.modules.start()
         path = ROOT / "truememory/engine.py"
-        original = next(node for node in ast.parse(path.read_text()).body
+        original = next(node for node in ast.parse(path.read_text(encoding="utf-8")).body
                         if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
         methods = [copy.deepcopy(node) for node in original.body
                    if isinstance(node, ast.FunctionDef) and node.name in {"update", "get"}]

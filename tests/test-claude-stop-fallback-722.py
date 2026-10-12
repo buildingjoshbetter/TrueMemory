@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def adapter_source() -> dict:
     source = ROOT / "truememory/hooks/adapters/claude.py"
-    tree = ast.parse(source.read_text())
+    tree = ast.parse(source.read_text(encoding="utf-8"))
     nodes = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))
              or isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "_HOOK_MODULES" for target in node.targets)]
     namespace = {"__file__": str(source), "json": json, "os": os, "sys": sys, "Path": Path, "CLIAdapter": object}
@@ -55,7 +55,10 @@ class InertStopFallbackControls(unittest.TestCase):
         directory = ROOT / "truememory/ingest/hooks"
         module = "truememory.ingest.hooks.stop"
         self.assertEqual(owned("python3 -m " + module, directory, "python3"), module)
-        self.assertEqual(owned("python3 " + shlex.quote(str(directory / "stop.py")), directory, "python3"), module)
+        import subprocess
+        parts = ["python3", str(directory / "stop.py")]
+        command = subprocess.list2cmdline(parts) if sys.platform == "win32" else " ".join(shlex.quote(part) for part in parts)
+        self.assertEqual(owned(command, directory, "python3"), module)
         for command in ("echo truememory", "echo -m " + module,
                         "python3 -m " + module + ".foreign", "python3 -m " + module + " && echo x",
                         "python3 /foreign/truememory/stop.py", "python3 -m foreign --name truememory"):
@@ -63,7 +66,7 @@ class InertStopFallbackControls(unittest.TestCase):
 
     def test_recursion_guards_do_not_read_source_or_mark_completion(self) -> None:
         source = ROOT / "truememory/ingest/hooks/stop.py"
-        node = next(node for node in ast.parse(source.read_text()).body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        node = next(node for node in ast.parse(source.read_text(encoding="utf-8")).body if isinstance(node, ast.FunctionDef) and node.name == "main")
         calls = []
         namespace = {"_parse_args": lambda: types.SimpleNamespace(host="claude", user="", db=""),
                      "os": os, "sys": sys, "json": json, "Path": lambda *args: calls.append("source")}
@@ -101,9 +104,9 @@ class FilesystemStopFallbackControls(unittest.TestCase):
                     patch.dict(os.environ, {}, clear=True):
                 adapter = adapter_type()
                 adapter.install_hooks("python3", "synthetic-account", "/synthetic/db")
-                first = json.loads(target.read_text())
+                first = json.loads(target.read_text(encoding="utf-8"))
                 adapter.install_hooks("python3", "synthetic-account", "/synthetic/db")
-                second = json.loads(target.read_text())
+                second = json.loads(target.read_text(encoding="utf-8"))
             self.assertEqual(first, second)
             self.assertEqual(second["other_setting"], "retained")
             commands = [hook for group in second["hooks"]["Stop"] for hook in group["hooks"]]
@@ -122,7 +125,7 @@ class FilesystemStopFallbackControls(unittest.TestCase):
             with patch.object(ADAPTER["ClaudeAdapter"], "config_path", new=property(lambda self: target)), \
                     patch.dict(os.environ, {}, clear=True):
                 ADAPTER["ClaudeAdapter"]().install_hooks("python3")
-            settings = json.loads(target.read_text())
+            settings = json.loads(target.read_text(encoding="utf-8"))
             self.assertEqual(settings["hooks"]["Stop"], [foreign])
             self.assertIn(foreign, settings["hooks"]["SessionEnd"])
             self.assertEqual(len(settings["hooks"]["SessionEnd"]), 2)

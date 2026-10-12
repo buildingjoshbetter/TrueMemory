@@ -136,7 +136,7 @@ class OpenClawNativeBridgeTests(unittest.TestCase):
     def test_installer_serializes_user_db_and_interpreter_without_execution(self) -> None:
         written: dict[str, str] = {}
         namespace = actual_source(ADAPTER, {"CLIAdapter": object,
-                                            "atomic_write_text": lambda p, t: written.update({str(p): t})})
+                                            "atomic_write_text": lambda p, t: written.update({Path(p).as_posix(): t})})
         namespace["_PLUGINS_DIR"] = Path("/synthetic/.openclaw/extensions")
         config_path = Path("/synthetic/.openclaw/openclaw.json")
         namespace["_CONFIG_PATH"] = config_path
@@ -161,7 +161,7 @@ class OpenClawNativeBridgeTests(unittest.TestCase):
     def permission_install(self, seed: object, *, raw: bool = False) -> dict[str, str]:
         written: dict[str, str] = {}
         namespace = actual_source(ADAPTER, {"CLIAdapter": object,
-                                            "atomic_write_text": lambda p, t: written.update({str(p): t})})
+                                            "atomic_write_text": lambda p, t: written.update({Path(p).as_posix(): t})})
         config_path = Path("/synthetic/.openclaw/openclaw.json")
         namespace["_CONFIG_PATH"] = config_path
         namespace["_PLUGINS_DIR"] = Path("/synthetic/.openclaw/extensions")
