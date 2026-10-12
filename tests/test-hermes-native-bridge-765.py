@@ -341,7 +341,8 @@ class HermesNativeBridgeControls(unittest.TestCase):
         if not missing_api:
             extractor.extract_facts_outcome = outcome
         pipeline = types.ModuleType("truememory.ingest.pipeline")
-        original = lambda *_args, **_kwargs: fact_list
+        def original(*_args: object, **_kwargs: object) -> list[object]:
+            return fact_list
         pipeline.extract_facts = original
         pipeline.extract_facts_simple = lambda _text: fact_list
         config = object()

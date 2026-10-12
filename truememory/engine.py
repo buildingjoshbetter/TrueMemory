@@ -173,7 +173,7 @@ except (ImportError, ModuleNotFoundError):
 _HAS_TEMPORAL = False
 try:
     from truememory.temporal import (
-        detect_temporal_intent, search_temporal, detect_episodes, detect_landmark_events,
+        detect_temporal_intent as detect_temporal_intent, search_temporal, detect_episodes, detect_landmark_events,
         resolve_temporal_intent, attach_temporal_resolution,
         _source_intervals, _temporal_row_matches, _exclusive_upper_bound,
     )
