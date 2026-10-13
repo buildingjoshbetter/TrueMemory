@@ -79,3 +79,14 @@ def test_unrecorded_queued_prompt_is_still_captured(tmp_path):
     ]
     outcome = parse_transcript_outcome(_write(tmp_path, records))
     assert "Synthetic prompt never dequeued." in [message.content for message in outcome.messages]
+
+
+def test_attachment_with_unhashable_type_counts_as_malformed(tmp_path):
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "Synthetic fixture prompt."}},
+        {"type": "attachment", "attachment": {"type": ["date"]}},
+        {"type": "attachment", "attachment": {"type": {"name": "date"}}},
+    ]
+    outcome = parse_transcript_outcome(_write(tmp_path, records))
+    assert outcome.status == "partial"
+    assert outcome.malformed_records == 2

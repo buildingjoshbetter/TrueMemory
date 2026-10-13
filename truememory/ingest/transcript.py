@@ -1143,7 +1143,8 @@ def _claude_context_record(entry: dict, prompts: set[str]) -> bool:
     if kind == "attachment":
         attachment = entry.get("attachment")
         return ("content" not in entry and isinstance(attachment, dict)
-                and attachment.get("type") in _CLAUDE_CONTEXT_ATTACHMENTS)
+                and isinstance(attachment.get("type"), str)
+                and attachment["type"] in _CLAUDE_CONTEXT_ATTACHMENTS)
     if kind == "queue-operation":
         content = entry.get("content")
         return content is None or (isinstance(content, str) and content in prompts)
