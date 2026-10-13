@@ -1099,6 +1099,15 @@ _NON_CONVERSATION_TYPES = {
     "progress",
     "summary",
     "system",
+    # Claude Code 2.1 session metadata. queue-operation and last-prompt repeat
+    # the prompt that is also written as the user record; the others carry
+    # host state. Unlisted future types still count as malformed.
+    "atis-latch",
+    "attachment",
+    "cost-state",
+    "last-prompt",
+    "permission-mode",
+    "queue-operation",
 }
 
 
