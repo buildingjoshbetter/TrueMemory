@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+from contextlib import ExitStack
 import importlib.util
 import json
 import os
@@ -11,6 +12,91 @@ import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+
+
+
+import os as _host_os
+import sys as _host_sys
+from pathlib import PurePosixPath, PureWindowsPath
+from types import ModuleType as _FixtureModule
+
+_HOST_PATH = Path
+_HOST_REPOSITORY = _HOST_PATH(__file__).resolve().parents[1]
+
+
+def _forbidden_target_effect(*args: object, **kwargs: object) -> object:
+    raise AssertionError("Unmocked synthetic target effect is forbidden")
+
+
+class _TargetPath(PurePosixPath):
+    def __new__(cls, *args: object):
+        if args:
+            first = args[0]
+            if isinstance(first, _HOST_PATH) or (
+                isinstance(first, str) and PureWindowsPath(first).is_absolute()
+            ):
+                native = _HOST_PATH(*args)
+                if (not native.is_absolute() or ".." in native.parts
+                        or not native.is_relative_to(_HOST_REPOSITORY)):
+                    raise AssertionError("Native fixture path outside repository")
+                return native
+        return super().__new__(cls, *args)
+
+    lstat = _forbidden_target_effect
+    stat = _forbidden_target_effect
+    resolve = _forbidden_target_effect
+    is_symlink = _forbidden_target_effect
+    read_bytes = _forbidden_target_effect
+    read_text = _forbidden_target_effect
+    write_bytes = _forbidden_target_effect
+    write_text = _forbidden_target_effect
+    open = _forbidden_target_effect
+    exists = _forbidden_target_effect
+    mkdir = _forbidden_target_effect
+    unlink = _forbidden_target_effect
+
+    def absolute(self):
+        if not self.is_absolute():
+            raise AssertionError("Relative synthetic path has no native working directory")
+        return self
+
+
+def _target_os():
+    module = _FixtureModule("synthetic_target_os")
+    module.__dict__.update(vars(_host_os))
+    module.name = "posix"
+    # Linux fixture symbols preserve access comparisons, not native Windows flags.
+    for name, value in {"O_RDONLY": 0, "O_WRONLY": 1, "O_RDWR": 2, "O_ACCMODE": 3,
+                        "O_CREAT": 64, "O_EXCL": 128, "O_TRUNC": 512, "O_APPEND": 1024,
+                        "O_NONBLOCK": 2048, "O_DIRECTORY": 65536,
+                        "O_NOFOLLOW": 131072, "O_CLOEXEC": 524288}.items():
+        setattr(module, name, value)
+    for name in ("getuid", "geteuid", "getpgid", "killpg", "kill", "pread", "open",
+                 "read", "write", "close", "fstat", "stat", "lstat", "fsync", "fdopen",
+                 "lseek", "umask", "access", "mkdir", "rename", "replace", "unlink",
+                 "rmdir", "listdir", "scandir", "fchmod", "dup", "pipe", "set_blocking"):
+        setattr(module, name, _forbidden_target_effect)
+    return module
+
+
+_TARGET_OS = _target_os() if _host_sys.platform == "win32" else _host_os
+
+
+def _prepare_synthetic_bootstrap(test):
+    if _host_sys.platform != "win32":
+        return
+    stack = ExitStack()
+    test.addCleanup(stack.close)
+    name = "_memory_bootstrap_synthetic_297"
+    synthetic = _FixtureModule(name)
+    synthetic.__file__ = str(_SOURCE)
+    stack.enter_context(patch.dict(sys.modules, {name: synthetic}))
+    # Fresh original-source globals keep every existing method-specific mock effective.
+    exec(compile(_SOURCE.read_bytes(), str(_SOURCE), "exec", dont_inherit=True), synthetic.__dict__)
+    synthetic.os, synthetic.Path = _TARGET_OS, _TargetPath
+    stack.enter_context(patch.object(sys.modules[__name__], "bootstrap", synthetic))
+    stack.enter_context(patch.object(sys.modules[__name__], "os", _TARGET_OS))
+    stack.enter_context(patch.object(sys.modules[__name__], "Path", _TargetPath))
 
 
 _SOURCE = Path(__file__).resolve().parents[1] / "truememory" / "memory_bootstrap.py"
@@ -25,10 +111,13 @@ def expectation() -> object:
     return bootstrap.LinuxScopeExpectation("/synthetic/owned", 123, 1000, 10, 20, 67108864, 0)
 
 
-_HAS_SCOPE_FLAGS = all(hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK"))
+_HAS_SCOPE_FLAGS = all(hasattr(_TARGET_OS, name) for name in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK"))
 
 
 class SyntheticReadbackControls(unittest.TestCase):
+    def setUp(self) -> None:
+        _prepare_synthetic_bootstrap(self)
+
     def test_bootstrap_imports_only_stdlib_and_does_not_activate(self) -> None:
         tree = ast.parse(_SOURCE.read_bytes())
         imports = {node.module.split(".")[0] for node in ast.walk(tree)

@@ -14,6 +14,112 @@ import unittest
 from unittest.mock import patch
 
 
+
+import os as _host_os
+import sys as _host_sys
+from pathlib import PurePosixPath, PureWindowsPath
+from types import ModuleType as _FixtureModule
+
+_HOST_PATH = Path
+_HOST_REPOSITORY = _HOST_PATH(__file__).resolve().parents[1]
+
+
+def _forbidden_target_effect(*args: object, **kwargs: object) -> object:
+    raise AssertionError("Unmocked synthetic target effect is forbidden")
+
+
+class _TargetPath(PurePosixPath):
+    def __new__(cls, *args: object):
+        if args:
+            first = args[0]
+            if isinstance(first, _HOST_PATH) or (
+                isinstance(first, str) and PureWindowsPath(first).is_absolute()
+            ):
+                native = _HOST_PATH(*args)
+                if (not native.is_absolute() or ".." in native.parts
+                        or not native.is_relative_to(_HOST_REPOSITORY)):
+                    raise AssertionError("Native fixture path outside repository")
+                return native
+        return super().__new__(cls, *args)
+
+    lstat = _forbidden_target_effect
+    stat = _forbidden_target_effect
+    resolve = _forbidden_target_effect
+    is_symlink = _forbidden_target_effect
+    read_bytes = _forbidden_target_effect
+    read_text = _forbidden_target_effect
+    write_bytes = _forbidden_target_effect
+    write_text = _forbidden_target_effect
+    open = _forbidden_target_effect
+    exists = _forbidden_target_effect
+    mkdir = _forbidden_target_effect
+    unlink = _forbidden_target_effect
+
+    def absolute(self):
+        if not self.is_absolute():
+            raise AssertionError("Relative synthetic path has no native working directory")
+        return self
+
+
+def _target_os():
+    module = _FixtureModule("synthetic_target_os")
+    module.__dict__.update(vars(_host_os))
+    module.name = "posix"
+    # Linux fixture symbols preserve access comparisons, not native Windows flags.
+    for name, value in {"O_RDONLY": 0, "O_WRONLY": 1, "O_RDWR": 2, "O_ACCMODE": 3,
+                        "O_CREAT": 64, "O_EXCL": 128, "O_TRUNC": 512, "O_APPEND": 1024,
+                        "O_NONBLOCK": 2048, "O_DIRECTORY": 65536,
+                        "O_NOFOLLOW": 131072, "O_CLOEXEC": 524288}.items():
+        setattr(module, name, value)
+    for name in ("getuid", "geteuid", "getpgid", "killpg", "kill", "pread", "open",
+                 "read", "write", "close", "fstat", "stat", "lstat", "fsync", "fdopen",
+                 "lseek", "umask", "access", "mkdir", "rename", "replace", "unlink",
+                 "rmdir", "listdir", "scandir", "fchmod", "dup", "pipe", "set_blocking"):
+        setattr(module, name, _forbidden_target_effect)
+    return module
+
+
+def _target_signal(original):
+    module = _FixtureModule("synthetic_target_signal")
+    module.__dict__.update(vars(original))
+    module.SIGTERM, module.SIGKILL, module.SIGUSR1 = 15, 9, 10
+    for name in ("signal", "alarm", "raise_signal", "pidfd_send_signal"):
+        setattr(module, name, _forbidden_target_effect)
+    return module
+
+
+def _target_select(original):
+    module = _FixtureModule("synthetic_target_select")
+    module.__dict__.update(vars(original))
+    module.poll = module.select = _forbidden_target_effect
+    return module
+
+
+def _prepare_target_module(module):
+    if _host_sys.platform != "win32":
+        return module
+    module.os = _TARGET_OS
+    module.Path = _TargetPath
+    for name in ("RUN_ROOT", "SOURCE_ROOT", "RUNTIME_PACKET"):
+        if hasattr(module, name):
+            value = getattr(module, name)
+            setattr(module, name, _TargetPath(value.as_posix()))
+    if hasattr(module, "sys"):
+        isolated = _FixtureModule("synthetic_target_sys")
+        isolated.__dict__.update(vars(module.sys))
+        module.sys = isolated
+    if hasattr(module, "signal"):
+        module.signal = _target_signal(module.signal)
+    if hasattr(module, "select"):
+        module.select = _target_select(module.select)
+    return module
+
+
+_TARGET_OS = _target_os() if _host_sys.platform == "win32" else _host_os
+if _host_sys.platform == "win32":
+    Path = _TargetPath
+
+
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "truememory_memory_bootstrap.py"
 SPEC = importlib.util.spec_from_file_location("synthetic_linux_preexec_author", MODULE_PATH)
@@ -21,6 +127,7 @@ assert SPEC is not None and SPEC.loader is not None
 MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
+_prepare_target_module(MODULE)
 
 
 def identity(cap: int = 67108864) -> object:
