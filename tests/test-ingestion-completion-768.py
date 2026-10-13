@@ -458,7 +458,13 @@ class FilesystemCompletionControls(unittest.TestCase):
         self.root = self.directory / "private-completion"
         self.source = self.directory / "source.jsonl"
         self.data = b"\n".join(json.dumps({"role": "user", "content": "synthetic source turn"}).encode() for _ in range(6))
-        self.source.write_bytes(self.data)
+        if os.name == "nt":
+            from truememory._windows_private import create_private_file
+            fd = create_private_file(self.source, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(self.data)
+        else:
+            self.source.write_bytes(self.data)
         self.shared = types.ModuleType("truememory.ingest.hooks._shared")
         self.shared.is_allowed_transcript = lambda source, host: Path(source).parent == self.directory
         self.shared.normalize_transcript_host = lambda host: host if host in ("claude", "codex", "gemini", "cursor") else ""

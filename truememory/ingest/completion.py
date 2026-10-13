@@ -74,7 +74,16 @@ def _private_directory(directory: Path) -> None:
     # Do not follow an existing link or change permissions of foreign paths.
     if directory.is_symlink():
         raise CompletionError("unsafe_directory")
-    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if os.name == "nt":
+        from truememory._windows_private import create_private_directory
+        if not directory.parent.exists():
+            _private_directory(directory.parent)
+        try:
+            create_private_directory(directory)
+        except FileExistsError:
+            pass
+    else:
+        directory.mkdir(parents=True, mode=0o700, exist_ok=True)
     for value in (directory.parent, directory):
         info = value.lstat()
         if not stat.S_ISDIR(info.st_mode) or value.is_symlink():
@@ -95,7 +104,16 @@ def _account_directory(directory: Path) -> None:
 def _open_private(path: Path, flags: int) -> int:
     if path.is_symlink():
         raise CompletionError("unsafe_file")
-    fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    if os.name == "nt" and flags & os.O_CREAT:
+        from truememory._windows_private import create_private_file
+        try:
+            fd = create_private_file(path, flags)
+        except FileExistsError:
+            if flags & os.O_EXCL:
+                raise
+            fd = os.open(path, (flags & ~(os.O_CREAT | os.O_EXCL)) | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    else:
+        fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
