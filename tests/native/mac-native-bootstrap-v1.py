@@ -4,7 +4,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import resource
 import select
 import signal
 import stat
@@ -82,6 +81,8 @@ class Protocol:
 def arm_limits() -> dict[str, list[int]]:
     if sys.platform != "darwin" or not sys.flags.isolated or not sys.flags.no_site or not sys.flags.dont_write_bytecode:
         raise BootstrapError("isolated_mac_child_required")
+    import resource
+
     os.umask(0o077)
     sys.dont_write_bytecode = True
     expected = {"cpu": (2, 3), "core": (0, 0), "nofile": (64, 64), "fsize": (1048576, 1048576)}

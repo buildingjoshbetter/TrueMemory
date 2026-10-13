@@ -26,7 +26,11 @@ _CASE_NUMBER = 0
 _ANNOUNCEMENT_BYTES = 0
 MAX_ANNOUNCEMENT_BYTES = 65536
 MAX_REGULAR_FIXTURE_BYTES_PER_CASE = 65536
-EVIDENCE_ROOT = Path("/results/source-capture-admission-native-v1")
+EVIDENCE_ROOT = (
+    Path("/results/source-capture-admission-native-v1")
+    if Path("/results").is_dir()
+    else Path(os.environ.get("TEMP", "/tmp")) / f"truememory-source-capture-admission-native-v1-{os.getpid()}"
+)
 
 
 def announce(path: Path, purpose: str) -> None:
