@@ -31,6 +31,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
+from truememory.memory_budget import LocalMemoryPolicy
+
+_LOCAL_MEMORY_POLICY = LocalMemoryPolicy()
+
 log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -268,6 +272,10 @@ def get_reranker(
         A ``sentence_transformers.CrossEncoder`` instance or RerankerProxy.
     """
     global _model, _model_name, _model_certified
+    configured_memory = "_LOCAL_MEMORY_POLICY" in globals()
+    if configured_memory:
+        from truememory.memory_budget import validate_local_policy
+        validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
     from truememory.tier_switch.serving import _control, _check
     control = _control(None, deadline, cancelled)
     _check(control)
@@ -314,11 +322,29 @@ def get_reranker(
                 from truememory.mps_utils import auto_detect_device, resolve_device
                 device = resolve_device(auto_detect_device())
 
-            from truememory.mps_utils import ensure_mps_memory_budget
-            ensure_mps_memory_budget(device)
-            from sentence_transformers import CrossEncoder
-            _check(control)
-            _model = CrossEncoder(name, device=device)
+            budget_owner = None
+            if configured_memory:
+                from truememory.memory_budget import (
+                    ProfileKey, allocation_scope, bind_model_owner, configured_local_owner,
+                )
+                budget_owner = configured_local_owner(globals()["_LOCAL_MEMORY_POLICY"], kind="local_reranker")
+            try:
+                with allocation_scope(budget_owner) if configured_memory else nullcontext() as memory:
+                    if memory is not None:
+                        memory.charge(ProfileKey("local reranker construction", "local_reranker",
+                                                 model_identity=(name, 0, "reranker"), device=device),
+                                      deadline=lambda: _check(control))
+                    from truememory.mps_utils import ensure_mps_memory_budget
+                    ensure_mps_memory_budget(device)
+                    from sentence_transformers import CrossEncoder
+                    _check(control)
+                    _model = CrossEncoder(name, device=device)
+                    if budget_owner is not None:
+                        bind_model_owner(_model, budget_owner)
+            except BaseException:
+                if budget_owner is not None:
+                    budget_owner.close()
+                raise
             _model_name = name
             _model_certified = True
             result = _model
@@ -391,6 +417,10 @@ def rerank(
         Top *top_k* results sorted by cross-encoder score, each with an added
         ``"rerank_score"`` key.
     """
+    configured_memory = "_LOCAL_MEMORY_POLICY" in globals()
+    if configured_memory:
+        from truememory.memory_budget import validate_local_policy
+        validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
     if not results:
         return []
 
@@ -404,7 +434,22 @@ def rerank(
 
     # Score all pairs (locked for thread safety with parallel queries)
     with _inference_lock:
-        scores = model.predict(pairs, batch_size=batch_size, show_progress_bar=False)
+        from contextlib import nullcontext
+        from truememory.mps_utils import _own_model
+        if configured_memory:
+            from truememory.memory_budget import ProfileKey, model_operation_scope
+            scope = model_operation_scope(
+                model, ProfileKey("local reranker forward", "local_reranker",
+                                  input_item_count=len(pairs),
+                                  batch_size=batch_size if type(batch_size) is int and batch_size >= 0 else None),
+            )
+        else:
+            scope = nullcontext()
+        with scope as memory:
+            with _own_model(model):
+                scores = model.predict(pairs, batch_size=batch_size, show_progress_bar=False)
+                if memory is not None:
+                    memory.retain_buffer(scores)
 
     # Attach scores and sort
     scored = []

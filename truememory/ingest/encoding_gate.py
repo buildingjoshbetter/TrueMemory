@@ -61,6 +61,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from truememory.memory_budget import LocalMemoryPolicy
+
 # Shared correction/update marker vocabulary (issue #649) — single source
 # of truth used by BOTH this gate and the dedup stage so the two never
 # disagree about what counts as a correction.
@@ -68,6 +70,8 @@ from truememory.ingest.markers import (
     UPDATE_MARKERS as _CONTRADICTION_MARKERS,  # noqa: F401  (exported; shared vocab)
     has_update_markers as _has_update_markers,
 )
+
+_LOCAL_MEMORY_POLICY = LocalMemoryPolicy()
 
 log = logging.getLogger(__name__)
 
@@ -501,6 +505,13 @@ class EncodingGate:
 
         Independent of novelty (r=0.30) and salience (r=0.23).
         """
+        configured_memory = "_LOCAL_MEMORY_POLICY" in globals()
+        if configured_memory:
+            from truememory.memory_budget import (
+                InvalidAllocationPlan, MemoryAdmissionRefused, ProfileKey, StaleBudgetOwner,
+                budgeted_encode_with_model_ownership, validate_local_policy,
+            )
+            validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
         EncodingGate._refresh_serving_generation(self)
         if not fact or fact.lower().strip().rstrip("!?.… ") in _PE_NOISE:
             return 0.0
@@ -520,6 +531,8 @@ class EncodingGate:
                 from truememory.vector_search import get_model
                 self._embed_model = get_model()
             except Exception as e:
+                if configured_memory and isinstance(e, (MemoryAdmissionRefused, StaleBudgetOwner, InvalidAllocationPlan)):
+                    raise
                 from truememory.tier_switch.runtime import raise_if_serving_rejection
                 raise_if_serving_rejection(e)
                 # PE model failed to load — degrade open (#585)
@@ -535,10 +548,16 @@ class EncodingGate:
 
         try:
             from truememory.mps_utils import encode_with_model_ownership
-            embeddings = encode_with_model_ownership(
-                model, [fact, mem_content, fact + " [SEP] " + mem_content,
-                        mem_content + " [SEP] " + mem_content],
-            )
+            texts = [fact, mem_content, fact + " [SEP] " + mem_content,
+                     mem_content + " [SEP] " + mem_content]
+            if configured_memory:
+                validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
+                embeddings = budgeted_encode_with_model_ownership(
+                    model, texts, ProfileKey("encoding gate prediction embedding", "local_embedding",
+                                             input_item_count=4),
+                )
+            else:
+                embeddings = encode_with_model_ownership(model, texts)
             emb_fact = embeddings[0]
             emb_mem = embeddings[1]
 
@@ -563,6 +582,8 @@ class EncodingGate:
             return pe
 
         except Exception as e:
+            if configured_memory and isinstance(e, (MemoryAdmissionRefused, StaleBudgetOwner, InvalidAllocationPlan)):
+                raise
             from truememory.tier_switch.runtime import raise_if_serving_rejection
             raise_if_serving_rejection(e)
             log.debug("PE embedding scorer failed: %s", e)

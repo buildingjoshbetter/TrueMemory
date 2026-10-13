@@ -29,6 +29,7 @@ _set_mps_memory_cap()
 import base64  # noqa: E402
 import gc  # noqa: E402
 import hmac  # noqa: E402
+import itertools  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
 import math  # noqa: E402
@@ -46,7 +47,7 @@ from concurrent.futures import Future, ThreadPoolExecutor  # noqa: E402
 from contextlib import contextmanager  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
-from typing import TYPE_CHECKING  # noqa: E402
+from typing import TYPE_CHECKING, Callable  # noqa: E402
 
 import numpy as np  # noqa: E402
 
@@ -172,20 +173,37 @@ def _batch_limit(value: object, maximum: int) -> int:
     return min(value, maximum)
 
 
-def _checked_batch(values: object, count: int, total: int, field: str) -> np.ndarray:
+def _checked_batch(
+    values: object, count: int, total: int, field: str,
+    *, admit: Callable[[tuple, int], None] | None = None,
+    before_materialize: Callable[[], None] | None = None,
+) -> np.ndarray:
+    if admit is not None and isinstance(values, np.ndarray) and values.ndim:
+        cast_bytes = 0 if values.dtype == np.dtype(np.float32) else math.prod(values.shape) * 4
+        admit((total, *values.shape[1:]), cast_bytes)
+    if not isinstance(values, np.ndarray) and before_materialize is not None:
+        before_materialize()
     batch = values if isinstance(values, np.ndarray) else np.asarray(values, dtype=np.float32)
     if batch.ndim == 0 or batch.shape[0] != count:
         raise ValueError("Model output count does not match the input microbatch")
     _check_result_size((total, *batch.shape[1:]), field)
+    if admit is not None:
+        admit((total, *batch.shape[1:]), 0)
     return np.asarray(batch, dtype=np.float32)
 
 
 def _store_batch_result(
     result: np.ndarray | None, values: object, offset: int, count: int, total: int,
     field: str = "vectors", *, indices: np.ndarray | None = None,
+    admit: Callable[[tuple, int], None] | None = None,
+    before_materialize: Callable[[], None] | None = None,
 ) -> np.ndarray:
     """Check the complete output before allocating it; keep every float32 row."""
-    batch = _checked_batch(values, count, total, field)
+    if admit is None and before_materialize is None:
+        batch = _checked_batch(values, count, total, field)
+    else:
+        batch = _checked_batch(values, count, total, field, admit=admit,
+                               before_materialize=before_materialize)
     if result is None:
         result = np.empty((total, *batch.shape[1:]), dtype=np.float32)
     elif result.shape[1:] != batch.shape[1:]:
@@ -229,6 +247,7 @@ def _json_default(obj):
 
 
 _ALLOWED_DTYPES = frozenset({"float32", "float64", "float16", "int32", "int64"})
+_decoded_array_groups = itertools.count()
 
 
 def _json_object_hook(obj):
@@ -237,6 +256,14 @@ def _json_object_hook(obj):
         dtype_str = obj["dtype"]
         if dtype_str not in _ALLOWED_DTYPES:
             raise ValueError(f"Disallowed dtype: {dtype_str}")
+        from truememory.memory_budget import ProfileKey, current_session
+        memory = current_session()
+        encoded = obj["__ndarray__"]
+        if memory is not None and type(encoded) is str:
+            memory.charge(ProfileKey("request ndarray decode", "model_server",
+                                     native_tensor_shape=(len(encoded),)),
+                          known_bytes=len(encoded) + 3 * ((len(encoded) + 3) // 4),
+                          group=f"request decoded array:{next(_decoded_array_groups)}")
         data = base64.b64decode(obj["__ndarray__"])
         return np.frombuffer(data, dtype=np.dtype(dtype_str)).reshape(obj["shape"])
     return obj
@@ -381,9 +408,21 @@ class ModelServer:
         self._busy_rejections = 0
         self._stopped = threading.Event()
         self._transport_context = threading.local()
+        self._memory_owner = None
+        if automatic_rss_budget:
+            from truememory.memory_budget import get_process_registry
+            self._memory_owner = get_process_registry().register_owner(
+                self._max_rss_bytes, kind="model_server",
+                usage_reader=lambda: psutil.Process().memory_info().rss if psutil is not None else None,
+            )
         # Submission requires a slot+bytes lease; at most max_handlers futures
         # can be running or waiting in this executor.
-        self._workers = ThreadPoolExecutor(max_workers=self._max_handlers, thread_name_prefix="model-client")
+        try:
+            self._workers = ThreadPoolExecutor(max_workers=self._max_handlers, thread_name_prefix="model-client")
+        except BaseException:
+            if self._memory_owner is not None:
+                self._memory_owner.close()
+            raise
         # Loaded embedding model + identity as ONE immutable snapshot,
         # assigned only under self._lock; the fast lane reads the single
         # reference lock-free (issue #577, panel round 2).
@@ -435,6 +474,8 @@ class ModelServer:
             deadline.check()
         budget = self._max_rss_bytes
         if budget == 0:
+            if getattr(self, "_memory_owner", None) is not None:
+                self._memory_stage(stage, deadline)
             return
         try:
             usage = psutil.Process().memory_info().rss if psutil is not None else None
@@ -452,6 +493,80 @@ class ModelServer:
             raise _ProcessMemoryRefused(
                 f"Model server busy: process RSS budget exhausted before {stage}"
             )
+        if getattr(self, "_memory_owner", None) is not None and not stage.endswith(" completion"):
+            self._memory_stage(stage, deadline)
+
+    def _memory_scope(self):
+        from contextlib import nullcontext
+        owner = getattr(self, "_memory_owner", None)
+        if owner is None:
+            return nullcontext(None)
+        from truememory.memory_budget import InvalidAllocationPlan, StaleBudgetOwner, allocation_scope
+        try:
+            owner.set_limit(self._max_rss_bytes)
+        except (InvalidAllocationPlan, StaleBudgetOwner, ValueError) as error:
+            raise _ProcessMemoryRefused(f"Model server busy: {error}") from error
+        return allocation_scope(owner)
+
+    def _memory_stage(
+        self, stage: str, deadline: _RequestDeadline | None = None, *,
+        known_bytes: int = 0, shape: tuple[int, ...] | None = None,
+        wire_signature: str | None = None, model_identity: tuple[str, int, str] | None = None,
+        device: str | None = None, input_count: int | None = None,
+    ) -> None:
+        owner = getattr(self, "_memory_owner", None)
+        if owner is None:
+            return
+        from truememory.memory_budget import (
+            InvalidAllocationPlan, MemoryAdmissionRefused, ProfileKey, StaleBudgetOwner, current_session,
+        )
+        if current_session() is None:
+            # A standalone sampled guard performs no allocation itself.
+            return
+        deadline = deadline or getattr(self._transport_context, "memory_deadline", None)
+        try:
+            owner.set_limit(self._max_rss_bytes)
+            key = ProfileKey(stage, "model_server", native_tensor_shape=shape,
+                             wire_signature=wire_signature, model_identity=model_identity,
+                             device=device, input_item_count=input_count)
+            with self._memory_scope() as memory:
+                memory.charge(key, known_bytes=known_bytes,
+                              deadline=deadline.check if deadline is not None else None)
+        except (MemoryAdmissionRefused, InvalidAllocationPlan, StaleBudgetOwner, ValueError) as error:
+            raise _ProcessMemoryRefused(f"Model server busy: {error}") from error
+
+    def _reserve_result_assembly(self, shape: tuple, cast_bytes: int = 0) -> None:
+        self._memory_stage("result assembly", known_bytes=math.prod(shape) * 4, shape=shape)
+        if cast_bytes:
+            self._memory_stage("result cast", known_bytes=cast_bytes, shape=(cast_bytes,))
+
+    def _result_admitter(self) -> Callable[[tuple, int], None] | None:
+        return self._reserve_result_assembly if getattr(self, "_memory_owner", None) is not None else None
+
+    def _before_result_materialization(self) -> None:
+        self._memory_stage("result materialize")
+
+    def _result_materializer(self) -> Callable[[], None] | None:
+        return self._before_result_materialization if getattr(self, "_memory_owner", None) is not None else None
+
+    def _result_admission_options(self, *, materialize: bool = True) -> dict[str, object]:
+        if getattr(self, "_memory_owner", None) is None:
+            return {}
+        options = {"admit": self._result_admitter()}
+        if materialize:
+            options["before_materialize"] = self._result_materializer()
+        return options
+
+    def _retain_memory_response(self, memory: object, response: dict) -> None:
+        if memory is None:
+            return
+        from truememory.memory_budget import InvalidAllocationPlan, MemoryAdmissionRefused, StaleBudgetOwner
+        try:
+            for value in response.values():
+                if isinstance(value, np.ndarray):
+                    memory.retain_buffer(value)
+        except (MemoryAdmissionRefused, InvalidAllocationPlan, StaleBudgetOwner, ValueError) as error:
+            raise _ProcessMemoryRefused(f"Model server busy: {error}") from error
 
     def _mark_sticky_cpu(self, kind: str) -> bool:
         """Permanently degrade *kind* ("embed"/"rerank") to CPU after an
@@ -506,32 +621,41 @@ class ModelServer:
         inference ownership throughout recovery and retry. Batch retries
         release the state lock so bookkeeping and the fast lane stay responsive.
         """
-        from truememory.mps_utils import flush_mps_cache
-        self._mark_sticky_cpu("embed")
-        flush_mps_cache()
-        if deadline is not None:
-            self._check_embed_recovery_deadline_locked(model, deadline)
-        try:
-            self._check_process_memory("embed CPU transfer", deadline)
-        except (_ProcessMemoryRefused, _RequestDeadlineExceeded):
-            # A refused transfer leaves the failed accelerator instance behind.
-            # Invalidate it so a cache hit cannot bypass sticky CPU selection.
-            state = self._embed_state
-            if state is not None and state.model is model:
-                self._publish_embed_state(None)
-            raise
-        if deadline is not None:
-            self._check_embed_recovery_deadline_locked(model, deadline)
-        if hasattr(model, "to"):
+        @contextmanager
+        def memory_scope() -> Iterator[object | None]:
+            if getattr(self, "_memory_owner", None) is None:
+                yield None
+            else:
+                with self._memory_scope() as memory:
+                    yield memory
+
+        with memory_scope() as _memory:
+            from truememory.mps_utils import flush_mps_cache
+            self._mark_sticky_cpu("embed")
+            flush_mps_cache()
+            if deadline is not None:
+                self._check_embed_recovery_deadline_locked(model, deadline)
             try:
-                model.to("cpu")
-            except BaseException:
-                # Failed or cancelled transfers cannot certify this instance
-                # as CPU-ready. Preserve the original error and sticky choice.
+                self._check_process_memory("embed CPU transfer", deadline)
+            except (_ProcessMemoryRefused, _RequestDeadlineExceeded):
+                # A refused transfer leaves the failed accelerator instance behind.
+                # Invalidate it so a cache hit cannot bypass sticky CPU selection.
                 state = self._embed_state
                 if state is not None and state.model is model:
                     self._publish_embed_state(None)
                 raise
+            if deadline is not None:
+                self._check_embed_recovery_deadline_locked(model, deadline)
+            if hasattr(model, "to"):
+                try:
+                    model.to("cpu")
+                except BaseException:
+                    # Failed or cancelled transfers cannot certify this instance
+                    # as CPU-ready. Preserve the original error and sticky choice.
+                    state = self._embed_state
+                    if state is not None and state.model is model:
+                        self._publish_embed_state(None)
+                    raise
 
     def _check_embed_recovery_deadline_locked(
         self, model: object, deadline: _RequestDeadline,
@@ -669,6 +793,8 @@ class ModelServer:
             # Legacy minilm/bge-small fall through to model2vec here, not
             # the 384-dimensional models used by the local loader.
             _check_result_size((count, 256), "vectors")
+            if getattr(self, "_memory_owner", None) is not None:
+                self._reserve_result_assembly((count, 256))
         # A custom truncate_dim is only an upper bound. Even ST's dimension
         # getter can return that bound when native width is unknown; check
         # the actual first slice before allocating the complete result.
@@ -748,7 +874,9 @@ class ModelServer:
         return indices[inverse]
 
     @staticmethod
-    def _preflight_rerank_result(model_name: str | None, count: int) -> None:
+    def _preflight_rerank_result(
+        model_name: str | None, count: int, *, admit: Callable[[tuple, int], None] | None = None,
+    ) -> None:
         from truememory.reranker import get_current_reranker_name
         name = model_name or get_current_reranker_name()
         if count and name in (
@@ -756,6 +884,8 @@ class ModelServer:
             "Alibaba-NLP/gte-reranker-modernbert-base",
         ):
             _check_result_size((count,), "scores")
+            if admit is not None:
+                admit((count,), 0)
         # Custom CrossEncoder constructors preserve num_labels=None; their
         # output may contain several labels per pair. Inspect its real shape.
 
@@ -795,54 +925,62 @@ class ModelServer:
         self._retire_stale_fast_encoder()
 
     def _get_embed_model(self, tier: str, deadline: _RequestDeadline | None = None):
-        model_id, state = self._resolve_embed_cache(tier)
-        if state is not None:
-            if state.tier != tier:
-                self._publish_embed_state(_EmbedState(
-                    model=state.model, tier=tier, model_id=model_id, generation=state.generation,
-                    prepared_identity=state.prepared_identity,
-                ))
-            return state.model
+        with self._memory_scope() as _memory:
+            model_id, state = self._resolve_embed_cache(tier)
+            if state is not None:
+                if state.tier != tier:
+                    self._publish_embed_state(_EmbedState(
+                        model=state.model, tier=tier, model_id=model_id, generation=state.generation,
+                        prepared_identity=state.prepared_identity,
+                    ))
+                return state.model
 
-        # Memory-first replacement: failed construction leaves the cache empty.
-        self._publish_embed_state(None)
-        self._check_process_memory("embed construction", deadline)
-        device = self._embed_device()
-        if deadline is not None:
-            deadline.check()
-        model = self._build_embed_model(model_id, device)
-        self._check_process_memory("embed construction completion", deadline)
-        # ONE atomic reference assignment of an immutable snapshot — the
-        # fast lane can never observe a torn (model, tier, model_id) triple.
-        self._publish_embed_state(_EmbedState(model=model, tier=tier, model_id=model_id))
-        log.info("Loaded embedding model for tier=%s (model=%s)", tier, model_id)
-        return model
+            # Memory-first replacement: failed construction leaves the cache empty.
+            self._publish_embed_state(None)
+            self._check_process_memory("embed construction", deadline)
+            device = self._embed_device()
+            if deadline is not None:
+                deadline.check()
+            self._memory_stage("embed construction", deadline,
+                               model_identity=((model_id, 256, "legacy")
+                                               if model_id in self._FAST_LANE_SAFE_MODEL_IDS else None),
+                               device=device)
+            model = self._build_embed_model(model_id, device)
+            self._check_process_memory("embed construction completion", deadline)
+            # ONE atomic reference assignment of an immutable snapshot — the
+            # fast lane can never observe a torn (model, tier, model_id) triple.
+            self._publish_embed_state(_EmbedState(model=model, tier=tier, model_id=model_id))
+            log.info("Loaded embedding model for tier=%s (model=%s)", tier, model_id)
+            return model
 
     def _get_prepared_embed_model(self, target: "EmbeddingTarget", deadline: _RequestDeadline) -> object:
-        from truememory.embedding_target import build_target_model
+        with self._memory_scope() as _memory:
+            from truememory.embedding_target import build_target_model
 
-        target.check_configuration()
-        deadline.check()
-        state = self._embed_state
-        if state is not None and (
-            state.prepared_identity == target.identity
-            or (state.model_id == target.model_id and target.model_id in self._FAST_LANE_SAFE_MODEL_IDS)
-        ):
-            return state.model
-        # A legacy custom label is not evidence that its constructor did not
-        # fall back. Only strict construction can establish that identity.
-        state = None
-        self._publish_embed_state(None)
-        self._check_process_memory("prepared embed construction", deadline)
-        device = self._embed_device()
-        deadline.check()
-        model = build_target_model(target, device, check=deadline.check)
-        self._check_process_memory("prepared embed construction completion", deadline)
-        self._publish_embed_state(_EmbedState(
-            model=model, tier=target.tier, model_id=target.model_id,
-            prepared_identity=target.identity,
-        ))
-        return model
+            target.check_configuration()
+            deadline.check()
+            state = self._embed_state
+            if state is not None and (
+                state.prepared_identity == target.identity
+                or (state.model_id == target.model_id and target.model_id in self._FAST_LANE_SAFE_MODEL_IDS)
+            ):
+                return state.model
+            # A legacy custom label is not evidence that its constructor did not
+            # fall back. Only strict construction can establish that identity.
+            state = None
+            self._publish_embed_state(None)
+            self._check_process_memory("prepared embed construction", deadline)
+            device = self._embed_device()
+            deadline.check()
+            self._memory_stage("prepared embed construction", deadline,
+                               model_identity=target.identity, device=device)
+            model = build_target_model(target, device, check=deadline.check)
+            self._check_process_memory("prepared embed construction completion", deadline)
+            self._publish_embed_state(_EmbedState(
+                model=model, tier=target.tier, model_id=target.model_id,
+                prepared_identity=target.identity,
+            ))
+            return model
 
     def _get_fast_encoder(
         self, tier: str, deadline: _RequestDeadline | None = None, *, expected_target: "EmbeddingTarget | None" = None,
@@ -861,80 +999,89 @@ class ModelServer:
         locked path) when there is no snapshot for this tier yet, or the
         loaded model has no explicit deterministic builder branch.
         """
-        state = self._embed_state  # single atomic reference read
-        if state is None or state.tier != tier:
-            # No main model loaded for this tier yet — declining means the
-            # one-time load happens exactly once, on the main path,
-            # without changing the daemon's default selection.
-            return None
+        with self._memory_scope() as _memory:
+            state = self._embed_state  # single atomic reference read
+            if state is None or state.tier != tier:
+                # No main model loaded for this tier yet — declining means the
+                # one-time load happens exactly once, on the main path,
+                # without changing the daemon's default selection.
+                return None
 
-        if state.model_id not in self._FAST_LANE_SAFE_MODEL_IDS:
-            return None
+            if state.model_id not in self._FAST_LANE_SAFE_MODEL_IDS:
+                return None
 
-        model_id, generation = state.model_id, state.generation
-        if expected_target is not None and model_id != expected_target.model_id:
-            from truememory.embedding_target import EmbeddingTargetError
-            raise EmbeddingTargetError("Fast encoder residency does not match the serving target")
-        # A slow CPU constructor must not retain the old main model snapshot.
-        state = None
-        if self._fast_encoder is not None and self._fast_generation is generation:
-            if expected_target is not None and self._fast_model_id != model_id:
+            model_id, generation = state.model_id, state.generation
+            if expected_target is not None and model_id != expected_target.model_id:
                 from truememory.embedding_target import EmbeddingTargetError
-                raise EmbeddingTargetError("Fast encoder cache does not match the serving target")
-            return self._fast_encoder
+                raise EmbeddingTargetError("Fast encoder residency does not match the serving target")
+            # A slow CPU constructor must not retain the old main model snapshot.
+            state = None
+            if self._fast_encoder is not None and self._fast_generation is generation:
+                if expected_target is not None and self._fast_model_id != model_id:
+                    from truememory.embedding_target import EmbeddingTargetError
+                    raise EmbeddingTargetError("Fast encoder cache does not match the serving target")
+                return self._fast_encoder
 
-        self._fast_encoder = None
-        self._fast_model_id = None
-        self._fast_generation = None
-        self._check_process_memory("fast embed construction", deadline)
-        model = self._build_embed_model(model_id, "cpu")
-        self._check_process_memory("fast embed construction completion", deadline)
-        # A changed generation, including A -> B -> A, must not publish this
-        # construction. Its already-captured request may still finish on it.
-        if self._residency_lock.acquire(blocking=False):
-            try:
-                state = self._embed_state
-                if state is not None and state.generation is generation:
-                    self._fast_encoder = model
-                    self._fast_model_id = model_id
-                    self._fast_generation = generation
-            finally:
-                self._residency_lock.release()
-                state = None
-        log.info(
-            "Fast-lane CPU encoder loaded (tier=%s, model=%s) — single-text "
-            "requests no longer queue behind batch work", tier, model_id,
-        )
-        return model
+            self._fast_encoder = None
+            self._fast_model_id = None
+            self._fast_generation = None
+            self._check_process_memory("fast embed construction", deadline)
+            self._memory_stage("fast embed construction", deadline,
+                               model_identity=(model_id, 256, "legacy"), device="cpu")
+            model = self._build_embed_model(model_id, "cpu")
+            self._check_process_memory("fast embed construction completion", deadline)
+            # A changed generation, including A -> B -> A, must not publish this
+            # construction. Its already-captured request may still finish on it.
+            if self._residency_lock.acquire(blocking=False):
+                try:
+                    state = self._embed_state
+                    if state is not None and state.generation is generation:
+                        self._fast_encoder = model
+                        self._fast_model_id = model_id
+                        self._fast_generation = generation
+                finally:
+                    self._residency_lock.release()
+                    state = None
+            log.info(
+                "Fast-lane CPU encoder loaded (tier=%s, model=%s) — single-text "
+                "requests no longer queue behind batch work", tier, model_id,
+            )
+            return model
 
     def _get_reranker(
         self, model_name: str | None = None, deadline: _RequestDeadline | None = None,
     ):
-        from truememory.reranker import get_current_reranker_name
-        name = model_name or get_current_reranker_name()
+        from contextlib import nullcontext
+        scope = self._memory_scope() if getattr(self, "_memory_owner", None) is not None else nullcontext(None)
+        with scope as _memory:
+            from truememory.reranker import get_current_reranker_name
+            name = model_name or get_current_reranker_name()
 
-        if self._reranker is not None and self._reranker_name == name:
+            if self._reranker is not None and self._reranker_name == name:
+                return self._reranker
+
+            self._reranker = None
+            self._reranker_name = None
+            self._check_process_memory("reranker construction", deadline)
+            from truememory.mps_utils import auto_detect_device, ensure_mps_memory_budget, resolve_device
+            if "rerank" in self._sticky_cpu:
+                device = "cpu"
+            else:
+                device = resolve_device(auto_detect_device())
+
+            ensure_mps_memory_budget(device)
+            from sentence_transformers import CrossEncoder
+            if deadline is not None:
+                deadline.check()
+            if getattr(self, "_memory_owner", None) is not None:
+                self._memory_stage("reranker construction", deadline,
+                                   model_identity=(name, 0, "reranker"), device=device)
+            model = CrossEncoder(name, device=device)
+            self._check_process_memory("reranker construction completion", deadline)
+            self._reranker = model
+            self._reranker_name = name
+            log.info("Loaded reranker model=%s device=%s", name, device)
             return self._reranker
-
-        self._reranker = None
-        self._reranker_name = None
-        self._check_process_memory("reranker construction", deadline)
-        from truememory.mps_utils import auto_detect_device, ensure_mps_memory_budget, resolve_device
-        if "rerank" in self._sticky_cpu:
-            device = "cpu"
-        else:
-            device = resolve_device(auto_detect_device())
-
-        ensure_mps_memory_budget(device)
-        from sentence_transformers import CrossEncoder
-        if deadline is not None:
-            deadline.check()
-        model = CrossEncoder(name, device=device)
-        self._check_process_memory("reranker construction completion", deadline)
-        self._reranker = model
-        self._reranker_name = name
-        log.info("Loaded reranker model=%s device=%s", name, device)
-        return self._reranker
 
     def _check_serving_embed_model(self, model: object, target: "EmbeddingTarget | None") -> None:
         if target is None:
@@ -984,6 +1131,8 @@ class ModelServer:
         (locked) path.
         """
         deadline = deadline or _RequestDeadline()
+        result_options = (self._result_admission_options()
+                          if getattr(self, "_memory_owner", None) is not None else {})
         deadline.check()
         if self._inference_lock.acquire(blocking=False):
             try:
@@ -1015,7 +1164,8 @@ class ModelServer:
                             deadline.check()
                             vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
                         return self._serving_embed_response(
-                            _checked_batch(vectors, len(texts), len(texts), "vectors"), len(texts), expected_target,
+                            _checked_batch(vectors, len(texts), len(texts), "vectors", **result_options),
+                            len(texts), expected_target,
                         )
                     finally:
                         model = None
@@ -1045,7 +1195,8 @@ class ModelServer:
                         vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
                         if expected_target is not None:
                             response = self._serving_embed_response(
-                                _checked_batch(vectors, len(texts), len(texts), "vectors"), len(texts), expected_target,
+                                _checked_batch(vectors, len(texts), len(texts), "vectors", **result_options),
+                                len(texts), expected_target,
                             )
                     finally:
                         model = None
@@ -1053,7 +1204,8 @@ class ModelServer:
                 if fast_owned:
                     self._retire_stale_fast_encoder()
             return (response if expected_target is not None else
-                    {"ok": True, "vectors": _checked_batch(vectors, len(texts), len(texts), "vectors")})
+                    {"ok": True, "vectors": _checked_batch(vectors, len(texts), len(texts), "vectors",
+                                                          **result_options)})
         except (_RequestDeadlineExceeded, _ResultTooLarge, _ProcessMemoryRefused):
             raise
         except Exception as exc:
@@ -1081,7 +1233,12 @@ class ModelServer:
             self._last_activity = time.time()
             self._inflight += 1
         try:
-            return self._handle_request_inner(request)
+            if getattr(self, "_memory_owner", None) is None:
+                return self._handle_request_inner(request)
+            with self._memory_scope() as memory:
+                response = self._handle_request_inner(request)
+                self._retain_memory_response(memory, response)
+                return response
         except _RequestDeadlineExceeded as exc:
             return {"ok": False, "error": str(exc)}
         except _ResultTooLarge as exc:
@@ -1089,17 +1246,22 @@ class ModelServer:
         except _ProcessMemoryRefused as exc:
             return {"ok": False, "error": str(exc), "error_code": "server_busy", "retry_after_ms": 250}
         finally:
+            self._transport_context.memory_deadline = None
             with self._activity_lock:
                 self._inflight -= 1
                 self._last_activity = time.time()
 
     def _handle_request_inner(self, request: dict) -> dict:
         op = request.get("op")
+        enrolled = getattr(self, "_memory_owner", None) is not None
+        result_options = self._result_admission_options() if enrolled else {}
+        preflight_options = self._result_admission_options(materialize=False) if enrolled else {}
 
         # Convert the wire epoch once. Queueing, loading and recovery consume
         # one monotonic budget; wall-clock adjustments cannot renew it.
         deadline = _RequestDeadline.from_wall_clock(request.get("deadline"))
         deadline = _RequestDeadline(deadline.expires_at, getattr(self._transport_context, "request", None))
+        self._transport_context.memory_deadline = deadline
         deadline.check()
 
         if op == "ping":
@@ -1179,6 +1341,8 @@ class ModelServer:
                                     self._preflight_embed_result(tier, len(texts))
                                 else:
                                     _check_result_size((len(texts), target.dimension), "vectors")
+                                    if enrolled:
+                                        self._reserve_result_assembly((len(texts), target.dimension))
                                 deadline.check()
                                 model = (self._get_embed_model(tier, deadline=deadline) if target is None
                                          else self._get_prepared_embed_model(target, deadline))
@@ -1210,6 +1374,7 @@ class ModelServer:
                                     check_target_vectors(target or expected_target, values, len(batch))
                                 vectors = _store_batch_result(
                                     vectors, values, offset, len(batch), len(texts), indices=indices,
+                                    **result_options,
                                 )
                                 offset += len(batch)
                         if retry is not None:
@@ -1223,6 +1388,7 @@ class ModelServer:
                                 check_target_vectors(target or expected_target, values, len(retry))
                             vectors = _store_batch_result(
                                 vectors, values, offset, len(retry), len(texts), indices=indices,
+                                **result_options,
                             )
                             offset += len(retry)
                     self._after_request_batches(throttler, len(texts), encode_start, deadline)
@@ -1267,7 +1433,7 @@ class ModelServer:
                         with deadline.locked(self._lock):
                             if reranker is None:
                                 deadline.start_inference()
-                                self._preflight_rerank_result(model_name, len(pairs))
+                                self._preflight_rerank_result(model_name, len(pairs), **preflight_options)
                                 deadline.check()
                                 reranker = self._get_reranker(model_name, deadline=deadline)
                                 self._check_serving_reranker(reranker, expected_name)
@@ -1307,10 +1473,12 @@ class ModelServer:
                                     retry = batch
                                     break
                                 if indices is None:
-                                    scores = _store_batch_result(scores, values, offset, len(batch), len(pairs), "scores")
+                                    scores = _store_batch_result(scores, values, offset, len(batch), len(pairs),
+                                                                 "scores", **result_options)
                                 else:
                                     scores = _store_batch_result(
                                         scores, values, offset, len(batch), len(pairs), "scores", indices=indices,
+                                        **result_options,
                                     )
                                 offset += len(batch)
                         if retry is not None:
@@ -1318,10 +1486,12 @@ class ModelServer:
                             deadline.check()
                             values = reranker.predict(retry, batch_size=limit, show_progress_bar=False)
                             if indices is None:
-                                scores = _store_batch_result(scores, values, offset, len(retry), len(pairs), "scores")
+                                scores = _store_batch_result(scores, values, offset, len(retry), len(pairs),
+                                                             "scores", **result_options)
                             else:
                                 scores = _store_batch_result(
                                     scores, values, offset, len(retry), len(pairs), "scores", indices=indices,
+                                    **result_options,
                                 )
                             offset += len(retry)
                     self._after_request_batches(throttler, len(pairs), predict_start, deadline)
@@ -1503,7 +1673,7 @@ class ModelServer:
                 if not chunk:
                     break
                 length -= len(chunk)
-        except OSError:
+        except (OSError, _ProcessMemoryRefused):
             pass
 
     def _dispatch_client(self, conn: socket.socket) -> Future | None:
@@ -1529,7 +1699,8 @@ class ModelServer:
                 return
             admitted.claimed = True
         try:
-            self._serve_client(conn, admitted)
+            with self._memory_scope() as _memory:
+                self._serve_client(conn, admitted)
         finally:
             # The serving frame and exception traceback have returned. No
             # decoded request, raw body, or response survives credit release.
@@ -1552,6 +1723,9 @@ class ModelServer:
             data = self._recv_exact(conn, admitted.length, admitted.frame_expires_at)
             if data is None:
                 return
+            import hashlib
+            self._memory_stage("request materialize", known_bytes=0, shape=(len(data),),
+                               wire_signature=hashlib.sha256(data).hexdigest())
             request = json.loads(data, object_hook=_json_object_hook)
             data = None
             if not isinstance(request, dict):
@@ -1572,6 +1746,9 @@ class ModelServer:
                     identity_error = identity_error or isinstance(error, EmbeddingTargetError)
                 if identity_error:
                     failure["error_code"] = "serving_identity_mismatch"
+                elif isinstance(error, _ProcessMemoryRefused):
+                    failure["error_code"] = "server_busy"
+                    failure["retry_after_ms"] = 250
                 self._send_response(conn, failure)
             except Exception:
                 # The connection is already failing. Keep serialization errors
@@ -1579,6 +1756,7 @@ class ModelServer:
                 pass
         finally:
             self._transport_context.request = None
+            self._transport_context.memory_deadline = None
             data = request = response = None
 
     def _stop_clients(self) -> None:
@@ -1606,39 +1784,56 @@ class ModelServer:
                 conn.close()
 
     def _recv_exact(self, conn: socket.socket, n: int, expires_at: float | None = None) -> bytes | None:
-        buf = bytearray()
-        while len(buf) < n:
-            if self._stopped.is_set():
-                return None
-            if expires_at is not None:
-                remaining = expires_at - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("request frame receive timed out: deadline exceeded")
-                # Cross-thread shutdown does not reliably interrupt recv on
-                # every platform. Poll shutdown without extending the frame budget.
-                conn.settimeout(min(remaining, 0.1))
-            try:
-                chunk = conn.recv(min(n - len(buf), 65536))
-            except TimeoutError:
-                if expires_at is None:
-                    raise
-                continue
-            if not chunk:
-                return None
-            buf.extend(chunk)
-        return bytes(buf)
+        with self._memory_scope() as _memory:
+            self._memory_stage("frame receive", _RequestDeadline(expires_at),
+                               known_bytes=2 * n + min(n, 65536), shape=(n,))
+            buf = bytearray(n)
+            offset = 0
+            while offset < n:
+                if self._stopped.is_set():
+                    return None
+                if expires_at is not None:
+                    remaining = expires_at - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("request frame receive timed out: deadline exceeded")
+                    # Cross-thread shutdown does not reliably interrupt recv on
+                    # every platform. Poll shutdown without extending the frame budget.
+                    conn.settimeout(min(remaining, 0.1))
+                try:
+                    chunk = conn.recv(min(n - offset, 65536))
+                except TimeoutError:
+                    if expires_at is None:
+                        raise
+                    continue
+                if not chunk:
+                    return None
+                buf[offset:offset + len(chunk)] = chunk
+                offset += len(chunk)
+            return bytes(buf)
 
     def _send_response(self, conn: socket.socket, response: dict):
         # Issue #646 (M-53): tag every response with the protocol version so
         # a newer client can detect a version mismatch instead of choking on
         # an unexpected payload shape.
-        if "protocol" not in response:
-            response = {**response, "protocol": PROTOCOL_VERSION}
-        if _response_wire_size(response) > _MAX_MESSAGE_SIZE:
-            response = {"ok": False, "error": "Response too large", "protocol": PROTOCOL_VERSION}
-        data = json.dumps(response, default=_json_default).encode("utf-8")
-        header = struct.pack(_HEADER_FMT, len(data))
-        conn.sendall(header + data)
+        with self._memory_scope() as _memory:
+            if "protocol" not in response:
+                response = {**response, "protocol": PROTOCOL_VERSION}
+            self._memory_stage("response metadata")
+            wire_bytes = _response_wire_size(response)
+            if wire_bytes > _MAX_MESSAGE_SIZE:
+                response = {"ok": False, "error": "Response too large", "protocol": PROTOCOL_VERSION}
+                wire_bytes = _response_wire_size(response)
+            if getattr(self, "_memory_owner", None) is not None:
+                payload_bytes = sum(math.prod(value.shape) * 4 for value in response.values()
+                                    if isinstance(value, np.ndarray))
+                encoded_bytes = sum(_array_base64_size(value.shape) for value in response.values()
+                                    if isinstance(value, np.ndarray))
+                # Original ndarray storage has a separate retained-result ticket.
+                copies = 2 * payload_bytes + 2 * encoded_bytes + 3 * wire_bytes + _HEADER_SIZE
+                self._memory_stage("response serialize", known_bytes=copies, shape=(wire_bytes,))
+            data = json.dumps(response, default=_json_default).encode("utf-8")
+            header = struct.pack(_HEADER_FMT, len(data))
+            conn.sendall(header + data)
 
     def _idle_checker(self):
         while self._running:
@@ -1817,6 +2012,9 @@ class ModelServer:
         PID_PATH.write_text(str(os.getpid()))
         srv.listen(16)
         srv.settimeout(2.0)
+        if "TRUEMEMORY_REQUIRE_PROCESS_MEMORY_CAP" in os.environ:
+            from truememory_memory_bootstrap import record_server_ready
+            record_server_ready()
 
         idle_thread = threading.Thread(target=self._idle_checker, daemon=True)
         idle_thread.start()
@@ -1869,6 +2067,8 @@ class ModelServer:
         self._fast_generation = None
         self._token = None
         gc.collect()
+        if getattr(self, "_memory_owner", None) is not None:
+            self._memory_owner.close()
         # Only remove artifacts THIS process owns (issue #646, M-20). After a
         # crash a fresh server may already hold the lock and have rewritten
         # PID_PATH; unlinking its live socket/token here would let concurrent
@@ -1896,6 +2096,9 @@ def _handle_signal(signum, frame):
 
 
 def main():
+    if "TRUEMEMORY_REQUIRE_PROCESS_MEMORY_CAP" in os.environ:
+        from truememory_memory_bootstrap import require_child_scope
+        require_child_scope()
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [model_server] %(levelname)s %(message)s",

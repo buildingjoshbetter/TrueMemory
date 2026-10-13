@@ -41,7 +41,10 @@ import logging
 import sqlite3
 from collections import defaultdict
 
+from truememory.memory_budget import LocalMemoryPolicy
 from truememory.tier_switch.runtime import database_operation
+
+_LOCAL_MEMORY_POLICY = LocalMemoryPolicy()
 
 log = logging.getLogger(__name__)
 
@@ -191,8 +194,20 @@ def search_hybrid(
     # ------------------------------------------------------------------
     from truememory.vector_search import get_model, serialize_f32
     from truememory.mps_utils import encode_with_mps_fallback
+    configured_memory = "_LOCAL_MEMORY_POLICY" in globals()
+    if configured_memory:
+        from truememory.memory_budget import (
+            ProfileKey, budgeted_encode_with_mps_fallback, validate_local_policy,
+        )
+        validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
     _q_model = get_model()
-    _q_emb = encode_with_mps_fallback(_q_model, [query])[0]
+    if configured_memory:
+        _q_values = budgeted_encode_with_mps_fallback(
+            _q_model, [query], ProfileKey("hybrid query embedding", "local_embedding", input_item_count=1),
+        )
+    else:
+        _q_values = encode_with_mps_fallback(_q_model, [query])
+    _q_emb = _q_values[0]
     _q_blob = serialize_f32(_q_emb)
 
     fts_results = search_fts(conn, query, limit=_CANDIDATE_POOL, include_directives=include_directives)

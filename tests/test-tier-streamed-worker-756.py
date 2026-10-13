@@ -178,6 +178,7 @@ class TestStreamedWorker(unittest.TestCase):
             self.modules[name] = module
             return module
 
+        load("memory_budget")
         target_module = load("embedding_target")
         self.target = target_module.EmbeddingTarget("custom", "synthetic/worker", 2, "custom")
         self.vector = types.ModuleType("synthetic_streamed_vector")

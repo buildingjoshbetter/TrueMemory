@@ -126,6 +126,7 @@ __all__ = [
     "predictive", "query_classifier", "reranker", "hyde", "clustering",
     "tier_config",
     "embedding_target", "maintenance", "rebuild_source", "tier_switch",
+    "memory_budget",
 ]
 
 

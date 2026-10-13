@@ -54,7 +54,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from truememory._platform import _env_int
+from truememory.memory_budget import LocalMemoryPolicy
 from truememory.storage import _deserialize_metadata, select_message_cols
+
+_LOCAL_MEMORY_POLICY = LocalMemoryPolicy()
 
 if TYPE_CHECKING:
     from truememory.embedding_target import EmbeddingTarget
@@ -267,6 +270,10 @@ def get_model():
     Local loading requires explicit TRUEMEMORY_NO_MODEL_SERVER=1.
     """
     global _model, _embedding_dim
+    configured_memory = "_LOCAL_MEMORY_POLICY" in globals()
+    if configured_memory:
+        from truememory.memory_budget import validate_local_policy
+        validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
     if _model is not None:
         return _model  # Fast path, no lock needed
     from truememory.tier_switch.runtime import require_model_load_allowed
@@ -291,71 +298,87 @@ def get_model():
 
             from truememory.mps_utils import ensure_mps_memory_budget, resolve_device
 
-            resolved = EMBEDDING_MODEL
-            if resolved == "model2vec":
-                from model2vec import StaticModel
-                _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
-                _embedding_dim = 256
-            elif resolved == "minilm":
-                device = resolve_device(None)
-                ensure_mps_memory_budget(device)
-                from sentence_transformers import SentenceTransformer
-                _model = SentenceTransformer("all-MiniLM-L6-v2", device=device)
-                _embedding_dim = 384
-            elif resolved == "bge-small":
-                device = resolve_device(None)
-                ensure_mps_memory_budget(device)
-                from sentence_transformers import SentenceTransformer
-                _model = SentenceTransformer("BAAI/bge-small-en-v1.5", device=device)
-                _embedding_dim = 384
-            elif resolved == "qwen3_256":
-                device = resolve_device(None)
-                ensure_mps_memory_budget(device)
-                from sentence_transformers import SentenceTransformer
-                import sys as _sys
-                _mkwargs = {}
-                if _sys.platform == "darwin":
-                    _mkwargs["attn_implementation"] = "eager"
-                _model = SentenceTransformer(
-                    "Qwen/Qwen3-Embedding-0.6B",
-                    truncate_dim=256,
-                    model_kwargs=_mkwargs or None,
-                    device=device,
+            budget_owner = None
+            if configured_memory:
+                from truememory.memory_budget import (
+                    ProfileKey, allocation_scope, bind_model_owner, configured_local_owner,
                 )
-                _embedding_dim = 256
-            elif resolved not in _MODEL_DIMS:
-                # Custom tier: load arbitrary SentenceTransformer model.
-                # Requires TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 (enforced by
-                # tier_config.resolve_custom_tier at config time).
-                if os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "").strip() != "1":
-                    logger.warning(
-                        "Custom model %r requested without "
-                        "TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 -- "
-                        "falling back to model2vec.",
-                        resolved,
-                    )
-                    from model2vec import StaticModel
-                    _model = StaticModel.from_pretrained(
-                        "minishlab/potion-base-8M", force_download=False
-                    )
-                    _embedding_dim = 256
-                else:
-                    from truememory.tier_config import resolve_custom_tier
-                    cfg = resolve_custom_tier()
-                    custom_dim = cfg["embed_dim"]
-                    device = resolve_device(None)
-                    ensure_mps_memory_budget(device)
-                    from sentence_transformers import SentenceTransformer
-                    _model = SentenceTransformer(
-                        resolved, truncate_dim=custom_dim,
-                        trust_remote_code=False,
-                        device=device,
-                    )
-                    _embedding_dim = custom_dim
-            else:
-                from model2vec import StaticModel
-                _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
-                _embedding_dim = 256
+                budget_owner = configured_local_owner(globals()["_LOCAL_MEMORY_POLICY"], kind="local_embedding")
+            try:
+                with allocation_scope(budget_owner) if configured_memory else nullcontext() as memory:
+                    if memory is not None:
+                        memory.charge(ProfileKey("local embedding construction", "local_embedding"))
+                    resolved = EMBEDDING_MODEL
+                    if resolved == "model2vec":
+                        from model2vec import StaticModel
+                        _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
+                        _embedding_dim = 256
+                    elif resolved == "minilm":
+                        device = resolve_device(None)
+                        ensure_mps_memory_budget(device)
+                        from sentence_transformers import SentenceTransformer
+                        _model = SentenceTransformer("all-MiniLM-L6-v2", device=device)
+                        _embedding_dim = 384
+                    elif resolved == "bge-small":
+                        device = resolve_device(None)
+                        ensure_mps_memory_budget(device)
+                        from sentence_transformers import SentenceTransformer
+                        _model = SentenceTransformer("BAAI/bge-small-en-v1.5", device=device)
+                        _embedding_dim = 384
+                    elif resolved == "qwen3_256":
+                        device = resolve_device(None)
+                        ensure_mps_memory_budget(device)
+                        from sentence_transformers import SentenceTransformer
+                        import sys as _sys
+                        _mkwargs = {}
+                        if _sys.platform == "darwin":
+                            _mkwargs["attn_implementation"] = "eager"
+                        _model = SentenceTransformer(
+                            "Qwen/Qwen3-Embedding-0.6B",
+                            truncate_dim=256,
+                            model_kwargs=_mkwargs or None,
+                            device=device,
+                        )
+                        _embedding_dim = 256
+                    elif resolved not in _MODEL_DIMS:
+                        # Custom tier: load arbitrary SentenceTransformer model.
+                        # Requires TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 (enforced by
+                        # tier_config.resolve_custom_tier at config time).
+                        if os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "").strip() != "1":
+                            logger.warning(
+                                "Custom model %r requested without "
+                                "TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 -- "
+                                "falling back to model2vec.",
+                                resolved,
+                            )
+                            from model2vec import StaticModel
+                            _model = StaticModel.from_pretrained(
+                                "minishlab/potion-base-8M", force_download=False
+                            )
+                            _embedding_dim = 256
+                        else:
+                            from truememory.tier_config import resolve_custom_tier
+                            cfg = resolve_custom_tier()
+                            custom_dim = cfg["embed_dim"]
+                            device = resolve_device(None)
+                            ensure_mps_memory_budget(device)
+                            from sentence_transformers import SentenceTransformer
+                            _model = SentenceTransformer(
+                                resolved, truncate_dim=custom_dim,
+                                trust_remote_code=False,
+                                device=device,
+                            )
+                            _embedding_dim = custom_dim
+                    else:
+                        from model2vec import StaticModel
+                        _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
+                        _embedding_dim = 256
+                    if budget_owner is not None:
+                        bind_model_owner(_model, budget_owner)
+            except BaseException:
+                if budget_owner is not None:
+                    budget_owner.close()
+                raise
     return _model
 
 
@@ -363,10 +386,15 @@ _prepared_target_slot = threading.Lock()
 
 
 def _load_frozen_embedding_target(target: EmbeddingTarget, *, timeout: float | None = None) -> object:
+    from contextlib import nullcontext
     from truememory.embedding_target import TARGET_PROBE_TEXT, build_target_model, check_target_vectors
     from truememory.model_client import EmbeddingProxy, PreparedEmbeddingProxy, use_model_server
     from truememory.mps_utils import _own_model, resolve_device
 
+    configured_memory = "_LOCAL_MEMORY_POLICY" in globals()
+    if configured_memory:
+        from truememory.memory_budget import validate_local_policy
+        validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
     expires = _target_deadline(timeout)
     target.check_configuration()
     if use_model_server():
@@ -392,14 +420,50 @@ def _load_frozen_embedding_target(target: EmbeddingTarget, *, timeout: float | N
         return proxy
     if not _prepared_target_slot.acquire(blocking=False):
         raise RuntimeError("Another prepared embedding target lease is active")
+    budget_owner = None
     try:
-        encoder = build_target_model(target, resolve_device(None), check=lambda: _target_remaining(expires))
-        with _own_model(encoder, remaining=lambda: _target_remaining(expires)):
-            _target_remaining(expires)
-            values = encoder.encode([TARGET_PROBE_TEXT], batch_size=1, show_progress_bar=False)
-            _target_remaining(expires)
-            check_target_vectors(target, np.asarray(values, dtype=np.float32), 1)
+        if configured_memory:
+            from truememory.memory_budget import (
+                ProfileKey, allocation_scope, bind_model_owner, configured_local_owner,
+                model_operation_scope,
+            )
+            budget_owner = configured_local_owner(globals()["_LOCAL_MEMORY_POLICY"], kind="local_prepared_embedding")
+        with allocation_scope(budget_owner) if configured_memory else nullcontext() as memory:
+            device = resolve_device(None)
+            if memory is not None:
+                memory.charge(ProfileKey("local prepared construction", "local_prepared_embedding",
+                                         model_identity=target.identity, device=device),
+                              deadline=lambda: _target_remaining(expires))
+            encoder = build_target_model(target, device, check=lambda: _target_remaining(expires))
+            if budget_owner is not None:
+                bind_model_owner(encoder, budget_owner)
+            if configured_memory:
+                scope = model_operation_scope(
+                    encoder, ProfileKey("local prepared probe", "local_prepared_embedding",
+                                        model_identity=target.identity, input_item_count=1, batch_size=1),
+                    deadline=lambda: _target_remaining(expires),
+                )
+            else:
+                scope = nullcontext()
+            with scope as memory:
+                with _own_model(encoder, remaining=lambda: _target_remaining(expires)):
+                    _target_remaining(expires)
+                    if memory is not None:
+                        memory.charge(ProfileKey("local probe result", "local_prepared_embedding",
+                                                 native_tensor_shape=(1, target.dimension)),
+                                      known_bytes=target.dimension * 4, retained_bytes=target.dimension * 4,
+                                      deadline=lambda: _target_remaining(expires), group="result assembly")
+                    values = encoder.encode([TARGET_PROBE_TEXT], batch_size=1, show_progress_bar=False)
+                    _target_remaining(expires)
+                    values = np.asarray(values, dtype=np.float32)
+                    check_target_vectors(target, values, 1)
+                    if memory is not None:
+                        memory.retain_buffer(values, deadline=lambda: _target_remaining(expires))
         return encoder
+    except BaseException:
+        if budget_owner is not None:
+            budget_owner.close()
+        raise
     finally:
         _prepared_target_slot.release()
 
@@ -495,9 +559,14 @@ class _PreparedEmbeddingLease:
     def encode(
         self, texts: str | list[str], *, timeout: float | None = None, batch_size: int = 32,
     ) -> np.ndarray:
+        from contextlib import nullcontext
         from truememory.embedding_target import TARGET_PROBE_TEXT, check_target_vectors
         from truememory.mps_utils import _own_model
 
+        configured_memory = "_LOCAL_MEMORY_POLICY" in globals()
+        if configured_memory:
+            from truememory.memory_budget import validate_local_policy
+            validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
         expires = _target_deadline(timeout)
         if type(batch_size) is not int or batch_size <= 0:
             raise ValueError("batch_size must be a positive integer")
@@ -523,18 +592,38 @@ class _PreparedEmbeddingLease:
                 return encoder.encode(texts, timeout=remaining, batch_size=batch_size)
             # The local tier worker owns its retry policy. Preserve exact-model
             # exclusion without adding an independent native recovery loop.
-            with _own_model(encoder, remaining=lambda: _target_remaining(expires)):
-                self.target.check_configuration()
-                _target_remaining(expires)
-                probe = not texts
-                values = encoder.encode(
-                    [TARGET_PROBE_TEXT] if probe else texts,
-                    batch_size=batch_size, show_progress_bar=False,
+            probe = not texts
+            count = 1 if probe else len(texts)
+            if configured_memory:
+                from truememory.memory_budget import ProfileKey, model_operation_scope
+                scope = model_operation_scope(
+                    encoder, ProfileKey("local prepared forward", "local_prepared_embedding",
+                                        model_identity=self.target.identity, input_item_count=count,
+                                        batch_size=batch_size),
+                    deadline=lambda: _target_remaining(expires),
                 )
-                _target_remaining(expires)
-                values = np.asarray(values, dtype=np.float32)
-                check_target_vectors(self.target, values, 1 if probe else len(texts))
-                return values[:0] if probe else values
+            else:
+                scope = nullcontext()
+            with scope as memory:
+                with _own_model(encoder, remaining=lambda: _target_remaining(expires)):
+                    self.target.check_configuration()
+                    _target_remaining(expires)
+                    if memory is not None:
+                        payload_bytes = count * self.target.dimension * 4
+                        memory.charge(ProfileKey("local prepared result", "local_prepared_embedding",
+                                                 native_tensor_shape=(count, self.target.dimension)),
+                                      known_bytes=payload_bytes, retained_bytes=payload_bytes,
+                                      deadline=lambda: _target_remaining(expires), group="result assembly")
+                    values = encoder.encode(
+                        [TARGET_PROBE_TEXT] if probe else texts,
+                        batch_size=batch_size, show_progress_bar=False,
+                    )
+                    _target_remaining(expires)
+                    values = np.asarray(values, dtype=np.float32)
+                    check_target_vectors(self.target, values, count)
+                    if memory is not None:
+                        memory.retain_buffer(values, deadline=lambda: _target_remaining(expires))
+                    return values[:0] if probe else values
         finally:
             encoder = None
             with self._state_lock:
@@ -595,10 +684,15 @@ def prepare_embedding_target(
     target: EmbeddingTarget, *, timeout: float | None = None,
 ) -> Iterator[_PreparedEmbeddingLease]:
     """Prepare outside SQLite transactions; never activate a tier or expose weights."""
+    from contextlib import nullcontext
     from truememory.embedding_target import EmbeddingTarget, TARGET_PROBE_TEXT, build_target_model
     from truememory.model_client import PreparedEmbeddingProxy, use_model_server
     from truememory.mps_utils import resolve_device
 
+    configured_memory = "_LOCAL_MEMORY_POLICY" in globals()
+    if configured_memory:
+        from truememory.memory_budget import validate_local_policy
+        validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
     if not isinstance(target, EmbeddingTarget):
         raise TypeError("Expected an immutable EmbeddingTarget")
     expires = _target_deadline(timeout)
@@ -631,7 +725,25 @@ def prepare_embedding_target(
             if encoder is None:
                 device = resolve_device(None)
                 _target_remaining(expires)
-                encoder = build_target_model(target, device, check=lambda: _target_remaining(expires))
+                budget_owner = None
+                if configured_memory:
+                    from truememory.memory_budget import (
+                        ProfileKey, allocation_scope, bind_model_owner, configured_local_owner,
+                    )
+                    budget_owner = configured_local_owner(globals()["_LOCAL_MEMORY_POLICY"], kind="local_prepared_embedding")
+                try:
+                    with allocation_scope(budget_owner) if configured_memory else nullcontext() as memory:
+                        if memory is not None:
+                            memory.charge(ProfileKey("local prepared construction", "local_prepared_embedding",
+                                                     model_identity=target.identity, device=device),
+                                          deadline=lambda: _target_remaining(expires))
+                        encoder = build_target_model(target, device, check=lambda: _target_remaining(expires))
+                        if budget_owner is not None:
+                            bind_model_owner(encoder, budget_owner)
+                except BaseException:
+                    if budget_owner is not None:
+                        budget_owner.close()
+                    raise
                 _target_remaining(expires)
         lease = _PreparedEmbeddingLease(
             target, encoder, shared=shared,
@@ -1172,6 +1284,19 @@ def _is_mps_oom(exc: Exception) -> bool:
 
 def _encode_with_mps_fallback(model, texts, **kwargs):
     """Encode texts with MPS OOM fallback. Thread-safe device transitions."""
+    if "_LOCAL_MEMORY_POLICY" in globals():
+        from truememory.memory_budget import (
+            ProfileKey, budgeted_encode_with_mps_fallback, validate_local_policy,
+        )
+        validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
+        count = 1 if type(texts) is str else len(texts) if type(texts) in (list, tuple) else None
+        batch_size = kwargs.get("batch_size")
+        return budgeted_encode_with_mps_fallback(
+            model, texts, ProfileKey("local embedding operation", "local_embedding",
+                                     input_item_count=count,
+                                     batch_size=batch_size if type(batch_size) is int and batch_size >= 0 else None),
+            native_kwargs=kwargs,
+        )
     from truememory.mps_utils import encode_with_mps_fallback
     return encode_with_mps_fallback(model, texts, **kwargs)
 
@@ -1695,6 +1820,10 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
             if sep_normed is not None:
                 separation = serialize_f32(sep_normed)
     except Exception as _serving_error:
+        if "_LOCAL_MEMORY_POLICY" in globals():
+            from truememory.memory_budget import InvalidAllocationPlan, MemoryAdmissionRefused, StaleBudgetOwner
+            if isinstance(_serving_error, (MemoryAdmissionRefused, StaleBudgetOwner, InvalidAllocationPlan)):
+                raise
         from truememory.tier_switch.runtime import raise_if_serving_rejection
         raise_if_serving_rejection(_serving_error)
         logger.warning("Failed to prepare separation vector during incremental publication", exc_info=True)

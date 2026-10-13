@@ -38,6 +38,10 @@ from types import ModuleType
 
 import numpy as np
 
+from truememory.memory_budget import LocalMemoryPolicy
+
+_LOCAL_MEMORY_POLICY = LocalMemoryPolicy()
+
 logger = logging.getLogger(__name__)
 
 
@@ -396,8 +400,20 @@ def search_clustered(
     from truememory.vector_search import get_model
     from truememory.mps_utils import encode_with_model_ownership
 
+    configured_memory = "_LOCAL_MEMORY_POLICY" in globals()
+    if configured_memory:
+        from truememory.memory_budget import (
+            ProfileKey, budgeted_encode_with_model_ownership, validate_local_policy,
+        )
+        validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
     model = get_model()
-    query_vec = encode_with_model_ownership(model, [query])[0].astype(np.float32)
+    if configured_memory:
+        values = budgeted_encode_with_model_ownership(
+            model, [query], ProfileKey("cluster query embedding", "local_embedding", input_item_count=1),
+        )
+    else:
+        values = encode_with_model_ownership(model, [query])
+    query_vec = values[0].astype(np.float32)
 
     # Keep centroids, memberships, vectors and winner content in one snapshot.
     # Encoding completes before we open an owned read transaction.

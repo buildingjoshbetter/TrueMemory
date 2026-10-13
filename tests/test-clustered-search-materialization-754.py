@@ -8,6 +8,7 @@ import math
 import random
 import sqlite3
 import struct
+import sys
 import tempfile
 import types
 import unittest
@@ -228,11 +229,19 @@ def load_clustering() -> tuple[types.ModuleType, types.SimpleNamespace]:
             return NUMPY
         if name == "truememory.vector_search":
             return vector
+        if name == "truememory.memory_budget":
+            return memory_budget
         if name == "truememory.mps_utils":
             return types.SimpleNamespace(encode_with_model_ownership=encode)
         if name == "truememory" or name.startswith("truememory."):
             raise AssertionError("unexpected application import")
         return builtins.__import__(name, globals, locals, fromlist, level)
+
+    memory_budget = types.ModuleType("synthetic_cluster_memory_budget")
+    sys.modules[memory_budget.__name__] = memory_budget
+    memory_budget.__dict__["__builtins__"] = dict(vars(builtins), __import__=synthetic_import)
+    budget_path = ROOT / "truememory/memory_budget.py"
+    exec(compile(budget_path.read_text(), str(budget_path), "exec"), memory_budget.__dict__)
 
     module = types.ModuleType("synthetic_clustering")
     module.__dict__["__builtins__"] = dict(vars(builtins), __import__=synthetic_import)

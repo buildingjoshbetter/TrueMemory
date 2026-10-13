@@ -405,22 +405,36 @@ def admit_capture(source: str, session_id: str, user_id: str = "", db_path: str 
     if original.is_symlink():
         raise CompletionError("source_link")
     try:
-        fd = os.open(original, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        with os.fdopen(fd, "rb") as handle:
-            before_stat = os.fstat(handle.fileno())
-            _source_owned(before_stat, handle.fileno())
-            before = _file_identity(before_stat)
-            if before[2] > MAX_CAPTURE_BYTES:
-                raise CompletionError("capture_limit")
-            data = handle.read(MAX_CAPTURE_BYTES + 1)
-            after_stat = os.fstat(handle.fileno())
-            _source_owned(after_stat, handle.fileno())
-            after = _file_identity(after_stat)
-        fd = os.open(original, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        with os.fdopen(fd, "rb") as handle:
-            path_stat = os.fstat(handle.fileno())
-            _source_owned(path_stat, handle.fileno())
-            path_after = _file_identity(path_stat)
+        fd = os.open(original, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+        try:
+            before_stat = os.fstat(fd)
+            _source_owned(before_stat, fd)
+            handle = os.fdopen(fd, "rb")
+            fd = None
+            with handle:
+                before = _file_identity(before_stat)
+                if before[2] > MAX_CAPTURE_BYTES:
+                    raise CompletionError("capture_limit")
+                data = handle.read(MAX_CAPTURE_BYTES + 1)
+                after_stat = os.fstat(handle.fileno())
+                _source_owned(after_stat, handle.fileno())
+                after = _file_identity(after_stat)
+        finally:
+            if fd is not None:
+                os.close(fd)
+        fd = os.open(original, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+        try:
+            path_stat = os.fstat(fd)
+            _source_owned(path_stat, fd)
+            handle = os.fdopen(fd, "rb")
+            fd = None
+            with handle:
+                path_after = _file_identity(path_stat)
+        finally:
+            if fd is not None:
+                os.close(fd)
     except CompletionError:
         raise
     except OSError as error:

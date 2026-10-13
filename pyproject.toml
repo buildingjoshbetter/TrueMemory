@@ -61,6 +61,7 @@ all = ["truememory[agentic,clustering]"]
 truememory-mcp = "truememory.mcp_server:main"
 truememory-ingest = "truememory.ingest.cli:main"
 truememory-model-server = "truememory.model_server:main"
+truememory-model-server-capped = "truememory_memory_bootstrap:main"
 
 [tool.setuptools.package-data]
 truememory = ["assets/*.icns"]
@@ -98,6 +99,9 @@ select = ["E4", "E7", "E9", "F"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["truememory"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"truememory_memory_bootstrap.py" = "truememory_memory_bootstrap.py"
 
 # CLAUDE_TEMPLATE.md lives inside the package at truememory/ingest/CLAUDE_TEMPLATE.md
 # so it's auto-included in the wheel — no force-include needed.

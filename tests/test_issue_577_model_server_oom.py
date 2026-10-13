@@ -807,6 +807,10 @@ class TestIssue577ClientDeadline:
         )
 
 
+class _SyntheticLocalEmbeddingModel:
+    __slots__ = ("__weakref__",)
+
+
 class TestIssue739LocalEmbeddingDevice(unittest.TestCase):
     """Exercise real local routing and device resolution with synthetic factories."""
 
@@ -819,7 +823,7 @@ class TestIssue739LocalEmbeddingDevice(unittest.TestCase):
         self.static_calls: list[tuple[str, dict]] = []
         self.availability_calls: list[str] = []
         self.available = {"cuda": True, "mps": True}
-        self.local_model = object()
+        self.local_model = _SyntheticLocalEmbeddingModel()
         self.proxy = object()
 
         def transformer(name: str, **kwargs: object) -> object:
@@ -869,6 +873,7 @@ class TestIssue739LocalEmbeddingDevice(unittest.TestCase):
 
     def load(self, model_id: str, override: str | None) -> object:
         self.vector_search._model = None
+        self.local_model = _SyntheticLocalEmbeddingModel()
         self.vector_search.EMBEDDING_MODEL = model_id
         self.vector_search._embedding_dim = -1
         self.transformer_calls.clear()

@@ -14,6 +14,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Callable, NamedTuple
 
+from truememory.memory_budget import DEFAULT_LOCAL_MEMORY_POLICY
 from truememory.tier_switch.cache import VectorCacheRegistry
 from truememory.tier_switch.throttler import DynamicThrottler
 
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
     from truememory.embedding_target import EmbeddingTarget
     from truememory.tier_switch.source import TierSourcePlan
     from truememory.vector_search import _PreparedEmbeddingLease
+
+_LOCAL_MEMORY_POLICY = DEFAULT_LOCAL_MEMORY_POLICY
 
 log = logging.getLogger(__name__)
 
@@ -197,6 +200,10 @@ class RebuildWorker:
                     except _SourceStopped:
                         raise
                     except Exception as error:
+                        if "_LOCAL_MEMORY_POLICY" in globals():
+                            from truememory.memory_budget import InvalidAllocationPlan, MemoryAdmissionRefused, StaleBudgetOwner
+                            if isinstance(error, (MemoryAdmissionRefused, StaleBudgetOwner, InvalidAllocationPlan)):
+                                raise
                         # No DB queries, status updates or retries after uncertain
                         # rollback. The caller must discard this connection.
                         if (self.conn.in_transaction or (publishing and
@@ -403,6 +410,10 @@ class RebuildWorker:
                         ),
                     )
                 except Exception as exc:
+                    if "_LOCAL_MEMORY_POLICY" in globals():
+                        from truememory.memory_budget import InvalidAllocationPlan, MemoryAdmissionRefused, StaleBudgetOwner
+                        if isinstance(exc, (MemoryAdmissionRefused, StaleBudgetOwner, InvalidAllocationPlan)):
+                            raise
                     # run() owns a clean connection. An active transaction here
                     # means rollback did not restore that boundary.
                     if self.conn.in_transaction:
@@ -486,10 +497,23 @@ class RebuildWorker:
         """Prepare both embeddings, then publish their pair and checkpoint atomically."""
         from truememory.mps_utils import encode_with_model_ownership
 
+        configured_memory = "_LOCAL_MEMORY_POLICY" in globals()
+        if configured_memory:
+            from truememory.memory_budget import (
+                ProfileKey, budgeted_encode_with_model_ownership, validate_local_policy,
+            )
+            validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
         texts = [m["content"] for m in batch]
         ids = [m["id"] for m in batch]
 
-        embeddings = encode_with_model_ownership(model, texts, show_progress_bar=False)
+        if configured_memory:
+            embeddings = budgeted_encode_with_model_ownership(
+                model, texts, ProfileKey("rebuild completion embedding", "local_embedding",
+                                         input_item_count=len(texts)),
+                native_kwargs={"show_progress_bar": False},
+            )
+        else:
+            embeddings = encode_with_model_ownership(model, texts, show_progress_bar=False)
         if len(embeddings) != len(ids):
             raise ValueError("Completion embedding count does not match the rebuild batch")
         completion_rows = [(mid, serialize_f32(emb)) for mid, emb in zip(ids, embeddings)]
@@ -504,7 +528,15 @@ class RebuildWorker:
             )
             for m in batch
         ]
-        sep_embeddings = encode_with_model_ownership(model, sep_texts, show_progress_bar=False)
+        if configured_memory:
+            validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
+            sep_embeddings = budgeted_encode_with_model_ownership(
+                model, sep_texts, ProfileKey("rebuild separation embedding", "local_embedding",
+                                             input_item_count=len(sep_texts)),
+                native_kwargs={"show_progress_bar": False},
+            )
+        else:
+            sep_embeddings = encode_with_model_ownership(model, sep_texts, show_progress_bar=False)
         if len(sep_embeddings) != len(ids):
             raise ValueError("Separation embedding count does not match the rebuild batch")
         separation_rows = [(mid, serialize_f32(emb)) for mid, emb in zip(ids, sep_embeddings)]

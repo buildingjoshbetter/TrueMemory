@@ -12,6 +12,7 @@ Set TRUEMEMORY_NO_MODEL_SERVER=1 at process startup for explicit local loading.
 
 import base64
 import json
+import itertools
 import logging
 import os
 import platform
@@ -84,6 +85,7 @@ _REQUEST_TIMEOUT = 120.0
 # Code hooks) set a short deadline via set_request_timeout() so a contended
 # server fast-fails and the caller's FTS-only fallback can trigger.
 _default_request_timeout: float | None = None
+_decoded_array_groups = itertools.count()
 
 
 def set_request_timeout(timeout: float | None) -> None:
@@ -101,8 +103,20 @@ def set_request_timeout(timeout: float | None) -> None:
 def _json_object_hook(obj):
     """Decode base64-encoded numpy arrays from JSON."""
     if "__ndarray__" in obj:
+        from truememory.memory_budget import ProfileKey, current_session
+        memory = current_session()
+        encoded = obj["__ndarray__"]
+        if memory is not None and type(encoded) is str:
+            decoded_bound = 3 * ((len(encoded) + 3) // 4)
+            memory.charge(ProfileKey("client ndarray decode", "model_client",
+                                     native_tensor_shape=(len(encoded),)),
+                          known_bytes=len(encoded) + decoded_bound,
+                          group=f"client decoded array:{next(_decoded_array_groups)}")
         data = base64.b64decode(obj["__ndarray__"])
-        return np.frombuffer(data, dtype=np.dtype(obj["dtype"])).reshape(obj["shape"])
+        values = np.frombuffer(data, dtype=np.dtype(obj["dtype"])).reshape(obj["shape"])
+        if memory is not None:
+            memory.retain_buffer(values)
+        return values
     return obj
 
 _APP_BUNDLE_PATH = _TRUEMEMORY_DIR / "TrueMemory.app"
@@ -237,8 +251,11 @@ def _server_ready() -> bool:
 
 def _probe_server(deadline: float) -> bool:
     """Validate transport/auth/protocol without renewing the caller's budget."""
+    policy = _required_capped_policy() if "TRUEMEMORY_REQUIRE_PROCESS_MEMORY_CAP" in os.environ else None
     if not _server_ready():
         return False
+    if policy is not None:
+        _verify_retained_capped_server(policy, deadline)
     try:
         response = _send_request({"op": "ping"}, timeout=min(0.2, _remaining(deadline)))
     except ModelServerBusyError:
@@ -253,6 +270,12 @@ def _probe_server(deadline: float) -> bool:
 
 
 def _write_start_claim(claim: dict) -> None:
+    if "TRUEMEMORY_REQUIRE_PROCESS_MEMORY_CAP" in os.environ:
+        from truememory_memory_bootstrap import _validate_claim, _write_console_claim
+        _required_capped_policy()
+        _validate_claim(claim, pending=True)
+        _write_console_claim(START_STATE_PATH, claim)
+        return
     temporary = START_STATE_PATH.with_name(START_STATE_PATH.name + "." + secrets.token_hex(8) + ".tmp")
     fd = os.open(str(temporary), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
@@ -272,6 +295,18 @@ def _launch_is_pending(claim: dict | None) -> bool:
 
 def _spawn_server(generation: str, deadline: float) -> subprocess.Popen:
     _remaining(deadline)
+    if "TRUEMEMORY_REQUIRE_PROCESS_MEMORY_CAP" in os.environ:
+        from truememory_memory_bootstrap import (
+            EnforcementUnavailable, _physical_total, launch_owned_linux,
+            plan_required_linux_launch, required_cap_selected,
+        )
+        required_cap_selected(os.environ)
+        if sys.platform != "linux":
+            raise EnforcementUnavailable("Required pre-exec memory cap is unsupported on this platform")
+        total = None if "TRUEMEMORY_MODEL_SERVER_MAX_RSS_MB" in os.environ else _physical_total()
+        policy = plan_required_linux_launch(os.environ, physical_total=total)
+        return launch_owned_linux(policy, generation=generation,
+                                  python_executable=os.path.abspath(sys.executable), deadline=deadline)
     app_exe = _ensure_app_bundle(deadline)
     env = os.environ.copy()
     env[_MODEL_SERVER_GENERATION_ENV] = generation
@@ -299,12 +334,33 @@ def _start_server(wait_timeout: float | None = None) -> bool:
     separate lifetime bind lock. A timed-out caller leaves its live child
     claimed, so concurrent or later clients wait instead of spawning copies.
     """
+    required_started = time.monotonic() if "TRUEMEMORY_REQUIRE_PROCESS_MEMORY_CAP" in os.environ else None
+    required_cap = False
+    required_policy = None
+    if "TRUEMEMORY_REQUIRE_PROCESS_MEMORY_CAP" in os.environ:
+        from truememory_memory_bootstrap import (
+            EnforcementUnavailable, _physical_total, plan_required_linux_launch,
+            required_cap_selected,
+        )
+        required_cap = required_cap_selected(os.environ)
+        if sys.platform != "linux":
+            raise EnforcementUnavailable("Required pre-exec memory cap is unsupported on this platform")
+        total = None if "TRUEMEMORY_MODEL_SERVER_MAX_RSS_MB" in os.environ else _physical_total()
+        required_policy = plan_required_linux_launch(os.environ, physical_total=total)
+        if not use_model_server():
+            raise EnforcementUnavailable("Required capped daemon cannot use local-model mode")
     if not use_model_server():
         return False
     wait = _SERVER_START_TIMEOUT if wait_timeout is None else min(_SERVER_START_TIMEOUT, max(wait_timeout, 0.0))
     if wait <= 0:
         return False
-    deadline = time.monotonic() + wait
+    deadline = (required_started if required_started is not None else time.monotonic()) + wait
+    if required_cap:
+        from truememory_memory_bootstrap import _required_linux_support
+        _required_linux_support(required_policy, deadline)
+        if _probe_server(deadline):
+            _verify_retained_capped_server(required_policy, deadline)
+            return True
     launched = False
     try:
         _TRUEMEMORY_DIR.mkdir(parents=True, exist_ok=True)
@@ -314,12 +370,16 @@ def _start_server(wait_timeout: float | None = None) -> bool:
             pass
         while time.monotonic() < deadline:
             if _probe_server(deadline):
+                if required_cap:
+                    _verify_retained_capped_server(required_policy, deadline)
                 return True
             _remaining(deadline)
             gate = try_file_lock(START_LOCK_PATH)
             if gate is not None:
                 try:
                     if _probe_server(deadline):
+                        if required_cap:
+                            _verify_retained_capped_server(required_policy, deadline)
                         return True
                     _remaining(deadline)
                     bind = try_file_lock(LOCK_PATH)
@@ -348,12 +408,20 @@ def _start_server(wait_timeout: float | None = None) -> bool:
                                 child_born = process_birth(child.pid)
                                 if child_born is None:
                                     raise OSError("Model server exited before startup")
+                                if required_cap and (type(child_born) is not float or child_born != child.record.identity.birth_time):
+                                    raise OSError("Actual model-server process birth differs from capped launch identity")
+                                if required_cap and child.record.identity.cap_bytes != required_policy.cap_bytes:
+                                    raise OSError("Capped launch ceiling changed during startup")
                                 claim["child"] = {"pid": child.pid, "born": child_born}
                                 _write_start_claim(claim)
+                                if required_cap:
+                                    child.release_after_claim(claim, deadline=deadline)
+                                    _retain_owned_capped_launch(child)
                             except (OSError, TimeoutError):
                                 # Invalidate this generation; a late child must
                                 # not publish after its launch failed.
-                                START_STATE_PATH.unlink(missing_ok=True)
+                                if not required_cap:
+                                    START_STATE_PATH.unlink(missing_ok=True)
                                 raise
                 finally:
                     os.close(gate)
@@ -366,6 +434,59 @@ def _start_server(wait_timeout: float | None = None) -> bool:
         log.warning("Shared model-server startup unavailable (%s)", type(error).__name__)
     log.warning("Shared model server unavailable within %.2fs; retry or inspect model_server.stderr", wait)
     return False
+
+
+_owned_capped_launches: list[object] = []
+
+
+def _required_capped_policy() -> object | None:
+    if "TRUEMEMORY_REQUIRE_PROCESS_MEMORY_CAP" not in os.environ:
+        return None
+    from truememory_memory_bootstrap import (
+        EnforcementUnavailable, _physical_total, plan_required_linux_launch, required_cap_selected,
+    )
+    required_cap_selected(os.environ)
+    if sys.platform != "linux":
+        raise EnforcementUnavailable("Required pre-exec memory cap is unsupported on this platform")
+    total = None if "TRUEMEMORY_MODEL_SERVER_MAX_RSS_MB" in os.environ else _physical_total()
+    policy = plan_required_linux_launch(os.environ, physical_total=total)
+    if not use_model_server():
+        raise EnforcementUnavailable("Required capped daemon cannot use local-model mode")
+    return policy
+
+
+def _verify_retained_capped_server(policy: object, deadline: float) -> None:
+    """Current readonly proof; joining never grants launch or stop authority."""
+    from truememory_memory_bootstrap import (
+        EnforcementUnavailable, _validate_claim, inspect_existing_owned_linux,
+    )
+    claim = read_start_claim(START_STATE_PATH)
+    _validate_claim(claim)
+    child = claim["child"]
+    observed_birth = process_birth(child["pid"])
+    if type(observed_birth) is not float or observed_birth != child["born"]:
+        raise EnforcementUnavailable("Required daemon current birth differs from its claim")
+    inspect_existing_owned_linux(policy, pid=child["pid"], birth_time=observed_birth,
+                                 generation=claim["generation"], claim=claim, deadline=deadline)
+    _remaining(deadline)
+
+
+def _retain_owned_capped_launch(handle: object) -> None:
+    """Retain native resources; an uncertain lifetime never triggers a live stop."""
+    import select
+    import threading
+    from truememory_memory_bootstrap import stop_owned_exact
+    _owned_capped_launches.append(handle)
+
+    def observe_exit() -> None:
+        try:
+            while not select.select([handle.record.pidfd], [], [], 1.0)[0]:
+                pass
+            stop_owned_exact(handle, deadline=time.monotonic() + 30.0)
+        except (OSError, RuntimeError, ValueError, TypeError, TimeoutError) as error:
+            log.warning("Capped daemon terminal evidence unresolved (%s)", type(error).__name__)
+
+    threading.Thread(target=observe_exit, name="truememory-capped-owner", daemon=True).start()
 
 
 def _remaining(deadline: float | None) -> float | None:
@@ -436,33 +557,43 @@ def _send_request(request: dict, timeout: float | None = None) -> dict:
     lock and a full encode.
     """
     deadline = None if timeout is None else time.monotonic() + timeout
-    sock = _connect(deadline)
-    try:
-        payload = request
-        if timeout is not None and "deadline" not in payload:
-            # Server checks this wall-clock epoch deadline before encode (M-44).
-            payload = {**request, "deadline": time.time() + max(_remaining(deadline), 0.0)}
-        data = json.dumps(payload).encode("utf-8")
-        header = struct.pack(_HEADER_FMT, len(data))
-        sock.settimeout(_remaining(deadline) if deadline is not None else _REQUEST_TIMEOUT)
+    from truememory.memory_budget import ProfileKey, cooperative_scope
+    with cooperative_scope() as memory:
+        sock = _connect(deadline)
         try:
-            sock.sendall(header + data)
-        except OSError:
-            # A bounded server may reject the header before our full send ends.
-            # Preserve that explicit error without mistaking overload for death.
-            recovery_deadline = time.monotonic() + 0.25
-            if deadline is not None:
-                recovery_deadline = min(recovery_deadline, deadline)
+            payload = request
+            if timeout is not None and "deadline" not in payload:
+                # Server checks this wall-clock epoch deadline before encode (M-44).
+                payload = {**request, "deadline": time.time() + max(_remaining(deadline), 0.0)}
+            if memory is not None:
+                memory.charge(ProfileKey("client request measure", "model_client"),
+                              deadline=lambda: _remaining(deadline))
+                wire_bytes = sum(len(chunk.encode("utf-8")) for chunk in json.JSONEncoder().iterencode(payload))
+                memory.charge(ProfileKey("client request serialize", "model_client",
+                                         native_tensor_shape=(wire_bytes,)),
+                              known_bytes=3 * wire_bytes + _HEADER_SIZE,
+                              deadline=lambda: _remaining(deadline))
+            data = json.dumps(payload).encode("utf-8")
+            header = struct.pack(_HEADER_FMT, len(data))
+            sock.settimeout(_remaining(deadline) if deadline is not None else _REQUEST_TIMEOUT)
             try:
-                _receive_response(sock, recovery_deadline)
-            except ModelServerBusyError:
+                sock.sendall(header + data)
+            except OSError:
+                # A bounded server may reject the header before our full send ends.
+                # Preserve that explicit error without mistaking overload for death.
+                recovery_deadline = time.monotonic() + 0.25
+                if deadline is not None:
+                    recovery_deadline = min(recovery_deadline, deadline)
+                try:
+                    _receive_response(sock, recovery_deadline)
+                except ModelServerBusyError:
+                    raise
+                except (OSError, ValueError):
+                    pass
                 raise
-            except (OSError, ValueError):
-                pass
-            raise
-        return _receive_response(sock, deadline)
-    finally:
-        sock.close()
+            return _receive_response(sock, deadline)
+        finally:
+            sock.close()
 
 
 def _receive_response(sock: socket.socket, deadline: float | None) -> dict:
@@ -488,6 +619,13 @@ def _decode_response(resp_data: bytes) -> dict:
     well-formed JSON response carrying an incompatible ``protocol`` version
     is rejected the same way.
     """
+    from truememory.memory_budget import ProfileKey, current_session
+    memory = current_session()
+    if memory is not None:
+        import hashlib
+        memory.charge(ProfileKey("client response materialize", "model_client",
+                                 native_tensor_shape=(len(resp_data),),
+                                 wire_signature=hashlib.sha256(resp_data).hexdigest()))
     try:
         resp = json.loads(resp_data, object_hook=_json_object_hook)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
@@ -509,14 +647,21 @@ def _decode_response(resp_data: bytes) -> dict:
 
 
 def _recv_exact(sock: socket.socket, n: int, deadline: float | None = None) -> bytes | None:
-    buf = bytearray()
-    while len(buf) < n:
+    from truememory.memory_budget import ProfileKey, current_session
+    memory = current_session()
+    if memory is not None:
+        memory.charge(ProfileKey("client frame receive", "model_client", native_tensor_shape=(n,)),
+                      known_bytes=2 * n + min(n, 65536), deadline=lambda: _remaining(deadline))
+    buf = bytearray(n)
+    offset = 0
+    while offset < n:
         if deadline is not None:
             sock.settimeout(_remaining(deadline))
-        chunk = sock.recv(n - len(buf))
+        chunk = sock.recv(min(n - offset, 65536))
         if not chunk:
             return None
-        buf.extend(chunk)
+        buf[offset:offset + len(chunk)] = chunk
+        offset += len(chunk)
     return bytes(buf)
 
 
@@ -536,12 +681,29 @@ def _request_with_autostart(request: dict, timeout: float | None = None) -> dict
     instead of silently absorbing the autostart + full-timeout retry cycle —
     deadline-bound callers (hook recall) have their own FTS-only fallback.
     """
+    required_started = time.monotonic() if "TRUEMEMORY_REQUIRE_PROCESS_MEMORY_CAP" in os.environ else None
+    required_policy = _required_capped_policy() if "TRUEMEMORY_REQUIRE_PROCESS_MEMORY_CAP" in os.environ else None
     if timeout is None:
         timeout = _default_request_timeout
     has_deadline = timeout is not None
-    started = time.monotonic()
+    started = required_started if required_started is not None else time.monotonic()
+    if required_policy is not None and timeout is not None and (type(timeout) not in (int, float) or timeout <= 0):
+        raise ValueError("Required request timeout must be a positive finite number")
+    required_deadline = started + (_SERVER_START_TIMEOUT if timeout is None else timeout) if required_policy is not None else None
+    if required_deadline is not None:
+        from truememory_memory_bootstrap import _deadline
+        _deadline(required_deadline)
+    required_existing = required_policy is not None and _server_ready()
+    if required_existing:
+        _verify_retained_capped_server(required_policy, required_deadline)
 
     try:
+        if required_policy is not None and not required_existing:
+            raise FileNotFoundError("Required daemon endpoint is absent")
+        if required_policy is not None and has_deadline:
+            response = _send_request(request, timeout=_remaining(required_deadline))
+            _remaining(required_deadline)
+            return response
         return _send_request(request, timeout=timeout)
     except ProtocolMismatchError:
         # A stale/foreign server is bound (M-53). Restarting won't help until
@@ -561,6 +723,8 @@ def _request_with_autostart(request: dict, timeout: float | None = None) -> dict
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0:
             raise _deadline_error(timeout)
+    elif required_deadline is not None:
+        remaining = _remaining(required_deadline)
 
     if not _start_server(wait_timeout=remaining):
         if has_deadline and time.monotonic() - started >= timeout:
@@ -575,10 +739,15 @@ def _request_with_autostart(request: dict, timeout: float | None = None) -> dict
         if remaining <= 0:
             raise _deadline_error(timeout)
         try:
+            if required_policy is not None:
+                _verify_retained_capped_server(required_policy, required_deadline)
+                remaining = _remaining(required_deadline)
             return _send_request(request, timeout=remaining)
         except TimeoutError:
             raise _deadline_error(timeout) from None
 
+    if required_policy is not None:
+        _verify_retained_capped_server(required_policy, required_deadline)
     return _send_request(request)
 
 
