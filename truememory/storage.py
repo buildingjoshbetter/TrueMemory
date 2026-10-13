@@ -18,6 +18,7 @@ import logging
 import os
 import sqlite3
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -27,9 +28,103 @@ log = logging.getLogger(__name__)
 # Schema DDL
 # ---------------------------------------------------------------------------
 
-_SCHEMA_SQL = """
--- Core messages table
-CREATE TABLE IF NOT EXISTS messages (
+_MESSAGES_FTS_FIELDS = ("id", "content", "sender", "recipient", "category", "modality")
+_MESSAGES_UNIQUE_GUARD = 'EXISTS (SELECT 1 FROM pragma_index_list(\'messages\') WHERE "unique" = 1)'
+
+
+def _message_value_changed(fields: tuple[str, ...]) -> str:
+    # BLOB casts format REALs with insufficient precision. BINARY comparison
+    # preserves that precision, but SQL cannot distinguish signed REAL zero.
+    return " OR ".join(
+        f"typeof(old.{field}) IS NOT typeof(new.{field}) "
+        f"OR old.{field} COLLATE BINARY IS NOT new.{field} COLLATE BINARY "
+        f"OR (typeof(old.{field}) = 'real' AND old.{field} = 0)"
+        for field in fields
+    )
+
+
+def _message_update_columns(conn: sqlite3.Connection | None, fields: tuple[str, ...]) -> str:
+    columns = {} if conn is None else {
+        row[1].lower(): row[6] for row in conn.execute("PRAGMA table_xinfo(messages)")
+    }
+    if any(columns.get(field, 0) for field in fields):
+        # A generated source can depend on any otherwise-derived column.
+        return ""
+    aliases = tuple(alias for alias in ("rowid", "_rowid_", "oid") if alias not in columns)
+    return " OF " + ", ".join((*fields, *aliases))
+
+
+def _messages_have_rowid_id(conn: sqlite3.Connection) -> bool:
+    columns = [tuple(row) for row in conn.execute("PRAGMA table_xinfo(messages)")]
+    identifier = next((row for row in columns if row[1].lower() == "id"), None)
+    table = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='messages'").fetchone()
+    return bool(
+        table and table[0] and not table[0].upper().startswith("CREATE VIRTUAL TABLE")
+        and identifier and identifier[2].upper() == "INTEGER" and identifier[5] == 1
+        and identifier[6] == 0 and sum(row[5] > 0 for row in columns) == 1
+        # WITHOUT ROWID and inline INTEGER PRIMARY KEY DESC have a separate
+        # primary-key index. Their id does not provide the required rowid alias.
+        and not any(row[3] == "pk" for row in conn.execute("PRAGMA index_list(messages)"))
+    )
+
+
+def _messages_fts_trigger_definitions(conn: sqlite3.Connection | None = None) -> dict[str, str]:
+    definitions = {
+        "messages_ai": """CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+            INSERT INTO messages_fts(rowid, content, sender, recipient, category, modality)
+            VALUES (new.id, new.content, new.sender, new.recipient, new.category, new.modality);
+        END""",
+        "messages_ad": """CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+            DELETE FROM messages_fts WHERE rowid = old.id;
+        END""",
+        "messages_au": f"""CREATE TRIGGER messages_au AFTER UPDATE{_message_update_columns(conn, _MESSAGES_FTS_FIELDS)} ON messages
+            WHEN {_message_value_changed(_MESSAGES_FTS_FIELDS)} BEGIN
+            DELETE FROM messages_fts WHERE rowid = old.id;
+            INSERT INTO messages_fts(rowid, content, sender, recipient, category, modality)
+            VALUES (new.id, new.content, new.sender, new.recipient, new.category, new.modality);
+        END""",
+    }
+    for suffix, event in (("ai", "INSERT"), ("au", "UPDATE")):
+        name = f"messages_fts_cleanup_{suffix}"
+        # The trigger-level guard avoids an FTS scan on ordinary schemas.
+        # Source fencing is independent of this cleanup and its trigger order.
+        definitions[name] = f"""CREATE TRIGGER {name} AFTER {event} ON messages
+            WHEN {_MESSAGES_UNIQUE_GUARD} BEGIN
+            DELETE FROM messages_fts WHERE NOT EXISTS (
+                SELECT 1 FROM messages WHERE messages.id = messages_fts.rowid
+            );
+        END"""
+    return definitions
+
+
+_MESSAGES_FTS_UPDATE_TRIGGER_SQL = _messages_fts_trigger_definitions()["messages_au"].replace(
+    "CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1,
+) + ";\n"
+
+_DUNBAR_OWNERSHIP_SQL = """
+CREATE TABLE IF NOT EXISTS dunbar_generated_relationships (
+    relationship_id INTEGER PRIMARY KEY,
+    generation TEXT NOT NULL,
+    row_fingerprint BLOB NOT NULL CHECK (length(row_fingerprint) = 32),
+    FOREIGN KEY (relationship_id) REFERENCES entity_relationships(id) ON DELETE CASCADE
+)
+"""
+_DUNBAR_OWNERSHIP_TRIGGERS = {
+    "dunbar_relationships_ai": """CREATE TRIGGER dunbar_relationships_ai AFTER INSERT ON entity_relationships BEGIN
+        DELETE FROM dunbar_generated_relationships WHERE relationship_id=new.id;
+    END""",
+    "dunbar_relationships_au": """CREATE TRIGGER dunbar_relationships_au AFTER UPDATE ON entity_relationships
+    WHEN old.id IS NOT new.id OR old.entity_a IS NOT new.entity_a OR old.entity_b IS NOT new.entity_b
+      OR old.relationship_type IS NOT new.relationship_type OR old.strength IS NOT new.strength
+      OR old.dunbar_layer IS NOT new.dunbar_layer OR old.last_interaction IS NOT new.last_interaction BEGIN
+        DELETE FROM dunbar_generated_relationships WHERE relationship_id=old.id OR relationship_id=new.id;
+    END""",
+    "dunbar_relationships_ad": """CREATE TRIGGER dunbar_relationships_ad AFTER DELETE ON entity_relationships BEGIN
+        DELETE FROM dunbar_generated_relationships WHERE relationship_id=old.id;
+    END""",
+}
+
+_MESSAGES_TABLE_SQL = """CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content TEXT NOT NULL,
     sender TEXT DEFAULT '',
@@ -42,7 +137,9 @@ CREATE TABLE IF NOT EXISTS messages (
     embedding_separation BLOB DEFAULT NULL,
     directive INTEGER DEFAULT 0,
     metadata TEXT DEFAULT '{}'
-);
+);"""
+
+_SCHEMA_SQL = "\n-- Core messages table\n" + _MESSAGES_TABLE_SQL + """
 
 -- FTS5 virtual table for full-text search
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -61,11 +158,7 @@ CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
     DELETE FROM messages_fts WHERE rowid = old.id;
 END;
 
-CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-    DELETE FROM messages_fts WHERE rowid = old.id;
-    INSERT INTO messages_fts(rowid, content, sender, recipient, category, modality)
-    VALUES (new.id, new.content, new.sender, new.recipient, new.category, new.modality);
-END;
+""" + _MESSAGES_FTS_UPDATE_TRIGGER_SQL + """
 
 -- Entity profiles (L0 Personality Engram)
 CREATE TABLE IF NOT EXISTS entity_profiles (
@@ -83,7 +176,9 @@ CREATE TABLE IF NOT EXISTS entity_style_vectors (
     entity TEXT PRIMARY KEY,
     vector TEXT,
     message_count INTEGER DEFAULT 0,
-    updated_at TEXT
+    updated_at TEXT,
+    vector_sum BLOB DEFAULT NULL,
+    accumulator_version INTEGER NOT NULL DEFAULT 0
 );
 
 -- Fact timeline (L5 contradiction tracking)
@@ -241,7 +336,314 @@ CREATE TABLE IF NOT EXISTS rebuild_status (
 );
 CREATE INDEX IF NOT EXISTS idx_rebuild_status_active
     ON rebuild_status(tier_group, status);
+
+CREATE TABLE IF NOT EXISTS maintenance_source_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    epoch TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (typeof(revision) = 'integer' AND revision >= 0),
+    insert_count INTEGER NOT NULL DEFAULT 0 CHECK (typeof(insert_count) = 'integer' AND insert_count >= 0),
+    correction_count INTEGER NOT NULL DEFAULT 0 CHECK (typeof(correction_count) = 'integer' AND correction_count >= 0),
+    max_seen_message_id INTEGER NOT NULL DEFAULT 0,
+    nonappend_revision INTEGER NOT NULL DEFAULT 0,
+    tracking_ready INTEGER NOT NULL DEFAULT 0 CHECK (tracking_ready IN (0, 1))
+);
+
+CREATE TABLE IF NOT EXISTS maintenance_layers (
+    layer TEXT PRIMARY KEY,
+    builder_version INTEGER NOT NULL DEFAULT 1,
+    outcome TEXT NOT NULL DEFAULT 'pending' CHECK (outcome IN
+        ('pending', 'running', 'success', 'success_empty', 'failed', 'unavailable', 'disabled', 'abandoned')),
+    successful_epoch TEXT,
+    successful_revision INTEGER,
+    successful_dependency TEXT,
+    successful_coverage TEXT NOT NULL DEFAULT 'unverified' CHECK (successful_coverage IN
+        ('unverified', 'complete', 'legacy_contacts_unowned', 'vector_generation_unverified')),
+    attempted_epoch TEXT,
+    attempted_revision INTEGER,
+    attempted_dependency TEXT,
+    attempted_insert_count INTEGER CHECK (attempted_insert_count IS NULL OR
+        (typeof(attempted_insert_count) = 'integer' AND attempted_insert_count >= 0)),
+    full_rebuild_required INTEGER NOT NULL DEFAULT 1 CHECK (full_rebuild_required IN (0, 1)),
+    output_count INTEGER,
+    run_generation TEXT,
+    error_category TEXT
+);
 """
+
+_MAINTENANCE_LAYERS = (
+    "clusters", "summaries", "contradictions", "structured_facts",
+    "surprise", "episodes", "landmarks", "dunbar",
+)
+
+_STYLE_OUTPUT_INVALIDATE_SQL = """UPDATE maintenance_layers SET
+    outcome='pending',full_rebuild_required=1,successful_coverage='unverified',
+    attempted_epoch=NULL,attempted_revision=NULL,attempted_dependency=NULL,
+    attempted_insert_count=NULL,run_generation=NULL,error_category=NULL
+    WHERE layer='style_vectors'"""
+_STYLE_OUTPUT_TRIGGERS = {
+    "truememory_style_output_" + operation.lower():
+        "CREATE TRIGGER truememory_style_output_" + operation.lower()
+        + " AFTER " + operation + " ON entity_style_vectors BEGIN "
+        + _STYLE_OUTPUT_INVALIDATE_SQL + "; END"
+    for operation in ("INSERT", "UPDATE", "DELETE")
+}
+
+
+def _style_output_tracking_ready(conn: sqlite3.Connection) -> bool:
+    expected = {name: " ".join(sql.split()) for name, sql in _STYLE_OUTPUT_TRIGGERS.items()}
+    installed = {name: " ".join(sql.strip().rstrip(";").split()) for name, sql in conn.execute(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN (?,?,?)", tuple(expected),
+    )}
+    return installed == expected and conn.execute(
+        "SELECT 1 FROM maintenance_layers WHERE layer='style_vectors'").fetchone() is not None
+
+
+def _prepare_style_maintenance(
+    conn: sqlite3.Connection, *, _on_safe_failure: Callable[[sqlite3.OperationalError], None] | None = None,
+) -> None:
+    """Explicitly enroll style output; ordinary schema initialization stays lazy."""
+    expected = {name: " ".join(sql.split()) for name, sql in _STYLE_OUTPUT_TRIGGERS.items()}
+
+    def installed() -> dict[str, str]:
+        return {name: " ".join(sql.strip().rstrip(";").split()) for name, sql in conn.execute(
+            "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN (?,?,?)",
+            tuple(expected),
+        )}
+
+    owned = not conn.in_transaction
+    try:
+        if _style_output_tracking_ready(conn):
+            return
+        conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT truememory_style_tracking")
+    except sqlite3.OperationalError as error:
+        # No preparation writes precede admission. A failed admission is safe
+        # only while the original transaction boundary remains unchanged.
+        if _on_safe_failure is not None and conn.in_transaction == (not owned):
+            _on_safe_failure(error)
+        raise
+    try:
+        conn.execute("UPDATE maintenance_layers SET layer=layer WHERE 0")
+        conn.execute("INSERT OR IGNORE INTO maintenance_layers(layer) VALUES ('style_vectors')")
+        current = installed()
+        if current != expected:
+            for name, sql in _STYLE_OUTPUT_TRIGGERS.items():
+                if current.get(name) != expected[name]:
+                    conn.execute("DROP TRIGGER IF EXISTS " + name)
+                    conn.execute(sql)
+            # Missing/replaced triggers make even v1 output unverified. This
+            # metadata-only invalidation also supersedes a failed attempt.
+            conn.execute(_STYLE_OUTPUT_INVALIDATE_SQL)
+        conn.execute("COMMIT" if owned else "RELEASE SAVEPOINT truememory_style_tracking")
+    except BaseException as error:
+        if conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO SAVEPOINT truememory_style_tracking")
+                conn.execute("RELEASE SAVEPOINT truememory_style_tracking")
+            if (_on_safe_failure is not None and isinstance(error, sqlite3.OperationalError)
+                    and conn.in_transaction == (not owned)):
+                _on_safe_failure(error)
+        # An ended transaction, failed rollback or failed savepoint release
+        # cannot attest that preparation left the previous generation intact.
+        raise
+
+
+_SCHEMA_SQL += _DUNBAR_OWNERSHIP_SQL + ";\n"
+
+
+def _initialize_style_accumulator_schema(conn: sqlite3.Connection) -> None:
+    """Add raw-sum storage without upgrading or rebuilding legacy profiles."""
+    required = {"vector_sum", "accumulator_version"}
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(entity_style_vectors)")}
+    if required <= columns:
+        return
+    owned = not conn.in_transaction
+    conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT truememory_style_schema")
+    completed = False
+    try:
+        conn.execute("UPDATE entity_style_vectors SET entity=entity WHERE 0")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(entity_style_vectors)")}
+        if "vector_sum" not in columns:
+            conn.execute("ALTER TABLE entity_style_vectors ADD COLUMN vector_sum BLOB DEFAULT NULL")
+        if "accumulator_version" not in columns:
+            conn.execute("ALTER TABLE entity_style_vectors ADD COLUMN accumulator_version INTEGER NOT NULL DEFAULT 0")
+        conn.execute("COMMIT" if owned else "RELEASE SAVEPOINT truememory_style_schema")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO SAVEPOINT truememory_style_schema")
+                conn.execute("RELEASE SAVEPOINT truememory_style_schema")
+
+
+def _dunbar_ownership_ready(conn: sqlite3.Connection) -> bool:
+    definitions = {name: " ".join(sql.split()) for name, sql in _DUNBAR_OWNERSHIP_TRIGGERS.items()}
+    installed = {row[0]: " ".join(row[1].strip().rstrip(";").split()) for row in conn.execute(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN "
+        "('dunbar_relationships_ai','dunbar_relationships_au','dunbar_relationships_ad')"
+    )}
+    return installed == definitions and conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dunbar_generated_relationships'"
+    ).fetchone() is not None
+
+
+def _initialize_dunbar_ownership(conn: sqlite3.Connection) -> None:
+    """Repair ownership tracking without trusting rows from an untracked interval."""
+    if _dunbar_ownership_ready(conn):
+        return
+    owned = not conn.in_transaction
+    conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT truememory_dunbar_schema")
+    completed = False
+    try:
+        if not owned:
+            conn.execute("UPDATE entity_relationships SET id=id WHERE 0")
+        if not _dunbar_ownership_ready(conn):
+            conn.execute(_DUNBAR_OWNERSHIP_SQL)
+            # Identical ID/value replacements cannot be detected retrospectively.
+            # Preserve those relationships and relinquish all uncertain ownership.
+            conn.execute("DELETE FROM dunbar_generated_relationships")
+            for name, definition in _DUNBAR_OWNERSHIP_TRIGGERS.items():
+                conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+                conn.execute(definition)
+        conn.execute("COMMIT" if owned else "RELEASE truememory_dunbar_schema")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO truememory_dunbar_schema")
+                conn.execute("RELEASE truememory_dunbar_schema")
+
+
+_MAINTENANCE_SOURCE_FIELDS = (
+    "id", "content", "sender", "recipient", "timestamp", "category",
+    "modality", "directive", "metadata",
+)
+
+
+def _maintenance_trigger_definitions(conn: sqlite3.Connection | None = None) -> dict[str, str]:
+    changed = _message_value_changed(_MAINTENANCE_SOURCE_FIELDS)
+    correction = """UPDATE maintenance_source_state SET
+                nonappend_revision = revision + 1,
+                max_seen_message_id = MAX(max_seen_message_id, new.id),
+                revision = revision + 1, correction_count = correction_count + 1
+            WHERE singleton = 1;"""
+    return {
+        "messages_maintenance_ai": f"""CREATE TRIGGER messages_maintenance_ai AFTER INSERT ON messages BEGIN
+            UPDATE maintenance_source_state SET
+                nonappend_revision = CASE WHEN new.id <= max_seen_message_id OR {_MESSAGES_UNIQUE_GUARD}
+                    THEN revision + 1 ELSE nonappend_revision END,
+                max_seen_message_id = MAX(max_seen_message_id, new.id),
+                revision = revision + 1, insert_count = insert_count + 1
+            WHERE singleton = 1;
+        END""",
+        "messages_maintenance_au": f"""CREATE TRIGGER messages_maintenance_au AFTER UPDATE{_message_update_columns(conn, _MAINTENANCE_SOURCE_FIELDS)} ON messages
+            WHEN NOT {_MESSAGES_UNIQUE_GUARD} AND ({changed}) BEGIN
+            {correction}
+        END""",
+        "messages_maintenance_unique_au": f"""CREATE TRIGGER messages_maintenance_unique_au AFTER UPDATE ON messages
+            WHEN {_MESSAGES_UNIQUE_GUARD} BEGIN
+            {correction}
+        END""",
+        "messages_maintenance_ad": """CREATE TRIGGER messages_maintenance_ad AFTER DELETE ON messages BEGIN
+            UPDATE maintenance_source_state SET
+                nonappend_revision = revision + 1,
+                revision = revision + 1, correction_count = correction_count + 1
+            WHERE singleton = 1;
+        END""",
+    }
+
+
+def _initialize_maintenance_tracking(conn: sqlite3.Connection) -> None:
+    """Install revision tracking atomically; incomplete legacy schemas stay open."""
+    definitions = _maintenance_trigger_definitions(conn)
+
+    def available() -> bool:
+        columns = {row[1].lower() for row in conn.execute("PRAGMA table_xinfo(messages)")}
+        return set(_MAINTENANCE_SOURCE_FIELDS).issubset(columns) and _messages_have_rowid_id(conn)
+
+    def installed() -> dict[str, str]:
+        placeholders = ",".join("?" for _ in definitions)
+        return {row[0]: " ".join(row[1].strip().rstrip(";").split()) for row in conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
+            f"AND name IN ({placeholders})", tuple(definitions),
+        )}
+
+    expected = {name: " ".join(sql.split()) for name, sql in definitions.items()}
+    ready = conn.execute("SELECT tracking_ready FROM maintenance_source_state WHERE singleton = 1").fetchone()
+    layers = {row[0] for row in conn.execute("SELECT layer FROM maintenance_layers")}
+    layer_columns = {row[1] for row in conn.execute("PRAGMA table_info(maintenance_layers)")}
+    if (ready and ready[0] and available() and installed() == expected and set(_MAINTENANCE_LAYERS).issubset(layers)
+            and {"attempted_insert_count", "successful_coverage"}.issubset(layer_columns)):
+        return
+
+    owned = not conn.in_transaction
+    conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT truememory_maintenance_schema")
+    completed = False
+    try:
+        # Recheck after writer admission: a concurrent opener may migrate first.
+        if not owned:
+            conn.execute("UPDATE maintenance_source_state SET tracking_ready=tracking_ready WHERE 0")
+        definitions = _maintenance_trigger_definitions(conn)
+        expected = {name: " ".join(sql.split()) for name, sql in definitions.items()}
+        if "attempted_insert_count" not in {row[1] for row in conn.execute("PRAGMA table_info(maintenance_layers)")}:
+            conn.execute(
+                "ALTER TABLE maintenance_layers ADD COLUMN attempted_insert_count INTEGER "
+                "CHECK (attempted_insert_count IS NULL OR "
+                "(typeof(attempted_insert_count) = 'integer' AND attempted_insert_count >= 0))"
+            )
+        if "successful_coverage" not in {row[1] for row in conn.execute("PRAGMA table_info(maintenance_layers)")}:
+            conn.execute(
+                "ALTER TABLE maintenance_layers ADD COLUMN successful_coverage TEXT NOT NULL DEFAULT 'unverified' "
+                "CHECK (successful_coverage IN "
+                "('unverified','complete','legacy_contacts_unowned','vector_generation_unverified'))"
+            )
+        supported = available()
+        initial_max = "MAX(0, COALESCE(MAX(id), 0)) FROM messages" if _messages_have_rowid_id(conn) else "0"
+        conn.execute(
+            "INSERT OR IGNORE INTO maintenance_source_state(singleton, epoch, max_seen_message_id) "
+            f"SELECT 1, lower(hex(randomblob(16))), {initial_max}"
+        )
+        conn.executemany("INSERT OR IGNORE INTO maintenance_layers(layer) VALUES (?)",
+                         ((layer,) for layer in _MAINTENANCE_LAYERS))
+        current = installed()
+        if supported:
+            # Missing/replaced triggers or an untracked legacy interval cannot
+            # attest the preceding source history. Invalidate old tokens.
+            invalidate = current != expected or not conn.execute(
+                "SELECT tracking_ready FROM maintenance_source_state WHERE singleton = 1"
+            ).fetchone()[0]
+            if invalidate:
+                conn.execute("UPDATE maintenance_source_state SET tracking_ready = 0 WHERE singleton = 1")
+                conn.execute("UPDATE maintenance_layers SET outcome = 'pending', full_rebuild_required = 1")
+            conn.execute(
+                "UPDATE maintenance_source_state SET epoch = lower(hex(randomblob(16))), "
+                "revision = 0, insert_count = 0, correction_count = 0, nonappend_revision = 0, "
+                "max_seen_message_id = (SELECT MAX(0, COALESCE(MAX(id), 0)) FROM messages), tracking_ready = 1 "
+                "WHERE singleton = 1 AND tracking_ready = 0"
+            )
+            for name, definition in definitions.items():
+                if current.get(name) != expected[name]:
+                    conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+                    conn.execute(definition)
+        else:
+            conn.execute("UPDATE maintenance_source_state SET tracking_ready = 0 WHERE singleton = 1 AND tracking_ready != 0")
+            for name in current:
+                conn.execute(f"DROP TRIGGER {name}")
+            log.warning("Source revision tracking unavailable for unsupported or incomplete messages schema")
+        conn.execute("COMMIT" if owned else "RELEASE truememory_maintenance_schema")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO truememory_maintenance_schema")
+                conn.execute("RELEASE truememory_maintenance_schema")
 
 
 # single source of truth for the sqlite busy_timeout pragma.
@@ -548,6 +950,64 @@ def _migrate_messages_schema(conn: sqlite3.Connection, db_path: str | Path) -> N
                 pass
 
 
+def _migrate_messages_fts_trigger(conn: sqlite3.Connection) -> None:
+    """Repair owned FTS triggers and refill legacy contents once, atomically."""
+    def available() -> bool:
+        columns = {row[1].lower() for row in conn.execute("PRAGMA table_xinfo(messages)")}
+        return set(_MESSAGES_FTS_FIELDS).issubset(columns) and _messages_have_rowid_id(conn)
+
+    if not available():
+        log.warning("FTS synchronization repair unavailable for unsupported or incomplete messages schema")
+        return
+    definitions = _messages_fts_trigger_definitions(conn)
+
+    def installed() -> dict[str, str]:
+        placeholders = ",".join("?" for _ in definitions)
+        return {row[0]: " ".join(row[1].strip().rstrip(";").split()) for row in conn.execute(
+            f"SELECT name, sql FROM sqlite_master WHERE type='trigger' AND name IN ({placeholders})",
+            tuple(definitions),
+        )}
+
+    expected = {name: " ".join(sql.split()) for name, sql in definitions.items()}
+    if installed() == expected:
+        return
+
+    owned = not conn.in_transaction
+    conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT truememory_fts_trigger")
+    completed = False
+    try:
+        # Another opener can complete this migration while BEGIN waits.
+        if not owned:
+            conn.execute("UPDATE messages SET id=id WHERE 0")
+        if not available():
+            log.warning("FTS synchronization repair unavailable for unsupported or incomplete messages schema")
+            return
+        definitions = _messages_fts_trigger_definitions(conn)
+        expected = {name: " ".join(sql.split()) for name, sql in definitions.items()}
+        current = installed()
+        if current != expected:
+            for name, definition in definitions.items():
+                if current.get(name) != expected[name]:
+                    conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+                    conn.execute(definition)
+            # This FTS table owns its content. Its 'rebuild' command would
+            # rebuild the stale copy rather than restore current messages.
+            conn.execute("DELETE FROM messages_fts")
+            conn.execute(
+                "INSERT INTO messages_fts(rowid, content, sender, recipient, category, modality) "
+                "SELECT id, content, sender, recipient, category, modality FROM messages"
+            )
+        conn.execute("COMMIT" if owned else "RELEASE truememory_fts_trigger")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO truememory_fts_trigger")
+                conn.execute("RELEASE truememory_fts_trigger")
+
+
 def create_db(db_path: str | Path) -> sqlite3.Connection:
     """
     Create (or open) a TrueMemory database with the full schema.
@@ -640,6 +1100,14 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
 
     _migrate_messages_schema(conn, db_path)
     conn.executescript(_SCHEMA_SQL)
+    try:
+        _migrate_messages_fts_trigger(conn)
+        _initialize_maintenance_tracking(conn)
+        _initialize_dunbar_ownership(conn)
+        _initialize_style_accumulator_schema(conn)
+    except sqlite3.Error:
+        conn.close()
+        raise
     # The directive index lives outside _SCHEMA_SQL on purpose: if a legacy
     # DB's migration could not add messages.directive (e.g. a rolled-back
     # ALTER), an unconditional CREATE INDEX inside executescript would turn a
@@ -1047,13 +1515,15 @@ def insert_message(conn: sqlite3.Connection, msg: dict) -> int:
     return cursor.lastrowid
 
 
-def delete_message(conn: sqlite3.Connection, msg_id: int) -> bool:
+def delete_message(conn: sqlite3.Connection, msg_id: int, *, commit: bool = True) -> bool:
     """
     Delete a single message and its vector embedding.
 
     The FTS5 DELETE trigger automatically removes the full-text index entry.
     The vector embedding in ``vec_messages`` is also removed if the table
     exists.
+
+    ``commit=False`` leaves publication inside the caller's writer transaction.
 
     Args:
         conn:   Open database connection.
@@ -1129,7 +1599,8 @@ def delete_message(conn: sqlite3.Connection, msg_id: int) -> bool:
     for _ent in _entities:
         for _tbl in ("summaries", "entity_profiles", "entity_style_vectors"):
             try:
-                conn.execute(f"DELETE FROM {_tbl} WHERE entity = ?", (_ent,))
+                conn.execute(f"DELETE FROM {_tbl} WHERE entity = ?",
+                             (_ent.lower() if _tbl == "entity_style_vectors" else _ent,))
             except sqlite3.OperationalError:
                 pass
         try:
@@ -1143,11 +1614,12 @@ def delete_message(conn: sqlite3.Connection, msg_id: int) -> bool:
     cursor = conn.execute("DELETE FROM messages WHERE id = ?", (msg_id,))
     deleted = cursor.rowcount > 0
 
-    conn.commit()
+    if commit:
+        conn.commit()
     return deleted
 
 
-def update_message(conn: sqlite3.Connection, msg_id: int, **fields) -> bool:
+def update_message(conn: sqlite3.Connection, msg_id: int, *, commit: bool = True, **fields) -> bool:
     """
     Update fields on an existing message.
 
@@ -1157,6 +1629,8 @@ def update_message(conn: sqlite3.Connection, msg_id: int, **fields) -> bool:
 
     The AFTER UPDATE trigger on ``messages`` automatically keeps the
     FTS5 index in sync.
+
+    ``commit=False`` leaves the source update inside the caller's writer fence.
 
     Args:
         conn:    Open database connection.
@@ -1178,5 +1652,6 @@ def update_message(conn: sqlite3.Connection, msg_id: int, **fields) -> bool:
     cursor = conn.execute(f"UPDATE messages SET {set_clause} WHERE id = ?", values)
 
     # The AFTER UPDATE trigger on messages keeps FTS5 in sync automatically.
-    conn.commit()
+    if commit:
+        conn.commit()
     return cursor.rowcount > 0

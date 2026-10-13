@@ -252,7 +252,7 @@ def test_uninstall_preserves_other_entries(tmp_path, monkeypatch):
         "hooks": {
             "SessionStart": [
                 {"command": "my-hook", "timeout": 5000},
-                {"command": "/path/to/truememory/hooks/session_start.py", "timeout": 10000},
+                {"command": "/usr/bin/python3 /path/to/truememory/ingest/hooks/session_start.py", "timeout": 10000},
             ]
         },
         "theme": "dark",
@@ -278,7 +278,7 @@ def test_uninstall_removes_nested_format(tmp_path, monkeypatch):
         "hooks": {
             "SessionStart": [
                 {"hooks": [{"type": "command", "command": "my-hook", "timeout": 5000}]},
-                {"hooks": [{"type": "command", "command": "/path/to/truememory/session_start.py", "timeout": 10000, "name": "truememory-sessionstart"}]},
+                {"hooks": [{"type": "command", "command": "/usr/bin/python3 /path/to/truememory/ingest/hooks/session_start.py", "timeout": 10000, "name": "truememory-sessionstart"}]},
             ]
         },
     }), encoding="utf-8")

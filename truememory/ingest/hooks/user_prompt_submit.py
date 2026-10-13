@@ -32,6 +32,7 @@ from pathlib import Path
 
 from truememory._platform import _env_int
 from truememory._sanitize import sanitize_injection_content
+from truememory.ingest.hooks.output import HOOK_HOSTS, emit_context, supports_context
 
 # Optional: fcntl isn't available on Windows, so we gracefully degrade
 try:
@@ -83,15 +84,14 @@ def _word_overlap(a: str, b: str) -> float:
 def _parse_args() -> argparse.Namespace:
     """Parse command-line overrides the installer threads through.
 
-    UserPromptSubmit doesn't actually use ``--user`` or ``--db`` — it only
-    writes a per-session diagnostic buffer — but the installer passes the
-    same flags to every hook for consistency, so we must accept them here
-    without erroring out. ``parse_known_args`` ensures forward compat with
-    future flags.
+    The trusted host/event select recall output and transcript admission.
+    ``parse_known_args`` keeps the existing forward-compatible flags.
     """
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--user", default=os.environ.get("TRUEMEMORY_USER_ID", ""))
     p.add_argument("--db", default=os.environ.get("TRUEMEMORY_DB_PATH", ""))
+    p.add_argument("--host", choices=HOOK_HOSTS, default="claude")
+    p.add_argument("--event", default="UserPromptSubmit")
     args, _ = p.parse_known_args()
     return args
 
@@ -737,7 +737,8 @@ def main():
         return
 
     prompt = input_data.get("prompt", "").strip()
-    session_id = input_data.get("session_id", "unknown")
+    from truememory.ingest.hooks._shared import hook_session_id
+    session_id = hook_session_id(input_data, args.host)
 
     if not prompt or len(prompt) < 3:
         # A too-short first prompt is still the session's first prompt:
@@ -765,10 +766,16 @@ def main():
     prompt_count = _increment_prompt_count(session_id)
 
     transcript_path = input_data.get("transcript_path", "")
-    if transcript_path and Path(transcript_path).exists():
+    if transcript_path:
         try:
-            from truememory.ingest.hooks._shared import should_extract_session, mark_session_extracted
-            if should_extract_session(session_id, transcript_path):
+            from truememory.ingest.hooks._shared import (
+                is_allowed_transcript, should_extract_session, mark_session_extracted,
+            )
+            if (
+                is_allowed_transcript(transcript_path, host=args.host)
+                and Path(transcript_path).is_file()
+                and should_extract_session(session_id, transcript_path)
+            ):
                 from truememory.ingest.hooks.stop import (
                     _has_enough_messages, _run_background_ingestion,
                     TRACE_DIR, LOG_DIR,
@@ -778,6 +785,7 @@ def main():
                 if _has_enough_messages(transcript_path, 10):
                     spawned_pid = _run_background_ingestion(
                         transcript_path, session_id, args.user, args.db,
+                        transcript_host=args.host,
                     )
                     # Only mark extracted on a real spawn; pid==0 means the
                     # session was queued to the backlog and must stay eligible
@@ -792,6 +800,11 @@ def main():
         _try_per_exchange_store(prompt, session_id, args.user, args.db, store_intensity)
     except Exception:
         pass  # Never crash the hook
+
+    # Capture still runs on Cursor, whose beforeSubmitPrompt response cannot
+    # inject context. Avoid searching for recall that the host cannot receive.
+    if not supports_context(args.host, args.event):
+        return
 
     # Issue #561 / #636 (M-41): consume the one-shot SessionStart recall marker
     # exactly ONCE per prompt. Both the proactive and auto-recall paths used to
@@ -828,7 +841,7 @@ def main():
         )
 
     if recall_context:
-        print(json.dumps({"additionalContext": recall_context}))
+        emit_context(recall_context, host=args.host, event=args.event)
 
 
 def buffer_message(session_id: str, prompt: str):

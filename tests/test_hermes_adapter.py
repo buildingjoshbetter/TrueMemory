@@ -114,13 +114,14 @@ def test_install_hooks_creates_hooks_config(tmp_path, monkeypatch):
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     hooks = data["hooks"]
 
-    # Should have 4 events registered
-    assert len(hooks) == 4
+    # Native capture needs the post-turn assistant event too.
+    assert len(hooks) == 5
 
     # Verify correct Hermes event names (from VALID_HOOKS)
     assert "on_session_start" in hooks
     assert "on_session_end" in hooks
     assert "pre_llm_call" in hooks
+    assert "post_llm_call" in hooks
     assert "on_session_finalize" in hooks
 
     # Each event should map to a list of entries
@@ -131,11 +132,14 @@ def test_install_hooks_creates_hooks_config(tmp_path, monkeypatch):
         assert isinstance(entry, dict)
         assert "command" in entry  # command is required
         assert "truememory" in entry["command"].lower()
+        assert "hermes.py" in entry["command"]
+        assert f"--event {event}" in entry["command"]
 
     # Verify timeouts are set (in seconds, as per Hermes source)
     assert hooks["on_session_start"][0]["timeout"] == 30
     assert hooks["on_session_end"][0]["timeout"] == 30
     assert hooks["pre_llm_call"][0]["timeout"] == 10
+    assert hooks["post_llm_call"][0]["timeout"] == 30
     assert hooks["on_session_finalize"][0]["timeout"] == 15
 
     # Verify no invalid events used

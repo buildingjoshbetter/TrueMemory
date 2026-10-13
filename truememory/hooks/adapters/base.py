@@ -8,8 +8,51 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
+import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
+
+
+def is_owned_hook_command(command: object) -> bool:
+    """Recognize a simple Python invocation of an installed TrueMemory hook."""
+    if not isinstance(command, str) or not command.strip() or any(char in command for char in ("\0", "\n", "\r")):
+        return False
+    try:
+        lexer = shlex.shlex(command, posix=False, punctuation_chars=";&|<>()`")
+        lexer.whitespace_split = True
+        for token in lexer:
+            if token and all(char in ";&|<>()`" for char in token):
+                return False
+            if not token.startswith("'") and any(part in token for part in ("$(", "${", "`")):
+                return False
+        tokens = shlex.split(command, comments=True, posix=sys.platform != "win32")
+    except ValueError:
+        return False
+    if sys.platform == "win32":
+        tokens = [token[1:-1] if token.startswith('"') and token.endswith('"') else token for token in tokens]
+    if len(tokens) < 2:
+        return False
+    executable = tokens[0].replace("\\", "/").rsplit("/", 1)[-1]
+    if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?", executable, re.IGNORECASE) is None:
+        return False
+    index = 1
+    while index < len(tokens) and tokens[index] in ("-B", "-u", "-E", "-I", "-s", "-S", "-O", "-OO"):
+        index += 1
+    if index >= len(tokens):
+        return False
+    stems = ("session_start", "user_prompt_submit", "stop", "compact")
+    if tokens[index] == "-m":
+        return index + 1 < len(tokens) and tokens[index + 1] in (
+            f"truememory.ingest.hooks.{stem}" for stem in stems
+        )
+    script = tokens[index].replace("\\", "/").split("/")
+    return (
+        len(script) >= 4
+        and script[-4:-1] == ["truememory", "ingest", "hooks"]
+        and script[-1] in (f"{stem}.py" for stem in stems)
+    )
 
 
 def atomic_write_text(path: Path, text: str) -> None:

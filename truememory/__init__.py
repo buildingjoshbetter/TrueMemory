@@ -125,6 +125,7 @@ __all__ = [
     "consolidation",
     "predictive", "query_classifier", "reranker", "hyde", "clustering",
     "tier_config",
+    "embedding_target", "maintenance", "rebuild_source", "tier_switch",
 ]
 
 

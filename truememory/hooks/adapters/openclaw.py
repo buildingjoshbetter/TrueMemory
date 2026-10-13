@@ -6,12 +6,10 @@ OpenClaw uses:
   The runtime reads ``sourceConfig.mcp?.servers`` in mcp-config.ts and all
   write-back functions (setConfiguredMcpServer, etc.) write to
   ``next.mcp = { ...next.mcp, servers }``.
-- ~/.openclaw/plugins/<name>/ for plugins (openclaw.plugin.json + index.js)
+- ~/.openclaw/extensions/<name>/ for plugins (openclaw.plugin.json + index.js)
   using ``export default { id, name, register(api) }`` — the plugin loader
   calls the ``register(api)`` function at startup.
-- Plugin lifecycle hooks: session_start, session_end, before_tool_call,
-  before_compaction (registered via ``api.on("event", handler)`` inside
-  ``register(api)`` callback)
+- A recall-only before_prompt_build hook registered via ``api.on``.
 - Container-based skills can be enabled/disabled in the ``skills:`` section
   of the main config
 
@@ -38,7 +36,7 @@ log = logging.getLogger(__name__)
 
 _OPENCLAW_DIR = Path.home() / ".openclaw"
 _CONFIG_PATH = _OPENCLAW_DIR / "openclaw.json"
-_PLUGINS_DIR = _OPENCLAW_DIR / "plugins"
+_PLUGINS_DIR = _OPENCLAW_DIR / "extensions"
 _PLUGIN_NAME = "truememory"
 
 _TEMPLATE_DIR = Path(__file__).parent.parent / "templates" / "openclaw"
@@ -115,6 +113,10 @@ class OpenClawAdapter(CLIAdapter):
         return True
 
     @property
+    def has_session_start(self) -> bool:
+        return False
+
+    @property
     def name(self) -> str:
         return "OpenClaw"
 
@@ -179,12 +181,42 @@ class OpenClawAdapter(CLIAdapter):
             dst = plugin_dir / template_file
             if src.exists():
                 content = src.read_text(encoding="utf-8")
-                if python_path:
+                if template_file == "index.js":
                     content = content.replace(
-                        'process.env.TRUEMEMORY_PYTHON || "python3"',
-                        f'process.env.TRUEMEMORY_PYTHON || "{python_path}"',
+                        'const INSTALLED_CONFIG = {"pythonPath": "python3", "userId": "", "dbPath": ""};',
+                        "const INSTALLED_CONFIG = " + json.dumps({
+                            "pythonPath": python_path or sys.executable,
+                            "userId": user_id,
+                            "dbPath": db_path,
+                        }) + ";",
                     )
                 atomic_write_text(dst, content)
+        self._configure_hook_permission()
+
+    def _configure_hook_permission(self) -> None:
+        try:
+            if _CONFIG_PATH.exists():
+                text = _CONFIG_PATH.read_text(encoding="utf-8")
+                config = json.loads(_strip_json5_comments(text))
+            else:
+                config = {}
+        except (OSError, json.JSONDecodeError):
+            log.warning("Cannot read OpenClaw hook policy in %s; preserving config", _CONFIG_PATH)
+            return
+        if not isinstance(config, dict):
+            return
+        current = config
+        for key in ("plugins", "entries", _PLUGIN_NAME, "hooks"):
+            if key not in current:
+                current[key] = {}
+            child = current[key]
+            if not isinstance(child, dict):
+                return
+            current = child
+        # Existing denials and all global activation policy retain authority.
+        if "allowConversationAccess" not in current:
+            current["allowConversationAccess"] = True
+            atomic_write_text(_CONFIG_PATH, json.dumps(config, indent=2))
 
     def uninstall(self) -> None:
         self._remove_mcp_entry()
@@ -199,7 +231,8 @@ class OpenClawAdapter(CLIAdapter):
     def get_system_prompt_content(self) -> str:
         from truememory.hooks.adapters.base import get_generic_system_prompt
         return get_generic_system_prompt(
-            has_hooks=self.has_hooks,
+            # The generic hook template promises capture and session autoload.
+            has_hooks=False,
             has_session_start=self.has_session_start,
         )
 

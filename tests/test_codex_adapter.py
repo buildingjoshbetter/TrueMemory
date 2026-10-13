@@ -218,7 +218,7 @@ def test_install_hooks_migrates_legacy_format(tmp_path, monkeypatch):
         '[general]\ntheme = "dark"\n\n'
         '[[hooks]]\n'
         'event = "SessionStart"\n'
-        'command = "/usr/bin/python3 /path/to/truememory/session_start.py"\n'
+        'command = "/usr/bin/python3 /path/to/truememory/ingest/hooks/session_start.py"\n'
         'timeout = 10000\n',
         encoding="utf-8",
     )
@@ -338,7 +338,7 @@ def test_uninstall_cleans_legacy_format(tmp_path, monkeypatch):
         '[general]\ntheme = "dark"\n\n'
         '[[hooks]]\n'
         'event = "SessionStart"\n'
-        'command = "/usr/bin/python3 /path/to/truememory/session_start.py"\n'
+        'command = "/usr/bin/python3 /path/to/truememory/ingest/hooks/session_start.py"\n'
         'timeout = 10000\n',
         encoding="utf-8",
     )
@@ -380,7 +380,7 @@ def test_remove_hook_blocks_correct_format():
         '[[hooks.SessionStart]]\n\n'
         '[[hooks.SessionStart.hooks]]\n'
         'type = "command"\n'
-        'command = "/usr/bin/python3 /path/to/truememory/session_start.py"\n'
+        'command = "/usr/bin/python3 /path/to/truememory/ingest/hooks/session_start.py"\n'
         'timeout = 10\n\n'
         '[[hooks.MyCustomHook]]\n\n'
         '[[hooks.MyCustomHook.hooks]]\n'
@@ -403,7 +403,7 @@ def test_remove_legacy_hook_blocks_with_blank_lines():
         '[[hooks]]\n'
         'event = "SessionStart"\n'
         '\n'
-        'command = "/usr/bin/python3 /path/to/truememory/session_start.py"\n'
+        'command = "/usr/bin/python3 /path/to/truememory/ingest/hooks/session_start.py"\n'
         'timeout = 10000\n\n'
         '[[hooks]]\n'
         'event = "MyCustomHook"\n'
@@ -432,12 +432,12 @@ def test_parse_existing_hooks_correct_format():
         '[[hooks.SessionStart]]\n\n'
         '[[hooks.SessionStart.hooks]]\n'
         'type = "command"\n'
-        'command = "/usr/bin/python3 /path/to/truememory/session_start.py"\n'
+        'command = "/usr/bin/python3 /path/to/truememory/ingest/hooks/session_start.py"\n'
         'timeout = 10\n\n'
         '[[hooks.Stop]]\n\n'
         '[[hooks.Stop.hooks]]\n'
         'type = "command"\n'
-        'command = "/usr/bin/python3 /path/to/truememory/stop.py"\n'
+        'command = "/usr/bin/python3 /path/to/truememory/ingest/hooks/stop.py"\n'
         'timeout = 5\n'
     )
     result = CodexAdapter._parse_existing_hooks(text)
@@ -446,7 +446,7 @@ def test_parse_existing_hooks_correct_format():
     assert "Stop" in result
     mg = result["SessionStart"][0]
     assert "hooks" in mg
-    assert mg["hooks"][0]["command"] == "/usr/bin/python3 /path/to/truememory/session_start.py"
+    assert mg["hooks"][0]["command"] == "/usr/bin/python3 /path/to/truememory/ingest/hooks/session_start.py"
 
 
 def test_parse_existing_hooks_empty():
@@ -465,7 +465,7 @@ def test_event_already_registered_correct_format():
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "/usr/bin/python3 /path/to/truememory/session_start.py",
+                        "command": "/usr/bin/python3 /path/to/truememory/ingest/hooks/session_start.py",
                         "timeout": 10,
                     }
                 ]

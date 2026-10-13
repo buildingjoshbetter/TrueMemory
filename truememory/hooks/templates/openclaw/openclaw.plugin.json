@@ -9,6 +9,14 @@
       "pythonPath": {
         "type": "string",
         "description": "Path to the Python interpreter with truememory installed"
+      },
+      "userId": {
+        "type": "string",
+        "description": "Configured TrueMemory user identity for recall"
+      },
+      "dbPath": {
+        "type": "string",
+        "description": "Configured TrueMemory database path for recall"
       }
     },
     "additionalProperties": false

@@ -124,11 +124,15 @@ class KimiAdapter(CLIAdapter):
 
             script_path = hooks_dir / info["script"]
             cmd = self._build_command(py, script_path, user_id, db_path)
+            toml_command = json.dumps(cmd, ensure_ascii=False)
+            # TOML forbids DEL; splitlines also treats these Unicode characters as boundaries.
+            for codepoint in (0x7F, 0x85, 0x2028, 0x2029):
+                toml_command = toml_command.replace(chr(codepoint), f"\\u{codepoint:04x}")
 
             lines_to_append.append("")
             lines_to_append.append("[[hooks]]")
             lines_to_append.append(f'event = "{event}"')
-            lines_to_append.append(f'command = "{cmd}"')
+            lines_to_append.append(f"command = {toml_command}")
             lines_to_append.append(f'timeout = {info["timeout"]}')
 
         if lines_to_append:
@@ -190,10 +194,15 @@ class KimiAdapter(CLIAdapter):
                     line = line.strip()
                     if not line or line.startswith("["):
                         break
-                    m = re.match(r'(\w+)\s*=\s*"([^"]*)"', line)
+                    m = re.match(r'(\w+)\s*=\s*("(?:\\.|[^"\\])*")\s*(?:#.*)?$', line)
                     if m:
-                        entry[m.group(1)] = m.group(2)
+                        try:
+                            entry[m.group(1)] = json.loads(m.group(2))
+                        except json.JSONDecodeError:
+                            return []
                     else:
+                        if re.match(r'\w+\s*=\s*"', line):
+                            return []
                         m = re.match(r'(\w+)\s*=\s*(\d+)', line)
                         if m:
                             entry[m.group(1)] = m.group(2)
