@@ -891,6 +891,7 @@ class TestIssue739LocalEmbeddingDevice(unittest.TestCase):
             ("bge-small", "BAAI/bge-small-en-v1.5", 384, {}),
             ("qwen3_256", "Qwen/Qwen3-Embedding-0.6B", 256, {
                 "truncate_dim": 256,
+                "config_kwargs": {"use_cache": False},
                 "model_kwargs": {"attn_implementation": "eager"} if sys.platform == "darwin" else None,
             }),
             ("synthetic/custom-encoder", "synthetic/custom-encoder", 192, {
@@ -935,6 +936,7 @@ class TestIssue739LocalEmbeddingDevice(unittest.TestCase):
             with self.subTest(platform=platform), patch.object(sys, "platform", platform):
                 self.load("qwen3_256", "cpu")
                 self.assertEqual(self.transformer_calls[0][1], {
+                    "config_kwargs": {"use_cache": False},
                     "truncate_dim": 256, "model_kwargs": model_kwargs, "device": "cpu",
                 })
 
