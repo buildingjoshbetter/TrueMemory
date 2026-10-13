@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -39,25 +40,42 @@ class TestIssue458SocketBounds:
             f"Server MAX_MESSAGE_SIZE too large ({model_server._MAX_MESSAGE_SIZE})"
         )
 
-    def test_issue_458_server_bounds_check_in_handle_client(self):
-        """model_server.py handle_client must check length before allocating."""
-        import inspect
-        from truememory.model_server import ModelServer
+    def test_issue_458_server_bounds_check_in_handle_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Reject an oversized header without reading or decoding its body."""
+        from truememory import model_server
 
-        source = inspect.getsource(ModelServer.handle_client)
-        assert "_MAX_MESSAGE_SIZE" in source or "MAX_MESSAGE" in source, (
-            "handle_client has no message size check — unbounded allocation DoS"
-        )
+        server = model_server.ModelServer()
+        conn = Mock(spec=socket.socket)
+        conn.recv.side_effect = [
+            struct.pack(">I", model_server._MAX_MESSAGE_SIZE + 1),
+            AssertionError("Oversized request body was read"),
+        ]
+        handled = Mock(side_effect=AssertionError("Oversized request was handled"))
+        monkeypatch.setattr(model_server, "_USE_UNIX", True)
+        monkeypatch.setattr(server, "handle_request", handled)
 
-    def test_issue_458_client_bounds_check_in_send_request(self):
-        """model_client.py _send_request must check response length."""
-        import inspect
-        from truememory.model_client import _send_request
+        server.handle_client(conn)
 
-        source = inspect.getsource(_send_request)
-        assert "_MAX_MESSAGE_SIZE" in source or "MAX_MESSAGE" in source, (
-            "_send_request has no response size check — unbounded allocation DoS"
-        )
+        conn.recv.assert_called_once_with(4)
+        conn.close.assert_called_once()
+        handled.assert_not_called()
+
+    def test_issue_458_client_bounds_check_in_send_request(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Reject an oversized response header before requesting its body."""
+        from truememory import model_client
+
+        conn = Mock(spec=socket.socket)
+        conn.recv.side_effect = [
+            struct.pack(">I", model_client._MAX_MESSAGE_SIZE + 1),
+            AssertionError("Oversized response body was read"),
+        ]
+        monkeypatch.setattr(model_client, "_connect", lambda deadline: conn)
+
+        with pytest.raises(ConnectionError, match="Response too large"):
+            model_client._send_request({"op": "ping"}, timeout=1)
+
+        conn.recv.assert_called_once_with(4)
+        conn.close.assert_called_once()
 
     @_SKIP_NO_UNIX
     def test_issue_458_oversized_message_rejected(self):

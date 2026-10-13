@@ -1,20 +1,25 @@
 """
 Fire-and-forget usage telemetry for TrueMemory.
 
-Disabled via TRUEMEMORY_TELEMETRY=off or {"telemetry": false} in config.
-Never blocks, never crashes, never slows down the user. All HTTP calls
-have a 3-second timeout. If the endpoint is unreachable, events are
-silently dropped.
+Disabled at startup via TRUEMEMORY_TELEMETRY=off or {"telemetry": false}
+in config. Events are queued and flushed in background threads; callers
+can also flush synchronously. HTTP calls use a configured 3-second timeout.
+Failed batches are dropped. Startup device discovery is synchronous.
 
-What is tracked:
-  - Tool call counts and latencies (which MCP tools are used)
-  - Session start/end events
-  - Tier, version, platform
-  - Email + UUID (on first registration)
+Built-in events are enabled by default and are not anonymous:
+  - Every event: name, persistent user UUID, timestamp
+  - Session start: tier, version, platform, architecture, Python version,
+    stable hashed device ID, and configured email on every session start
+  - Tool calls: tool name, latency, success or failure
+  - Registration: email and tier; tier changes: new and previous tier
 
-What is NEVER tracked:
+The UUID persists in config. The device ID is a truncated SHA-256 hash of
+the OS machine identifier and stays stable while that identifier does.
+
+Built-in events exclude:
   - Query content or search terms
   - Memory content or stored facts
+  - Tool arguments, results, and exception text
   - File paths, API keys, or credentials
 """
 
@@ -58,7 +63,7 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,10}$")
 
 
 def get_device_id() -> str:
-    """Return a SHA256-hashed machine ID for privacy-safe device counting."""
+    """Return a stable, pseudonymous machine-ID hash for device counting."""
     global _device_id_cache
     if _device_id_cache is not None:
         return _device_id_cache
@@ -123,7 +128,7 @@ def init(config: dict) -> dict | None:
         config["user_id"] = _user_id
         _save_user_id(config)
 
-    # Track session start and do a synchronous flush to check for updates
+    # Queue session fields, then flush in a background thread for update checks.
     session_props = {
         "tier": config.get("tier", "edge"),
         "version": _get_version(),
@@ -201,7 +206,7 @@ def track(event: str, properties: dict | None = None) -> None:
 
 
 def identify(email: str, properties: dict | None = None) -> None:
-    """Register user identity (first-run only)."""
+    """Emit an identity event when a valid email is configured."""
     if not _enabled:
         return
     if not _is_valid_email(email):

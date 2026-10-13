@@ -79,6 +79,8 @@ SPAWN_CAP = _env_int("TRUEMEMORY_SPAWN_CAP", _SPAWN_CAP_DEFAULT, lo=1)
 
 def _sanitize_session_id(session_id: str) -> str:
     """Sanitize session_id to prevent path traversal."""
+    if not isinstance(session_id, str):
+        return "unknown"
     safe = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64]
     return safe or "unknown"
 
@@ -108,46 +110,54 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--user", default=os.environ.get("TRUEMEMORY_USER_ID", ""))
     p.add_argument("--db", default=os.environ.get("TRUEMEMORY_DB_PATH", ""))
+    p.add_argument("--host", choices=("claude", "codex", "gemini", "cursor"), default="claude")
+    p.add_argument("--event", default="Stop")
     args, _ = p.parse_known_args()
     return args
 
 
-def main():
-    if os.environ.get("TRUEMEMORY_EXTRACTION"):
-        try:
-            input_data = json.load(sys.stdin)
-        except (json.JSONDecodeError, EOFError):
-            input_data = {}
-        transcript_path = input_data.get("transcript_path", "")
-        session_id = input_data.get("session_id", "")
-        if transcript_path and session_id:
-            from truememory.ingest.hooks._shared import mark_session_extracted
-            try:
-                mark_session_extracted(session_id, transcript_path)
-            except Exception as exc:
-                log.debug("stop hook: failed to mark extraction session %s: %s", session_id, exc)
-        return
-
+def main() -> None:
     args = _parse_args()
+    if os.environ.get("TRUEMEMORY_EXTRACTION"):
+        return
 
     try:
         input_data = json.load(sys.stdin)
     except (json.JSONDecodeError, EOFError):
         input_data = {}
 
-    transcript_path = input_data.get("transcript_path", "")
-    session_id = input_data.get("session_id", "unknown")
+    if not isinstance(input_data, dict):
+        return
+    if input_data.get("stop_hook_active") is True:
+        return
+    from truememory.ingest.hooks._shared import is_allowed_transcript, transcript_input_path, hook_session_id
+    transcript_path = transcript_input_path(input_data.get("transcript_path", ""))
+    native_session_id = hook_session_id(input_data, host=args.host)
+    session_id = native_session_id if args.host == "claude" else _sanitize_session_id(native_session_id)
 
-    if not transcript_path or not Path(transcript_path).exists():
+    if not transcript_path:
         return
     # M-90: transcript_path comes from attacker-influenceable hook stdin.
     # parse_transcript's plaintext fallback would read ANY readable file into
     # the memory store, so confirm containment in an allowed transcripts root
     # (the compact hook already did this; stop/drain previously did not).
-    from truememory.ingest.hooks._shared import is_allowed_transcript
-    if not is_allowed_transcript(transcript_path):
-        log.warning("stop hook: transcript_path %r outside allowed roots; skipping", transcript_path)
+    if not is_allowed_transcript(transcript_path, host=args.host):
+        log.warning("stop hook: transcript source rejected for host=%s", args.host)
         return
+    if not Path(transcript_path).is_file():
+        return
+
+    capture = None
+    if args.host == "claude":
+        from truememory.ingest.completion import admit_capture, has_receipt
+        try:
+            capture = admit_capture(transcript_path, session_id, args.user, args.db, args.host,
+                                    root=BACKLOG_DIR.parent / "ingest-completion-v1")
+            if has_receipt(capture):
+                return
+        except OSError as error:
+            log.warning("stop hook: capture retained nonterminal source (%s)", type(error).__name__)
+            return
 
     # Pre-flight check: ensure our write directories exist and are writable
     # so we fail early with a clear message instead of silently losing work
@@ -157,15 +167,23 @@ def main():
     # Proper transcript validation: parse and count actual message objects
     # instead of substring-matching (which false-positives on content that
     # contains the literal strings "human" or "user").
-    if not _has_enough_messages(transcript_path, MIN_MESSAGES):
+    if not _has_enough_messages(str(capture.path) if capture else transcript_path, MIN_MESSAGES):
         return
 
     from truememory.ingest.hooks._shared import should_extract_session, mark_session_extracted
-    if not should_extract_session(session_id, transcript_path):
+    if capture is None and not should_extract_session(session_id, transcript_path):
         log.info("stop hook: session %s already extracted at this size, skipping", session_id)
         return
 
-    spawned_pid = _run_background_ingestion(transcript_path, session_id, args.user, args.db)
+    if capture is not None:
+        spawned_pid = _run_background_ingestion(
+            transcript_path, session_id, args.user, args.db, transcript_host=args.host,
+            completion_capture=capture,
+        )
+    else:
+        spawned_pid = _run_background_ingestion(
+            transcript_path, session_id, args.user, args.db, transcript_host=args.host,
+        )
 
     # Only mark the session extracted when a real ingest process was spawned.
     # _run_background_ingestion returns 0 when the spawn cap denied it or Popen
@@ -224,56 +242,15 @@ def _writable_dirs_ok() -> bool:
 
 
 def _has_enough_messages(transcript_path: str, min_messages: int) -> bool:
-    """Check whether the transcript has at least `min_messages` user turns.
+    """Count meaningful canonical human turns, independently of completion coverage."""
+    from truememory.ingest.transcript import parse_transcript_outcome, strip_truememory_blocks
 
-    Parses the transcript properly instead of substring-counting so that
-    conversations containing the literal strings "human"/"user" in content
-    don't inflate the count.
-    """
-    try:
-        content = Path(transcript_path).read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    outcome = parse_transcript_outcome(Path(transcript_path))
+    if outcome.status == "unreadable":
         return False
-
-    if not content.strip():
-        return False
-
-    # Try JSON array first (Claude Code format)
-    count = 0
-    try:
-        if content.lstrip().startswith("["):
-            data = json.loads(content)
-            if isinstance(data, list):
-                for entry in data:
-                    if isinstance(entry, dict):
-                        role = entry.get("type") or entry.get("role") or ""
-                        if role in ("human", "user"):
-                            count += 1
-                return count >= min_messages
-    except json.JSONDecodeError:
-        pass
-
-    # Try JSONL
-    try:
-        for line in content.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-                if isinstance(entry, dict):
-                    role = entry.get("type") or entry.get("role") or ""
-                    if role in ("human", "user"):
-                        count += 1
-            except json.JSONDecodeError:
-                continue
-        if count > 0:
-            return count >= min_messages
-    except Exception:
-        pass
-
-    # Fall back to length heuristic for plain text
-    return len(content) > min_messages * 50
+    count = sum(message.role == "human" and bool(strip_truememory_blocks(message.content).strip())
+                for message in outcome.messages)
+    return count >= min_messages
 
 
 def _count_active_ingest_processes() -> int:
@@ -303,6 +280,7 @@ def _queue_to_backlog(
     user_id: str,
     db_path: str,
     reason: str,
+    transcript_host: str = "claude",
 ) -> None:
     """Drop a queue marker so a later session can re-attempt this ingestion.
 
@@ -312,6 +290,13 @@ def _queue_to_backlog(
     BACKLOG_DIR and let the next session's startup hook drain it (drain
     path is a follow-up item).
     """
+    from truememory.ingest.hooks._shared import is_allowed_transcript, normalize_transcript_host
+    transcript_host = normalize_transcript_host(transcript_host)
+    if not is_allowed_transcript(transcript_path, host=transcript_host):
+        return
+    if any(not isinstance(value, str) or "\0" in value for value in (user_id, db_path)):
+        return
+    session_id = _sanitize_session_id(session_id)
     try:
         from datetime import datetime, timezone
         BACKLOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -328,6 +313,7 @@ def _queue_to_backlog(
         marker = BACKLOG_DIR / f"{safe_sid}.json"
         _atomic_write_text(marker, json.dumps({
             "transcript_path": transcript_path,
+            "transcript_host": transcript_host,
             "session_id": session_id,
             "user_id": user_id,
             "db_path": db_path,
@@ -345,6 +331,9 @@ def _run_background_ingestion(
     session_id: str,
     user_id: str,
     db_path: str,
+    transcript_host: str = "claude",
+    *,
+    completion_capture=None,
 ) -> int:
     """Launch the ingestion pipeline as a background process.
 
@@ -358,6 +347,21 @@ def _run_background_ingestion(
     for a later session to re-attempt — NEVER fall back to synchronous
     inline ingestion (that blocks Claude Code's shutdown).
     """
+    from truememory.ingest.hooks._shared import is_allowed_transcript, normalize_transcript_host
+    transcript_host = normalize_transcript_host(transcript_host)
+    if not is_allowed_transcript(transcript_path, host=transcript_host):
+        log.warning("stop hook: background transcript source rejected")
+        return 0
+    if any(not isinstance(value, str) or "\0" in value for value in (user_id, db_path)):
+        return 0
+    if completion_capture is not None:
+        from truememory.ingest.completion import dispatch
+        try:
+            return dispatch(completion_capture, GATE_THRESHOLD)
+        except OSError as error:
+            log.warning("stop hook: completion dispatch retained work (%s)", type(error).__name__)
+            return 0
+    session_id = _sanitize_session_id(session_id)
     # Log the effective config for debugging. Operators commonly wire up
     # multiple profiles and need to confirm which user/db the hook actually
     # saw after the arg-parse + env-var resolution.
@@ -370,6 +374,8 @@ def _run_background_ingestion(
     cmd = [
         sys.executable, "-m", "truememory.ingest.cli",
         "ingest", transcript_path,
+        "--transcript-host", transcript_host,
+        "--automatic",
     ]
 
     if user_id:
@@ -405,6 +411,7 @@ def _run_background_ingestion(
         _queue_to_backlog(
             transcript_path, session_id, user_id, db_path,
             reason="extraction_budget_exhausted",
+            transcript_host=transcript_host,
         )
         return 0
 
@@ -424,6 +431,7 @@ def _run_background_ingestion(
             _queue_to_backlog(
                 transcript_path, session_id, user_id, db_path,
                 reason=f"spawn_cap_reached:SPAWN_CAP={effective_cap}",
+                transcript_host=transcript_host,
             )
             return 0
 
@@ -449,6 +457,7 @@ def _run_background_ingestion(
             _queue_to_backlog(
                 transcript_path, session_id, user_id, db_path,
                 reason=f"popen_failed:{type(e).__name__}:{e}",
+                transcript_host=transcript_host,
             )
             return 0
         finally:

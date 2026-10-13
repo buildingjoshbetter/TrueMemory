@@ -152,6 +152,7 @@ def test_configure_restores_hf_offline_on_success(monkeypatch, tmp_path):
     monkeypatch.setenv("TRUEMEMORY_DB", str(db_path))
     monkeypatch.setattr(ms, "_TRUEMEMORY_DIR", home / ".truememory")
     monkeypatch.setattr(ms, "_CONFIG_PATH", home / ".truememory" / "config.json")
+    monkeypatch.setattr(ms, "_CONFIG_LOCK_PATH", ms._CONFIG_PATH.with_name("config.json.lock"))
     monkeypatch.setattr(ms, "_DB_PATH", str(db_path))
     monkeypatch.setattr(ms, "_memory", None)
 
@@ -198,6 +199,7 @@ def test_configure_restores_hf_offline_on_set_embedding_model_raise(
     monkeypatch.setenv("TRUEMEMORY_DB", str(db_path))
     monkeypatch.setattr(ms, "_TRUEMEMORY_DIR", home / ".truememory")
     monkeypatch.setattr(ms, "_CONFIG_PATH", home / ".truememory" / "config.json")
+    monkeypatch.setattr(ms, "_CONFIG_LOCK_PATH", ms._CONFIG_PATH.with_name("config.json.lock"))
     monkeypatch.setattr(ms, "_DB_PATH", str(db_path))
     monkeypatch.setattr(ms, "_memory", None)
 
@@ -214,20 +216,30 @@ def test_configure_restores_hf_offline_on_set_embedding_model_raise(
 
     import truememory.vector_search as vs
 
+    attempted_tiers = []
+
     def _boom(tier):
+        attempted_tiers.append(tier)
         raise ValueError("simulated: model removed")
 
+    import truememory.reranker as rr
+    monkeypatch.setattr(vs, "_model", None)
+    monkeypatch.setattr(rr, "_model", None)
     monkeypatch.setattr(vs, "set_embedding_model", _boom)
 
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
     monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
 
-    # truememory_configure wraps the tier switch; ValueError propagates
-    # out per Python semantics after finally runs.
+    # Failed lazy projection is returned as a truthful incomplete activation.
     import os as _os
-    import pytest
-    with pytest.raises(ValueError):
-        ms.truememory_configure(tier="pro")
+    result = json.loads(ms.truememory_configure(tier="pro"))
+    assert attempted_tiers == ["pro", "edge"]
+    assert result["status"] == "activation_pending"
+    assert result["rebuild_error"] == "ValueError: simulated: model removed"
+    assert result["served_tier"] is None
+    assert result["description"] == "Serving state awaits authoritative readback."
+    assert "warning" in result
+    assert not ms._CONFIG_PATH.exists() or json.loads(ms._CONFIG_PATH.read_text(encoding="utf-8")).get("tier", "edge") == "edge"
 
     # Critical F31 assertion: offline mode was RESTORED despite the raise
     assert _os.environ.get("HF_HUB_OFFLINE") == "1", (

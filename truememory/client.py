@@ -176,6 +176,7 @@ class Memory:
             query, limit=limit * 3 if user_id else limit,
             include_directives=include_directives,
             _skip_reranker=_skip_reranker,
+            **({"landmark_sender": user_id} if user_id else {}),
         )
 
         if user_id:
@@ -250,6 +251,7 @@ class Memory:
         results = self._engine.search_agentic(
             query, limit=limit * 3 if user_id else limit, llm_fn=llm_fn,
             include_directives=include_directives,
+            **({"landmark_sender": user_id} if user_id else {}),
         )
 
         if user_id:
@@ -259,6 +261,23 @@ class Memory:
             r["user_id"] = r.get("sender", "")
 
         return results[:limit]
+
+    def resolve_temporal_query(self, query: str, user_id: str | None = None) -> dict:
+        """Inspect date/landmark resolution without retrieving or inventing memories."""
+        from truememory.temporal import resolve_temporal_intent, _SOURCE_INTERVAL_ROW_LIMIT, _source_interval_candidates
+
+        self._engine._ensure_connection()
+        intent = resolve_temporal_intent(self._engine.conn, query, user_id)
+        if intent.get("after") or intent.get("before"):
+            _, diagnostic = _source_interval_candidates(self._engine.conn)
+            if diagnostic is not None:
+                intent["source_interval_coverage"] = diagnostic
+            intent["source_interval_lookup_policy"] = {
+                "candidate_limit": _SOURCE_INTERVAL_ROW_LIMIT,
+                "visited_row_limit": _SOURCE_INTERVAL_ROW_LIMIT + 1,
+                "overflow": "incomplete", "complete_archive": False,
+            }
+        return intent
 
     def get(self, memory_id: int) -> dict | None:
         """Retrieve a single memory by ID."""

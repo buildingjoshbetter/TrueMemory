@@ -89,6 +89,8 @@ class TestIssue460WarmSearch:
 
             m1._engine.close()
             m2._engine.close()
+            from truememory.maintenance import get_coordinator
+            assert get_coordinator(db_path).wait(10), "Synthetic maintenance teardown did not finish"
 
     def test_issue_460_metadata_survives_multiple_adds(self):
         """Metadata must persist across multiple add() calls."""

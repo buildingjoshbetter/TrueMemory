@@ -25,6 +25,9 @@ Design:
 
 import re
 import sqlite3
+import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from truememory.storage import _row_to_dict, select_message_cols
@@ -509,6 +512,248 @@ def detect_temporal_intent(query: str) -> dict:
 # Temporal search and timeline
 # ---------------------------------------------------------------------------
 
+_LANDMARK_ROW_LIMIT = 1024
+_LANDMARK_CANDIDATE_LIMIT = 16
+_SOURCE_INTERVAL_ROW_LIMIT = 1024
+
+
+def _has_bounded_primary_key(conn: sqlite3.Connection, table: str) -> bool:
+    if table not in {"messages", "landmark_events"}:
+        return False
+    columns = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    keys = [column for column in columns if column[5]]
+    return len(keys) == 1 and keys[0][1] == "id" and keys[0][2].upper() == "INTEGER"
+
+
+def _source_interval_candidates(conn: sqlite3.Connection) -> tuple[list[dict], dict | None]:
+    """Inspect a bounded raw-PK batch before selecting provenance rows."""
+    try:
+        if not _has_bounded_primary_key(conn, "messages"):
+            return [], {"status": "incomplete", "reason": "source_interval_lookup_unavailable",
+                        "candidate_limit": _SOURCE_INTERVAL_ROW_LIMIT,
+                        "visited_row_limit": _SOURCE_INTERVAL_ROW_LIMIT + 1}
+        rows = conn.execute(
+            "SELECT id,substr(metadata,1,65537),length(metadata) FROM messages "
+            "ORDER BY id LIMIT ?", (_SOURCE_INTERVAL_ROW_LIMIT + 1,),
+        ).fetchall()
+    except sqlite3.Error:
+        return [], {"status": "incomplete", "reason": "source_interval_lookup_unavailable",
+                    "candidate_limit": _SOURCE_INTERVAL_ROW_LIMIT,
+                    "visited_row_limit": _SOURCE_INTERVAL_ROW_LIMIT + 1}
+    diagnostic = None
+    if len(rows) > _SOURCE_INTERVAL_ROW_LIMIT:
+        diagnostic = {"status": "incomplete", "reason": "source_interval_inventory_limit",
+                      "candidate_limit": _SOURCE_INTERVAL_ROW_LIMIT,
+                      "visited_row_limit": _SOURCE_INTERVAL_ROW_LIMIT + 1}
+    candidates = []
+    for message_id, raw, length in rows[:_SOURCE_INTERVAL_ROW_LIMIT]:
+        if (length or 0) > 65536:
+            diagnostic = diagnostic or {"status": "incomplete", "reason": "source_metadata_limit",
+                                        "candidate_limit": _SOURCE_INTERVAL_ROW_LIMIT,
+                                        "visited_row_limit": _SOURCE_INTERVAL_ROW_LIMIT + 1}
+            continue
+        try:
+            metadata = json.loads(raw) if isinstance(raw, str) else None
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        namespace = metadata.get("truememory_ingest")
+        if isinstance(namespace, dict) and type(namespace.get("version")) is int and namespace["version"] == 1:
+            candidates.append({"id": message_id, "metadata": metadata})
+    return candidates, diagnostic
+
+
+def _source_intervals(metadata: object) -> tuple[list[tuple[str, str]], bool] | None:
+    if not isinstance(metadata, dict) or "truememory_ingest" not in metadata:
+        return None
+    try:
+        from truememory.ingest.provenance import source_intervals
+    except ImportError:
+        return [], True
+    return source_intervals(metadata)
+
+
+def _temporal_row_matches(row: dict, after: str | None, before_excl: str | None) -> bool:
+    if not after and not before_excl:
+        return True
+    intervals = _source_intervals(row.get("metadata"))
+    if intervals is not None:
+        return any(
+            (not after or end >= after) and (not before_excl or start < before_excl)
+            for start, end in intervals[0]
+        )
+    timestamp = row.get("timestamp") or ""
+    return bool(timestamp) and (not after or timestamp >= after) and (
+        not before_excl or timestamp < before_excl
+    )
+
+
+def _landmark_date(timestamp: object, metadata: object) -> str | None:
+    intervals = _source_intervals(metadata)
+    if intervals is not None:
+        # An extraction-input interval is not an exact semantic event anchor,
+        # even if the entire input happened on one calendar day.
+        return None
+    if not isinstance(timestamp, str) or not timestamp or len(timestamp) > 64:
+        return None
+    if len(timestamp) < 10 or not _ISO_DATE_RE.fullmatch(timestamp[:10]):
+        return None
+    try:
+        normalized = timestamp[:-1] + "+00:00" if timestamp.endswith("Z") else timestamp
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    # Use the encoded source calendar, never the querying machine's time zone.
+    return parsed.date().isoformat()
+
+
+def _landmark_phrase(text: str) -> tuple[str, str | None]:
+    phrase = text.strip().rstrip("?. ")
+    quoted = len(phrase) >= 2 and phrase[0] == phrase[-1] and phrase[0] in {"'", '"'}
+    if quoted:
+        phrase = phrase[1:-1].strip()
+    qualifier = re.fullmatch(r"(.+?)['\u2019]s\s+(.+)", phrase) if not quoted else None
+    entity = qualifier.group(1).strip() if qualifier else None
+    phrase = qualifier.group(2).strip() if qualifier else phrase
+    return " ".join(phrase.casefold().split()), entity
+
+
+def resolve_temporal_intent(
+    conn: sqlite3.Connection, query: str, sender: str | None = None,
+) -> dict:
+    """Resolve one literal stored landmark without guessing an event date.
+
+    Stored context is heuristic evidence. The returned citation identifies its
+    live source; it does not certify the date of the event described there.
+    Unresolved/ambiguous diagnostics preserve the original parser's window.
+    """
+    intent = detect_temporal_intent(query)
+    clauses = list(re.finditer(
+        r"\b(after|before)\s+(.+?)(?=\s+(?:and\s+)?(?:after|before)\b|\?|$)",
+        query, re.IGNORECASE,
+    ))
+    if not clauses or intent.get("after") or intent.get("before") or parse_date_reference(query):
+        return intent
+    diagnostic = {"status": "unresolved", "reason": "no_matching_event", "candidates": []}
+    intent["landmark_resolution"] = diagnostic
+    if len(clauses) != 1:
+        diagnostic["reason"] = "multiple_named_anchors"
+        return intent
+    clause = clauses[0]
+    phrase, entity = _landmark_phrase(clause.group(2))
+    diagnostic["phrase"] = phrase
+    if not phrase or len(phrase) > 256 or (entity and len(entity) > 128):
+        diagnostic["reason"] = "unsupported_phrase"
+        return intent
+    try:
+        if not _has_bounded_primary_key(conn, "landmark_events") or not _has_bounded_primary_key(conn, "messages"):
+            diagnostic["reason"] = "landmark_schema_unavailable"
+            return intent
+        rows = conn.execute(
+            "SELECT id, substr(event_name,1,513), length(event_name), timestamp, "
+            "substr(related_entities,1,4097), source_message_id "
+            "FROM landmark_events ORDER BY id LIMIT ?", (_LANDMARK_ROW_LIMIT + 1,),
+        ).fetchall()
+    except sqlite3.Error:
+        diagnostic["reason"] = "landmark_schema_unavailable"
+        return intent
+    if len(rows) > _LANDMARK_ROW_LIMIT:
+        diagnostic["reason"] = "landmark_inventory_limit"
+        return intent
+    pattern = re.compile(r"(?<!\w)" + re.escape(phrase) + r"(?!\w)")
+    candidates: dict[int, dict] = {}
+    for landmark_id, name, name_length, timestamp, related_json, source_id in rows:
+        if not isinstance(name, str) or not pattern.search(" ".join(name.casefold().split())):
+            continue
+        if not isinstance(source_id, int) or isinstance(source_id, bool) or source_id <= 0:
+            diagnostic["reason"] = "source_identity_unavailable"
+            return intent
+        try:
+            source = conn.execute(
+                "SELECT id,sender,recipient,timestamp,substr(metadata,1,65537),length(metadata), "
+                "substr(content,1,4097),length(content),directive FROM messages WHERE id = ?",
+                (source_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            diagnostic["reason"] = "source_schema_unavailable"
+            return intent
+        if source is None:
+            diagnostic["reason"] = "source_missing"
+            return intent
+        _, source_sender, recipient, source_time, metadata, metadata_length, content, content_length, directive = source
+        if sender is not None and source_sender != sender:
+            continue
+        if directive:
+            continue
+        if (metadata_length or 0) > 65536 or (content_length or 0) > 4096 or not isinstance(content, str) or not pattern.search(
+            " ".join(content.casefold().split())
+        ):
+            diagnostic["reason"] = "source_content_unresolved"
+            return intent
+        try:
+            related = json.loads(related_json) if isinstance(related_json, str) else None
+            source_metadata = json.loads(metadata) if isinstance(metadata, str) else metadata
+        except (ValueError, TypeError):
+            diagnostic["reason"] = "source_metadata_invalid"
+            return intent
+        if not isinstance(source_metadata, dict):
+            diagnostic["reason"] = "source_metadata_invalid"
+            return intent
+        if not isinstance(related, list) or not all(isinstance(value, str) for value in related):
+            diagnostic["reason"] = "related_entities_invalid"
+            return intent
+        if entity and entity.casefold() not in {
+            str(value or "").casefold() for value in [source_sender, recipient, *related]
+        }:
+            continue
+        date = _landmark_date(source_time, source_metadata)
+        if name_length > 512 or timestamp != source_time or date is None:
+            diagnostic["reason"] = "source_date_unresolved"
+            return intent
+        candidate = {
+            "landmark_id": landmark_id, "event_name": name, "source_message_id": source_id,
+            "timestamp": source_time, "date": date, "sender": source_sender,
+            "related_entities": related[:10],
+            "timestamp_basis": "source_input_scope" if _source_intervals(source_metadata) is not None
+            else "source_message_timestamp",
+        }
+        previous = candidates.get(source_id)
+        if previous and previous["date"] != date:
+            diagnostic["reason"] = "conflicting_source_dates"
+            return intent
+        candidates.setdefault(source_id, candidate)
+    diagnostic["candidates"] = list(candidates.values())[:_LANDMARK_CANDIDATE_LIMIT]
+    if len(candidates) != 1:
+        if candidates:
+            diagnostic.update(status="ambiguous", reason="multiple_sources",
+                              candidates_truncated=len(candidates) > _LANDMARK_CANDIDATE_LIMIT)
+        return intent
+    candidate = next(iter(candidates.values()))
+    # Replay the unchanged parser so its 31/7/365-day windows remain identical.
+    anchored_query = query[:clause.start(2)] + candidate["date"] + query[clause.end(2):]
+    try:
+        resolved = detect_temporal_intent(anchored_query)
+    except (ValueError, OverflowError):
+        diagnostic["reason"] = "unsupported_date_window"
+        return intent
+    diagnostic.update(status="resolved", reason="unique_live_source")
+    resolved["landmark_resolution"] = diagnostic
+    return resolved
+
+
+def attach_temporal_resolution(results: list[dict], intent: dict) -> list[dict]:
+    diagnostic = intent.get("landmark_resolution")
+    coverage = intent.get("source_interval_coverage")
+    if diagnostic is None and coverage is None:
+        return results
+    additions = {}
+    if diagnostic is not None:
+        additions["temporal_resolution"] = diagnostic
+    if coverage is not None:
+        additions["temporal_scope_coverage"] = coverage
+    return [dict(row, **additions) for row in results]
+
 def search_temporal(
     conn: sqlite3.Connection,
     query: str,
@@ -516,6 +761,8 @@ def search_temporal(
     hybrid_results: list[dict] | None = None,
     limit: int = 10,
     include_directives: bool = False,
+    landmark_sender: str | None = None,
+    resolved_intent: dict | None = None,
 ) -> list[dict]:
     """
     Apply temporal filtering and re-ranking to search results.
@@ -543,7 +790,7 @@ def search_temporal(
     Returns:
         List of message dicts, temporally filtered and ordered.
     """
-    intent = detect_temporal_intent(query)
+    intent = resolved_intent if resolved_intent is not None else resolve_temporal_intent(conn, query, landmark_sender)
 
     # Merge input result sets (prefer hybrid if both are provided)
     results = []
@@ -553,7 +800,7 @@ def search_temporal(
         results = list(fts_results)
 
     if not intent["has_temporal"]:
-        return results[:limit]
+        return attach_temporal_resolution(results[:limit], intent)
 
     after = _validate_iso_date(intent["after"])
     before = _validate_iso_date(intent["before"])
@@ -564,14 +811,8 @@ def search_temporal(
         before_excl = _exclusive_upper_bound(before) if before else None
         filtered = []
         for r in results:
-            ts = r.get("timestamp", "")
-            if not ts:
-                continue
-            if after and ts < after:
-                continue
-            if before_excl and ts >= before_excl:
-                continue
-            filtered.append(r)
+            if _temporal_row_matches(r, after, before_excl):
+                filtered.append(r)
         results = filtered
 
     # --- If trajectory, sort chronologically ---
@@ -583,6 +824,10 @@ def search_temporal(
         existing_ids = {r.get("id") for r in results}
         extra = get_timeline(conn, after=after, before=before,
                              include_directives=include_directives)
+        for row in extra:
+            if row.get("temporal_scope_coverage"):
+                intent["source_interval_coverage"] = row["temporal_scope_coverage"]
+                break
         for msg in extra:
             if msg["id"] not in existing_ids:
                 results.append(msg)
@@ -592,7 +837,7 @@ def search_temporal(
         if intent["is_trajectory"] or intent["sort_by_time"]:
             results.sort(key=lambda r: r.get("timestamp", ""))
 
-    return results[:limit]
+    return attach_temporal_resolution(results[:limit], intent)
 
 
 def get_timeline(
@@ -653,7 +898,34 @@ def get_timeline(
     sql = f"SELECT {select_message_cols(conn)} FROM messages{where} ORDER BY timestamp"
 
     rows = conn.execute(sql, params).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    results = [_row_to_dict(r) for r in rows]
+    if after or before:
+        before_excl = _exclusive_upper_bound(before) if before else None
+        # Only recognized v1 provenance needs a second lookup: its scalar end
+        # can lie outside a window intersecting one of its individual scopes.
+        scope_rows, diagnostic = _source_interval_candidates(conn)
+        present = {row.get("id") for row in results}
+        columns = select_message_cols(conn)
+        for candidate in scope_rows:
+            if candidate["id"] in present or not _temporal_row_matches(candidate, after, before_excl):
+                continue
+            row = conn.execute(f"SELECT {columns} FROM messages WHERE id = ?", (candidate["id"],)).fetchone()
+            if row is None:
+                continue
+            message = _row_to_dict(row)
+            if entity is not None and entity.lower() not in {
+                (message.get("sender") or "").lower(), (message.get("recipient") or "").lower(),
+            }:
+                continue
+            if not include_directives and message.get("directive"):
+                continue
+            results.append(message)
+            present.add(message.get("id"))
+        results = [row for row in results if _temporal_row_matches(row, after, before_excl)]
+        results.sort(key=lambda row: row.get("timestamp", ""))
+        if diagnostic:
+            results = [dict(row, temporal_scope_coverage=diagnostic) for row in results]
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -673,38 +945,17 @@ def _parse_naive(ts: str) -> datetime:
     return datetime.fromisoformat(stripped)
 
 
-def detect_episodes(conn, gap_hours=6):
-    """
-    Group messages into episodes using a time-gap heuristic.
-    Messages within gap_hours of each other belong to the same episode.
-    Stores episodes in the episodes table and updates episode_id on messages.
-
-    Args:
-        conn:      Open database connection.
-        gap_hours: Maximum gap (in hours) between consecutive messages
-                   within the same episode (default 6).
-
-    Returns:
-        Number of episodes detected.
-    """
-    rows = conn.execute(
-        "SELECT id, timestamp FROM messages WHERE timestamp != '' ORDER BY timestamp"
-    ).fetchall()
-
+def _group_episode_rows(rows: list[tuple], gap_hours: float) -> list[list[tuple]]:
+    """Keep the existing lexical ordering and naive timestamp gap semantics."""
     if not rows:
-        return 0
-
-    # Clear existing episodes
-    conn.execute("DELETE FROM episodes")
-    conn.execute("UPDATE messages SET episode_id = NULL")
-
+        return []
     episodes = []
     current_episode_msgs = [rows[0]]
     gap_delta = timedelta(hours=gap_hours)
 
     for i in range(1, len(rows)):
-        msg_id, ts = rows[i]
-        prev_id, prev_ts = rows[i - 1]
+        ts = rows[i][1]
+        prev_ts = rows[i - 1][1]
 
         try:
             curr_dt = _parse_naive(ts)
@@ -713,37 +964,120 @@ def detect_episodes(conn, gap_hours=6):
             if (curr_dt - prev_dt) > gap_delta:
                 # New episode
                 episodes.append(current_episode_msgs)
-                current_episode_msgs = [(msg_id, ts)]
+                current_episode_msgs = [rows[i]]
             else:
-                current_episode_msgs.append((msg_id, ts))
+                current_episode_msgs.append(rows[i])
         except (ValueError, TypeError):
-            current_episode_msgs.append((msg_id, ts))
+            current_episode_msgs.append(rows[i])
 
     # Don't forget the last episode
     if current_episode_msgs:
         episodes.append(current_episode_msgs)
+    return episodes
 
-    # Store episodes and update messages
-    for ep_msgs in episodes:
-        if not ep_msgs:
-            continue
 
+@contextmanager
+def _episode_transaction(conn: sqlite3.Connection) -> Iterator[None]:
+    owned = not conn.in_transaction
+    conn.execute("BEGIN" if owned else "SAVEPOINT truememory_episodes")
+    completed = False
+    try:
+        yield
+        conn.execute("COMMIT" if owned else "RELEASE truememory_episodes")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO truememory_episodes")
+                conn.execute("RELEASE truememory_episodes")
+
+
+def _reconcile_episodes(conn: sqlite3.Connection, gap_hours: float) -> int:
+    rows = conn.execute(
+        "SELECT id, timestamp, episode_id FROM messages WHERE timestamp != '' ORDER BY timestamp"
+    ).fetchall()
+    assigned = conn.execute(
+        "SELECT id, episode_id FROM messages WHERE episode_id IS NOT NULL"
+    ).fetchall()
+    previous = conn.execute(
+        "SELECT id, start_time, end_time, message_count, summary FROM episodes"
+    ).fetchall()
+    groups = _group_episode_rows(rows, gap_hours)
+    members: dict[int, set[int]] = {}
+    for mid, episode_id in assigned:
+        members.setdefault(episode_id, set()).add(mid)
+    matching = {
+        frozenset(members[episode[0]]): episode
+        for episode in previous
+        if episode[0] in members and len(members[episode[0]]) == episode[3]
+    }
+
+    kept: set[int] = set()
+    eligible: set[int] = set()
+    assignments = []
+    for ep_msgs in groups:
+        member_ids = frozenset(message[0] for message in ep_msgs)
+        eligible.update(member_ids)
         start_time = ep_msgs[0][1]
         end_time = ep_msgs[-1][1]
         msg_count = len(ep_msgs)
+        old = matching.get(member_ids)
+        if old is None:
+            cursor = conn.execute(
+                "INSERT INTO episodes (start_time, end_time, message_count) VALUES (?, ?, ?)",
+                (start_time, end_time, msg_count),
+            )
+            episode_id = cursor.lastrowid
+        else:
+            episode_id = old[0]
+            # Membership alone cannot prove a summary's source text unchanged.
+            # Preserve the old detector's invalidation without rewriting empties.
+            if tuple(old[1:4]) != (start_time, end_time, msg_count) or old[4] not in ("", None):
+                conn.execute(
+                    "UPDATE episodes SET start_time = ?, end_time = ?, message_count = ?, summary = '' WHERE id = ?",
+                    (start_time, end_time, msg_count, episode_id),
+                )
+        kept.add(episode_id)
+        assignments.extend((episode_id, message[0], episode_id)
+                           for message in ep_msgs if message[2] != episode_id)
 
-        cursor = conn.execute(
-            "INSERT INTO episodes (start_time, end_time, message_count) VALUES (?, ?, ?)",
-            (start_time, end_time, msg_count)
-        )
-        episode_id = cursor.lastrowid
+    assignments.extend((None, mid, None) for mid, _ in assigned if mid not in eligible)
+    conn.executemany(
+        "UPDATE messages SET episode_id = ? WHERE id = ? AND episode_id IS NOT ?",
+        assignments,
+    )
+    conn.executemany("DELETE FROM episodes WHERE id = ?",
+                     ((episode[0],) for episode in previous if episode[0] not in kept))
+    return len(groups)
 
-        msg_ids = [m[0] for m in ep_msgs]
-        for mid in msg_ids:
-            conn.execute("UPDATE messages SET episode_id = ? WHERE id = ?", (episode_id, mid))
 
-    conn.commit()
-    return len(episodes)
+def detect_episodes(conn: sqlite3.Connection, gap_hours: float = 6) -> int:
+    """Reconcile six-hour groups atomically, preserving unchanged episode IDs.
+
+    Exact member sets keep their IDs. Merges, splits and membership changes
+    get new IDs; nonempty derived summaries are invalidated. Only changed rows
+    are written. A caller transaction remains open and owns the final commit.
+    """
+    owned = not conn.in_transaction
+    for attempt in range(3):
+        version = conn.execute("PRAGMA data_version").fetchone()[0] if owned else None
+        try:
+            with _episode_transaction(conn):
+                return _reconcile_episodes(conn, gap_hours)
+        except sqlite3.OperationalError as error:
+            # WAL readers cannot upgrade a snapshot after another writer
+            # commits. Retry only our own transaction, at most twice; never
+            # restart a caller's snapshot or commit its unrelated writes.
+            code = getattr(error, "sqlite_errorcode", None)
+            stale = code == 517  # SQLITE_BUSY_SNAPSHOT
+            if code is None and str(error) == "database is locked" and owned:
+                # Python 3.10 does not expose extended SQLite error codes.
+                stale = conn.execute("PRAGMA data_version").fetchone()[0] != version
+            if not owned or not stale or attempt == 2:
+                raise
+    raise AssertionError("Episode snapshot retry limit was not enforced")
 
 
 def get_episode_messages(conn, episode_id):
@@ -827,12 +1161,11 @@ def detect_landmark_events(conn):
     """
     import json
 
-    conn.execute("DELETE FROM landmark_events")
-
-    rows = conn.execute(
+    source_sql = (
         "SELECT id, content, sender, recipient, timestamp FROM messages "
         "WHERE timestamp != '' ORDER BY timestamp"
-    ).fetchall()
+    )
+    rows = conn.execute(source_sql).fetchall()
 
     # Landmark event patterns
     event_patterns = {
@@ -866,7 +1199,7 @@ def detect_landmark_events(conn):
         ),
     }
 
-    count = 0
+    events = []
     for msg_id, content, sender, recipient, timestamp in rows:
         for event_type, pattern in event_patterns.items():
             match = pattern.search(content)
@@ -893,14 +1226,29 @@ def detect_landmark_events(conn):
                     if noun not in common and noun.lower() not in [r.lower() for r in related]:
                         related.append(noun)
 
-                conn.execute(
-                    "INSERT INTO landmark_events "
-                    "(event_name, timestamp, event_type, related_entities, source_message_id) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                events.append(
                     (event_context, timestamp, event_type, json.dumps(related[:10]), msg_id)
                 )
-                count += 1
                 break  # One event per message is enough
 
-    conn.commit()
-    return count
+    conn.execute("SAVEPOINT truememory_landmarks")
+    completed = False
+    try:
+        # Own the writer before validating the source used for computation.
+        conn.execute("DELETE FROM landmark_events WHERE 0")
+        if conn.execute(source_sql).fetchall() != rows:
+            raise sqlite3.OperationalError("Landmark source changed during computation; retry the operation")
+        conn.execute("DELETE FROM landmark_events")
+        conn.executemany(
+            "INSERT INTO landmark_events "
+            "(event_name, timestamp, event_type, related_entities, source_message_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            events,
+        )
+        conn.execute("RELEASE truememory_landmarks")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            conn.execute("ROLLBACK TO truememory_landmarks")
+            conn.execute("RELEASE truememory_landmarks")
+    return len(events)

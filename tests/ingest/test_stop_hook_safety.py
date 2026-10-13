@@ -14,6 +14,12 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _allow_synthetic_transcripts(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRUEMEMORY_TRANSCRIPT_DIR", str(tmp_path))
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +52,7 @@ def test_spawn_cap_blocks_when_at_cap(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "Popen", _record_popen)
 
     stop_mod._run_background_ingestion(
-        transcript_path="/fake/transcript.json",
+        transcript_path=str(tmp_path / "transcript.json"),
         session_id="sess-at-cap",
         user_id="alice",
         db_path="/tmp/fake.db",
@@ -93,7 +99,7 @@ def test_spawn_cap_allows_spawn_under_cap(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "Popen", _record_popen)
 
     stop_mod._run_background_ingestion(
-        transcript_path="/fake/transcript.json",
+        transcript_path=str(tmp_path / "transcript.json"),
         session_id="sess-ok",
         user_id="alice",
         db_path="/tmp/fake.db",
@@ -174,7 +180,7 @@ def test_popen_failure_queues_backlog_not_inline(monkeypatch, tmp_path):
 
     # Must not raise, must not call inline ingest, must queue to backlog.
     stop_mod._run_background_ingestion(
-        transcript_path="/fake/transcript.json",
+        transcript_path=str(tmp_path / "transcript.json"),
         session_id="sess-popen-fail",
         user_id="alice",
         db_path="/tmp/fake.db",
@@ -207,7 +213,7 @@ def test_backlog_write_failure_is_swallowed(monkeypatch, tmp_path):
 
     # Should not raise
     stop_mod._queue_to_backlog(
-        transcript_path="/fake/transcript.json",
+        transcript_path=str(tmp_path / "transcript.json"),
         session_id="sess-backlog-fail",
         user_id="alice",
         db_path="/tmp/fake.db",
@@ -222,7 +228,7 @@ def test_backlog_marker_schema(monkeypatch, tmp_path):
 
     monkeypatch.setattr(stop_mod, "BACKLOG_DIR", tmp_path / "backlog")
     stop_mod._queue_to_backlog(
-        transcript_path="/conv/transcript.json",
+        transcript_path=str(tmp_path / "transcript.json"),
         session_id="sess-abc",
         user_id="alice",
         db_path="/tmp/alice.db",
@@ -250,7 +256,7 @@ def test_empty_session_id_still_queues(monkeypatch, tmp_path):
 
     monkeypatch.setattr(stop_mod, "BACKLOG_DIR", tmp_path / "backlog")
     stop_mod._queue_to_backlog(
-        transcript_path="/conv/transcript.json",
+        transcript_path=str(tmp_path / "transcript.json"),
         session_id="",
         user_id="",
         db_path="",

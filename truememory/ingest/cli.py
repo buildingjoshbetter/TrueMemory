@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -43,6 +44,11 @@ def main():
     p_ingest.add_argument("--provider", default="auto", help="LLM provider (auto/ollama/claude_cli/openrouter/anthropic)")
     p_ingest.add_argument("--model", default="", help="LLM model name")
     p_ingest.add_argument("--session", default="", help="Session identifier to tag this ingestion trace with")
+    p_ingest.add_argument("--transcript-host", choices=("claude", "codex", "gemini", "cursor"),
+                          default="claude", help=argparse.SUPPRESS)
+    p_ingest.add_argument("--automatic", action="store_true", help=argparse.SUPPRESS)
+    p_ingest.add_argument("--completion-key", default="", help=argparse.SUPPRESS)
+    p_ingest.add_argument("--completion-attempt", type=int, default=0, help=argparse.SUPPRESS)
     p_ingest.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
 
     # --- install command ---
@@ -89,6 +95,17 @@ def main():
     p_upgrade.add_argument("tier", choices=["edge", "base", "pro"], help="Target tier")
     p_upgrade.add_argument("--force", action="store_true", help="Re-embed even if tier is unchanged")
 
+    p_cancel = sub.add_parser(
+        "cancel-rebuild", help="Cancel one explicitly identified interrupted tier rebuild",
+        description=("Read truememory_status(status_id) for the matching rebuild.id and rebuild.job_id. "
+                     "This command cancels only that marker. Retry upgrade-tier explicitly afterward."),
+    )
+    p_cancel.add_argument("--status-id", required=True, type=_positive_rebuild_status_id,
+                          help="Exact positive rebuild.id returned by truememory_status")
+    p_cancel.add_argument("--job-id", required=True, type=_rebuild_job_id,
+                          help="Exact matching 32-character lowercase hexadecimal rebuild.job_id")
+    p_cancel.add_argument("--db", default=None, help="Path to the same truememory database")
+
     # --- migrate-memory command ---
     p_migrate = sub.add_parser("migrate-memory", help="Migrate MEMORY.md facts into TrueMemory")
     p_migrate.add_argument("--path", default=None, help="Path to MEMORY.md (auto-detected if not specified)")
@@ -119,13 +136,83 @@ def main():
         _run_setup(args)
     elif args.command == "upgrade-tier":
         _run_upgrade_tier(args)
+    elif args.command == "cancel-rebuild":
+        _run_cancel_rebuild(args)
     elif args.command == "migrate-memory":
         _run_migrate_memory(args)
     else:
         parser.print_help()
 
 
+def _positive_rebuild_status_id(value: str) -> int:
+    if (type(value) is not str or re.fullmatch(r"[1-9][0-9]{0,18}", value) is None
+            or int(value) > 9223372036854775807):
+        raise argparse.ArgumentTypeError("status ID must be an exact positive SQLite integer")
+    return int(value)
+
+
+def _rebuild_job_id(value: str) -> str:
+    if type(value) is not str or re.fullmatch(r"[0-9a-f]{32}", value) is None:
+        raise argparse.ArgumentTypeError("job ID must be exactly 32 lowercase hexadecimal characters")
+    return value
+
+
+def _run_cancel_rebuild(args: argparse.Namespace) -> None:
+    """Cancel one explicit marker; do not discover, retry, or rebuild anything."""
+    try:
+        if type(args.status_id) is not int or not 1 <= args.status_id <= 9223372036854775807:
+            raise argparse.ArgumentTypeError("status ID must be an exact positive SQLite integer")
+        job_id = _rebuild_job_id(args.job_id)
+    except argparse.ArgumentTypeError as error:
+        print(f"Invalid rebuild identity: {error}", file=sys.stderr)
+        raise SystemExit(2) from error
+
+    from truememory.tier_switch.manager import RebuildManager
+    manager = RebuildManager()
+    try:
+        result = manager.cancel(args.status_id, expected_job_id=job_id,
+                                db_path=Path(args.db) if args.db is not None else None)
+    except Exception as error:
+        print(f"Rebuild cancellation refused: {error}", file=sys.stderr)
+        print("Read truememory_status(status_id) again and use its matching rebuild.id and rebuild.job_id.", file=sys.stderr)
+        raise SystemExit(1) from error
+    if result.get("status") != "cancelled" or result.get("job_id") != job_id:
+        print("No matching interrupted rebuild was cancelled. Read truememory_status(status_id) again.", file=sys.stderr)
+        raise SystemExit(1)
+    print(f"Rebuild {args.status_id} cancelled (job_id={job_id}).")
+    print("Retry the original upgrade-tier request explicitly to resume the eligible inactive prefix.")
+
+
 def _run_ingest(args):
+    if not getattr(args, "automatic", False):
+        return _execute_ingest(args)
+    from truememory.ingest.completion import (
+        CompletionError, admit_capture, load_capture, reserve_inline_attempt, worker_claim,
+    )
+    host = getattr(args, "transcript_host", "claude")
+    try:
+        key = getattr(args, "completion_key", "")
+        if key:
+            capture = load_capture(key, args.user, args.db, host)
+            if (str(Path(args.transcript).expanduser().resolve()) != str(capture.path.resolve())
+                    or args.session != capture.metadata["session_id"]):
+                raise CompletionError("worker_capture_mismatch")
+            attempt = getattr(args, "completion_attempt", 0)
+        else:
+            capture = admit_capture(args.transcript, args.session, args.user, args.db, host)
+            attempt = reserve_inline_attempt(capture)
+        if not attempt:
+            return
+        args.transcript = str(capture.path)
+        with worker_claim(capture, attempt) as allowed:
+            if allowed:
+                return _execute_ingest(args, capture)
+    except OSError as error:
+        logging.getLogger(__name__).warning("Automatic ingestion retained nonterminal work (%s)", type(error).__name__)
+        raise SystemExit(5) from error
+
+
+def _execute_ingest(args, capture=None):
     level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(level=level, format="%(levelname)s %(message)s")
 
@@ -213,6 +300,7 @@ def _run_ingest(args):
             gate_threshold=args.threshold,
             llm_config=config,
             session_id=args.session,
+            require_complete=True,
         )
     except RuntimeError as e:
         # auto_detect raises RuntimeError when no LLM backend is available
@@ -224,34 +312,29 @@ def _run_ingest(args):
     if args.trace:
         save_trace(result, args.trace)
 
-    try:
-        from truememory.ingest.hooks._shared import mark_session_extracted
-        mark_session_extracted(args.session, args.transcript)
-    except Exception:
-        pass
-
-    # issue #422: this point is only reached on a confirmed-successful ingest
-    # (all error paths above sys.exit before here). Remove the backlog
-    # .processing claim now that the work is done. Crashed workers never reach
-    # this line, so their claim is left for the stale watcher to re-queue.
-    try:
-        from truememory.ingest.hooks._shared import clear_backlog_processing
-        clear_backlog_processing(args.session)
-    except Exception as e:
-        # Non-fatal: the ingest already succeeded. But if we can't drop the
-        # claim, the stale watcher will (eventually) restore the .processing
-        # marker to .json and re-queue this already-done session, wasting an
-        # extraction. Log it so that wasted re-runs are diagnosable instead of
-        # silently swallowed.
-        logging.getLogger(__name__).warning(
-            "failed to clear backlog .processing claim for session %r: %s",
-            args.session, e,
-        )
-
-    _cascade_next()
+    from truememory.ingest.completion import strict_complete, record_receipt, drain
+    if not strict_complete(result, capture):
+        if capture is not None:
+            record_receipt(capture, result)
+        logging.getLogger(__name__).warning("Ingestion coverage remains unproven; completion and claims retained")
+        raise SystemExit(5)
+    if capture is None:
+        return
+    if not record_receipt(capture, result):
+        raise SystemExit(5)
+    host = getattr(args, "transcript_host", "claude")
+    drain(args.user, args.db, host)
+    _cascade_next(host, automatic=True, user_id=args.user, db_path=args.db)
 
 
-def _cascade_next() -> None:
+def _clear_legacy_processing(args) -> bool:
+    """Explicit legacy utility; automatic completion never uses this path."""
+    from truememory.ingest.hooks._shared import clear_backlog_processing
+    return clear_backlog_processing(args.session)
+
+
+def _cascade_next(host: str = "claude", *, automatic: bool = False,
+                  user_id: str = "", db_path: str | None = None) -> None:
     """Spawn the next backlog ingest process if work remains and slots are free.
 
     This creates a self-sustaining chain: each ingest process spawns the
@@ -262,6 +345,10 @@ def _cascade_next() -> None:
     Uses atomic rename (.json → .processing) to prevent TOCTOU races where
     multiple drainers read the same marker before either acquires the flock.
     """
+    if automatic:
+        from truememory.ingest.completion import convert_legacy_pointers
+        convert_legacy_pointers(user_id, db_path, host)
+        return
     import subprocess as _sp
 
     backlog_dir = Path.home() / ".truememory" / "backlog"
@@ -275,7 +362,12 @@ def _cascade_next() -> None:
         record_stale_processing_pid,
         mark_session_extracted,
         _quarantine_marker,
+        backlog_transcript_source,
+        normalize_transcript_host,
     )
+    host = normalize_transcript_host(host)
+    if not host:
+        return
     cleanup_stale_processing(backlog_dir)
 
     try:
@@ -291,7 +383,7 @@ def _cascade_next() -> None:
     except ImportError:
         return
 
-    for marker_path in markers[:1]:
+    for marker_path in markers:
         claimed_path = marker_path.with_suffix(".processing")
         try:
             marker_path.rename(claimed_path)
@@ -315,9 +407,20 @@ def _cascade_next() -> None:
             continue
 
         try:
-            transcript = data.get("transcript_path", "")
-            if not transcript or not Path(transcript).exists():
-                claimed_path.unlink(missing_ok=True)
+            if (
+                isinstance(data, dict)
+                and normalize_transcript_host(data.get("transcript_host", "claude"))
+                and data.get("transcript_host", "claude") != host
+            ):
+                claimed_path.rename(marker_path)
+                continue
+            source = backlog_transcript_source(data, host=host)
+            if source is None:
+                _quarantine_marker(claimed_path)
+                continue
+            transcript, session_id = source
+            if not Path(transcript).is_file():
+                _quarantine_marker(claimed_path)
                 continue
 
             if not check_extraction_budget():
@@ -340,8 +443,9 @@ def _cascade_next() -> None:
                 cmd = [
                     sys.executable, "-m", "truememory.ingest.cli",
                     "ingest", transcript,
+                    "--transcript-host", host,
+                    "--automatic",
                 ]
-                session_id = data.get("session_id", "")
                 if session_id:
                     cmd.extend(["--session", session_id])
                 if data.get("user_id"):
@@ -369,8 +473,9 @@ def _cascade_next() -> None:
             # the session if the spawned worker exits non-zero.
             logging.getLogger(__name__).info(
                 "Cascade: spawned next ingest for session %s (PID %d)",
-                data.get("session_id", "?"), proc.pid,
+                session_id, proc.pid,
             )
+            return
         except Exception:
             try:
                 claimed_path.rename(marker_path)
@@ -492,12 +597,13 @@ def _save_truememory_config(config: dict) -> None:
     _save_config(config)
 
 
-def _setup_cli_integrations(args, config):
-    """Step 3 of setup: detect installed CLIs and configure TrueMemory."""
+def _setup_cli_integrations(args: argparse.Namespace, config: dict) -> list[str]:
+    """Configure selected CLIs and return IDs whose setup failed."""
     from truememory.hooks.registry import detect_installed, get_adapter
     from truememory.hooks.cli import install_cli
 
     cli_arg = getattr(args, "cli", "")
+    failures: list[str] = []
 
     if cli_arg:
         requested_ids = [c.strip() for c in cli_arg.split(",") if c.strip()]
@@ -505,20 +611,22 @@ def _setup_cli_integrations(args, config):
             adapter = get_adapter(cli_id)
             if adapter is None:
                 print(f"  \033[33m⚠ Unknown CLI: {cli_id}\033[0m")
+                failures.append(cli_id)
                 continue
             print(f"  Setting up {adapter.name}...")
             if install_cli(cli_id, user_id=config.get("user_id", "")):
                 print(f"  \033[32m✓ {adapter.name} — configured\033[0m")
             else:
                 print(f"  \033[31m✗ {adapter.name} — failed\033[0m")
-        return
+                failures.append(cli_id)
+        return failures
 
     installed = detect_installed()
 
     if not installed:
         print("  No supported CLIs detected. Install hooks manually later with:")
         print("    truememory-ingest setup --cli <name>")
-        return
+        return failures
 
     print("  \033[1mCLI Integration\033[0m")
     print("  ──────────────")
@@ -553,10 +661,61 @@ def _setup_cli_integrations(args, config):
             print(f"  \033[32m✓ {adapter.name} — MCP server configured, hooks installed\033[0m")
         else:
             print(f"  \033[31m✗ {adapter.name} — setup failed\033[0m")
+            failures.append(adapter.cli_id)
 
     if len(selected) > 1:
         names = ", ".join(a.name for a in selected)
-        print(f"\n  TrueMemory is ready. Your memories sync across {names}.")
+        print(f"\n  CLI setup attempted for {names}. Check each result above.")
+    return failures
+
+
+def _setup_model_readiness(tier: str, existing_tier: str) -> list[str]:
+    """Switch through certification, then exercise the admitted serving identity."""
+    from truememory.maintenance import maintenance_owner
+    from truememory.tier_switch.manager import RebuildManager, _get_db_path, _open_db
+    from truememory.tier_switch.runtime import serving_operation
+
+    failures: list[str] = []
+    manager = RebuildManager()
+    try:
+        if not manager.run_rebuild_sync(tier):
+            return ["tier activation"]
+    except Exception as error:
+        print(f"Tier activation remains incomplete: {error}", file=sys.stderr)
+        return ["tier activation"]
+    if manager._last_action == "config_only" or {tier, existing_tier} == {"base", "pro"}:
+        return failures
+    try:
+        with maintenance_owner(_get_db_path()):
+            conn = _open_db(initialize=True)
+            try:
+                with serving_operation(conn) as operation:
+                    if operation.tier != tier:
+                        raise RuntimeError("Requested setup tier is not the admitted serving tier")
+                    try:
+                        from truememory.vector_search import _encode_with_mps_fallback, get_model
+                        _encode_with_mps_fallback(get_model(), ["TrueMemory setup readiness check."], show_progress_bar=False)
+                        if tier in ("base", "pro"):
+                            print("  \033[32mQwen3-Embedding-0.6B @ 256d Matryoshka ready\033[0m")
+                        else:
+                            print("  \033[32mpotion-base-8M (256-dim) ready\033[0m")
+                    except Exception as error:
+                        failures.append("embedding model")
+                        print(f"Embedding model readiness check failed: {error}", file=sys.stderr)
+                    try:
+                        from truememory.reranker import get_reranker
+                        get_reranker().predict([("TrueMemory setup readiness check.", "TrueMemory setup readiness check.")],
+                                               show_progress_bar=False)
+                        print("  \033[32mCross-encoder reranker ready\033[0m")
+                    except Exception as error:
+                        failures.append("reranker")
+                        print(f"Reranker readiness check failed: {error}", file=sys.stderr)
+            finally:
+                conn.close()
+    except Exception as error:
+        failures.append("serving admission")
+        print(f"Serving readiness admission failed: {error}", file=sys.stderr)
+    return failures
 
 
 def _run_setup(args):
@@ -586,30 +745,7 @@ def _run_setup(args):
             print(f"  \033[33m⚠ Invalid choice '{choice}', defaulting to Edge tier.\033[0m")
             tier = "edge"
 
-    # Pre-load the embedding model so first search isn't slow
-    print()
-    print("  \033[1mDownloading embedding model...\033[0m")
-    try:
-        os.environ["TRUEMEMORY_EMBED_MODEL"] = tier
-        from truememory.vector_search import set_embedding_model, get_model
-        set_embedding_model(tier)
-        get_model()  # triggers download if not cached
-        if tier in ("base", "pro"):
-            print("  \033[32m✓ Qwen3-Embedding-0.6B @ 256d Matryoshka ready\033[0m")
-        else:
-            print("  \033[32m✓ potion-base-8M (256-dim) ready\033[0m")
-    except Exception as e:
-        print(f"  \033[33m⚠ Model download failed: {e}\033[0m")
-        print("  The model will download on first use instead.")
-
-    # Also pre-download the cross-encoder reranker if available
-    try:
-        from truememory.reranker import get_reranker
-        print("  Downloading reranker model...")
-        get_reranker()
-        print("  \033[32m✓ Cross-encoder reranker ready\033[0m")
-    except Exception:
-        pass  # Optional component, don't fail setup
+    model_failures = _setup_model_readiness(tier, existing_tier)
 
     # ── Step 2: API key for HyDE / deep search ───────────────────────
     print()
@@ -680,25 +816,46 @@ def _run_setup(args):
             from getpass import getpass as _getpass
             api_key = _getpass(f"  {prompt_text}: ").strip()
 
-    # ── Save config ───────────────────────────────────────────────────
-    config["tier"] = tier
+    # Independent settings cannot publish a requested tier before certification.
+    from truememory.tier_switch.projection import (
+        CONFIG_WRITE_LOCK, ConfigFileLock, _read_config, _write_config, patch_config_fields,
+    )
+    fields = {}
     if llm_provider:
-        config["llm_provider"] = llm_provider
+        fields["llm_provider"] = llm_provider
     if api_key_field and api_key:
-        config[api_key_field] = api_key
-
-    _save_truememory_config(config)
+        fields[api_key_field] = api_key
+    config = patch_config_fields(fields, config_path=_TRUEMEMORY_CONFIG_PATH)
+    if tier == "edge" and not existing_tier:
+        with ConfigFileLock(_TRUEMEMORY_CONFIG_PATH.with_name("config.json.lock"), strict=True), CONFIG_WRITE_LOCK:
+            config = _read_config(_TRUEMEMORY_CONFIG_PATH)
+            if "tier" not in config:
+                config["tier"] = "edge"
+                _write_config(_TRUEMEMORY_CONFIG_PATH, config)
     print()
     print(f"  \033[32m✓ Config saved to {_TRUEMEMORY_CONFIG_PATH}\033[0m")
 
     # ── Step 3: CLI integration ─────────────────────────────────────────
     print()
-    _setup_cli_integrations(args, config)
+    integration_failures = _setup_cli_integrations(args, config)
 
     # ���─ Done ──────────────────────────────────────────────────────────
     print()
     print("  \033[1;33m══════════════════════════════════════════════\033[0m")
-    print("  \033[1mSetup complete!\033[0m")
+    if model_failures or integration_failures:
+        print("  Setup saved; readiness is incomplete.")
+        if model_failures:
+            print("  Selected-tier model readiness is incomplete.")
+            print(f"  Failed model checks: {', '.join(model_failures)}")
+            print("  Restore model-download access or fix the model error above, then retry:")
+            print("    truememory-ingest setup --non-interactive")
+        if integration_failures:
+            print(f"  Failed CLI integrations: {', '.join(integration_failures)}")
+            print("  Resolve the CLI setup errors above, then retry using a supported CLI name:")
+            print("    truememory-ingest setup --non-interactive --cli <name>")
+        print("  Existing installation and saved configuration were retained.")
+    else:
+        print("  \033[1mSetup complete!\033[0m")
     print(f"  Tier:     {tier}")
     print(f"  Provider: {llm_provider or 'none (basic search only)'}")
     print()
@@ -706,81 +863,35 @@ def _run_setup(args):
     print()
     print("  \033[2mThanks for using TrueMemory, a Sauron company.\033[0m")
     print()
+    if model_failures or integration_failures:
+        raise SystemExit(1)
 
 
 def _run_upgrade_tier(args):
     """Switch embedding tier and re-embed all memories with the new model."""
     tier = args.tier.lower().strip()
     config = _load_truememory_config()
-    old_tier = config.get("tier", "edge")
+    from truememory.tier_switch.manager import RebuildManager
 
-    if tier == old_tier and not args.force:
-        print(f"Already on {tier} tier. Use --force to re-embed anyway.")
-        return
+    def progress_callback(processed, total, metrics):
+        pct = 100.0 * processed / max(1, total)
+        print(f"\r  Re-embedding: {pct:.0f}% ({processed}/{total})", end="", flush=True)
 
-    from truememory.tier_switch.cache import get_transition_action
-
-    action = get_transition_action(old_tier, tier, force=args.force)
-
-    if action == "noop":
-        print(f"Already on {tier} tier.")
-        return
-
-    if action == "config_only":
-        config["tier"] = tier
-        _save_truememory_config(config)
-        os.environ["TRUEMEMORY_EMBED_MODEL"] = tier
-        from truememory.vector_search import set_embedding_model
-        set_embedding_model(tier)
-        from truememory.reranker import set_active_tier
-        set_active_tier(tier)
-        print(f"\033[32m✓ Switched to {tier} instantly (same embedding model)\033[0m")
-        return
-
-    print(f"Switching from {old_tier} to {tier}...")
-
-    os.environ.pop("HF_HUB_OFFLINE", None)
-    os.environ.pop("TRANSFORMERS_OFFLINE", None)
+    manager = RebuildManager()
     try:
-        os.environ["TRUEMEMORY_EMBED_MODEL"] = tier
-        from truememory.vector_search import set_embedding_model
-        set_embedding_model(tier)
-
-        from truememory.reranker import set_active_tier
-        set_active_tier(tier)
-
-        from truememory.tier_switch.manager import RebuildManager
-
-        def progress_callback(processed, total, metrics):
-            pct = metrics.get("progress_pct", 0)
-            eta = metrics.get("eta_seconds", 0)
-            bs = metrics.get("batch_size", 0)
-            ram = metrics.get("ram_pct", 0)
-            print(
-                f"\r  Re-embedding: {pct:.0f}% ({processed}/{total}) "
-                f"| ETA {eta:.0f}s | BS={bs} | RAM={ram:.0f}%",
-                end="", flush=True,
-            )
-
-        manager = RebuildManager()
-        success = manager.run_rebuild_sync(
-            target_tier=tier,
-            force=args.force,
-            progress_callback=progress_callback,
-        )
-
-        if success:
-            print(f"\n  \033[32m✓ Tier switched to {tier}\033[0m")
-        else:
-            print("\n  \033[31m✗ Rebuild failed. Run again to retry.\033[0m")
-            sys.exit(1)
-    except Exception as e:
-        print(f"\n\033[31mError during tier switch: {e}\033[0m", file=sys.stderr)
-        print("Config was saved. Re-run to retry, or use truememory-ingest setup.")
-        sys.exit(1)
-    finally:
-        os.environ["HF_HUB_OFFLINE"] = "1"
-        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        success = manager.run_rebuild_sync(target_tier=tier, force=args.force, progress_callback=progress_callback)
+    except Exception as error:
+        state = "activation pending" if manager._last_outcome == "activation_pending" else "switch incomplete"
+        print(f"Tier {state}: {error}", file=sys.stderr)
+        print("Read truememory_status() for rebuild.id and its matching rebuild.job_id. "
+              "For interrupted work, use truememory-ingest cancel-rebuild --status-id ID --job-id JOB_ID, "
+              "then retry the original request explicitly.", file=sys.stderr)
+        raise SystemExit(1) from error
+    if not success:
+        print("Tier activation is incomplete. Read truememory_status() before retrying. "
+              "Use its matching rebuild.id and rebuild.job_id with cancel-rebuild only for interrupted work.", file=sys.stderr)
+        raise SystemExit(1)
+    config = _load_truememory_config()
 
     _tier_descriptions = {
         "edge": "Edge — 89.6% LoCoMo, Model2Vec + MiniLM",
@@ -848,47 +959,8 @@ def _run_install(args):
     py = sys.executable
 
     if args.dry_run:
-        hooks_dir = Path(__file__).parent / "hooks"
-        hook_files = {
-            "SessionStart": hooks_dir / "session_start.py",
-            "UserPromptSubmit": hooks_dir / "user_prompt_submit.py",
-            "SessionEnd": hooks_dir / "stop.py",
-            "PreCompact": hooks_dir / "compact.py",
-        }
-        import shlex
-        _HOOK_MODULES = {
-            "session_start.py": "truememory.ingest.hooks.session_start",
-            "user_prompt_submit.py": "truememory.ingest.hooks.user_prompt_submit",
-            "stop.py": "truememory.ingest.hooks.stop",
-            "compact.py": "truememory.ingest.hooks.compact",
-        }
-        def _build_command(hook_path: Path) -> str:
-            module = _HOOK_MODULES.get(hook_path.name)
-            if module:
-                parts: list[str] = [py, "-m", module]
-            else:
-                parts = [py, str(hook_path)]
-            if args.user:
-                parts.extend(["--user", args.user])
-            if args.db:
-                parts.extend(["--db", args.db])
-            if sys.platform == "win32":
-                import subprocess as _sp
-                return _sp.list2cmdline(parts)
-            return " ".join(shlex.quote(p) for p in parts)
-
-        settings = {
-            "hooks": {
-                event: [{
-                    "matcher": "",
-                    "hooks": [{
-                        "type": "command",
-                        "command": _build_command(path),
-                    }],
-                }]
-                for event, path in hook_files.items()
-            }
-        }
+        from truememory.hooks.adapters.claude import claude_hook_settings
+        settings = claude_hook_settings(py, args.user, args.db or "")
         print("Add the following to your Claude Code settings.json:\n")
         print(json.dumps(settings, indent=2))
         return
