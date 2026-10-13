@@ -77,6 +77,9 @@ def _private_directory(directory: Path) -> None:
     if os.name == "nt":
         from truememory._windows_private import create_private_directory
         if not directory.parent.exists():
+            # A missing drive or share root is its own parent; stop instead of recursing.
+            if directory.parent.parent == directory.parent:
+                raise CompletionError("unsafe_directory")
             _private_directory(directory.parent)
         try:
             create_private_directory(directory)
