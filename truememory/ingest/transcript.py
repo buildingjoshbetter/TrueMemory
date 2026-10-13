@@ -935,6 +935,7 @@ def _parse_transcript_text_outcome(text: str, *, jsonl: bool = False) -> Transcr
     messages: list[Message] = []
     malformed = unrecognized = 0
     native_records: list[tuple[int, _CodexRecord]] = []
+    prompts = _recorded_prompts(entries)
     for index, entry in enumerate(entries):
         if isinstance(entry, str) and allow_strings:
             messages.append(Message(role="unknown", content=entry))
@@ -953,6 +954,8 @@ def _parse_transcript_text_outcome(text: str, *, jsonl: bool = False) -> Transcr
             malformed += 1
             continue
         if isinstance(top_type, str) and top_type in _NON_CONVERSATION_TYPES:
+            continue
+        if _claude_context_record(entry, prompts):
             continue
         # The supported older tool-call format has name/input instead of
         # content. Keep its existing _extract_message behavior intact.
@@ -1099,16 +1102,52 @@ _NON_CONVERSATION_TYPES = {
     "progress",
     "summary",
     "system",
-    # Claude Code 2.1 session metadata. queue-operation and last-prompt repeat
-    # the prompt that is also written as the user record; the others carry
-    # host state. Unlisted future types still count as malformed.
+    # Claude Code 2.1 session metadata without conversation text. last-prompt
+    # only repeats the leaf user record. Unlisted future types still count as
+    # malformed.
     "atis-latch",
-    "attachment",
     "cost-state",
     "last-prompt",
     "permission-mode",
-    "queue-operation",
 }
+
+# Claude Code 2.1 attachment types observed carrying host context, not user
+# text. Other attachment types keep their previous parsing and coverage.
+_CLAUDE_CONTEXT_ATTACHMENTS = frozenset({
+    "agent_listing_delta", "auto_mode", "date", "deferred_tools_delta",
+    "environment", "hook_success", "model", "prompt_snapshot",
+    "remote_session_change", "session_context", "skill_listing",
+    "total_tokens_reminder",
+})
+
+
+def _recorded_prompts(entries: list[object]) -> set[str]:
+    prompts: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("type") != "user" or not isinstance(entry.get("message"), dict):
+            continue
+        content = entry["message"].get("content")
+        if isinstance(content, str):
+            prompts.add(content)
+        elif isinstance(content, list):
+            texts = [block.get("text") for block in content
+                     if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)]
+            prompts.update(texts)
+            prompts.add("".join(texts))
+    return prompts
+
+
+def _claude_context_record(entry: dict, prompts: set[str]) -> bool:
+    """True when a Claude Code record holds host context or an already recorded prompt."""
+    kind = entry.get("type")
+    if kind == "attachment":
+        attachment = entry.get("attachment")
+        return ("content" not in entry and isinstance(attachment, dict)
+                and attachment.get("type") in _CLAUDE_CONTEXT_ATTACHMENTS)
+    if kind == "queue-operation":
+        content = entry.get("content")
+        return content is None or (isinstance(content, str) and content in prompts)
+    return False
 
 
 def _extract_message(entry: dict) -> Message | None:

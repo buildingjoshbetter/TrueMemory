@@ -51,3 +51,31 @@ def test_unlisted_metadata_type_still_counts_as_malformed(tmp_path):
     outcome = parse_transcript_outcome(_write(tmp_path, records))
     assert outcome.status == "partial"
     assert outcome.malformed_records == 1
+
+
+def test_unknown_attachment_type_is_not_assumed_benign(tmp_path):
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "Synthetic fixture prompt."}},
+        {"type": "attachment", "attachment": {"type": "queued_command", "prompt": "Synthetic queued text."}},
+    ]
+    outcome = parse_transcript_outcome(_write(tmp_path, records))
+    assert outcome.status == "partial"
+    assert outcome.malformed_records == 1
+
+
+def test_attachment_with_top_level_text_is_still_captured(tmp_path):
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "Synthetic fixture prompt."}},
+        {"type": "attachment", "attachment": {"type": "date"}, "content": "Synthetic attached text."},
+    ]
+    outcome = parse_transcript_outcome(_write(tmp_path, records))
+    assert "Synthetic attached text." in [message.content for message in outcome.messages]
+
+
+def test_unrecorded_queued_prompt_is_still_captured(tmp_path):
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "Synthetic fixture prompt."}},
+        {"type": "queue-operation", "operation": "enqueue", "content": "Synthetic prompt never dequeued."},
+    ]
+    outcome = parse_transcript_outcome(_write(tmp_path, records))
+    assert "Synthetic prompt never dequeued." in [message.content for message in outcome.messages]
