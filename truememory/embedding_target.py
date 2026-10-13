@@ -115,6 +115,7 @@ def build_target_model(
         admit()
         return SentenceTransformer(
             "Qwen/Qwen3-Embedding-0.6B", truncate_dim=256,
+            config_kwargs={"use_cache": False},
             model_kwargs=model_kwargs, device=device,
         )
     admit()

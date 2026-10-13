@@ -725,6 +725,7 @@ class ModelServer:
             return SentenceTransformer(
                 "Qwen/Qwen3-Embedding-0.6B",
                 truncate_dim=256,
+                config_kwargs={"use_cache": False},
                 model_kwargs=mkwargs or None,
                 device=device,
             )

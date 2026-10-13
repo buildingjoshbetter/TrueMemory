@@ -336,6 +336,7 @@ def get_model():
                         _model = SentenceTransformer(
                             "Qwen/Qwen3-Embedding-0.6B",
                             truncate_dim=256,
+                            config_kwargs={"use_cache": False},
                             model_kwargs=_mkwargs or None,
                             device=device,
                         )
