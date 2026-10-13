@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Callable, NamedTuple
 
-from truememory.memory_budget import DEFAULT_LOCAL_MEMORY_POLICY
+from truememory.memory_budget import DEFAULT_LOCAL_MEMORY_POLICY as _LOCAL_MEMORY_POLICY
 from truememory.tier_switch.cache import VectorCacheRegistry
 from truememory.tier_switch.throttler import DynamicThrottler
 
@@ -22,8 +22,6 @@ if TYPE_CHECKING:
     from truememory.embedding_target import EmbeddingTarget
     from truememory.tier_switch.source import TierSourcePlan
     from truememory.vector_search import _PreparedEmbeddingLease
-
-_LOCAL_MEMORY_POLICY = DEFAULT_LOCAL_MEMORY_POLICY
 
 log = logging.getLogger(__name__)
 
@@ -502,7 +500,7 @@ class RebuildWorker:
             from truememory.memory_budget import (
                 ProfileKey, budgeted_encode_with_model_ownership, validate_local_policy,
             )
-            validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
+            validate_local_policy(_LOCAL_MEMORY_POLICY)
         texts = [m["content"] for m in batch]
         ids = [m["id"] for m in batch]
 
@@ -529,7 +527,7 @@ class RebuildWorker:
             for m in batch
         ]
         if configured_memory:
-            validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
+            validate_local_policy(_LOCAL_MEMORY_POLICY)
             sep_embeddings = budgeted_encode_with_model_ownership(
                 model, sep_texts, ProfileKey("rebuild separation embedding", "local_embedding",
                                              input_item_count=len(sep_texts)),
