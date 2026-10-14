@@ -191,6 +191,8 @@ class InertCompletionControls(unittest.TestCase):
     def test_legacy_conversion_requires_exact_scope_retires_admitted_pointer_and_avoids_live_workers(self) -> None:
         shared = types.ModuleType("truememory.ingest.hooks._shared")
         shared.backlog_transcript_source = lambda value, host: (value["transcript_path"], value["session_id"])
+        marked = []
+        shared.mark_session_extracted = lambda session, transcript, **options: marked.append((session, options))
         platform = types.ModuleType("truememory._platform")
         platform.pid_is_alive = lambda pid: pid == 42
         baseline = {"transcript_path": "/synthetic/source.jsonl", "session_id": "synthetic/a",
@@ -206,7 +208,8 @@ class InertCompletionControls(unittest.TestCase):
             scenarios.append((value, ".json", False))
         for value, suffix, admitted in scenarios:
             raw = json.dumps(value).encode()
-            info = types.SimpleNamespace(st_dev=1, st_ino=1, st_size=len(raw), st_mtime_ns=1, st_ctime_ns=1)
+            info = types.SimpleNamespace(st_dev=1, st_ino=1, st_size=len(raw), st_mtime_ns=1, st_ctime_ns=1,
+                                         st_mode=stat.S_IFREG | 0o600)
             handle = types.SimpleNamespace(read=lambda count: raw[:count], fileno=lambda: 41)
             entry = types.SimpleNamespace(path="/synthetic/pointer" + suffix)
             with patch.dict(sys.modules, {shared.__name__: shared, platform.__name__: platform}), \
@@ -218,14 +221,19 @@ class InertCompletionControls(unittest.TestCase):
                     patch.object(COMPLETION, "_open_private", return_value=41), \
                     patch.object(COMPLETION.os, "fdopen", side_effect=lambda *args: contextlib.nullcontext(handle)), \
                     patch.object(COMPLETION.os, "fstat", return_value=info), \
+                    patch.object(COMPLETION.os, "lstat", return_value=info), \
                     patch.object(COMPLETION, "_source_owned"), \
                     patch.object(COMPLETION, "admit_capture", return_value=object()) as capture, \
                     patch.object(COMPLETION, "dispatch", return_value=0) as dispatch:
                 COMPLETION.convert_legacy_pointers("synthetic-account", "/synthetic/db", "claude")
             self.assertEqual(capture.call_count, int(admitted))
             self.assertEqual(dispatch.call_count, int(admitted))
-            # Completion owns an admitted pointer's retries, so only it retires.
+            # Completion owns an admitted pointer's retries, so only it retires,
+            # and the stale-session scanner is told the session is handled.
             self.assertEqual(removed.call_count, int(admitted))
+            self.assertEqual(len(marked), int(admitted))
+            if admitted:
+                self.assertEqual(marked.pop(), ("synthetic/a", {"running": False}))
             if admitted:
                 self.assertEqual(capture.call_args.args,
                     ("/synthetic/source.jsonl", "synthetic/a", "synthetic-account", "/synthetic/db", "claude"))

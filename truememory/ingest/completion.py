@@ -1064,7 +1064,7 @@ def adopt_legacy_pointer(pointer: Path, scope: tuple[str, str | None, str] | Non
     """
     if pointer.suffix not in (".json", ".processing"):
         return None
-    from truememory.ingest.hooks._shared import backlog_transcript_source
+    from truememory.ingest.hooks._shared import backlog_transcript_source, mark_session_extracted
     from truememory._platform import pid_is_alive
     base = _base()
     _private_directory(base)
@@ -1118,8 +1118,17 @@ def adopt_legacy_pointer(pointer: Path, scope: tuple[str, str | None, str] | Non
         transcript, session = source
         # A removed transcript can never be admitted; retire its pointer too.
         capture = admit_capture(transcript, session, user_id, db_path, host) if Path(transcript).is_file() else None
-        with contextlib.suppress(FileNotFoundError):
-            pointer.unlink()
+        # The stale-session scanner skips handled sessions; without this mark
+        # it re-queues them and holds its watermark, starving later sessions.
+        mark_session_extracted(session, transcript, running=False)
+        try:
+            current = os.lstat(pointer)
+        except FileNotFoundError:
+            return capture
+        if [current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns] == before[:4]:
+            # A pointer rewritten during admission names newer bytes; keep it.
+            with contextlib.suppress(FileNotFoundError):
+                pointer.unlink()
         return capture
 
 

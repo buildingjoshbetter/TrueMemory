@@ -323,3 +323,21 @@ def test_orphan_bytes_from_an_interrupted_admission_are_removed(env):
     added = completion.admit_capture(str(other_path), other, "", "", "claude", root=env.root)
     assert not orphan.exists()
     assert kept.path.exists() and added.path.exists()
+
+
+def test_a_pointer_rewritten_during_adoption_is_kept(env, monkeypatch):
+    env.backlog.mkdir(parents=True, exist_ok=True)
+    session, path = _transcript(env, _turns(6))
+    stop._queue_to_backlog(str(path), session, "", "", reason="synthetic", transcript_host="claude")
+    pointer = env.backlog / f"{session}.json"
+    real_admit = completion.admit_capture
+
+    def admit(*args, **kwargs):
+        capture = real_admit(*args, **kwargs)
+        # A SessionEnd refused by backpressure queues the newest bytes meanwhile.
+        stop._queue_to_backlog(str(path), session, "", "", reason="newer", transcript_host="claude")
+        return capture
+
+    monkeypatch.setattr(completion, "admit_capture", admit)
+    assert completion.adopt_legacy_pointer(pointer) is not None
+    assert json.loads(pointer.read_text())["reason"] == "newer"

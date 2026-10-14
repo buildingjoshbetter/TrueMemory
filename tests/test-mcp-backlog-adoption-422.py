@@ -191,3 +191,51 @@ def test_foreign_scope_and_live_claims_are_retained(env):
     assert completion.adopt_legacy_pointer(claimed) is None
     assert claimed.exists()
     assert env.spawned == []
+
+
+def test_stale_scan_reaches_a_crashed_session_behind_handled_ones(env, monkeypatch):
+    # Adopted pointers once retired without marking their session, so the
+    # scanner re-queued the same first sessions on every pass, held its
+    # watermark and never reached a later crash-ended session.
+    from truememory.ingest.hooks import session_start, stop
+
+    monkeypatch.setattr(session_start, "_SCAN_MARKER", env.home / ".truememory" / ".last_stale_scan")
+    monkeypatch.setattr(session_start, "BACKLOG_DIR", env.backlog)
+    monkeypatch.setattr(stop, "BACKLOG_DIR", env.backlog)
+    monkeypatch.setattr(_shared, "EXTRACTED_DIR", env.home / ".truememory" / "extracted")
+
+    def session(humans: int) -> str:
+        name = str(uuid.uuid4())
+        rows = []
+        for index in range(humans):
+            rows.append({"type": "user", "message": {"role": "user", "content": f"synthetic question {index}"}})
+            rows.append({"type": "assistant", "message": {"role": "assistant",
+                         "content": [{"type": "text", "text": f"answer {index} " + "z" * 900}]}})
+        rows += [{"type": "assistant", "message": {"role": "assistant",
+                  "content": [{"type": "text", "text": "padding " + "z" * 900}]}}] * 4
+        (env.projects / f"{name}.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        return name
+
+    short = [session(2) for _ in range(3)] + [session(1)]
+    crashed = session(8)
+    # Keep the crashed session behind the scanner's cap in directory order.
+    while [entry.name[:-6] for entry in os.scandir(env.projects)].index(crashed) < session_start._SCAN_CAP:
+        renamed = str(uuid.uuid4())
+        os.replace(env.projects / f"{crashed}.jsonl", env.projects / f"{renamed}.jsonl")
+        crashed = renamed
+
+    for _ in range(4):
+        session_start._scan_stale_sessions()
+        completion.convert_legacy_pointers("", "", "claude")
+        marker = session_start._SCAN_MARKER
+        # Let the next pass run as if the scan interval had elapsed.
+        os.lseek(fd := os.open(marker, os.O_RDWR), 0, os.SEEK_SET)
+        watermark = float(os.read(fd, 64) or b"0")
+        os.ftruncate(fd, 0)
+        os.write(fd, str(watermark - session_start._SCAN_INTERVAL - 1).encode())
+        os.close(fd)
+    sessions = [command[command.index("--session") + 1] for command in env.spawned]
+    assert crashed in sessions
+    assert len(sessions) == len(set(sessions)), "a handled session was queued again"
+    assert not list(env.backlog.glob("*.json"))
+    assert all((env.home / ".truememory" / "extracted" / name).exists() for name in short + [crashed])
