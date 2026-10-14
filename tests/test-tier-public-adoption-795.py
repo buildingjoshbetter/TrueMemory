@@ -71,8 +71,29 @@ class FakeConnection:
         self.closed = True
 
     def execute(self, sql: str, parameters: tuple = ()) -> object:
+        if sql.startswith("PRAGMA synchronous="):
+            return None  # connection-local durability, not database state
         self.executed.append(sql)
         raise AssertionError("Unexpected SQL on stub: " + sql)
+
+
+class FakeJobLock:
+    def __init__(self, events: list) -> None:
+        self.events = events
+
+    def adopt(self) -> None:
+        self.events.append("job_lock_adopt")
+
+    def release(self) -> None:
+        self.events.append("job_lock_release")
+
+
+class RebuildSourceChanged(RuntimeError):
+    pass
+
+
+class TierSourceUntrusted(RebuildSourceChanged):
+    pass
 
 
 @contextlib.contextmanager
@@ -130,7 +151,9 @@ class Harness:
                 maintenance_owner=self.owner
             ),
             "truememory.rebuild_source": types.SimpleNamespace(
-                ensure_rebuild_tracking=lambda conn: self.events.append("tracking")
+                ensure_rebuild_tracking=lambda conn: self.events.append("tracking"),
+                RebuildSourceChanged=RebuildSourceChanged,
+                manifest_key=lambda targets: "vec_source_v1:" + ":".join(targets),
             ),
             "truememory.tier_switch.cache": types.SimpleNamespace(
                 preflight_ram_check=lambda group: (True, ""),
@@ -148,6 +171,7 @@ class Harness:
                 exclusive_activation=self.exclusive
             ),
             "truememory.tier_switch.activation": types.SimpleNamespace(
+                TierActivationError=type("TierActivationError", (RuntimeError,), {}),
                 ActivationIntent=ActivationIntent,
                 LegacyTierPolicy=LegacyTierPolicy,
                 read_activation_state=lambda conn: self.state,
@@ -180,6 +204,12 @@ class Harness:
                 _cancel_policy_job_in_writer=lambda *args, **kwargs: self.events.append(
                     ("cancel", kwargs)
                 ),
+                acquire_tier_job_lock=lambda path, **kwargs: FakeJobLock(self.events),
+                tier_job_alive=lambda path: True,
+                tier_job_owner=lambda path: contextlib.nullcontext(),
+                end_abandoned_tier_job=lambda conn, job_id, **kwargs: self.events.append(
+                    ("abandon", job_id, kwargs)
+                ) or True,
             ),
             "truememory.tier_switch.projection": types.SimpleNamespace(
                 capture_config_guard=lambda **kwargs: self.guard,
@@ -200,7 +230,10 @@ class Harness:
                 ),
             ),
             "truememory.tier_switch.source": types.SimpleNamespace(
-                read_tier_progress=lambda *args, **kwargs: None
+                read_tier_progress=lambda *args, **kwargs: None,
+                TierSourceUntrusted=TierSourceUntrusted,
+                _receipt_key=lambda targets: "tier_pair_receipt_v1:" + ":".join(targets),
+                plan_tier_source=Mock(side_effect=AssertionError("unreceipted pairs need no plan")),
             ),
             "truememory.vector_search": types.SimpleNamespace(
                 init_prepared_target_tables=lambda *args: self.events.append("tables")
@@ -336,7 +369,7 @@ class Harness:
         self.events.append("stage")
         return self.intent
 
-    def prepare(self, old="edge", requested="base"):
+    def prepare(self, old="edge", requested="base", job_lock=None):
         self.guard.tier = old
         self.manager._serving_identity = lambda *args: (
             Target.capture(old),
@@ -349,7 +382,7 @@ class Harness:
         self.manager._create_status_row = lambda *args, **kwargs: (
             self.events.append(("status", kwargs)) or 17
         )
-        return self.manager._prepare_job(self.conn, requested, False)
+        return self.manager._prepare_job(self.conn, requested, False, job_lock=job_lock)
 
 
 class MemoryPath:
@@ -454,6 +487,18 @@ class PublicAdoptionTests(unittest.TestCase):
             h.prepare()
         self.assertNotIn("tracking", h.events)
         self.assertNotIn("select", h.events)
+
+    def test_selected_marker_under_held_job_lock_is_ended_as_abandoned(self):
+        h = self.h
+        h.marker = types.SimpleNamespace(state="selected", job_id="c" * 32)
+        h.state.intent = ActivationIntent(job_id="c" * 32, status_id=9, state="staged")
+        h.manager._terminate_status = lambda conn, sid, status, error, **kwargs: h.events.append(
+            ("terminate", sid, status)
+        )
+        self.assertEqual(h.prepare(job_lock=object()), (h.job, h.intent, 17))
+        self.assertIn(("abandon", "c" * 32, {"outcome": "failed"}), h.events)
+        self.assertIn(("terminate", 9, "interrupted"), h.events)
+        self.assertLess(h.events.index(("terminate", 9, "interrupted")), h.events.index("select"))
 
     def test_same_space_policy_projects_without_source_or_native(self):
         h = self.h
@@ -827,17 +872,24 @@ class PublicAdoptionTests(unittest.TestCase):
             conn.execute("SELECT count(*) FROM rebuild_status").fetchone(), (0,)
         )
 
-    def test_nonempty_inactive_pair_requires_receipt(self):
+    def test_nonempty_unreceipted_inactive_pair_is_discarded_not_refused(self):
         h = self.h
         conn = sqlite3.connect(":memory:")
         self.addCleanup(conn.close)
+        conn.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT)")
         for name in h.job.target.tables:
             conn.execute(f'CREATE TABLE "{name}"(embedding BLOB)')
+        conn.commit()
+        discarded = []
+        h.manager._discard_inactive_pair = lambda c, target, **kwargs: discarded.append((target, kwargs))
+        serving = Target.capture("edge").tables
+        h.manager._check_inactive_target(conn, h.job.target, serving)
+        self.assertEqual(discarded, [])
         conn.execute("INSERT INTO vec_messages_basepro VALUES (x'01')")
         conn.commit()
         before = conn.total_changes
-        with self.assertRaises(h.manager_module.TierSwitchUnsupportedError):
-            h.manager._check_inactive_target(conn, h.job.target)
+        h.manager._check_inactive_target(conn, h.job.target, serving)
+        self.assertEqual(discarded, [(h.job.target, {"protected": serving})])
         self.assertEqual(conn.total_changes, before)
 
     def test_configure_queued_clears_memory_and_reports_served_tier(self):

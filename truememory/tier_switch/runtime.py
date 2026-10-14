@@ -90,6 +90,7 @@ class ConnectionWriteLock:
 _local = threading.local()
 _acknowledged: tuple[str, ...] | None = None
 _pid = os.getpid()
+_OWNER_POLL_SECONDS = 0.05
 
 
 def _after_fork() -> None:
@@ -206,6 +207,20 @@ def apply_runtime_policy(result: TierSelection | LegacyTierPolicy, *, deadline: 
         _pid = os.getpid()
         if vector._model is not None and reranker._model is not None and reranker._model_certified:
             _acknowledged = key
+
+
+def reset_legacy_runtime(tier: str) -> None:
+    """Drop a partial controlled projection; legacy serving re-resolves lazily.
+
+    Used only after a failed activation was rolled back to a legacy database:
+    the frozen target or policy tier would otherwise refuse legacy admission.
+    """
+    global _acknowledged
+    with serving.exclusive_activation():
+        _acknowledged = None
+        vector, reranker = _modules()
+        vector.set_embedding_model(tier)
+        reranker.set_active_tier(tier)
 
 
 def _prepare_legacy_policy(policy: LegacyTierPolicy, effective: str, *, deadline: float | None,
@@ -575,7 +590,16 @@ def open_engine_for_operation(engine: object) -> None:
                 raise failure
             if not retry_allowed(failure):
                 raise failure
-            wait_for_automatic_owner(failure, deadline=deadline)
+            try:
+                wait_for_automatic_owner(failure, deadline=deadline)
+            except MaintenanceBusyError:
+                # Besides automatic owners, only a certified tier activation commit
+                # (in any process) grants a bounded wait; other owners still refuse.
+                from truememory.tier_switch.job import tier_activation_in_progress
+                if (getattr(failure, "_automatic_owner", None) is not None
+                        or str(engine.db_path) == ":memory:" or not tier_activation_in_progress(engine.db_path)):
+                    raise
+                time.sleep(min(_OWNER_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
             outside_admission()
             if not retry_allowed(failure):
                 raise failure

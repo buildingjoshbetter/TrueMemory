@@ -213,3 +213,32 @@ def mirror_activation(result: TierSelection | LegacyTierPolicy, *,
         config[_GENERATION_KEY] = result.generation
         _write_config(config_path, config)
         return desired
+
+
+def revert_activation_mirror(result: TierSelection | LegacyTierPolicy, *,
+                             expected_config: ConfigGuard,
+                             config_path: Path | None = None, lock_path: Path | None = None) -> bool:
+    """Undo mirror_activation only while config still names exactly this result.
+
+    Used after the database journal was restored to the previous selection;
+    a config that has moved on is left untouched (False).
+    """
+    from truememory.tier_switch.activation import ConfigGuard
+
+    if type(expected_config) is not ConfigGuard:
+        raise ConfigProjectionConflict("Invalid expected config guard")
+    config_path, lock_path = _paths(config_path, lock_path)
+    with ConfigFileLock(lock_path, strict=True), CONFIG_WRITE_LOCK:
+        config = _read_config(config_path)
+        if _guard(config) != ConfigGuard(True, result.target.tier, result.generation):
+            return False
+        if expected_config.tier_present:
+            config["tier"] = expected_config.tier
+        else:
+            config.pop("tier", None)
+        if expected_config.generation is None:
+            config.pop(_GENERATION_KEY, None)
+        else:
+            config[_GENERATION_KEY] = expected_config.generation
+        _write_config(config_path, config)
+        return True

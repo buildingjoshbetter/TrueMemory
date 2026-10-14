@@ -128,7 +128,7 @@ class TestTierJobIdentity(unittest.TestCase):
                 opened(conn)
             return conn
 
-        patch.object(self.api, "maintenance_owner", owner).start()
+        patch.object(self.api, "tier_job_owner", owner).start()
         patch.object(self.api.sqlite3, "connect", connect).start()
         return reopened
 
@@ -374,7 +374,7 @@ class TestTierJobIdentity(unittest.TestCase):
                     results.append((threading.get_ident(), conn.in_transaction))
             except BaseException as error:
                 results.append(type(error).__name__)
-        with patch.object(self.api, "maintenance_owner", owner), patch.object(self.api.sqlite3, "connect", connect):
+        with patch.object(self.api, "tier_job_owner", owner), patch.object(self.api.sqlite3, "connect", connect):
             thread = threading.Thread(target=worker)
             thread.start()
             thread.join(timeout=3)
@@ -389,8 +389,8 @@ class TestTierJobIdentity(unittest.TestCase):
         job = self.capture()
         self.events.clear()
         reopened = self.reopen_hooks()
-        with patch.object(self.api, "maintenance_owner", side_effect=self.modules["maintenance"].MaintenanceBusyError("synthetic busy")):
-            with self.assertRaises(self.modules["maintenance"].MaintenanceBusyError):
+        with patch.object(self.api, "tier_job_owner", side_effect=self.api.TierJobBusyError("synthetic busy")):
+            with self.assertRaises(self.api.TierJobBusyError):
                 with self.api.open_tier_job(job):
                     self.fail("Busy owner must not yield")
         self.assertEqual(reopened, [])

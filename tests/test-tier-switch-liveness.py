@@ -153,7 +153,8 @@ def run_scenario(body: str, *, tier: str = "base", timeout: float = 240) -> list
             PYTHONPATH=os.pathsep.join(filter(None, (str(ROOT), os.environ.get("PYTHONPATH")))),
         )
         completed = subprocess.run(
-            [sys.executable, "-c", PRELUDE + textwrap.dedent(body)], env=env, cwd=home,
+            [sys.executable, "-c", PRELUDE + "PRELUDE_SOURCE = " + repr(PRELUDE) + "\n" + textwrap.dedent(body)],
+            env=env, cwd=home,
             capture_output=True, text=True, timeout=timeout,
         )
     results = [json.loads(line[7:]) for line in completed.stdout.splitlines() if line.startswith("RESULT ")]
@@ -183,6 +184,229 @@ class CertifiedSwitchOnCreatedDatabase(unittest.TestCase):
         self.assertEqual(result["registry"], ["vec_messages_edge"])
         self.assertEqual(result["status"], ["complete"])
         self.assertEqual(result["config"], "edge")
+
+
+
+class RebuildKeepsDatabaseAvailable(unittest.TestCase):
+    def test_fresh_opens_and_foreign_commits_during_rebuild(self):
+        (result,) = run_scenario("""
+            import subprocess
+            seed(30)
+            stub_models(delay=0.15)
+            outcome = switch("edge", join=False)
+            time.sleep(0.6)
+            from truememory.engine import TrueMemoryEngine
+            engine = TrueMemoryEngine(DB)
+            added = engine.add("written by a fresh engine during the rebuild", sender="bob")["id"]
+            listed = len(engine.get_all(limit=100))
+            drain()  # automatic consolidation is a different owner; this test is about the rebuild
+            child = subprocess.run([sys.executable, "-c",
+                "import logging; logging.basicConfig(level=logging.CRITICAL)\\n"
+                "from truememory.engine import TrueMemoryEngine\\n"
+                "print(len(TrueMemoryEngine(%r).get_all(limit=100)))" % DB], capture_output=True, text=True)
+            alive = outcome["manager"]._active_thread.is_alive()
+            engine.close(); drain()
+            outcome["manager"]._active_thread.join(120)
+            conn = connect()
+            emit(added=added, listed=listed, child=child.stdout.strip(), child_error=child.stderr[-300:],
+                 alive_during_writes=alive, outcome=outcome["manager"]._last_outcome, state=state(),
+                 edge=conn.execute("SELECT count(*) FROM vec_messages_edge").fetchone()[0],
+                 covered=conn.execute("SELECT count(*) FROM vec_messages_edge WHERE rowid=?", (added,)).fetchone()[0])
+        """)
+        self.assertEqual(result["added"], 31)
+        self.assertEqual(result["listed"], 31)
+        self.assertEqual(result["child"], "31", result["child_error"])
+        self.assertTrue(result["alive_during_writes"])
+        self.assertEqual(result["outcome"], "complete")
+        self.assertEqual(result["state"]["selected"], "edge")
+        self.assertEqual(result["edge"], 31)
+        self.assertEqual(result["covered"], 1)
+
+    def test_correction_during_rebuild_restarts_the_generation(self):
+        (result,) = run_scenario("""
+            seed(30)
+            stub_models(delay=0.1)
+            outcome = switch("edge", join=False)
+            time.sleep(0.6)
+            conn = sqlite3.connect(DB)
+            conn.execute("DELETE FROM messages WHERE id=5"); conn.commit(); conn.close()
+            outcome["manager"]._active_thread.join(120)
+            conn = connect()
+            emit(outcome=outcome["manager"]._last_outcome, state=state(),
+                 edge=conn.execute("SELECT count(*) FROM vec_messages_edge").fetchone()[0],
+                 ghost=conn.execute("SELECT count(*) FROM vec_messages_edge WHERE rowid=5").fetchone()[0])
+        """)
+        self.assertEqual(result["outcome"], "complete")
+        self.assertEqual(result["state"]["selected"], "edge")
+        self.assertEqual((result["edge"], result["ghost"]), (29, 0))
+
+    def test_killed_worker_reports_interrupted_and_retry_recovers(self):
+        (result,) = run_scenario("""
+            import signal, subprocess
+            seed(40)
+            code = PRELUDE_SOURCE + "\\nstub_models(delay=0.2)\\nswitch('edge', join=False)\\nprint('started', flush=True)\\ntime.sleep(60)\\n"
+            child = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+            child.stdout.readline(); time.sleep(1.0)
+            os.kill(child.pid, signal.SIGKILL); child.wait()
+            before = state()
+            from truememory.tier_switch.manager import RebuildManager
+            status = RebuildManager().get_status(1)["status"]
+            stub_models()
+            outcome = switch("edge")
+            emit(before=before, status=status, outcome=outcome["outcome"], after=state())
+        """)
+        self.assertEqual(result["before"]["marker"], "selected")
+        self.assertEqual(result["status"], "interrupted")
+        self.assertEqual(result["outcome"], "complete")
+        self.assertEqual(result["after"]["selected"], "edge")
+        self.assertEqual(result["after"]["status_rows"][0], [1, "interrupted"])
+
+    def test_unbound_selected_marker_can_be_cancelled(self):
+        (result,) = run_scenario("""
+            seed(10)
+            from truememory.embedding_target import EmbeddingTarget
+            from truememory.rebuild_source import ensure_rebuild_tracking
+            from truememory.tier_switch.job import select_tier_job
+            from truememory.tier_switch.manager import RebuildManager
+            conn = sqlite3.connect(DB)
+            ensure_rebuild_tracking(conn)
+            job = select_tier_job(conn, EmbeddingTarget.capture("edge"))
+            conn.close()
+            try:
+                RebuildManager().cancel(7, expected_job_id="0" * 32, db_path=Path(DB))
+                wrong = None
+            except Exception as error:
+                wrong = type(error).__name__
+            cancelled = RebuildManager().cancel(7, expected_job_id=job.job_id, db_path=Path(DB))
+            emit(wrong=wrong, cancelled=cancelled, state=state())
+        """)
+        self.assertEqual(result["wrong"], "TierSwitchUnsupportedError")
+        self.assertEqual(result["cancelled"]["status"], "cancelled")
+        self.assertEqual(result["state"]["marker"], "cancelled")
+
+
+
+class UnusableInactivePairsAreReset(unittest.TestCase):
+    def test_released_switch_back_cache_is_discarded_and_rebuilt(self):
+        (result,) = run_scenario("""
+            seed(30)
+            conn = connect()
+            for t in ("vec_messages_edge", "vec_messages_sep_edge"):
+                conn.execute(f"CREATE VIRTUAL TABLE {t} USING vec0(embedding float[256] distance_metric=cosine)")
+            for i in range(1, 21):
+                conn.execute("INSERT INTO vec_messages_edge(rowid,embedding) VALUES (?,?)", (i, vec(i)))
+                conn.execute("INSERT INTO vec_messages_sep_edge(rowid,embedding) VALUES (?,?)", (i, vec(-i)))
+            conn.execute("INSERT INTO vector_cache_registry(tier_group,vec_table,sep_table,last_embedded_id,vector_count,"
+                         "model_name,embedding_dim) VALUES ('edge','vec_messages_edge','vec_messages_sep_edge',20,20,'potion-base-8M',256)")
+            conn.commit(); conn.close()
+            stub_models()
+            outcome = switch("edge")
+            conn = connect()
+            emit(outcome=outcome["outcome"], state=state(),
+                 edge=conn.execute("SELECT count(*) FROM vec_messages_edge").fetchone()[0],
+                 basepro=conn.execute("SELECT count(*) FROM vec_messages_basepro").fetchone()[0],
+                 registry=conn.execute("SELECT model_name, vector_count FROM vector_cache_registry WHERE tier_group='edge'").fetchone())
+        """)
+        self.assertEqual(result["outcome"], "complete")
+        self.assertEqual(result["state"]["selected"], "edge")
+        self.assertEqual(result["edge"], 30)
+        self.assertEqual(result["basepro"], 30)
+        self.assertEqual(result["registry"], ["model2vec", 30])
+
+    def test_round_trip_returns_to_previously_served_groups(self):
+        (result,) = run_scenario("""
+            seed(25)
+            stub_models()
+            first = switch("edge")["outcome"]
+            from truememory.engine import TrueMemoryEngine
+            engine = TrueMemoryEngine(DB)
+            appended = engine.add("written while edge serves", sender="alice")["id"]
+            engine.close(); drain()
+            back = switch("base")["outcome"]
+            after_back = state()
+            again = switch("edge")["outcome"]
+            conn = connect()
+            emit(first=first, back=back, after_back=after_back, again=again, state=state(),
+                 edge=conn.execute("SELECT count(*) FROM vec_messages_edge").fetchone()[0],
+                 basepro=conn.execute("SELECT count(*) FROM vec_messages_basepro").fetchone()[0],
+                 appended=appended)
+        """)
+        self.assertEqual((result["first"], result["back"], result["again"]), ("complete", "complete", "complete"))
+        self.assertEqual(result["after_back"]["selected"], "base")
+        self.assertEqual(result["state"]["selected"], "edge")
+        self.assertEqual((result["edge"], result["basepro"]), (26, 26))
+
+    def test_partial_pair_invalidated_by_a_forget_is_rebuilt(self):
+        (result,) = run_scenario("""
+            seed(30)
+            stub_models(delay=0.1)
+            outcome = switch("edge", join=False)
+            for _ in range(400):
+                conn = connect()
+                published = conn.execute("SELECT count(*) FROM vec_messages_edge").fetchone()[0]
+                conn.close()
+                if published:
+                    break
+                time.sleep(0.05)
+            outcome["manager"].cancel()
+            outcome["manager"]._active_thread.join(60)
+            conn = connect()
+            partial = conn.execute("SELECT count(*) FROM vec_messages_edge").fetchone()[0]
+            conn.execute("DELETE FROM messages WHERE id=12"); conn.commit(); conn.close()
+            stub_models()
+            retried = switch("edge")["outcome"]
+            conn = connect()
+            emit(cancelled=outcome["manager"]._last_outcome, partial=partial, retried=retried, state=state(),
+                 edge=conn.execute("SELECT count(*) FROM vec_messages_edge").fetchone()[0])
+        """)
+        self.assertEqual(result["cancelled"], "cancelled")
+        self.assertGreater(result["partial"], 0)
+        self.assertEqual(result["retried"], "complete")
+        self.assertEqual(result["state"]["selected"], "edge")
+        self.assertEqual(result["edge"], 29)
+
+
+
+class ActivationFailuresKeepPreviousServing(unittest.TestCase):
+    def test_unloadable_reranker_refuses_before_the_durable_commit(self):
+        (result,) = run_scenario("""
+            seed(20)
+            stub_models(rerankers_available=lambda name: "MiniLM" not in name)
+            outcome = switch("edge")
+            emit(outcome=outcome["outcome"], state=state(), config=json.loads(CONFIG.read_text())["tier"])
+        """)
+        self.assertEqual(result["outcome"], "interrupted")
+        self.assertIsNone(result["state"]["selected"])
+        self.assertEqual(result["state"]["marker"], "failed")
+        self.assertEqual(result["state"]["status_rows"], [[1, "failed"]])
+        self.assertEqual(result["config"], "base")
+
+    def test_projection_fault_after_commit_restores_previous_selection(self):
+        (result,) = run_scenario("""
+            seed(20)
+            loadable = {"ok": False}
+            stub_models(embeddings_available=lambda: loadable["ok"])
+            outcome = switch("edge")
+            restored = state()
+            config = json.loads(CONFIG.read_text())
+            from truememory.engine import TrueMemoryEngine
+            engine = TrueMemoryEngine(DB)
+            added = engine.add("legacy serving still accepts writes", sender="alice")["id"]
+            engine.close(); drain()
+            loadable["ok"] = True
+            retried = switch("edge")
+            emit(outcome=outcome["outcome"], served=outcome["manager"]._served_tier, restored=restored,
+                 config=config, added=added, retried=retried["outcome"], final=state())
+        """)
+        self.assertEqual(result["outcome"], "failed")
+        self.assertEqual(result["served"], "base")
+        self.assertIsNone(result["restored"]["selected"])
+        self.assertEqual(result["restored"]["marker"], "failed")
+        self.assertEqual(result["restored"]["status_rows"], [[1, "failed"]])
+        self.assertEqual(result["config"]["tier"], "base")
+        self.assertEqual(result["added"], 21)
+        self.assertEqual(result["retried"], "complete")
+        self.assertEqual(result["final"]["selected"], "edge")
 
 
 if __name__ == "__main__":

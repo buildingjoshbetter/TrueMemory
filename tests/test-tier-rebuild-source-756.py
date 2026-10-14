@@ -317,19 +317,29 @@ class TestTierSource(unittest.TestCase):
         self.assertEqual(resumed.manifest, plan.manifest)
         self.assertEqual(self.publish(resumed, page)[0].manifest.consumed, 1)
 
-    def test_external_commit_data_version_requires_explicit_revalidation(self):
+    def test_external_commits_keep_the_plan_until_a_correction(self):
+        # Other connections commit while a rebuild runs (foreground adds, hooks,
+        # consolidation). Appends stay valid; a correction retires the plan.
         uri = "file:tier_source_synthetic?mode=memory&cache=shared"
         first = sqlite3.connect(uri, uri=True)
         second = sqlite3.connect(uri, uri=True)
         try:
             self.create_schema(first)
+            first.executemany("INSERT INTO messages VALUES (?,?,?,?,?)",
+                              [(mid, f"synthetic-{mid}", "s", "r", "2026-01-02") for mid in (1, 2)])
+            first.commit()
             plan = self.api.plan_tier_source(first, model_id="synthetic-model", dimension=2, targets=TARGETS)
             plan = self.api.initialize_tier_source(first, plan)
             second.execute("INSERT INTO metadata(key,value) VALUES ('external','synthetic')")
+            second.execute("INSERT INTO messages VALUES (3,'appended','s','r','2026-01-03')")
             second.commit()
-            with self.assertRaisesRegex(self.api.TierSourceUntrusted, "Connection changed"):
-                self.api.read_tier_page(first, plan)
+            page = self.api.read_tier_page(first, plan)
+            self.assertEqual([row[0] for row in page.rows], [1, 2])
             self.assertEqual(first.total_changes, plan.changes)
+            second.execute("UPDATE messages SET content='corrected' WHERE id=1")
+            second.commit()
+            with self.assertRaises(self.source.RebuildSourceChanged):
+                self.api.read_tier_page(first, plan)
         finally:
             second.close()
             first.close()

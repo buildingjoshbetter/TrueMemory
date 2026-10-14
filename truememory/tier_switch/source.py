@@ -1,11 +1,13 @@
 """Model-free, bounded source checkpoints for caller-owned inactive tier pairs.
 
-The caller owns the maintenance lease, exclusive cooperating pair writer, target
+The caller owns the tier-job lease, exclusive cooperating pair writer, target
 schema/model validation, and database identity across reopen. Tracking, metadata,
 and both target tables must exist before planning. This adapter neither clears
-tables nor activates them. It rejects borrowed transactions and concurrent writes
-until the caller replans. Receipts detect changed stored bytes, not a hostile SQL
-writer capable of forging both data and receipts.
+tables nor activates them. It rejects borrowed transactions, its own unplanned
+writes, schema changes and source corrections until the caller replans; appends
+committed by other connections remain valid and are left for a delta. Receipts
+detect changed stored bytes, not a hostile SQL writer capable of forging both
+data and receipts.
 """
 
 import hashlib
@@ -349,8 +351,10 @@ def _audit_pair(conn: sqlite3.Connection, plan: TierSourcePlan) -> None:
 
 
 def _fence(conn: sqlite3.Connection, plan: TierSourcePlan) -> None:
-    if (conn is not plan.connection or conn.total_changes != plan.changes
-            or conn.execute("PRAGMA main.data_version").fetchone()[0] != plan.data_version):
+    # Commits by other connections are expected while a rebuild runs. They are
+    # judged by _check (schema, saved receipt, append-only source) and by the
+    # full pair audit at activation, not by PRAGMA data_version.
+    if conn is not plan.connection or conn.total_changes != plan.changes:
         raise TierSourceUntrusted("Connection changed; explicitly replan and revalidate the tier pair")
 
 

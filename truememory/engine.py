@@ -786,11 +786,26 @@ class TrueMemoryEngine:
                         # add() silently fail vec INSERTs. Surface the migration
                         # guidance so the user can re-embed instead.
                         if not local_only:
-                            init_vec_table(self.conn)
+                            from truememory.maintenance import MaintenanceBusyError
+                            try:
+                                init_vec_table(self.conn)
+                            except MaintenanceBusyError:
+                                # Maintenance elsewhere (consolidation, a tier
+                                # activation) must not refuse a fresh open when the
+                                # captured pair is already stable; migrate later.
+                                try:
+                                    local_only = _legacy_initialization_is_local(self.conn, operation)
+                                except TierRuntimeError:
+                                    local_only = False
+                                if not local_only:
+                                    raise
+                        if not local_only:
                             try:
                                 from truememory.vector_search import migrate_legacy_vec_tables
                                 if _preparing and not defer_legacy_migration:
                                     migrate_legacy_vec_tables(self.conn)
+                            except MaintenanceBusyError:
+                                logger.debug("Legacy vec table migration deferred by maintenance", exc_info=True)
                             except Exception as _serving_error:
                                 from truememory.tier_switch.runtime import raise_if_serving_rejection
                                 raise_if_serving_rejection(_serving_error)
