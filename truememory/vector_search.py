@@ -1539,7 +1539,8 @@ def backfill_missing_vectors(conn: sqlite3.Connection, *, write_lock: object,
         if stopped():
             return 0
         separation = _encode_with_mps_fallback(model, [_build_sep_text(row[2], row[3], row[4], row[1]) for row in batch])
-        selection = capture_writer_selection(conn)
+        with write_lock:
+            selection = capture_writer_selection(conn)
         for row, left, right in zip(batch, completion, separation):
             if stopped():
                 return published

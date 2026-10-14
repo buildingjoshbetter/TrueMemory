@@ -857,10 +857,22 @@ class TestPublicBoundaries(unittest.TestCase):
         engine = self.fixture.lifecycle_engine("_open_connection_handle")
         self.conn.execute("INSERT INTO messages(id,content) VALUES(991,'synthetic caller')")
         before = self.conn.commits, self.conn.rollbacks
-        with engine._write_lock:
+        owned, release = threading.Event(), threading.Event()
+        def holder():
+            with engine._write_lock:
+                owned.set()
+                release.wait(2)
+        thread = threading.Thread(target=holder)
+        thread.start()
+        try:
+            self.assertTrue(owned.wait(2))
             with self.assertRaises(self.api.TierRuntimeError):
                 with self.api.maintenance_serving_operation(self.conn, connection_lock=engine._write_lock):
                     self.fail("Borrowed busy admission entered maintenance")
+        finally:
+            release.set()
+            thread.join(2)
+        self.assertFalse(thread.is_alive())
         cancelled = threading.Event()
         cancelled.set()
         for controls, kind in (({"cancelled": cancelled}, self.fixture.gate.ServingLeaseCancelled),

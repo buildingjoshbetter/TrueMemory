@@ -49,18 +49,27 @@ class SelectedModelsUnavailable(RuntimeError):
 
 
 class ConnectionWriteLock:
-    """Identify Engine-owned SQL without claiming ownership of caller SQL."""
+    """Identify Engine-owned SQL without claiming ownership of caller SQL.
+
+    Every statement on the Engine's connection runs under it: sqlite3 shares
+    cached statements per connection, and two threads stepping one corrupt it.
+    Re-entrant, so a public body that holds it can run nested Engine paths.
+    """
 
     def __init__(self, engine: object) -> None:
         import weakref
         self._engine = weakref.ref(engine)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._owner: tuple[int, object, bool] | None = None
+        self._depth = 0
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
         acquired = self._lock.acquire(blocking, timeout)
         if not acquired:
             return False
+        if self._depth:  # Re-entered by the owning thread.
+            self._depth += 1
+            return True
         try:
             engine = self._engine()
             conn = None if engine is None else engine.conn
@@ -71,6 +80,7 @@ class ConnectionWriteLock:
                     raise
                 borrowed = False
             self._owner = (threading.get_ident(), conn, borrowed)
+            self._depth = 1
         except BaseException:
             self._lock.release()
             raise
@@ -89,11 +99,13 @@ class ConnectionWriteLock:
         owner = self._owner
         if owner is None or owner[0] != threading.get_ident():
             raise RuntimeError("Only the Engine writer owner can release its lock")
-        self._owner = None
+        self._depth -= 1
+        if not self._depth:
+            self._owner = None
         self._lock.release()
 
     def locked(self) -> bool:
-        return self._lock.locked()
+        return self._owner is not None
 
     def __enter__(self) -> ConnectionWriteLock:
         self.acquire()
@@ -943,8 +955,10 @@ def engine_serving_operation(
     _suppress_maintenance: bool = False, models: str = "required",
 ) -> Iterator[ServingOperation]:
     """Finish cold initialization before capturing tables for the public body."""
-    open_engine_for_operation(engine)
-    parent = current_operation(engine.conn)
+    parent = current_operation(engine.conn) if engine.conn is not None else None
+    if parent is None:
+        open_engine_for_operation(engine)  # A nested admission reuses its parent's open handle.
+        parent = current_operation(engine.conn)
     owns_scope = parent is None
     cold = not (getattr(engine, "_runtime_initialized", True) or getattr(engine, "ready", False))
     initialized = False
@@ -1015,18 +1029,30 @@ def engine_fallback_operation(function: Callable[P, R]) -> Callable[P, R]:
 
 
 def admitted_call(engine: object, admit: Callable[[], AbstractContextManager[object]], body: Callable[[], R], *,
-                  retry_writer: bool = False) -> R:
+                  retry_writer: bool = False, serialize: bool = True) -> R:
     """Retry a top-level call once when a selection change refused it before any effect.
 
     Admission refusals happen before the body runs; a writer refusal rolled
     back the body's transaction. Nested calls and caller transactions refuse.
+    The body runs under the Engine's connection lock (after admission, never
+    while waiting for one) unless it serializes its own statements.
     """
+    lock = getattr(engine, "_write_lock", None) if serialize else None
+    if not isinstance(lock, ConnectionWriteLock):
+        lock = None  # Nested calls re-enter it; no other lock can serialize them.
+
+    def run() -> R:
+        if lock is None:
+            return body()
+        with lock:
+            return body()
+
     nested = current_runtime_operation() is not None
     started = borrowed = False
     try:
         with admit() as operation:
             started, borrowed = True, operation.borrowed
-            return body()
+            return run()
     except Exception as error:
         # A caller transaction is judged as admission recorded it: on a shared
         # connection a live in_transaction may be another thread's read.
@@ -1037,7 +1063,7 @@ def admitted_call(engine: object, admit: Callable[[], AbstractContextManager[obj
         if nested or not retry:
             raise
     with admit():
-        return body()
+        return run()
 
 
 def _selection_changed(error: BaseException) -> bool:

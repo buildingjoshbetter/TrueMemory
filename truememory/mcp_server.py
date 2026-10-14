@@ -1097,7 +1097,8 @@ def truememory_directives(user_id: str = "") -> str:
         query += " AND sender = ?"
         params.append(user_id)
     query += " ORDER BY id"
-    rows = m._engine.conn.execute(query, params).fetchall()
+    with m._engine._write_lock:
+        rows = m._engine.conn.execute(query, params).fetchall()
     results = []
     for row in rows:
         results.append({
@@ -1664,7 +1665,8 @@ def truememory_entity_profile(entity: str) -> str:
 
     try:
         from truememory.personality import get_entity_profile
-        profile = get_entity_profile(m._engine.conn, entity)
+        with m._engine._write_lock:
+            profile = get_entity_profile(m._engine.conn, entity)
         if profile:
             return json.dumps(profile, indent=2, default=str)
         return json.dumps({"error": f"No profile found for '{entity}'"})

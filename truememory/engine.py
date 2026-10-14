@@ -1773,7 +1773,9 @@ class TrueMemoryEngine:
     def get(self, memory_id: int, *, _source_snapshot: bool = False) -> dict | None:
         """Retrieve a single memory by ID."""
         self._ensure_connection()
-        if _source_snapshot:
+        with self._write_lock:  # Statements on the shared connection never interleave.
+            if not _source_snapshot:
+                return get_message(self.conn, memory_id)
             import hashlib
             import json
             from truememory.storage import _row_to_dict, select_message_cols
@@ -1781,17 +1783,16 @@ class TrueMemoryEngine:
                 f"SELECT {select_message_cols(self.conn)} FROM messages WHERE id = ?",
                 (memory_id,),
             ).fetchone()
-            if row is None:
-                return None
-            result = _row_to_dict(row)
-            try:
-                raw_snapshot = json.dumps(list(row), ensure_ascii=True, allow_nan=False,
-                                          separators=(",", ":")).encode("utf-8")
-            except (TypeError, ValueError, UnicodeError) as exc:
-                raise sqlite3.OperationalError("Source snapshot contains unsupported stored values") from exc
-            result["_source_snapshot_sha256"] = hashlib.sha256(raw_snapshot).hexdigest()
-            return result
-        return get_message(self.conn, memory_id)
+        if row is None:
+            return None
+        result = _row_to_dict(row)
+        try:
+            raw_snapshot = json.dumps(list(row), ensure_ascii=True, allow_nan=False,
+                                      separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise sqlite3.OperationalError("Source snapshot contains unsupported stored values") from exc
+        result["_source_snapshot_sha256"] = hashlib.sha256(raw_snapshot).hexdigest()
+        return result
 
     def get_all(self, limit: int = 100, offset: int = 0, user_id: str | None = None) -> list[dict]:
         """List memories with pagination.
@@ -1806,18 +1807,18 @@ class TrueMemoryEngine:
         """
         self._ensure_connection()
         from truememory.storage import _row_to_dict, select_message_cols
-        select_cols = select_message_cols(self.conn)
-
-        if user_id:
-            rows = self.conn.execute(
-                f"SELECT {select_cols} FROM messages WHERE sender = ? ORDER BY id DESC LIMIT ? OFFSET ?",
-                (user_id, limit, offset),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                f"SELECT {select_cols} FROM messages ORDER BY id DESC LIMIT ? OFFSET ?",
-                (limit, offset),
-            ).fetchall()
+        with self._write_lock:
+            select_cols = select_message_cols(self.conn)
+            if user_id:
+                rows = self.conn.execute(
+                    f"SELECT {select_cols} FROM messages WHERE sender = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (user_id, limit, offset),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    f"SELECT {select_cols} FROM messages ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (limit, offset),
+                ).fetchall()
 
         return [_row_to_dict(r) for r in rows]
 
@@ -3283,10 +3284,11 @@ class TrueMemoryEngine:
         # Add live DB stats if connected.
         if self.conn:
             try:
-                stats["message_count"] = get_message_count(self.conn)
-                dc = self.conn.execute(
-                    "SELECT COUNT(*) FROM messages WHERE directive = 1"
-                ).fetchone()
+                with self._write_lock:
+                    stats["message_count"] = get_message_count(self.conn)
+                    dc = self.conn.execute(
+                        "SELECT COUNT(*) FROM messages WHERE directive = 1"
+                    ).fetchone()
                 stats["directive_count"] = dc[0] if dc else 0
             except Exception:
                 logger.debug("Failed to get message count in get_stats()", exc_info=True)
@@ -3322,7 +3324,8 @@ class TrueMemoryEngine:
         from truememory.vector_search import note_vectorless, vector_coverage
         try:
             with serving_operation(self.conn, connection_lock=self._write_lock, models="none") as operation:
-                coverage = vector_coverage(self.conn, operation.tables)
+                with self._write_lock:
+                    coverage = vector_coverage(self.conn, operation.tables)
                 if seed_backfill and coverage["first_vectorless_id"] is not None and coverage["backfill_from"] is None:
                     from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
                     try:
@@ -3335,14 +3338,22 @@ class TrueMemoryEngine:
         except Exception as error:
             return {"status": "unavailable", "error_category": type(error).__name__[:64]}
 
-    @engine_fallback_operation
     def backfill_vectors(self, budget: int = 32, *, stop: threading.Event | None = None) -> int:
-        """Embed one bounded, resumable batch of memories stored without vectors."""
-        self._ensure_connection()
-        if not self._has_vectors:
-            return 0
+        """Embed one bounded, resumable batch of memories stored without vectors.
+
+        Admitted like add (optional models), but each statement takes the
+        connection lock itself, so encoding never blocks foreground calls.
+        """
+        from truememory.tier_switch.runtime import admitted_call, engine_serving_operation
         from truememory.vector_search import backfill_missing_vectors
-        return backfill_missing_vectors(self.conn, write_lock=self._write_lock, budget=budget, stop=stop)
+
+        def body() -> int:
+            self._ensure_connection()
+            if not self._has_vectors:
+                return 0
+            return backfill_missing_vectors(self.conn, write_lock=self._write_lock, budget=budget, stop=stop)
+        return admitted_call(self, lambda: engine_serving_operation(self, models="optional"), body,
+                             retry_writer=True, serialize=False)
 
     def _schedule_backfill(self) -> None:
         """Start one background backfill pass when memories still lack vectors.

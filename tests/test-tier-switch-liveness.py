@@ -1779,5 +1779,44 @@ class ProcessProjectionScope(unittest.TestCase):
         self.assertEqual(result["vectors"], {"same": [1, 1, 1], "other": [0, 1, 1], "controlled": [1, 1]})
         self.assertEqual(result["reload_notes"], 1)
 
+
+class SharedEngineThreads(unittest.TestCase):
+    def test_threads_sharing_one_engine_keep_its_statements_intact(self):
+        # sqlite3 shares cached statements per connection: two threads stepping
+        # one engine's connection raised IndexError, SystemError or "no such table".
+        (result,) = run_scenario("""
+            import collections
+            import model2vec
+            model2vec.StaticModel.from_pretrained = staticmethod(lambda *args, **kwargs: FakeEncoder())
+            from truememory.engine import TrueMemoryEngine
+            engine = TrueMemoryEngine(DB)
+            for i in range(30):
+                engine.add(f"seed memory {i}", sender="alice")
+            ops, errors = collections.Counter(), collections.Counter()
+            stop = time.monotonic() + 6
+            def loop(kind, call):
+                n = 0
+                while time.monotonic() < stop:
+                    n += 1
+                    try:
+                        call(n)
+                        ops[kind] += 1
+                    except Exception as error:
+                        errors[f"{kind}: {type(error).__name__}: {str(error)[:80]}"] += 1
+            calls = {"get": lambda n: engine.get(random.randint(1, 30)),
+                     "get_all": lambda n: engine.get_all(limit=20),
+                     "search": lambda n: engine.search("seed memory", limit=5),
+                     "add": lambda n: engine.add(f"concurrent memory {n}", sender="alice"),
+                     "delete": lambda n: engine.delete(random.randint(31, 2000))}
+            threads = [threading.Thread(target=loop, args=item) for item in calls.items()]
+            [thread.start() for thread in threads]
+            [thread.join() for thread in threads]
+            engine.close()
+            emit(ops=sorted(kind for kind, count in ops.items() if count), errors=errors)
+        """, tier="edge")
+        self.assertEqual(result["errors"], {})
+        self.assertEqual(result["ops"], ["add", "delete", "get", "get_all", "search"])
+
+
 if __name__ == "__main__":
     unittest.main()
