@@ -230,3 +230,39 @@ def test_small_hosts_keep_room_for_base_tier_models(monkeypatch, physical_gib, e
     monkeypatch.setitem(sys.modules, "psutil", sensor)
     assert ms._automatic_rss_budget_bytes() == expected_gib * 1024 ** 3
     assert memory_budget.automatic_budget_bytes() == expected_gib * 1024 ** 3
+
+
+class HalfPrecisionModel:
+    def __init__(self, device: str, dtype) -> None:
+        self.device = device
+        self.dtype = dtype
+
+    def parameters(self):
+        return iter([types.SimpleNamespace(dtype=self.dtype)])
+
+    def float(self):
+        self.dtype = "float32"
+        return self
+
+
+@pytest.mark.parametrize("platform, device, expected", [
+    ("darwin", "cpu", "float32"), ("darwin", "mps", "bfloat16"), ("linux", "cpu", "bfloat16"),
+])
+def test_cpu_models_on_macos_run_in_float32(monkeypatch, platform, device, expected):
+    torch = types.SimpleNamespace(bfloat16="bfloat16", float16="float16")
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(mps_utils.sys, "platform", platform)
+    model = HalfPrecisionModel(device, "bfloat16")
+    assert mps_utils.prefer_float32_on_cpu(model) is model
+    assert model.dtype == expected
+
+
+def test_static_models_are_left_alone(monkeypatch):
+    monkeypatch.setattr(mps_utils.sys, "platform", "darwin")
+    model = types.SimpleNamespace(device="cpu")
+    assert mps_utils.prefer_float32_on_cpu(model) is model
+
+
+def test_mps_cap_leaves_room_for_resident_models_and_a_long_batch():
+    for physical_gib in (8, 16, 36, 64):
+        assert mps_utils._default_mps_budget_bytes(physical_gib * 1024 ** 3) == int(3.25 * 1024 ** 3)

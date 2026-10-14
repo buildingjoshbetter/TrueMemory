@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import math
 from contextlib import contextmanager
 from collections.abc import Iterator
 import dataclasses
@@ -77,13 +78,14 @@ class BudgetTestCase(unittest.TestCase):
 
 class TestMPSBudget(BudgetTestCase):
     def test_preserved_intended_byte_curve(self) -> None:
-        for physical, expected in ((8, 1.52), (12, 2.28), (16, 1.5),
-                                   (18, 1.5), (24, 1.92), (32, 2.5), (64, 2.5)):
+        # Every curve point is below the 3.25 GiB floor for resident Base/Pro models.
+        for physical, expected in ((8, 3.25), (12, 3.25), (16, 3.25),
+                                   (18, 3.25), (24, 3.25), (32, 3.25), (64, 3.25)):
             with self.subTest(physical=physical):
                 self.assertEqual(self.budget._default_mps_budget_bytes(physical * GIB), int(expected * GIB))
 
     def test_differing_recommended_sizes_enforce_the_same_bytes(self) -> None:
-        for recommended, fraction in ((20, 0.125), (25, 0.1)):
+        for recommended, fraction in ((20, 0.1625), (25, 0.13)):
             with self.subTest(recommended=recommended):
                 self.fresh()
                 def query() -> int:
@@ -91,8 +93,8 @@ class TestMPSBudget(BudgetTestCase):
                     return recommended * GIB
                 self.recommended.side_effect = query
                 policy = self.budget.ensure_mps_memory_budget("mps")
-                self.assertEqual(policy.intended_bytes, int(2.5 * GIB))
-                self.assertEqual(policy.effective_bytes, int(2.5 * GIB))
+                self.assertEqual(policy.intended_bytes, int(3.25 * GIB))
+                self.assertEqual(policy.effective_bytes, int(3.25 * GIB))
                 self.assertEqual(policy.recommended_bytes, recommended * GIB)
                 self.assertEqual(policy.fraction, fraction)
                 self.assertEqual((policy.source, policy.enforcement), ("automatic", "enforced"))
@@ -228,7 +230,7 @@ class TestMPSBudget(BudgetTestCase):
         self.assertEqual(len(results), 8)
         self.assertTrue(all(result is results[0] for result in results))
         self.recommended.assert_called_once_with()
-        self.setter.assert_called_once_with(0.125)
+        self.setter.assert_called_once_with(0.1625)
 
 
 class TestFactoryCoverage(BudgetTestCase):
@@ -328,7 +330,7 @@ class TestFactoryCoverage(BudgetTestCase):
                     self.assertEqual(self.factories[0][1]["device"],
                                      {"mps": "mps", "auto": None, "cpu": "cpu", "cuda": "cuda:0"}[device])
                     if device in ("mps", "auto"):
-                        self.assertEqual(self.events, ["recommended", ("set", 0.125), "construct"])
+                        self.assertEqual(self.events, ["recommended", ("set", 0.1625), "construct"])
                     else:
                         self.assertEqual(self.events, ["construct"])
                         self.assertNotIn(LOW, self.env)
@@ -341,9 +343,9 @@ class TestFactoryCoverage(BudgetTestCase):
         server._get_reranker("synthetic/reranker")
         self.local_reranker().get_reranker("synthetic/reranker", device="mps")
         self.assertEqual(len(self.factories), 4)
-        self.assertEqual(self.events[:2], ["recommended", ("set", 0.125)])
+        self.assertEqual(self.events[:2], ["recommended", ("set", 0.1625)])
         self.recommended.assert_called_once_with()
-        self.setter.assert_called_once_with(0.125)
+        self.setter.assert_called_once_with(0.1625)
 
     def test_cpu_fast_encoder_sticky_reranker_and_explicit_cpu_skip_budget(self) -> None:
         server = self.server()
@@ -383,7 +385,7 @@ class TestFactoryCoverage(BudgetTestCase):
         self.assertIsNone(rerank._model)
         self.assertIsNone(server._reranker)
         self.assertIsNone(self.budget.get_mps_memory_budget())
-        self.setter.assert_called_once_with(0.125)
+        self.setter.assert_called_once_with(0.1625)
 
     def test_server_sticky_flags_do_not_switch_the_whole_shared_throttler_to_cpu(self) -> None:
         server = self.server()
@@ -442,15 +444,15 @@ class TestThrottlerBudget(BudgetTestCase):
     def test_memory_and_growth_use_effective_bytes_not_physical_ram(self) -> None:
         policy = self.budget.ensure_mps_memory_budget("mps")
         throttler = self.module.DynamicThrottler("mps")
-        self.assertEqual(throttler.mps_cap_gb, 2.5)
+        self.assertEqual(throttler.mps_cap_gb, 3.25)
         for ratio, status in ((0.84, "ok"), (0.85, "warning"), (0.95, "critical")):
             with self.subTest(ratio=ratio):
                 self.now += 20
-                self.torch.mps.driver_allocated_memory.return_value = int(ratio * policy.effective_bytes)
+                self.torch.mps.driver_allocated_memory.return_value = math.ceil(ratio * policy.effective_bytes)
                 readings = throttler._read_all_channels()
                 self.assertAlmostEqual(readings["mps_level"]["ratio"], ratio)
                 self.assertEqual(readings["mps_level"]["status"], status)
-        self.assertEqual(throttler.growth_tracker._cap_gb, 2.5)
+        self.assertEqual(throttler.growth_tracker._cap_gb, 3.25)
         self.assertAlmostEqual(readings["growth_rate"]["slope_pct"], 10)
         self.assertEqual(throttler._build_metrics()["mps_budget"], {
             "scope": "process_mps_allocator",
@@ -486,7 +488,7 @@ class TestThrottlerBudget(BudgetTestCase):
         self.assertEqual(throttler._read_all_channels()["mps_level"]["status"], "unknown")
         self.budget.ensure_mps_memory_budget("mps")
         self.assertEqual(throttler._read_all_channels()["mps_level"]["status"], "ok")
-        self.assertEqual(throttler.mps_cap_gb, 2.5)
+        self.assertEqual(throttler.mps_cap_gb, 3.25)
 
     def test_mixed_device_daemon_keeps_monitoring_the_surviving_mps_model(self) -> None:
         policy = self.budget.ensure_mps_memory_budget("mps")
@@ -509,7 +511,7 @@ class TestThrottlerBudget(BudgetTestCase):
                         _reranker=types.SimpleNamespace(device="cpu" if fallback == "rerank" else "mps"),
                     )
                     namespace["_mark_sticky_cpu"](owner, fallback)
-                    self.torch.mps.driver_allocated_memory.return_value = int(0.95 * policy.effective_bytes)
+                    self.torch.mps.driver_allocated_memory.return_value = math.ceil(0.95 * policy.effective_bytes)
                     readings = throttler._read_all_channels()
                     self.assertEqual(readings["mps_level"]["status"], "critical")
                     self.assertAlmostEqual(readings["mps_level"]["ratio"], 0.95)

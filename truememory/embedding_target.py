@@ -110,16 +110,17 @@ def build_target_model(
     ensure_mps_memory_budget(device)
     from sentence_transformers import SentenceTransformer
 
+    from truememory.mps_utils import prefer_float32_on_cpu
     if target.model_id == "qwen3_256":
         model_kwargs = {"attn_implementation": "eager"} if sys.platform == "darwin" else None
         admit()
-        return SentenceTransformer(
+        return prefer_float32_on_cpu(SentenceTransformer(
             "Qwen/Qwen3-Embedding-0.6B", truncate_dim=256,
             config_kwargs={"use_cache": False},
             model_kwargs=model_kwargs, device=device,
-        )
+        ))
     admit()
-    return SentenceTransformer(
+    return prefer_float32_on_cpu(SentenceTransformer(
         target.model_id, truncate_dim=target.dimension,
         trust_remote_code=False, device=device,
-    )
+    ))

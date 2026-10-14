@@ -661,6 +661,8 @@ class ModelServer:
                     if state is not None and state.model is model:
                         self._publish_embed_state(None)
                     raise
+                from truememory.mps_utils import prefer_float32_on_cpu
+                prefer_float32_on_cpu(model)
                 # The moved weights' accelerator storage is free only now.
                 flush_mps_cache()
 
@@ -978,6 +980,8 @@ class ModelServer:
                 selected = "cpu"
                 self._check_process_memory(stage, deadline)
                 continue
+            from truememory.mps_utils import prefer_float32_on_cpu
+            prefer_float32_on_cpu(model)
             try:
                 self._check_process_memory(stage + " completion", deadline)
             except BaseException:
