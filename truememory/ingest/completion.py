@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import hashlib
+import heapq
 import json
 import logging
 import os
@@ -1402,20 +1403,66 @@ def adopt_legacy_pointer(pointer: Path, scope: tuple[str, str | None, str] | Non
         return capture
 
 
+def _read_cursor(marker: Path) -> str:
+    try:
+        return _read_private(marker, 4096).decode() if marker.exists() else ""
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _write_cursor(marker: Path, name: str) -> None:
+    # A lost cursor only restarts the rotation from the first name.
+    temporary = marker.with_name(marker.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        _account_directory(marker.parent)
+        fd = _open_private(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(name.encode())
+        os.replace(temporary, marker)
+    except OSError:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+
+
+def _pointer_window(directory: Path, cursor: str) -> list[str]:
+    """The next MAX_CAPTURES pointer names after cursor, wrapping to the start."""
+    def names(after: bool) -> list[str]:
+        with os.scandir(directory) as entries:
+            return heapq.nsmallest(MAX_CAPTURES, (entry.name for entry in entries
+                                                  if entry.name.endswith((".json", ".processing"))
+                                                  and (entry.name > cursor) is after))
+    window = names(True)
+    if len(window) < MAX_CAPTURES and cursor:
+        window += names(False)[:MAX_CAPTURES - len(window)]
+    return window
+
+
 def convert_legacy_pointers(user_id: str = "", db_path: str | None = None, host: str = "claude") -> None:
-    """Adopt this account's legacy pointers; each retires once its bytes are admitted."""
+    """Adopt this account's legacy pointers; each retires once its bytes are admitted.
+
+    One run visits at most MAX_CAPTURES pointers in name order, starting after
+    the last one this account and host visited, so pointers that stay
+    unadoptable never hide later ones from the next run.
+    """
     directory = Path(os.environ.get("TRUEMEMORY_BACKLOG_DIR", str(Path.home() / ".truememory" / "backlog")))
     if not directory.exists() or directory.is_symlink():
         return
-    with os.scandir(directory) as entries:
-        pointers = [Path(entry.path) for entry in islice(entries, MAX_CAPTURES)]
-    for pointer in pointers:
-        try:
-            capture = adopt_legacy_pointer(pointer, (user_id, db_path, host))
-            if capture is not None and dispatch(capture):
-                return
-        except (OSError, ValueError, TypeError) as error:
-            log.warning("Legacy pointer retained without completion (%s)", type(error).__name__)
-            if str(error) in BACKPRESSURE:
-                # Later pointers would be refused too, after copying their bytes.
-                return
+    marker = account_root(user_id, db_path) / ("legacy-" + _digest(host)[:16] + ".cursor")
+    visited = cursor = _read_cursor(marker)
+    try:
+        for name in _pointer_window(directory, cursor):
+            try:
+                capture = adopt_legacy_pointer(directory / name, (user_id, db_path, host))
+                visited = name
+                if capture is not None and dispatch(capture):
+                    return
+            except (OSError, ValueError, TypeError) as error:
+                log.warning("Legacy pointer retained without completion (%s)", type(error).__name__)
+                if str(error) in BACKPRESSURE:
+                    # Later pointers would be refused too, after copying their
+                    # bytes; this one is retried first next time.
+                    return
+                visited = name
+    finally:
+        if visited != cursor:
+            _write_cursor(marker, visited)

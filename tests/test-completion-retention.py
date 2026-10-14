@@ -615,6 +615,55 @@ def test_unchanged_bytes_are_not_reingested_after_their_receipt_is_pruned(env, m
     assert (first.directory / "ingested" / "ab").read_text(encoding="utf-8").split() == keys[1:]
 
 
+def test_conversion_reaches_every_pointer_across_runs(env, monkeypatch):
+    # Pre-fix: SessionStart looked only at the first MAX_CAPTURES directory
+    # entries, so pointers that stayed unadoptable hid every later one.
+    monkeypatch.setattr(completion, "MAX_CAPTURES", 4)
+    env.backlog.mkdir(parents=True, exist_ok=True)
+    for _ in range(10):
+        session, path = _transcript(env, _turns(6), "0" + str(uuid.uuid4())[1:])
+        # Another account's pointers stay while no adopter for it runs.
+        stop._queue_to_backlog(str(path), session, "other", "", reason="synthetic", transcript_host="claude")
+    own = []
+    for _ in range(3):
+        session, path = _transcript(env, _turns(6), "f" + str(uuid.uuid4())[1:])
+        stop._queue_to_backlog(str(path), session, "", "", reason="synthetic", transcript_host="claude")
+        own.append(env.backlog / f"{session}.json")
+    real_scandir = os.scandir
+
+    class Listing:
+        def __init__(self, entries):
+            self.entries = entries
+
+        def __enter__(self):
+            return iter(self.entries)
+
+        def __exit__(self, *exc):
+            return False
+
+    def ordered(path="."):
+        # A directory that lists the retained pointers first.
+        if Path(path) == env.backlog:
+            with real_scandir(path) as entries:
+                return Listing(sorted(entries, key=lambda entry: entry.name))
+        return real_scandir(path)
+
+    monkeypatch.setattr(completion.os, "scandir", ordered)
+    visits = []
+    real_adopt = completion.adopt_legacy_pointer
+    monkeypatch.setattr(completion, "adopt_legacy_pointer",
+                        lambda pointer, scope=None: visits.append(pointer) or real_adopt(pointer, scope))
+    per_run = []
+    for _ in range(8):
+        before = len(visits)
+        completion.convert_legacy_pointers("", "", "claude")
+        per_run.append(len(visits) - before)
+    assert not any(pointer.exists() for pointer in own)
+    assert len(env.spawned) == 3
+    assert len(list(env.backlog.glob("0*.json"))) == 10
+    assert max(per_run) <= completion.MAX_CAPTURES
+
+
 def test_a_failed_windows_ownership_query_is_retried_not_settled(env, monkeypatch):
     # Pre-fix: _windows_security failing for any transient reason made the
     # source look foreign-owned and settled the capture at once.

@@ -177,14 +177,26 @@ class InertCompletionControls(unittest.TestCase):
         def entries():
             for index in range(5005):
                 visited.append(index)
-                yield types.SimpleNamespace(path="/synthetic/pointer-" + str(index) + ".txt")
+                name = "pointer-" + str(index) + (".json" if index % 2 else ".txt")
+                yield types.SimpleNamespace(name=name, path="/synthetic/" + name)
+        adopted = []
         with patch.dict(sys.modules, {shared.__name__: shared, platform.__name__: platform}), \
                 patch.object(Path, "exists", return_value=True), patch.object(Path, "is_symlink", return_value=False), \
                 patch.object(Path, "unlink") as removed, \
                 patch.object(COMPLETION.os, "scandir", return_value=contextlib.nullcontext(entries())), \
-                patch.object(COMPLETION, "_open_private") as opened:
+                patch.object(COMPLETION, "_open_private") as opened, \
+                patch.object(COMPLETION, "_read_cursor", return_value=""), \
+                patch.object(COMPLETION, "_write_cursor") as saved, \
+                patch.object(COMPLETION, "adopt_legacy_pointer",
+                             side_effect=lambda pointer, scope: adopted.append(pointer.name)):
             COMPLETION.convert_legacy_pointers("synthetic-account", "/synthetic/db", "claude")
-        self.assertEqual(len(visited), COMPLETION.MAX_CAPTURES)
+        # Every name is listed so no pointer stays hidden, but one run inspects
+        # at most MAX_CAPTURES pointers in name order and never other files.
+        self.assertEqual(len(visited), 5005)
+        self.assertEqual(len(adopted), COMPLETION.MAX_CAPTURES)
+        self.assertEqual(adopted, sorted(adopted))
+        self.assertTrue(all(name.endswith(".json") for name in adopted))
+        self.assertEqual(saved.call_args.args[1], adopted[-1])
         opened.assert_not_called()
         removed.assert_not_called()
 
@@ -211,13 +223,14 @@ class InertCompletionControls(unittest.TestCase):
             info = types.SimpleNamespace(st_dev=1, st_ino=1, st_size=len(raw), st_mtime_ns=1, st_ctime_ns=1,
                                          st_mode=stat.S_IFREG | 0o600)
             handle = types.SimpleNamespace(read=lambda count: raw[:count], fileno=lambda: 41)
-            entry = types.SimpleNamespace(path="/synthetic/pointer" + suffix)
+            entry = types.SimpleNamespace(name="pointer" + suffix, path="/synthetic/pointer" + suffix)
             with patch.dict(sys.modules, {shared.__name__: shared, platform.__name__: platform}), \
                     patch.object(Path, "exists", return_value=True), patch.object(Path, "is_symlink", return_value=False), \
                     patch.object(Path, "is_file", return_value=True), patch.object(Path, "unlink") as removed, \
                     patch.object(COMPLETION, "_private_directory"), \
                     patch.object(COMPLETION, "_lock", side_effect=lambda *args, **kwargs: contextlib.nullcontext(True)), \
                     patch.object(COMPLETION.os, "scandir", return_value=contextlib.nullcontext(iter([entry]))), \
+                    patch.object(COMPLETION, "_read_cursor", return_value=""), patch.object(COMPLETION, "_write_cursor"), \
                     patch.object(COMPLETION, "_open_private", return_value=41), \
                     patch.object(COMPLETION.os, "fdopen", side_effect=lambda *args: contextlib.nullcontext(handle)), \
                     patch.object(COMPLETION.os, "fstat", return_value=info), \
