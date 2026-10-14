@@ -896,6 +896,49 @@ class ProjectionFaultsAfterCommit(unittest.TestCase):
         self.assertEqual(result["added_vectors"], {"edge": 1, "basepro": 1})
 
 
+class ConfigChangesFromOlderReleases(unittest.TestCase):
+    def test_same_space_config_change_retires_the_policy(self):
+        # 0.7.6.1 switches base and pro by rewriting config.json only.
+        (result,) = run_scenario("""
+            seed(10)
+            os.environ["TRUEMEMORY_EMBED_MODEL"] = ""
+            stub_models()
+            assert switch("pro")["outcome"] == "complete"
+            policy = state()
+            config = json.loads(CONFIG.read_text()); config["tier"] = "base"
+            CONFIG.write_text(json.dumps(config))
+            from truememory.engine import TrueMemoryEngine
+            from truememory.tier_switch.runtime import engine_serving_operation
+            engine = TrueMemoryEngine(DB)
+            with engine_serving_operation(engine) as operation:
+                served = operation.tier
+            added = engine.add("after the older release changed tier", sender="alice")["id"]
+            engine.close(); drain()
+            emit(policy=policy, served=served, added=added, state=state(), switched=switch("edge").get("outcome"),
+                 final=state())
+        """)
+        self.assertEqual((result["policy"]["selected"], result["policy"]["acknowledged"]), ("pro", True))
+        self.assertEqual(result["served"], "base")
+        self.assertEqual(result["added"], 11)
+        self.assertIsNone(result["state"]["selected"])
+        self.assertEqual(result["switched"], "complete")
+        self.assertEqual(result["final"]["selected"], "edge")
+
+    def test_cross_space_config_edit_is_restored_to_the_selection(self):
+        (result,) = run_scenario("""
+            seed(10)
+            stub_models()
+            assert switch("edge")["outcome"] == "complete"
+            config = json.loads(CONFIG.read_text()); config["tier"] = "pro"  # Edited; nothing was rebuilt.
+            CONFIG.write_text(json.dumps(config))
+            switched = switch("base").get("outcome")
+            emit(switched=switched, state=state(), config=json.loads(CONFIG.read_text())["tier"])
+        """)
+        self.assertEqual(result["switched"], "complete")
+        self.assertEqual(result["state"]["selected"], "base")
+        self.assertEqual(result["config"], "base")
+
+
 class ActivationEdgeCases(unittest.TestCase):
     def test_cancel_while_waiting_for_maintenance_ends_the_job(self):
         (result,) = run_scenario("""

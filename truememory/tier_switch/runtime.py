@@ -942,23 +942,73 @@ def reconcile_controlled_database(conn: sqlite3.Connection, path: os.PathLike[st
             "Tier selection no longer matches its vector pair (changed by another release); "
             "serving the configured legacy tier")
         return False
-    _mirror_unacknowledged_selection(conn, Path(path))
+    if _is_default_store(path):
+        if reconcile_config_tier(conn):
+            return False
+        _mirror_unacknowledged_selection(conn, Path(path))
     return True
+
+
+def _is_default_store(path: os.PathLike[str]) -> bool:
+    """Only the store the shared config describes (RebuildManager's default) mirrors it."""
+    from pathlib import Path
+    default = Path(os.environ.get("TRUEMEMORY_DB_PATH") or os.environ.get("TRUEMEMORY_DB")
+                   or Path.home() / ".truememory" / "memories.db").expanduser()
+    return Path(path).resolve() == default.resolve()
+
+
+def reconcile_config_tier(conn: sqlite3.Connection, *, config_path: os.PathLike[str] | None = None,
+                          lock_path: os.PathLike[str] | None = None) -> bool:
+    """Resolve an acknowledged journal whose same-generation config names another tier.
+
+    An older release (or a hand edit) changed config.json without touching the
+    journal. In the same embedding space the config is the newer request: the
+    journal is retired (True) and legacy serving follows the config. Otherwise
+    no rebuild happened, so the journal stays authoritative and the config is
+    written back to it. Caller owns maintenance.
+    """
+    import logging
+    from truememory.embedding_target import EmbeddingTarget, EmbeddingTargetError
+    from truememory.tier_switch.activation import retire_same_space_activation
+    from truememory.tier_switch.projection import (
+        CONFIG_WRITE_LOCK, ConfigFileLock, _guard, _paths, _read_config, _write_config,
+    )
+
+    state = read_activation_state(conn)
+    result = state.selection or state.legacy_policy
+    if result is None or not result.config_acknowledged:
+        return False
+    config_path, lock_path = _paths(config_path, lock_path)
+    with ConfigFileLock(lock_path, strict=True), CONFIG_WRITE_LOCK:
+        config = _read_config(config_path)
+        guard = _guard(config)
+        if guard.generation != result.generation or guard.tier == result.target.tier:
+            return False
+        try:
+            requested = EmbeddingTarget.capture(guard.tier)
+        except (EmbeddingTargetError, ValueError):
+            requested = None
+        if requested is not None and requested.identity == result.target.identity:
+            retired = retire_same_space_activation(conn, generation=result.generation)
+            if retired:
+                logging.getLogger(__name__).warning(
+                    "Config selects tier %s in the same embedding space; serving it instead of %s",
+                    guard.tier, result.target.tier)
+            return retired
+        config["tier"] = result.target.tier
+        _write_config(config_path, config)
+        logging.getLogger(__name__).warning(
+            "Config named tier %s without a rebuild; restored the selected tier %s", guard.tier, result.target.tier)
+        return False
 
 
 def _mirror_unacknowledged_selection(conn: sqlite3.Connection, path: os.PathLike[str]) -> None:
     import logging
-    from pathlib import Path
 
     state = read_activation_state(conn)
     result = state.selection or state.legacy_policy
     expected = getattr(state.intent, "expected_config", None)
     if result is None or result.config_acknowledged or expected is None:
-        return
-    # Only the store the shared config describes (RebuildManager's default) mirrors it.
-    default = Path(os.environ.get("TRUEMEMORY_DB_PATH") or os.environ.get("TRUEMEMORY_DB")
-                   or Path.home() / ".truememory" / "memories.db").expanduser()
-    if Path(path).resolve() != default.resolve():
         return
     from truememory.tier_switch.activation import (
         LegacyTierPolicy, TierActivationError, acknowledge_config, acknowledge_policy_config,

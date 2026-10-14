@@ -685,9 +685,30 @@ def retire_incoherent_activation(conn: sqlite3.Connection) -> bool:
         state = _state(conn)
         if (state.selection is None and state.legacy_policy is None) or _publication_coherent(conn, state):
             return False
-        for key in (_SELECTED, _INTENT):
-            row = conn.execute("SELECT value FROM main.metadata WHERE key=?", (key,)).fetchone()
-            if row is not None:
-                _put(conn, key + "_retired", row[0])
-                conn.execute("DELETE FROM main.metadata WHERE key=?", (key,))
+        _retire_records(conn)
     return True
+
+
+def retire_same_space_activation(conn: sqlite3.Connection, *, generation: str) -> bool:
+    """Retire this acknowledged generation in favour of a same-space config tier.
+
+    Older releases switch Base<->Pro by rewriting config.json alone (keeping the
+    generation). That is a newer user request in the same embedding space, so
+    legacy serving of the configured tier is coherent. Caller owns maintenance.
+    """
+    with _transaction(conn, write=True):
+        _guard_storage(conn)
+        state = _state(conn)
+        result = state.selection or state.legacy_policy
+        if result is None or result.generation != generation or not result.config_acknowledged:
+            return False
+        _retire_records(conn)
+    return True
+
+
+def _retire_records(conn: sqlite3.Connection) -> None:
+    for key in (_SELECTED, _INTENT):
+        row = conn.execute("SELECT value FROM main.metadata WHERE key=?", (key,)).fetchone()
+        if row is not None:
+            _put(conn, key + "_retired", row[0])
+            conn.execute("DELETE FROM main.metadata WHERE key=?", (key,))

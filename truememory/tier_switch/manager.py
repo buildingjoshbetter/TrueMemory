@@ -485,6 +485,7 @@ class RebuildManager:
         )
         from truememory.tier_switch.job import read_selected_job_marker, select_tier_job
         from truememory.tier_switch.projection import capture_config_guard
+        from truememory.tier_switch.runtime import reconcile_config_tier
         from truememory.tier_switch.serving import exclusive_activation
         from truememory.vector_search import init_prepared_target_tables
 
@@ -495,6 +496,8 @@ class RebuildManager:
         target = EmbeddingTarget.capture(target_tier)
         reranker_id = get_tier_config(target_tier)["reranker"]
         with exclusive_activation(cancelled=self._cancel_requested):
+            # An older release may have switched Base<->Pro through config alone.
+            reconcile_config_tier(conn, config_path=self._config_path, lock_path=self._config_lock_path)
             state = read_activation_state(conn)
             guard = capture_config_guard(config_path=self._config_path, lock_path=self._config_lock_path)
             previous = state.selection or state.legacy_policy
