@@ -1948,5 +1948,53 @@ class SwitchStaging(unittest.TestCase):
         self.assertEqual(heartbeat, 1)
 
 
+
+class FailedSwitchRecovery(unittest.TestCase):
+    def test_store_switches_back_after_a_failed_activation(self):
+        # GPUBox D2: a killed edge job, its retry, then edge->base with a delete
+        # mid-rebuild and a failed activation. Asking for edge again was refused
+        # ("Policy projection requires an explicit same-space public target"),
+        # so the store looked stuck on a failed switch.
+        (result,) = run_scenario("""
+            import signal, subprocess
+            seed(40)
+            code = PRELUDE_SOURCE + "\\nstub_models(delay=0.2)\\nswitch('edge', join=False)\\nprint('started', flush=True)\\ntime.sleep(60)\\n"
+            child = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+            child.stdout.readline(); time.sleep(1.0)
+            os.kill(child.pid, signal.SIGKILL); child.wait()
+            stub_models()
+            retried = switch("edge")["outcome"]
+            stub_models(rerankers_available=lambda name: "gte-reranker" not in name)
+            from truememory.engine import TrueMemoryEngine
+            engine = TrueMemoryEngine(DB)
+            encode, deleted = FakeLease.encode, []
+            def delete_once(self, texts, **kwargs):
+                if not deleted:
+                    deleted.append(engine.delete(7) and 7)
+                return encode(self, texts, **kwargs)
+            FakeLease.encode = delete_once
+            failed = switch("base")["outcome"]
+            FakeLease.encode = encode
+            back = switch("edge")
+            served = len(engine.search("synthetic fact", limit=3))
+            stub_models()
+            again = switch("base")["outcome"]
+            engine.close()
+            conn = connect()
+            kept = conn.execute("SELECT count(*) FROM vec_messages_basepro WHERE rowid=7").fetchone()[0]
+            check = conn.execute("PRAGMA integrity_check").fetchone()[0]
+            conn.close()
+            emit(retried=retried, failed=failed, back=back.get("outcome", back.get("message")), served=served,
+                 again=again, deleted=deleted, kept=kept, check=check, state=state())
+        """)
+        self.assertEqual(result["retried"], "complete")
+        self.assertEqual(result["failed"], "interrupted")
+        self.assertEqual(result["back"], "complete")
+        self.assertEqual(result["served"], 3)
+        self.assertEqual(result["again"], "complete")
+        self.assertEqual((result["deleted"], result["kept"], result["check"]), ([7], 0, "ok"))
+        self.assertEqual(result["state"]["selected"], "base")
+
+
 if __name__ == "__main__":
     unittest.main()

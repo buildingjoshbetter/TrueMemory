@@ -516,7 +516,9 @@ class RebuildManager:
             self._served_tier = old_target.tier
             if old_target == target:
                 self._last_action = "noop"
-                if previous is not None:
+                # Base/Pro rebind as a same-space policy; another selected tier
+                # (edge, custom) is projected by the next serving admission.
+                if previous is not None and previous.target.tier in ("base", "pro"):
                     from truememory.tier_switch.runtime import apply_runtime_policy
                     self._last_outcome = "activation_pending"
                     apply_runtime_policy(previous)
