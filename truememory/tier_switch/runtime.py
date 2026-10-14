@@ -102,14 +102,20 @@ class ConnectionWriteLock:
 _local = threading.local()
 _acknowledged: tuple[str, ...] | None = None
 _pid = os.getpid()
+# The database whose selection or policy the process-global projection serves.
+# Only that database's legacy admission (its journal was retired or restored)
+# may reset it; any other legacy database refuses, so a process alternating
+# between a controlled and a legacy store never reloads models per call.
+_projected_database: tuple[str, object] | None = None
 _OWNER_POLL_SECONDS = 0.05
 
 
 def _after_fork() -> None:
-    global _local, _acknowledged, _pid
+    global _local, _acknowledged, _pid, _projected_database
     _local = threading.local()
     _acknowledged = None
     _pid = os.getpid()
+    _projected_database = None
 
 
 if hasattr(os, "register_at_fork"):
@@ -228,14 +234,20 @@ def reset_legacy_runtime(tier: str, *, deadline: float | None = None,
     Used when a database's journal is gone (rolled back or retired) while this
     process still holds its frozen target or policy tier.
     """
-    global _acknowledged
+    global _acknowledged, _projected_database
     bounded = time.monotonic() + serving._KEY_WAIT_SECONDS if deadline is None else deadline
     with serving.exclusive_activation(deadline=bounded, cancelled=cancelled):
-        _acknowledged = None
+        _acknowledged = _projected_database = None
         vector, reranker = _modules()
         vector.set_embedding_model(tier)
         reranker.set_active_tier(tier)
         _pin_process_tier(tier)
+
+
+def note_projected_database(conn: sqlite3.Connection) -> None:
+    """Record which database the process projection now serves (after a switch)."""
+    global _projected_database
+    _projected_database = _database_identity(conn)
 
 
 def _pin_process_tier(tier: str) -> None:
@@ -495,6 +507,7 @@ def serving_operation(
     only bodies such as get/delete), and "optional" projects when possible and
     otherwise admits with models_ready=False (FTS-only add).
     """
+    global _projected_database
     serving._control(None, deadline, cancelled)
     if models not in _MODEL_MODES:
         raise TierRuntimeError("Unsupported model admission mode")
@@ -542,6 +555,9 @@ def serving_operation(
             if borrowed:
                 raise TierRuntimeError("Legacy database requires explicit coherent runtime selection")
             with _connection_read(conn, connection_lock, deadline, cancelled):
+                if _projected_database not in (None, _database_identity(conn)):
+                    raise TierRuntimeError("Another database's tier selection is loaded in this process; "
+                                           "serve this legacy database from a separate process")
                 tier = _legacy_reset_tier(conn)
             try:
                 reset_legacy_runtime(tier, deadline=deadline, cancelled=cancelled)
@@ -591,6 +607,8 @@ def serving_operation(
         operation = ServingOperation(selection, tables, tier, effective, key, conn, lease,
                                      database, borrowed, policy, connection_lock, _defer_maintenance, ready)
         lease.check_admission()
+        if ready and (selection is not None or policy is not None):
+            _projected_database = database
         with _bound(operation):
             yield operation
 

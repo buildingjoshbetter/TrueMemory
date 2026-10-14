@@ -225,7 +225,7 @@ class Harness:
                     "apply_frozen"
                 ),
                 apply_runtime_policy=lambda result: self.events.append("apply_policy"),
-                reconcile_config_tier=lambda conn, **kwargs: False,
+                reconcile_config_tier=lambda conn, **kwargs: False, note_projected_database=lambda conn: None,
                 serving_operation=Mock(
                     side_effect=AssertionError("native readiness forbidden")
                 ),

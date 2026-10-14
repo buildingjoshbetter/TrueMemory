@@ -1450,5 +1450,42 @@ class ActivationFairness(unittest.TestCase):
         self.assertEqual(result["outcome"], "complete")
 
 
+
+class ProcessProjectionScope(unittest.TestCase):
+    def test_other_legacy_store_refuses_instead_of_reloading_models(self):
+        # One process alternating a controlled store and an unrelated legacy
+        # store used to reset and reload both models on every switch.
+        (result,) = run_scenario("""
+            seed(10)
+            stub_models()
+            import model2vec
+            from truememory import vector_search
+            loads = {"legacy": 0, "frozen": 0}
+            def legacy_load(*args, **kwargs):
+                loads["legacy"] += 1
+                return FakeEncoder()
+            model2vec.StaticModel.from_pretrained = staticmethod(legacy_load)
+            frozen = vector_search._load_frozen_embedding_target
+            def frozen_load(target, timeout=None):
+                loads["frozen"] += 1
+                return frozen(target, timeout)
+            vector_search._load_frozen_embedding_target = frozen_load
+            assert switch("edge")["outcome"] == "complete"
+            from truememory.engine import TrueMemoryEngine
+            controlled, legacy = TrueMemoryEngine(DB), TrueMemoryEngine(str(HOME / "other.db"))
+            def attempt(call):
+                try:
+                    return len(call())
+                except Exception as error:
+                    return type(error).__name__
+            before = dict(loads)
+            calls = [[attempt(lambda: controlled.search("synthetic fact", limit=3)),
+                      attempt(lambda: legacy.get_all(limit=3))] for _ in range(5)]
+            controlled.close(); legacy.close(); drain()
+            emit(calls=calls, loads={name: loads[name] - before[name] for name in loads})
+        """)
+        self.assertEqual(result["calls"], [[3, "TierRuntimeError"]] * 5)
+        self.assertEqual(result["loads"], {"legacy": 0, "frozen": 0})
+
 if __name__ == "__main__":
     unittest.main()

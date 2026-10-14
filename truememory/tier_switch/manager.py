@@ -848,7 +848,7 @@ class RebuildManager:
                         intent: object, *, policy: bool = False) -> None:
         from truememory.tier_switch.activation import acknowledge_config, acknowledge_policy_config, LegacyTierPolicy
         from truememory.tier_switch.projection import mirror_activation
-        from truememory.tier_switch.runtime import apply_frozen_selection, apply_runtime_policy
+        from truememory.tier_switch.runtime import apply_frozen_selection, apply_runtime_policy, note_projected_database
 
         self._last_outcome = "activation_pending"
         self._served_tier = result.target.tier
@@ -857,6 +857,7 @@ class RebuildManager:
             apply_runtime_policy(result)
         else:
             apply_frozen_selection(result)
+        note_projected_database(conn)
         if type(result) is LegacyTierPolicy:
             acknowledge_policy_config(conn, generation=result.generation)
         else:
