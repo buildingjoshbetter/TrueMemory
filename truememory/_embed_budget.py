@@ -1,7 +1,7 @@
 """Embedding input cap and token-budgeted batches that bound attention memory."""
 from __future__ import annotations
 
-from truememory._rerank_budget import budgeted_slices, memory_pressure_divisor
+from truememory._rerank_budget import budget_batch_size, budgeted_slices, memory_pressure_divisor
 
 # Above the longest stored memory, so existing vectors are unchanged; only
 # oversized texts such as pasted documents are truncated.
@@ -41,10 +41,15 @@ def budgeted_encode(model: object, texts: object, **kwargs: object):
     Inputs whose default batches already fit keep the original single call.
     """
     batch_size = kwargs.get("batch_size", 32)
-    plain = (type(batch_size) is int and batch_size > 0 and not kwargs.get("convert_to_tensor")
+    # One text is always one batch, so single queries skip measurement entirely.
+    plain = (isinstance(texts, list) and len(texts) > 1 and type(batch_size) is int and batch_size > 0
+             and not kwargs.get("convert_to_tensor") and kwargs.get("convert_to_numpy", True) is not False
              and kwargs.get("output_value", "sentence_embedding") == "sentence_embedding")
     lengths = text_token_lengths(model, texts) if plain else None
-    slices = None if lengths is None else budgeted_slices(lengths, batch_size, embed_token_budget())
+    # Batches that fit even the smallest budget skip the memory read.
+    if lengths is None or budget_batch_size(max(lengths), batch_size, EMBED_TOKEN_BUDGET // 4) >= batch_size:
+        return model.encode(texts, **kwargs)
+    slices = budgeted_slices(lengths, batch_size, embed_token_budget())
     if slices is None:
         return model.encode(texts, **kwargs)
     import numpy as np

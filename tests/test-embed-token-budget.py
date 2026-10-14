@@ -20,6 +20,7 @@ class FakeEmbedder:
 
     def tokenizer(self, texts, truncation, max_length):
         assert truncation is True
+        self.tokenized = getattr(self, "tokenized", 0) + 1
         return {"input_ids": [[0] * min(len(text.split()) + 2, max_length) for text in texts]}
 
     def encode(self, texts, batch_size=32, show_progress_bar=False, **kwargs):
@@ -125,3 +126,21 @@ def test_model_server_short_embed_unchanged():
 def test_batch_size_bounds(length):
     from truememory._rerank_budget import budget_batch_size
     assert 1 <= budget_batch_size(length, 32, EMBED_TOKEN_BUDGET) <= 32
+
+
+def test_single_text_and_list_outputs_skip_measurement():
+    model = FakeEmbedder(EMBED_MAX_TOKENS)
+    budgeted_encode(model, _texts(5000), batch_size=32)
+    budgeted_encode(model, _texts(5000, 5000), batch_size=32, convert_to_numpy=False)
+    assert getattr(model, "tokenized", 0) == 0
+    assert model.calls == [(1, 32), (2, 32)]
+
+
+def test_short_batches_skip_the_memory_read(monkeypatch):
+    def unexpected():
+        raise AssertionError("memory read for a batch that always fits")
+
+    monkeypatch.setattr(embed_budget, "embed_token_budget", unexpected)
+    model = FakeEmbedder(EMBED_MAX_TOKENS)
+    budgeted_encode(model, _texts(*([500] * 32)), batch_size=32)
+    assert model.calls == [(32, 32)]
