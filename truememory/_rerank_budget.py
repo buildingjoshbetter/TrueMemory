@@ -13,7 +13,7 @@ RERANK_TOKEN_BUDGET = 64 * 512 * 512
 def cap_reranker_length(model: object) -> None:
     """Bound a cross-encoder's input length without raising a smaller limit."""
     current = getattr(model, "max_seq_length", None)
-    if current is None or current > RERANK_MAX_TOKENS:
+    if type(current) is int and current > RERANK_MAX_TOKENS:
         model.max_seq_length = RERANK_MAX_TOKENS
 
 

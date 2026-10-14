@@ -4,8 +4,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from truememory import rerank_budget
-from truememory.rerank_budget import (
+from truememory import _rerank_budget as rerank_budget
+from truememory._rerank_budget import (
     RERANK_MAX_TOKENS, RERANK_TOKEN_BUDGET, budget_batch_size, budgeted_predict,
     budgeted_slices, cap_reranker_length, pair_token_lengths, rerank_token_budget,
 )
@@ -37,10 +37,11 @@ def _pairs(*word_counts: int) -> list[list[str]]:
 
 
 def test_cap_lowers_long_limits_only():
-    for current, expected in ((8192, RERANK_MAX_TOKENS), (None, RERANK_MAX_TOKENS), (512, 512)):
+    for current, expected in ((8192, RERANK_MAX_TOKENS), (None, None), (512, 512)):
         model = FakeCrossEncoder(current)
         cap_reranker_length(model)
         assert model.max_seq_length == expected
+    cap_reranker_length(object())
 
 
 def test_budget_shrinks_under_memory_pressure():

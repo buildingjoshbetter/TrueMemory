@@ -1078,7 +1078,7 @@ class ModelServer:
                 self._memory_stage("reranker construction", deadline,
                                    model_identity=(name, 0, "reranker"), device=device)
             model = CrossEncoder(name, device=device)
-            from truememory.rerank_budget import cap_reranker_length
+            from truememory._rerank_budget import cap_reranker_length
             cap_reranker_length(model)
             self._check_process_memory("reranker construction completion", deadline)
             self._reranker = model
@@ -1444,7 +1444,7 @@ class ModelServer:
                                 order = self._rerank_global_order(reranker, pairs, limit, deadline)
                                 if order is not None:
                                     recovery_name = self._reranker_name
-                                from truememory.rerank_budget import budgeted_slices, pair_token_lengths, rerank_token_budget
+                                from truememory._rerank_budget import budgeted_slices, pair_token_lengths, rerank_token_budget
                                 lengths = pair_token_lengths(reranker, pairs)
                                 slices = (None if lengths is None else
                                           budgeted_slices(lengths, limit, rerank_token_budget()))

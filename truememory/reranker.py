@@ -32,7 +32,6 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from truememory.memory_budget import LocalMemoryPolicy
-from truememory.rerank_budget import budgeted_predict, cap_reranker_length
 
 _LOCAL_MEMORY_POLICY = LocalMemoryPolicy()
 
@@ -340,6 +339,7 @@ def get_reranker(
                     from sentence_transformers import CrossEncoder
                     _check(control)
                     _model = CrossEncoder(name, device=device)
+                    from truememory._rerank_budget import cap_reranker_length
                     cap_reranker_length(_model)
                     if budget_owner is not None:
                         bind_model_owner(_model, budget_owner)
@@ -449,6 +449,7 @@ def rerank(
             scope = nullcontext()
         with scope as memory:
             with _own_model(model):
+                from truememory._rerank_budget import budgeted_predict
                 scores = budgeted_predict(model, pairs, batch_size)
                 if memory is not None:
                     memory.retain_buffer(scores)
