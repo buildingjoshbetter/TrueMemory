@@ -1854,5 +1854,40 @@ class SharedEngineThreads(unittest.TestCase):
         self.assertTrue(result["committed_within_a_second"])
 
 
+
+class SwitchStaging(unittest.TestCase):
+    def test_switch_waits_a_bounded_time_for_maintenance_elsewhere(self):
+        # Another process's consolidation pass refused the switch at once; it now
+        # waits for the pass (new owners yield), and names the cause past the bound.
+        (result,) = run_scenario("""
+            import subprocess
+            seed(20)
+            stub_models()
+            from truememory.tier_switch import manager as manager_module
+            holder = subprocess.Popen([sys.executable, "-c", PRELUDE_SOURCE + %r], stdin=subprocess.PIPE,
+                                      stdout=subprocess.PIPE, text=True)
+            holder.stdin.write("acquire\\n"); holder.stdin.flush()
+            holder.stdout.readline()
+            manager_module._STAGING_MAINTENANCE_SECONDS = 1.0
+            bounded = switch("edge")
+            manager_module._STAGING_MAINTENANCE_SECONDS = 60.0
+            def release():
+                time.sleep(3)
+                holder.communicate("release\\n", timeout=30)
+            releaser = threading.Thread(target=release)
+            releaser.start()
+            started = time.monotonic()
+            waited = switch("edge")
+            seconds = time.monotonic() - started
+            releaser.join(); drain()
+            emit(bounded=bounded, outcome=waited.get("outcome", waited.get("error")), waited=seconds >= 2.5, state=state())
+        """ % HOLD_MAINTENANCE)
+        self.assertEqual(result["bounded"]["error"], "MaintenanceBusyError")
+        self.assertIn("retry the tier switch", result["bounded"]["message"])
+        self.assertEqual(result["outcome"], "complete")
+        self.assertTrue(result["waited"])
+        self.assertEqual(result["state"]["selected"], "edge")
+
+
 if __name__ == "__main__":
     unittest.main()

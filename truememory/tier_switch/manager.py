@@ -44,6 +44,9 @@ _ACTIVATION_RETRIES = 3
 # get maintenance in the gap between attempts instead of failing.
 _WRITER_DRAIN_SECONDS = 4.0
 _CATCH_UP_ROUNDS = 5
+# How long staging a switch waits for maintenance another process owns. New
+# owners yield meanwhile, so only the pass already running must finish.
+_STAGING_MAINTENANCE_SECONDS = 60.0
 
 
 class TierSwitchUnsupportedError(RuntimeError):
@@ -159,8 +162,6 @@ class RebuildManager:
         config_path: Path | None = None, config_lock_path: Path | None = None,
     ) -> int:
         """Stage an inactive job, then hand only its immutable identity to a thread."""
-        from truememory.maintenance import maintenance_owner
-
         with self._state_lock:
             if self._claimed or self._active_thread and self._active_thread.is_alive():
                 if self._requested_tier != target_tier:
@@ -190,7 +191,7 @@ class RebuildManager:
             # Tier-job liveness before maintenance: the worker keeps it, so a
             # selected marker seen under this lock can only be abandoned.
             job_lock = self._acquire_job_lock(path) if path.exists() else None
-            with maintenance_owner(path):
+            with self._staging_window(path):
                 if self._bootstrap_empty_configuration(path, target_tier, force):
                     return 0
                 if job_lock is None:
@@ -274,8 +275,6 @@ class RebuildManager:
         self, target_tier: str, force: bool = False, progress_callback=None,
         db_path: Path | None = None,
     ) -> bool:
-        from truememory.maintenance import maintenance_owner
-
         if force:
             raise TierSwitchUnsupportedError("Active force/reset requires an alternate inactive pair and is not supported")
         path = Path(db_path) if db_path is not None else _get_db_path()
@@ -287,7 +286,7 @@ class RebuildManager:
         conn = None
         prepared = None
         try:
-            with maintenance_owner(path):
+            with self._staging_window(path):
                 if self._bootstrap_empty_configuration(path, target_tier, force):
                     return self._last_outcome == "complete"
                 if job_lock is None:
@@ -694,6 +693,23 @@ class RebuildManager:
                          "WHERE id=? AND status IN ('pending','running') AND (? IS NULL OR tier_group=?)",
                          (status, time.time(), error[:1000], status_id, group, group))
 
+    @contextlib.contextmanager
+    def _staging_window(self, path: Path):
+        """Own maintenance to stage a job, waiting a bounded time for another owner."""
+        from truememory.maintenance import MaintenanceBusyError
+        with contextlib.ExitStack() as stack:
+            try:
+                stack.enter_context(self._publication_window(
+                    path, deadline=time.monotonic() + _STAGING_MAINTENANCE_SECONDS,
+                    cancelled=self._cancel_requested, mark=False))
+            except MaintenanceBusyError as error:
+                if self._cancel_requested.is_set():
+                    raise
+                raise MaintenanceBusyError(
+                    f"A maintenance pass kept this database busy for {_STAGING_MAINTENANCE_SECONDS:.0f} s; "
+                    "retry the tier switch when it finishes") from error
+            yield
+
     @staticmethod
     @contextlib.contextmanager
     def _publication_window(path: Path, *, deadline: float, cancelled: threading.Event | None = None,
@@ -706,7 +722,6 @@ class RebuildManager:
         when maintenance turns out to be busy.
         """
         from truememory.maintenance import MaintenanceBusyError, maintenance_owner, maintenance_wanted
-        from truememory.tier_switch.job import acquire_tier_activation_lock
         with contextlib.ExitStack() as stack:
             # While waiting, new owners everywhere yield; the current one finishes.
             with contextlib.ExitStack() as wanting:
@@ -722,9 +737,11 @@ class RebuildManager:
                             on_wait()
                         asked = asked or wanting.enter_context(maintenance_wanted(path))
                         time.sleep(0.05)
-            activation = acquire_tier_activation_lock(path, timeout=0.5) if mark else None
-            if activation is not None:
-                stack.callback(activation.release)
+            if mark:
+                from truememory.tier_switch.job import acquire_tier_activation_lock
+                activation = acquire_tier_activation_lock(path, timeout=0.5)
+                if activation is not None:
+                    stack.callback(activation.release)
             yield
 
     @staticmethod

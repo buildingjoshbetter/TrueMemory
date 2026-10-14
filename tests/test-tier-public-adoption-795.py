@@ -148,7 +148,9 @@ class Harness:
                 get_tier_config=lambda tier: {"reranker": "synthetic/reranker"}
             ),
             "truememory.maintenance": types.SimpleNamespace(
-                maintenance_owner=self.owner
+                maintenance_owner=self.owner,
+                MaintenanceBusyError=type("MaintenanceBusyError", (RuntimeError,), {}),
+                maintenance_wanted=lambda path: contextlib.nullcontext(),
             ),
             "truememory.rebuild_source": types.SimpleNamespace(
                 ensure_rebuild_tracking=lambda conn: self.events.append("tracking"),
