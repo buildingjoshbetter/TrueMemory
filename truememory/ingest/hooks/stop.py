@@ -85,14 +85,14 @@ def _sanitize_session_id(session_id: str) -> str:
     return safe or "unknown"
 
 
-def _prune_old_files(directory: Path, retention_days: int = 30) -> None:
-    """Delete files in directory older than retention_days."""
+def _prune_old_files(directory: Path, retention_days: int = 30, *, keep: tuple[str, ...] = ()) -> None:
+    """Delete files in directory older than retention_days, except suffixes in ``keep``."""
     if not directory.exists():
         return
     cutoff = time.time() - (retention_days * 86400)
     for path in directory.iterdir():
         try:
-            if path.is_file() and path.stat().st_mtime < cutoff:
+            if path.suffix not in keep and path.is_file() and path.stat().st_mtime < cutoff:
                 path.unlink()
         except OSError:
             continue
@@ -147,27 +147,33 @@ def main() -> None:
     if not Path(transcript_path).is_file():
         return
 
+    # Proper transcript validation: parse and count actual message objects
+    # instead of substring-matching (which false-positives on content that
+    # contains the literal strings "human" or "user"). Declining here keeps
+    # short sessions out of the bounded completion store.
+    if not _has_enough_messages(transcript_path, MIN_MESSAGES):
+        return
+
     capture = None
     if args.host == "claude":
-        from truememory.ingest.completion import admit_capture, has_receipt
+        from truememory.ingest.completion import BACKPRESSURE, CompletionError, admit_capture, has_receipt
         try:
             capture = admit_capture(transcript_path, session_id, args.user, args.db, args.host,
                                     root=BACKLOG_DIR.parent / "ingest-completion-v1")
             if has_receipt(capture):
                 return
         except OSError as error:
-            log.warning("stop hook: capture retained nonterminal source (%s)", type(error).__name__)
+            reason = error.args[0] if isinstance(error, CompletionError) and error.args else type(error).__name__
+            log.warning("stop hook: completion admission refused (%s)", reason)
+            if reason in BACKPRESSURE:
+                # The pointer is adopted once completion has room again.
+                _queue_to_backlog(transcript_path, session_id, args.user, args.db,
+                                  reason="completion_backpressure:" + reason, transcript_host=args.host)
             return
 
     # Pre-flight check: ensure our write directories exist and are writable
     # so we fail early with a clear message instead of silently losing work
     if not _writable_dirs_ok():
-        return
-
-    # Proper transcript validation: parse and count actual message objects
-    # instead of substring-matching (which false-positives on content that
-    # contains the literal strings "human" or "user").
-    if not _has_enough_messages(str(capture.path) if capture else transcript_path, MIN_MESSAGES):
         return
 
     from truememory.ingest.hooks._shared import should_extract_session, mark_session_extracted
@@ -217,7 +223,8 @@ def _writable_dirs_ok() -> bool:
 
     _prune_old_files(TRACE_DIR)
     _prune_old_files(LOG_DIR)
-    _prune_old_files(BACKLOG_DIR)
+    # Queued pointers are work, not logs: adoption retires them, age never does.
+    _prune_old_files(BACKLOG_DIR, keep=(".json", ".processing"))
 
     # Check disk free space — abort if less than 10 MB available
     try:
@@ -242,15 +249,16 @@ def _writable_dirs_ok() -> bool:
 
 
 def _has_enough_messages(transcript_path: str, min_messages: int) -> bool:
-    """Count meaningful canonical human turns, independently of completion coverage."""
-    from truememory.ingest.transcript import parse_transcript_outcome, strip_truememory_blocks
+    """Count meaningful canonical human turns, independently of completion coverage.
 
-    outcome = parse_transcript_outcome(Path(transcript_path))
-    if outcome.status == "unreadable":
-        return False
-    count = sum(message.role == "human" and bool(strip_truememory_blocks(message.content).strip())
-                for message in outcome.messages)
-    return count >= min_messages
+    JSONL is read record by record and only until the threshold is met. A
+    transcript larger than the completion copy limit counts as substantive
+    without being parsed, so hook time and memory stay bounded.
+    """
+    from truememory.ingest.completion import MAX_CAPTURE_BYTES
+    from truememory.ingest.transcript import has_human_messages
+
+    return bool(has_human_messages(Path(transcript_path), min_messages, substantive=MAX_CAPTURE_BYTES))
 
 
 def _count_active_ingest_processes() -> int:
