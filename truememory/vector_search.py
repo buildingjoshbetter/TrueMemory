@@ -172,24 +172,6 @@ def resolve_tier() -> str:
         pass
     return "edge"
 
-
-def configured_tier() -> str:
-    """The legacy tier (env var, then config.json, then edge), ignoring projections."""
-    env = os.environ.get("TRUEMEMORY_EMBED_MODEL", "").strip().lower()
-    if env:
-        return env
-    try:
-        import json
-        from pathlib import Path
-        _cfg = Path.home() / ".truememory" / "config.json"
-        if _cfg.exists():
-            tier = json.loads(_cfg.read_text(encoding="utf-8")).get("tier", "")
-            if tier:
-                return tier.strip().lower()
-    except Exception:
-        pass
-    return "edge"
-
 _raw_env = resolve_tier()
 EMBEDDING_MODEL = _resolve_model_name(_raw_env)
 

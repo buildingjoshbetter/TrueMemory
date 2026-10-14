@@ -738,13 +738,20 @@ class TestPublicBoundaries(unittest.TestCase):
         def set_active_tier(tier):
             resets.append(("reranker", tier))
             reranker._frozen_reranker_id, reranker._active_tier = None, tier
-        vector.configured_tier, vector.set_embedding_model = (lambda: "edge"), set_embedding_model
-        vector.resolve_tier = lambda: "edge"
+        vector.set_embedding_model, vector.resolve_tier = set_embedding_model, (lambda: "edge")
         vector._active_vec_table, vector._active_sep_table = (lambda conn: "vec_messages"), (lambda conn: "vec_messages_sep")
         reranker.set_active_tier = set_active_tier
         reranker.get_current_reranker_name = lambda: "cross-encoder/ms-marco-MiniLM-L-6-v2"
         other = sqlite3.connect(":memory:")
         self.addCleanup(other.close)
+        # An empty legacy store whose config.json names edge.
+        self.modules["tier_switch.projection"] = types.SimpleNamespace(
+            _paths=lambda config, lock: (None, None), _read_config=lambda path: {"tier": "edge"},
+            _guard=lambda config: types.SimpleNamespace(tier=config["tier"]))
+        other.executescript("CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT); "
+                            "CREATE TABLE messages(id INTEGER PRIMARY KEY); "
+                            "CREATE TABLE vector_cache_registry(tier_group TEXT PRIMARY KEY, vec_table TEXT, "
+                            "sep_table TEXT, embedding_dim INTEGER)")
         with self.api.serving_operation(other) as operation:
             self.assertEqual(operation.key[:4], ("legacy", "model2vec", "256", "edge"))
             self.assertIsNone(operation.policy)

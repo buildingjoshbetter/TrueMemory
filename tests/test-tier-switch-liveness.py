@@ -1114,5 +1114,79 @@ class ActivationEdgeCases(unittest.TestCase):
         self.assertIsInstance(other["search"], list, other["search"])
 
 
+# A long-running process pinned to its startup tier (the MCP server pins
+# TRUEMEMORY_EMBED_MODEL) that switches to base itself, then waits.
+STALE_ENV_PROCESS = """
+os.environ["TRUEMEMORY_EMBED_MODEL"] = "edge"
+stub_models()
+import model2vec, sentence_transformers
+model2vec.StaticModel.from_pretrained = staticmethod(lambda *args, **kwargs: FakeEncoder())
+sentence_transformers.SentenceTransformer = lambda *args, **kwargs: FakeEncoder()
+from truememory.engine import TrueMemoryEngine
+from truememory.tier_switch.runtime import engine_serving_operation
+switched = switch("base")["outcome"]
+engine = TrueMemoryEngine(DB)
+engine.add("written while base is selected", sender="alice")
+drain()
+print("READY", switched, flush=True)
+sys.stdin.readline()
+out = {}
+try:
+    with engine_serving_operation(engine) as operation:
+        out["served"] = [operation.tier, list(operation.tables)]
+except Exception as error:
+    out["served"] = type(error).__name__
+try:
+    out["add"] = engine.add("written after the selection was retired elsewhere", sender="alice")["id"]
+except Exception as error:
+    out["add"] = type(error).__name__
+out["env"] = os.environ["TRUEMEMORY_EMBED_MODEL"]
+engine.close(); drain()
+emit(**out)
+"""
+
+class RetiredSelectionInPinnedProcess(unittest.TestCase):
+    def run_retire(self, config_tier):
+        (result,) = run_scenario(steps("""
+            import subprocess
+            from truememory.maintenance import maintenance_owner
+            from truememory.tier_switch.activation import retire_incoherent_activation
+            seed(15, group="edge")
+            process = subprocess.Popen([sys.executable, "-c", PRELUDE_SOURCE + %r], stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            ready = process.stdout.readline().strip()
+            # 0.7.6.1 effects: its rebuild rewrites the registry row, and config names the tier.
+            conn = connect()
+            conn.execute("UPDATE vector_cache_registry SET model_name='Qwen3-Embedding-0.6B' WHERE tier_group='basepro'")
+            conn.commit(); conn.close()
+            config = json.loads(CONFIG.read_text()); config["tier"] = %r; CONFIG.write_text(json.dumps(config))
+            with maintenance_owner(DB):  # As any open elsewhere does.
+                conn = connect(); retired = retire_incoherent_activation(conn); conn.close()
+            out, err = process.communicate("go\\n", timeout=120)
+            lines = [json.loads(line[7:]) for line in out.splitlines() if line.startswith("RESULT ")]
+            conn = connect()
+            emit(ready=ready, retired=retired, process=lines[0] if lines else err[-2000:],
+                 messages=conn.execute("SELECT count(*) FROM messages").fetchone()[0],
+                 vectors=conn.execute("SELECT count(*) FROM vec_messages_basepro WHERE rowid=17").fetchone()[0])
+        """ % (STALE_ENV_PROCESS, config_tier)), tier="edge")
+        self.assertEqual((result["ready"], result["retired"]), ("READY complete", True))
+        self.assertIsInstance(result["process"], dict, result["process"])
+        return result
+
+    def test_process_resets_to_the_stores_configured_tier(self):
+        result = self.run_retire("pro")
+        process = result["process"]
+        self.assertEqual(process["served"], ["pro", ["vec_messages_basepro", "vec_messages_sep_basepro"]])
+        self.assertEqual((process["add"], process["env"]), (17, "pro"))
+        self.assertEqual((result["messages"], result["vectors"]), (17, 1))
+
+    def test_process_refuses_a_configured_tier_whose_pair_is_stale(self):
+        # Config names edge, but the edge pair predates the base selection.
+        result = self.run_retire("edge")
+        process = result["process"]
+        self.assertEqual((process["served"], process["add"]), ("TierRuntimeError", "TierRuntimeError"))
+        self.assertEqual(result["messages"], 16)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -231,6 +231,48 @@ def reset_legacy_runtime(tier: str, *, deadline: float | None = None,
         vector, reranker = _modules()
         vector.set_embedding_model(tier)
         reranker.set_active_tier(tier)
+        _pin_process_tier(tier)
+
+
+def _pin_process_tier(tier: str) -> None:
+    """Keep a pinned process tier equal to the legacy tier this process serves.
+
+    The MCP server pins TRUEMEMORY_EMBED_MODEL at startup and legacy
+    resolution reads it first. Controlled serving never consults it, so it is
+    only updated when legacy serving resumes.
+    """
+    if os.environ.get("TRUEMEMORY_EMBED_MODEL", "").strip():
+        os.environ["TRUEMEMORY_EMBED_MODEL"] = tier
+
+
+def _legacy_reset_tier(conn: sqlite3.Connection) -> str:
+    """The store's configured tier, verified against its legacy pair and metadata.
+
+    config.json is the store's shared truth; this process's env may still pin
+    the tier it started with. A tier whose registry pair or embedder metadata
+    disagrees would serve stale vectors, so it is refused instead.
+    """
+    from truememory.embedding_target import EmbeddingTarget
+    from truememory.tier_switch.projection import _guard, _paths, _read_config
+
+    refused = "Legacy database requires explicit coherent runtime selection"
+    try:
+        tier = _guard(_read_config(_paths(None, None)[0])).tier
+        target = EmbeddingTarget.capture(tier)
+        row = conn.execute("SELECT vec_table, sep_table, embedding_dim FROM main.vector_cache_registry "
+                           "WHERE tier_group=?", (target.tier_group,)).fetchone()
+        populated = conn.execute("SELECT 1 FROM main.messages LIMIT 1").fetchone() is not None
+        metadata = dict(conn.execute("SELECT key, value FROM main.metadata WHERE key IN ('embed_model','embed_dim')"))
+    except Exception as error:
+        raise TierRuntimeError(refused) from error
+    generic = ("vec_messages", "vec_messages_sep")
+    tables = generic if row is None else (row[0], row[1])
+    if tables not in (target.tables, generic) or (row is not None and row[2] not in (None, target.dimension)):
+        raise TierRuntimeError(refused)
+    if (populated or tier != "edge") and metadata != {"embed_model": target.model_id,
+                                                      "embed_dim": str(target.dimension)}:
+        raise TierRuntimeError(refused)
+    return tier
 
 
 def _prepare_legacy_policy(policy: LegacyTierPolicy, effective: str, *, deadline: float | None,
@@ -495,8 +537,10 @@ def serving_operation(
             # open elsewhere, or rolled back): serve the configured legacy tier.
             if borrowed:
                 raise TierRuntimeError("Legacy database requires explicit coherent runtime selection")
+            with _connection_read(conn, connection_lock, deadline, cancelled):
+                tier = _legacy_reset_tier(conn)
             try:
-                reset_legacy_runtime(vector.configured_tier(), deadline=deadline, cancelled=cancelled)
+                reset_legacy_runtime(tier, deadline=deadline, cancelled=cancelled)
             except serving.ServingLeaseError as error:
                 raise TierRuntimeError("Legacy database requires explicit coherent runtime selection") from error
         if reranker_id is not None:
