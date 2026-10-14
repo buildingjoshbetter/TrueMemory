@@ -109,7 +109,8 @@ def test_construction_is_admitted_with_model_size(budgeted, monkeypatch):
     server, rss = budgeted
     builds = []
     monkeypatch.setattr(server, "_build_embed_model", lambda model_id, device: builds.append(device) or Model(device))
-    # 1,200 MiB resident plus 2.4 GB of Qwen weights exceeds the 3,072 MiB budget.
+    monkeypatch.setattr(mps_utils, "auto_detect_device", lambda: "cpu")
+    # 1,200 MiB resident plus 2.4 GB of Qwen weights on CPU exceeds the 3,072 MiB budget.
     rss.rss = 1200 * MIB
     with server._lock, pytest.raises(ms._ProcessMemoryRefused):
         server._get_embed_model("base")
@@ -222,12 +223,16 @@ def test_single_text_waits_for_bookkeeping_instead_of_cloning(plain, monkeypatch
     assert builds == [] and plain._fast_encoder is None
 
 
-@pytest.mark.parametrize("physical_gib, expected_gib", [(4, 2), (8, 3), (12, 3), (16, 4), (64, 8)])
-def test_small_hosts_keep_room_for_base_tier_models(monkeypatch, physical_gib, expected_gib):
+@pytest.mark.parametrize("platform, physical_gib, expected_gib", [
+    ("linux", 4, 2), ("linux", 8, 3), ("linux", 12, 3), ("linux", 16, 4), ("linux", 64, 8),
+    ("darwin", 4, 2), ("darwin", 8, 4), ("darwin", 12, 4), ("darwin", 16, 4), ("darwin", 64, 8),
+])
+def test_small_hosts_keep_room_for_base_tier_models(monkeypatch, platform, physical_gib, expected_gib):
     from truememory import memory_budget
     sensor = types.SimpleNamespace(virtual_memory=lambda: types.SimpleNamespace(total=physical_gib * 1024 ** 3))
     monkeypatch.setattr(ms, "psutil", sensor)
     monkeypatch.setitem(sys.modules, "psutil", sensor)
+    monkeypatch.setattr(sys, "platform", platform)
     assert ms._automatic_rss_budget_bytes() == expected_gib * 1024 ** 3
     assert memory_budget.automatic_budget_bytes() == expected_gib * 1024 ** 3
 
@@ -265,4 +270,72 @@ def test_static_models_are_left_alone(monkeypatch):
 
 def test_mps_cap_leaves_room_for_resident_models_and_a_long_batch():
     for physical_gib in (8, 16, 36, 64):
-        assert mps_utils._default_mps_budget_bytes(physical_gib * 1024 ** 3) == int(3.25 * 1024 ** 3)
+        assert mps_utils._default_mps_budget_bytes(physical_gib * 1024 ** 3) == 4 * 1024 ** 3
+
+
+def _embed_request(server, monkeypatch, rss, *, resident: str, loaded_rss_mib: int):
+    builds = []
+
+    def build(model_id, device):
+        builds.append(device)
+        rss.rss = loaded_rss_mib * MIB
+        return Model(device)
+
+    monkeypatch.delenv("TRUEMEMORY_DEVICE", raising=False)
+    monkeypatch.setattr(mps_utils, "auto_detect_device", lambda: resident)
+    monkeypatch.setattr(server, "_build_embed_model", build)
+    with server._memory_scope():
+        response = server.handle_request({"op": "embed", "texts": ["synthetic a", "synthetic b"], "tier": "base"})
+    return response, builds
+
+
+def test_loading_request_is_not_refused_by_its_own_construction_charge(budgeted, monkeypatch):
+    server, rss = budgeted
+    # 2,900 MiB resident after a float32 CPU load fits the 3,072 MiB budget
+    # only once the 2.4 GB construction reservation is returned.
+    response, builds = _embed_request(server, monkeypatch, rss, resident="cpu", loaded_rss_mib=2900)
+    assert response["ok"] is True, response
+    assert builds == [None]
+
+
+def test_accelerator_loads_are_not_charged_against_rss(budgeted, monkeypatch):
+    server, rss = budgeted
+    # MPS weights never appear in RSS, so 1,200 MiB + 2.4 GB must not refuse an MPS load.
+    rss.rss = 1200 * MIB
+    response, builds = _embed_request(server, monkeypatch, rss, resident="mps", loaded_rss_mib=1300)
+    assert response["ok"] is True, response
+
+
+def test_clone_without_room_waits_for_the_main_model(budgeted, monkeypatch):
+    server, rss = budgeted
+    builds = []
+    monkeypatch.setattr(server, "_build_embed_model", lambda model_id, device: builds.append(device) or Model(device))
+    server._publish_embed_state(ms._EmbedState(model=Model("cpu"), tier="", model_id="qwen3_256"))
+    # 1,200 MiB resident plus a 2.4 GB CPU clone exceeds the 3,072 MiB budget.
+    rss.rss = 1200 * MIB
+    released = threading.Event()
+
+    def inference():
+        with server._inference_lock:
+            released.wait(5)
+
+    worker = threading.Thread(target=inference)
+    worker.start()
+    try:
+        with server._memory_scope():
+            assert server._handle_fast_embed(["synthetic"], "") is None
+    finally:
+        released.set()
+        worker.join()
+    assert builds == [] and server._fast_encoder is None
+
+
+def test_session_release_returns_one_stage(budgeted):
+    from truememory.memory_budget import ProfileKey
+    server, _ = budgeted
+    with server._memory_scope() as session:
+        lease = session.charge(ProfileKey("synthetic stage", "model_server"), known_bytes=1000)
+        assert lease.reserved_known_bytes >= 1000
+        session.release("synthetic stage")
+        assert lease.reserved_known_bytes == 0
+
