@@ -37,6 +37,7 @@ _LOCK_PATH = _TRUEMEMORY_DIR / "rebuild.lock"
 # corrections, and activation retries after a tail appended at the last moment.
 _SOURCE_RESTARTS = 2
 _ACTIVATION_RETRIES = 3
+_CATCH_UP_ROUNDS = 5
 
 
 class TierSwitchUnsupportedError(RuntimeError):
@@ -803,7 +804,7 @@ class RebuildManager:
         from truememory.rebuild_source import RebuildSourceChanged
         from truememory.tier_switch.source import initialize_tier_source, plan_tier_source
 
-        restarts = 0
+        restarts = rounds = 0
         while True:
             try:
                 plan = plan_tier_source(conn, model_id=job.target.model_id, dimension=job.target.dimension,
@@ -820,8 +821,12 @@ class RebuildManager:
                 with self._publication_window(job.database_path, deadline=expires, cancelled=self._cancel_requested):
                     self._discard_inactive_pair(conn, job.target, protected=protected, job=job)
                 continue
+            rounds += 1
+            # Each round prepares the target model again; a store that never
+            # stops appending ends as failed with a resumable delta instead.
             if (result.status == "complete" and result.captured_range_complete and not result.current_source_complete
-                    and not self._cancel_requested.is_set() and time.monotonic() < expires):
+                    and rounds <= _CATCH_UP_ROUNDS and not self._cancel_requested.is_set()
+                    and time.monotonic() < expires):
                 continue
             return result
 

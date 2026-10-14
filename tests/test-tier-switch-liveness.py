@@ -8,6 +8,7 @@ database, journal, job marker, source fences and serving gate are real.
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,24 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _vector_extension_available() -> bool:
+    try:
+        import sqlite_vec
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+        finally:
+            conn.close()
+        return True
+    except (ImportError, AttributeError, OSError, sqlite3.Error):
+        return False
+
+
+if not _vector_extension_available():
+    raise unittest.SkipTest("Tier switching needs sqlite-vec with extension loading")
 
 PRELUDE = r'''
 import json, os, random, sqlite3, struct, sys, threading, time, logging
@@ -240,6 +259,7 @@ class RebuildKeepsDatabaseAvailable(unittest.TestCase):
         self.assertEqual(result["state"]["selected"], "edge")
         self.assertEqual((result["edge"], result["ghost"]), (29, 0))
 
+    @unittest.skipIf(sys.platform == "win32", "SIGKILL is unavailable on Windows")
     def test_killed_worker_reports_interrupted_and_retry_recovers(self):
         (result,) = run_scenario("""
             import signal, subprocess

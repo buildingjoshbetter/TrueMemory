@@ -673,6 +673,13 @@ def retire_incoherent_activation(conn: sqlite3.Connection) -> bool:
     config and registry are coherent, so legacy serving resumes from them. The
     retired records stay under *_retired keys. Caller owns maintenance.
     """
+    # Every controlled open checks this: decide on a read snapshot first, so a
+    # coherent journal never takes the database write lock.
+    with _transaction(conn, write=False):
+        _guard_storage(conn)
+        state = _state(conn)
+        if (state.selection is None and state.legacy_policy is None) or _publication_coherent(conn, state):
+            return False
     with _transaction(conn, write=True):
         _guard_storage(conn)
         state = _state(conn)

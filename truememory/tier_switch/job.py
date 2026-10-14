@@ -91,7 +91,10 @@ def acquire_tier_job_lock(db_path: str | os.PathLike[str], *, timeout: float = 0
 
 def tier_job_alive(db_path: str | os.PathLike[str]) -> bool:
     """True while any process holds the database's tier-job lock."""
-    lock = acquire_tier_job_lock(db_path)
+    try:
+        lock = acquire_tier_job_lock(db_path)
+    except OSError:
+        return False  # No worker could have opened the lock file either.
     if lock is None:
         return True
     lock.release()
