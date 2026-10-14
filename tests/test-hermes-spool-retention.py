@@ -154,6 +154,63 @@ class HermesSpoolRetention(unittest.TestCase):
         self.assertTrue(spawn.called)
         self.assertEqual(self.store.state()["captures"], {})
 
+    def test_superseding_a_flushed_snapshot_keeps_its_extraction_queued(self) -> None:
+        first = payload(self.store.session, 1, [], post=True)
+        self.store.capture(first, "post_llm_call")
+        history = [{"role": "user", "content": first["extra"]["user_message"]},
+                   {"role": "assistant", "content": first["extra"]["assistant_response"]}]
+        key = self.store.capture(payload(self.store.session, 2, history), "pre_llm_call")
+        state = self.store.state()
+        superseded = [item for item in state["captures"].values() if item["state"] == "superseded"]
+        self.assertEqual(len(superseded), 1)
+        self.assertTrue(superseded[0]["flush"])
+        newest = state["captures"][state["turns"][key]["snapshot"]]
+        # A crash before the next post must not lose the flushed turn.
+        self.assertTrue(newest["flush"])
+        self.assertTrue(BRIDGE._work_available(state))
+
+    def test_long_session_without_delivered_contexts_stays_bounded(self) -> None:
+        history: list[dict[str, str]] = []
+        for number in range(150):
+            key = self.store.capture(payload(self.store.session, number, history), "pre_llm_call")
+            self.run_worker()  # the hook already gave up waiting; the context is never written
+            event = payload(self.store.session, number, history, post=True)
+            self.store.capture(event, "post_llm_call")
+            self.run_worker()
+            history = history[-4:] + [{"role": "user", "content": event["extra"]["user_message"]},
+                                      {"role": "assistant", "content": event["extra"]["assistant_response"]}]
+        state = self.store.state()
+        self.assertLessEqual(len(list(self.store.path.glob("*.context.json"))), 1)
+        self.assertEqual(state["turns"][key]["context_state"], "ready")
+        self.assertLessEqual(len(state["captures"]), 2 * (BRIDGE.RETAINED_TURNS + 2))
+        self.assertEqual(len(state["turns"]), 150)
+
+    def test_finished_sessions_are_collected_when_the_account_is_full(self) -> None:
+        sessions = []
+        for index in range(6):
+            store = BRIDGE.Store(self.store.root, self.store.user, self.store.db, f"finished-{index}")
+            history: list[dict[str, str]] = []
+            for number in range(3):
+                store.capture(payload(store.session, number, history), "pre_llm_call")
+                event = payload(store.session, number, history, post=True)
+                store.capture(event, "post_llm_call")
+                history += [{"role": "user", "content": event["extra"]["user_message"]},
+                            {"role": "assistant", "content": event["extra"]["assistant_response"]}]
+            self.store, saved = store, self.store
+            self.run_worker()
+            self.store = saved
+            old = __import__("time").time() - 7200
+            os.utime(store.state_path, (old, old))
+            sessions.append(store)
+        residual = self.store.usage()[0]
+        self.assertGreater(residual, 0)
+        live = BRIDGE.Store(self.store.root, self.store.user, self.store.db, "live-session")
+        with patch.object(BRIDGE, "MAX_SCOPE_BYTES", 12000):
+            live.capture(payload("live-session", 1, []), "pre_llm_call")
+        self.assertEqual(len(live.state()["captures"]), 1)
+        self.assertFalse(any(store.path.exists() for store in sessions))
+        self.assertLessEqual(self.store.usage()[0], 12000)
+
 
 if __name__ == "__main__":
     unittest.main()
