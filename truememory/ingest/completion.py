@@ -846,7 +846,11 @@ def _prefix_state(capture: Capture) -> str:
         info = _source_state(capture.path)
     except (FileNotFoundError, NotADirectoryError):
         return "changed"
-    except CompletionError:
+    except CompletionError as error:
+        # Windows reports a failed security query the same way as a foreign
+        # owner; it is retried with the other transient errors.
+        if str(error) == "source_ownership_unavailable":
+            return "unavailable"
         # No longer a regular file owned by this account.
         return "changed"
     except OSError as error:

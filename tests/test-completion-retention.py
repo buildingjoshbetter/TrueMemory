@@ -569,3 +569,33 @@ def test_a_dead_worker_never_leaves_its_entry_pending_after_the_source_changes(e
     live_path.unlink()
     assert completion.dispatch(running) == 0
     assert _state(env)[running.key]["status"] == "pending"
+
+
+def test_a_failed_windows_ownership_query_is_retried_not_settled(env, monkeypatch):
+    # Pre-fix: _windows_security failing for any transient reason made the
+    # source look foreign-owned and settled the capture at once.
+    monkeypatch.setattr(completion, "MAX_CAPTURE_BYTES", 256)
+    session, path = _transcript(env, _turns(6))
+    capture = completion.admit_capture(str(path), session, "", "", "claude", root=env.root)
+    real = completion._source_owned
+    reason = ["source_ownership_unavailable"]
+
+    def owned(info, fd):
+        raise completion.CompletionError(reason[0])
+
+    monkeypatch.setattr(completion, "_source_owned", owned)
+    assert completion.dispatch(capture) == 0
+    entry = _state(env)[capture.key]
+    assert entry["status"] == "queued" and len(entry["unavailable"]) == 1
+    with pytest.raises(completion.CompletionError, match="source_unavailable"):
+        completion.verify_capture(capture)
+    monkeypatch.setattr(completion, "_source_owned", real)
+    assert completion.dispatch(capture) == env.worker.pid
+
+    other, other_path = _transcript(env, _turns(6))
+    foreign = completion.admit_capture(str(other_path), other, "", "", "claude", root=env.root)
+    reason[0] = "source_not_owned"
+    monkeypatch.setattr(completion, "_source_owned", owned)
+    assert completion.dispatch(foreign) == 0
+    entry = _state(env)[foreign.key]
+    assert (entry["status"], entry["outcomes"][-1]["category"]) == ("exhausted", "source_prefix_changed")
