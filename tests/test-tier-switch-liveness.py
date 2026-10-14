@@ -651,5 +651,249 @@ class RerankerOverridesDoNotFailOtherOperations(unittest.TestCase):
         self.assertGreaterEqual(result["waited"], 0.8)
 
 
+class ActivationLockOrder(unittest.TestCase):
+    def test_activation_and_relaunched_consolidation_do_not_deadlock(self):
+        # Consolidation owns maintenance and then a serving reader. Activation
+        # must take the same order; the reverse froze the process (H1).
+        (result,) = run_scenario("""
+            seed(30)
+            stub_models(delay=0.05)
+            from truememory.engine import TrueMemoryEngine
+            from truememory.maintenance import get_coordinator
+            from truememory.tier_switch import runtime, serving
+            from truememory.tier_switch.manager import RebuildManager
+            engine = TrueMemoryEngine(DB); engine.get_all(limit=1); drain()
+            finalize = RebuildManager._finalize_rebuild
+            activating = threading.Event()
+            def marked(self, *args, **kwargs):
+                activating.set()
+                return finalize(self, *args, **kwargs)
+            RebuildManager._finalize_rebuild = marked
+            opened = runtime.open_serving_connection
+            def open_when_activation_starts(path, factory):
+                # The coordinator owns maintenance from launch; it reaches its
+                # serving reader exactly when the worker starts activating.
+                started = time.monotonic()
+                while not (activating.is_set() or serving._DEFAULT_GATE._writers) and time.monotonic() - started < 30:
+                    time.sleep(0.01)
+                time.sleep(0.2)
+                return opened(path, factory)
+            runtime.open_serving_connection = open_when_activation_starts
+            manager = switch("edge", join=False)["manager"]
+            worker = manager._active_thread
+            time.sleep(0.3)
+            launched = get_coordinator(DB).request_layers(threshold=1, include_layers=True)
+            worker.join(45)
+            finished = not worker.is_alive()
+            served = threading.Event()
+            threading.Thread(target=lambda: (engine.get_all(limit=1), served.set()), daemon=True).start()
+            responsive = served.wait(5)
+            if not finished:
+                manager.cancel(); worker.join(30)  # Breaks a deadlock so the scenario can report it.
+            served.wait(30)
+            engine.close(); drain()
+            emit(launched=launched, finished=finished, responsive=responsive, outcome=manager._last_outcome, state=state())
+        """)
+        self.assertTrue(result["launched"])
+        self.assertTrue(result["finished"], result)
+        self.assertTrue(result["responsive"])
+        self.assertEqual(result["outcome"], "complete")
+        self.assertEqual(result["state"]["selected"], "edge")
+
+
+def steps(*parts: str) -> str:
+    return "".join(textwrap.dedent(part) for part in parts)
+
+
+def run_child(source: str) -> str:
+    """Scenario code that runs ``source`` in a fresh interpreter and binds its RESULT to ``child``."""
+    return ("_run = subprocess.run([sys.executable, '-c', PRELUDE_SOURCE + %r], capture_output=True, text=True)\n"
+            "_lines = [json.loads(l[7:]) for l in _run.stdout.splitlines() if l.startswith('RESULT ')]\n"
+            "child = _lines[0] if _lines else {'error': _run.stderr[-2000:], 'returncode': _run.returncode}\n" % source)
+
+
+# Drains keep automatic consolidation (another maintenance owner) out of the way.
+LONG_RUNNING = """
+stub_models()
+from truememory.engine import TrueMemoryEngine
+engine = TrueMemoryEngine(DB)
+engine.get_all(limit=1); drain()
+print("OPEN", flush=True)
+sys.stdin.readline()
+window_id = engine.add("second server stores during the activation window", sender="alice")["id"]
+drain()
+print("ADDED", window_id, flush=True)
+sys.stdin.readline()
+out = {"window": window_id}
+for name, call in (("get_all", lambda: len(engine.get_all(limit=100))),
+                   ("add", lambda: engine.add("second server after the other process changed tier", sender="alice")["id"]),
+                   ("search", lambda: [row.get("id") for row in engine.search("second server", limit=3)])):
+    try:
+        out[name] = call()
+    except Exception as error:
+        out[name] = type(error).__name__ + ": " + str(error)[:120]
+engine.close(); drain()
+emit(**out)
+"""
+
+CRASH_IN_RESTORE = """
+stub_models(embeddings_available=lambda: False)
+from truememory.tier_switch import projection
+from truememory.tier_switch.manager import RebuildManager
+if CRASH_POINT == "config":
+    projection.revert_activation_mirror = lambda *args, **kwargs: os._exit(9)
+else:
+    RebuildManager._restore_journal_rows = lambda *args, **kwargs: os._exit(9)
+switch("edge")
+"""
+
+OPEN_AFTER_CRASH = """
+stub_models()
+from truememory.engine import TrueMemoryEngine
+from truememory.tier_switch.runtime import engine_serving_operation
+engine = TrueMemoryEngine(DB)
+added = engine.add("after a crash inside the restore", sender="alice")["id"]
+with engine_serving_operation(engine) as operation:
+    served = list(operation.tables)
+engine.close(); drain()
+emit(added=added, served=served, back=switch("base").get("outcome"), state=state())
+"""
+
+HOLD_MAINTENANCE = """
+from truememory.maintenance import MaintenanceBusyError, maintenance_owner
+sys.stdin.readline()
+while True:
+    try:
+        owner = maintenance_owner(DB)
+        owner.__enter__()
+        break
+    except MaintenanceBusyError:
+        time.sleep(0.05)
+print("HELD", flush=True)
+sys.stdin.readline()
+owner.__exit__(None, None, None)
+"""
+
+class ProjectionFaultsAfterCommit(unittest.TestCase):
+    def test_used_selection_is_kept_and_other_processes_keep_working(self):
+        (result,) = run_scenario("""
+            import subprocess
+            seed(20)
+            stub_models()
+            other = subprocess.Popen([sys.executable, "-c", PRELUDE_SOURCE + %r], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            assert other.stdout.readline().startswith("OPEN")
+            from truememory import vector_search
+            loaded = vector_search._load_frozen_embedding_target
+            seen = {}
+            def load(target, timeout=None):
+                if "fault" not in seen:
+                    # Another process writes under the committed selection, then
+                    # this projection fails (memory pressure, missing cache).
+                    seen["fault"] = True
+                    other.stdin.write("go\\n"); other.stdin.flush()
+                    seen["added"] = other.stdout.readline().strip()
+                    raise OSError("synthetic: frozen target could not load after the commit")
+                return loaded(target, timeout)
+            vector_search._load_frozen_embedding_target = load
+            switched = switch("edge")
+            outcome = switched.get("outcome", switched)
+            out, err = other.communicate("go\\n", timeout=120)
+            results = [json.loads(line[7:]) for line in out.splitlines() if line.startswith("RESULT ")]
+            window = int(seen["added"].split()[1])
+            conn = connect()
+            emit(outcome=outcome, state=state(), other=results[0] if results else err[-2000:],
+                 window_in_edge=conn.execute("SELECT count(*) FROM vec_messages_edge WHERE rowid=?", (window,)).fetchone()[0])
+        """ % LONG_RUNNING)
+        self.assertEqual(result["outcome"], "activation_pending")
+        self.assertEqual(result["state"]["selected"], "edge")
+        self.assertEqual(result["window_in_edge"], 1)
+        other = result["other"]
+        self.assertIsInstance(other, dict, other)
+        self.assertEqual((other["window"], other["get_all"], other["add"]), (21, 21, 22))
+        self.assertIsInstance(other["search"], list, other["search"])
+
+    def test_unused_selection_is_restored(self):
+        (result,) = run_scenario("""
+            seed(20)
+            stub_models(embeddings_available=lambda: False)
+            outcome = switch("edge")["outcome"]
+            stub_models()
+            from truememory.engine import TrueMemoryEngine
+            from truememory.tier_switch.runtime import engine_serving_operation
+            engine = TrueMemoryEngine(DB)
+            added = engine.add("after the restore", sender="alice")["id"]
+            with engine_serving_operation(engine) as operation:
+                served = list(operation.tables)
+            engine.close(); drain()
+            emit(outcome=outcome, state=state(), config=json.loads(CONFIG.read_text())["tier"], added=added, served=served)
+        """)
+        self.assertEqual(result["outcome"], "failed")
+        self.assertIsNone(result["state"]["selected"])
+        self.assertEqual(result["state"]["marker"], "failed")
+        self.assertEqual(result["config"], "base")
+        self.assertEqual(result["added"], 21)
+        self.assertEqual(result["served"], ["vec_messages_basepro", "vec_messages_sep_basepro"])
+
+    def test_crash_inside_the_restore_leaves_a_servable_store(self):
+        for point in ("config", "journal"):
+            with self.subTest(crash_before=point):
+                self.assert_servable_after_crash(point)
+
+    def assert_servable_after_crash(self, point):
+        (result,) = run_scenario(steps("""
+            import subprocess
+            seed(20)
+            os.environ["TRUEMEMORY_EMBED_MODEL"] = ""
+            crasher = "CRASH_POINT = %r\\n" + %r
+            crashed = subprocess.run([sys.executable, "-c", PRELUDE_SOURCE + crasher]).returncode
+        """ % (point, CRASH_IN_RESTORE), run_child(OPEN_AFTER_CRASH), """
+            conn = connect()
+            emit(crashed=crashed, opener=child,
+                 added_vectors={group: conn.execute(f"SELECT count(*) FROM vec_messages_{group} WHERE rowid=21").fetchone()[0]
+                                for group in ("edge", "basepro")})
+        """))
+        self.assertEqual(result["crashed"], 9)
+        opener = result["opener"]
+        self.assertEqual(opener.get("served"), ["vec_messages_edge", "vec_messages_sep_edge"], opener)
+        self.assertEqual(opener["added"], 21)
+        self.assertEqual(opener["back"], "complete")
+        self.assertEqual(opener["state"]["selected"], "base")
+        self.assertEqual(result["added_vectors"], {"edge": 1, "basepro": 1})
+
+
+class ActivationEdgeCases(unittest.TestCase):
+    def test_cancel_while_waiting_for_maintenance_ends_the_job(self):
+        (result,) = run_scenario("""
+            import subprocess
+            seed(20)
+            stub_models(delay=0.02)
+            from truememory.tier_switch.manager import RebuildManager
+            holder = subprocess.Popen([sys.executable, "-c", PRELUDE_SOURCE + %r], stdin=subprocess.PIPE,
+                                      stdout=subprocess.PIPE, text=True)
+            finalize = RebuildManager._finalize_rebuild
+            activating = threading.Event()
+            def finalize_after_maintenance_is_taken(self, *args, **kwargs):
+                # Another process starts maintenance just as activation begins.
+                holder.stdin.write("acquire\\n"); holder.stdin.flush()
+                holder.stdout.readline()
+                activating.set()
+                return finalize(self, *args, **kwargs)
+            RebuildManager._finalize_rebuild = finalize_after_maintenance_is_taken
+            manager = switch("edge", join=False)["manager"]
+            worker = manager._active_thread
+            activating.wait(60); time.sleep(0.5)
+            manager.cancel()
+            worker.join(60)
+            stopped = not worker.is_alive()
+            holder.communicate("release\\n", timeout=30)
+            emit(stopped=stopped, outcome=manager._last_outcome, state=state())
+        """ % HOLD_MAINTENANCE)
+        self.assertTrue(result["stopped"])
+        self.assertNotEqual(result["outcome"], "activation_pending")
+        self.assertIsNone(result["state"]["selected"])
+        self.assertEqual(result["state"]["marker"], "failed")
+        self.assertEqual(result["state"]["status_rows"], [[1, "failed"]])
+
 if __name__ == "__main__":
     unittest.main()

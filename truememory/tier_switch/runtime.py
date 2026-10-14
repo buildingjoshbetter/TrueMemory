@@ -209,14 +209,16 @@ def apply_runtime_policy(result: TierSelection | LegacyTierPolicy, *, deadline: 
             _acknowledged = key
 
 
-def reset_legacy_runtime(tier: str) -> None:
-    """Drop a partial controlled projection; legacy serving re-resolves lazily.
+def reset_legacy_runtime(tier: str, *, deadline: float | None = None,
+                         cancelled: threading.Event | None = None) -> None:
+    """Drop a controlled projection; legacy serving re-resolves lazily.
 
-    Used only after a failed activation was rolled back to a legacy database:
-    the frozen target or policy tier would otherwise refuse legacy admission.
+    Used when a database's journal is gone (rolled back or retired) while this
+    process still holds its frozen target or policy tier.
     """
     global _acknowledged
-    with serving.exclusive_activation():
+    bounded = time.monotonic() + serving._KEY_WAIT_SECONDS if deadline is None else deadline
+    with serving.exclusive_activation(deadline=bounded, cancelled=cancelled):
         _acknowledged = None
         vector, reranker = _modules()
         vector.set_embedding_model(tier)

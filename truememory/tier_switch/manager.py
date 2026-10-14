@@ -37,6 +37,9 @@ _LOCK_PATH = _TRUEMEMORY_DIR / "rebuild.lock"
 # corrections, and activation retries after a tail appended at the last moment.
 _SOURCE_RESTARTS = 2
 _ACTIVATION_RETRIES = 3
+# How long the activation commit waits for this process's readers to drain
+# while it owns maintenance, before releasing it and retrying.
+_WRITER_DRAIN_SECONDS = 30.0
 _CATCH_UP_ROUNDS = 5
 
 
@@ -738,8 +741,8 @@ class RebuildManager:
         from truememory.embedding_target import EmbeddingTarget
         from truememory.tier_switch.activation import read_activation_state
         from truememory.tier_switch.job import check_selected_tier_job, end_selected_tier_job
+        from truememory.rebuild_source import RebuildSourceChanged
         from truememory.tier_switch.source import TierSourceUntrusted, plan_tier_source
-        from truememory.tier_switch.serving import exclusive_activation
 
         check_selected_tier_job(conn, job)
         if read_activation_state(conn).intent != intent:
@@ -770,9 +773,9 @@ class RebuildManager:
                 self._last_outcome = outcome
                 return False
             try:
-                with exclusive_activation(deadline=expires, cancelled=self._cancel_requested):
-                    self._finalize_rebuild(conn, job.target.tier, job.target.tier_group, intent=intent, job=job,
-                                           plan=result.plan, deadline=expires)
+                # Lock order (as consolidation): maintenance, then the serving writer.
+                self._finalize_rebuild(conn, job.target.tier, job.target.tier_group, intent=intent, job=job,
+                                       plan=result.plan, deadline=expires)
             except TierSourceUntrusted:
                 # Rows appended between finishing and the activation writer are a
                 # tail, not a fault: embed them and retry activation (bounded).
@@ -782,7 +785,7 @@ class RebuildManager:
                 try:
                     tail = plan_tier_source(conn, model_id=job.target.model_id, dimension=job.target.dimension,
                                             targets=job.target.tables).action == "delta"
-                except (TierSourceUntrusted, ValueError):
+                except (RebuildSourceChanged, ValueError):
                     tail = False
                 if not tail:
                     raise
@@ -1018,97 +1021,165 @@ class RebuildManager:
                           plan: "TierSourcePlan | None" = None, deadline: float | None = None) -> None:
         """A paired current-source certificate is the only activation authority.
 
-        The target reranker is proven before the durable commit (the embedding
-        target already encoded the pair). Maintenance is owned only for the
-        commit itself. If projection still fails, the exact previous journal,
-        registry, marker and config are restored, so the acknowledged previous
-        selection keeps serving and a retry is not refused.
+        Lock order matches consolidation: maintenance (the publication window),
+        then this process's serving writer, never the reverse. A writer that
+        cannot drain quickly releases maintenance and retries. The target
+        reranker is proven first, outside both. If projection still fails and
+        nothing was written under the new selection, the previous config,
+        journal, registry and marker are restored (config first: a crash in
+        between leaves an unacknowledged selection that the next open mirrors).
         """
         from truememory.tier_switch.activation import commit_certified_selection
+        from truememory.tier_switch.serving import ServingLeaseTimeout, exclusive_activation
 
         if intent is None or job is None or plan is None or (target_tier, to_group) != (job.target.tier, job.target.tier_group):
             raise TierSwitchUnsupportedError("Tier activation requires an exact paired completion certificate")
-        self._prove_target_runtime(intent)
-        self._last_outcome = "activation_pending"
-        self._served_tier = None
         bound = time.monotonic() + 600 if deadline is None else deadline
-        with self._publication_window(job.database_path, deadline=bound, cancelled=self._cancel_requested):
-            conn.execute("PRAGMA synchronous=FULL")
-            snapshot = _activation_snapshot(conn, intent.target.tier_group)
-            result = commit_certified_selection(conn, intent, job, plan)
+        self._prove_target_runtime(intent, deadline=bound)
+        self._served_tier = None
+        result = snapshot = None
+        try:
+            while result is None:
+                with self._publication_window(job.database_path, deadline=bound, cancelled=self._cancel_requested):
+                    try:
+                        with exclusive_activation(deadline=min(bound, time.monotonic() + _WRITER_DRAIN_SECONDS),
+                                                  cancelled=self._cancel_requested):
+                            conn.execute("PRAGMA synchronous=FULL")
+                            snapshot = _activation_snapshot(conn, intent.target.tier_group)
+                            result = commit_certified_selection(conn, intent, job, plan)
+                    except ServingLeaseTimeout:
+                        if time.monotonic() >= bound:
+                            raise
+                if result is None:
+                    time.sleep(0.2)  # Let long readers finish without holding maintenance.
+        except BaseException:
+            # Commit exceptions are ambiguous; only a fresh readback decides.
+            if result is None and self._activation_committed(job, intent):
+                self._last_outcome = "activation_pending"
+            raise
+        self._last_outcome = "activation_pending"
         try:
             self._project_result(conn, result, intent)
         except Exception:
-            if self._restore_previous_activation(conn, job, intent, result, snapshot, bound):
+            if self._restore_previous_activation(conn, job, intent, result, plan, snapshot, bound):
                 self._last_outcome = "failed"
             raise
 
     @staticmethod
-    def _prove_target_runtime(intent: "ActivationIntent") -> None:
+    def _activation_committed(job: "TierJob", intent: "ActivationIntent") -> bool:
+        from truememory.tier_switch.activation import read_activation_state
+        try:
+            conn = _open_db(job.database_path)
+        except Exception:
+            return True  # Unknown: the caller keeps the conservative pending readback.
+        try:
+            selection = read_activation_state(conn).selection
+            return selection is not None and selection.intent_id == intent.intent_id
+        except Exception:
+            return True
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _prove_target_runtime(intent: "ActivationIntent", *, deadline: float | None = None) -> None:
         from truememory import reranker
         from truememory.embedding_target import TARGET_PROBE_TEXT
-        model = reranker.get_reranker(model_name=intent.reranker_id, certified=True)
+        model = reranker.get_reranker(model_name=intent.reranker_id, certified=True, deadline=deadline)
         model.predict([(TARGET_PROBE_TEXT, TARGET_PROBE_TEXT)], show_progress_bar=False)
 
     def _restore_previous_activation(self, conn: sqlite3.Connection, job: "TierJob", intent: "ActivationIntent",
-                                     result: "TierSelection", snapshot: dict, deadline: float) -> bool:
-        """Undo this exact unacknowledged commit; anything newer is left alone."""
-        from truememory.tier_switch.activation import ActivationIntent, _guard_storage, _state, _transaction
-        from truememory.tier_switch.job import _SELECTION_FIELDS, _SELECTION_TABLE, _selection_values
+                                     result: "TierSelection", plan: "TierSourcePlan", snapshot: dict,
+                                     deadline: float) -> bool:
+        """Undo this exact unacknowledged commit only while nothing used it.
+
+        Any source write after the commit was published to the new pair (other
+        processes serve a committed selection before acknowledgement), so the
+        selection is then kept: restoring would blind the old pair to it.
+        """
+        from truememory.tier_switch.activation import _guard_storage, _state, _transaction
         from truememory.tier_switch.projection import revert_activation_mirror
         from truememory.tier_switch.runtime import reset_legacy_runtime
 
+        if conn.in_transaction or intent.expected_config is None:
+            return False
         try:
-            if conn.in_transaction:
+            with _transaction(conn, write=False):
+                _guard_storage(conn)
+                if not self._commit_unused(conn, _state(conn), intent, result, plan):
+                    log.warning("Writes arrived under the new tier selection; keeping it despite the projection fault")
+                    return False
+            # Config first: a crash before the journal restore leaves a coherent,
+            # unacknowledged selection rather than legacy serving of a missing pair.
+            if not revert_activation_mirror(result, expected_config=intent.expected_config,
+                                            config_path=self._config_path, lock_path=self._config_lock_path):
                 return False
-            with self._publication_window(job.database_path, deadline=max(deadline, time.monotonic() + 30)):
-                with _transaction(conn, write=True):
-                    _guard_storage(conn)
-                    state = _state(conn)
-                    # An open elsewhere may already have mirrored and acknowledged it.
-                    if (state.selection is None
-                            or dataclasses.replace(state.selection, config_acknowledged=False) != result
-                            or type(state.intent) is not ActivationIntent or state.intent.intent_id != result.intent_id
-                            or state.intent.state not in ("db_selected", "config_acknowledged")):
-                        return False
-                    # Primary keys are preserved (UPSERT/DELETE), like activation itself.
-                    for key, row in snapshot["metadata"].items():
-                        if row is None:
-                            conn.execute("DELETE FROM main.metadata WHERE key=?", (key,))
-                        else:
-                            conn.execute("INSERT INTO main.metadata(key,value,updated_at) VALUES (?,?,?) "
-                                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
-                                         "updated_at=excluded.updated_at", (key, *row))
-                    registry = snapshot["registry"]
-                    if registry is None:
-                        conn.execute("DELETE FROM main.vector_cache_registry WHERE tier_group=?",
-                                     (intent.target.tier_group,))
-                    else:
-                        conn.execute(
-                            "INSERT INTO main.vector_cache_registry(tier_group, vec_table, sep_table, last_embedded_id, "
-                            "vector_count, model_name, embedding_dim, last_updated, created) VALUES (?,?,?,?,?,?,?,?,?) "
-                            "ON CONFLICT(tier_group) DO UPDATE SET vec_table=excluded.vec_table, "
-                            "sep_table=excluded.sep_table, last_embedded_id=excluded.last_embedded_id, "
-                            "vector_count=excluded.vector_count, model_name=excluded.model_name, "
-                            "embedding_dim=excluded.embedding_dim, last_updated=excluded.last_updated, "
-                            "created=excluded.created", registry)
-                    conn.execute(f"INSERT INTO main.{_SELECTION_TABLE}(singleton, {', '.join(_SELECTION_FIELDS)}, state) "
-                                 "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 'failed')", _selection_values(job))
+            if not self._restore_journal_rows(conn, job, intent, result, plan, snapshot, deadline):
+                return False
         except Exception:
             log.warning("The previous tier selection could not be restored after a projection fault", exc_info=True)
             return False
-        if intent.expected_config is not None:
-            try:
-                revert_activation_mirror(result, expected_config=intent.expected_config,
-                                         config_path=self._config_path, lock_path=self._config_lock_path)
-            except Exception:
-                log.warning("Config still names the abandoned tier; the database journal is authoritative", exc_info=True)
-            if intent.expected_generation is None and intent.previous_policy is None:
-                # The process may hold a partial frozen projection of the target;
-                # legacy serving re-resolves the restored tier lazily.
-                reset_legacy_runtime(intent.expected_config.tier)
-            self._served_tier = intent.expected_config.tier
+        if intent.expected_generation is None and intent.previous_policy is None:
+            # The process may hold a partial frozen projection of the target;
+            # legacy serving re-resolves the restored tier lazily.
+            reset_legacy_runtime(intent.expected_config.tier)
+        self._served_tier = intent.expected_config.tier
         log.warning("Tier activation projection failed; restored the previous selection")
+        return True
+
+    @staticmethod
+    def _commit_unused(conn: sqlite3.Connection, state: "ActivationState", intent: "ActivationIntent",
+                       result: "TierSelection", plan: "TierSourcePlan") -> bool:
+        """This commit is still current and no source or vector write followed it."""
+        from truememory.rebuild_source import read_rebuild_revision
+        from truememory.tier_switch.activation import ActivationIntent
+
+        # An open elsewhere may already have mirrored and acknowledged it.
+        if (state.selection is None
+                or dataclasses.replace(state.selection, config_acknowledged=False) != result
+                or type(state.intent) is not ActivationIntent or state.intent.intent_id != result.intent_id
+                or state.intent.state not in ("db_selected", "config_acknowledged")):
+            return False
+        # The certificate proved the source equal to the captured revision at commit.
+        source = plan.manifest.source
+        if read_rebuild_revision(conn) != (source.tracker, source.revision, source.schema_signature):
+            return False
+        return all(conn.execute(f'SELECT count(*) FROM main."{name}"').fetchone()[0] == result.vector_count
+                   for name in result.tables)
+
+    def _restore_journal_rows(self, conn: sqlite3.Connection, job: "TierJob", intent: "ActivationIntent",
+                              result: "TierSelection", plan: "TierSourcePlan", snapshot: dict,
+                              deadline: float) -> bool:
+        from truememory.tier_switch.activation import _guard_storage, _state, _transaction
+        from truememory.tier_switch.job import _SELECTION_FIELDS, _SELECTION_TABLE, _selection_values
+
+        with self._publication_window(job.database_path, deadline=max(deadline, time.monotonic() + 30)):
+            with _transaction(conn, write=True):
+                _guard_storage(conn)
+                if not self._commit_unused(conn, _state(conn), intent, result, plan):
+                    return False
+                # Primary keys are preserved (UPSERT/DELETE), like activation itself.
+                for key, row in snapshot["metadata"].items():
+                    if row is None:
+                        conn.execute("DELETE FROM main.metadata WHERE key=?", (key,))
+                    else:
+                        conn.execute("INSERT INTO main.metadata(key,value,updated_at) VALUES (?,?,?) "
+                                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                                     "updated_at=excluded.updated_at", (key, *row))
+                registry = snapshot["registry"]
+                if registry is None:
+                    conn.execute("DELETE FROM main.vector_cache_registry WHERE tier_group=?",
+                                 (intent.target.tier_group,))
+                else:
+                    conn.execute(
+                        "INSERT INTO main.vector_cache_registry(tier_group, vec_table, sep_table, last_embedded_id, "
+                        "vector_count, model_name, embedding_dim, last_updated, created) VALUES (?,?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT(tier_group) DO UPDATE SET vec_table=excluded.vec_table, "
+                        "sep_table=excluded.sep_table, last_embedded_id=excluded.last_embedded_id, "
+                        "vector_count=excluded.vector_count, model_name=excluded.model_name, "
+                        "embedding_dim=excluded.embedding_dim, last_updated=excluded.last_updated, "
+                        "created=excluded.created", registry)
+                conn.execute(f"INSERT INTO main.{_SELECTION_TABLE}(singleton, {', '.join(_SELECTION_FIELDS)}, state) "
+                             "VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 'failed')", _selection_values(job))
         return True
 
     def _apply_config_switch(

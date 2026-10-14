@@ -218,10 +218,10 @@ def mirror_activation(result: TierSelection | LegacyTierPolicy, *,
 def revert_activation_mirror(result: TierSelection | LegacyTierPolicy, *,
                              expected_config: ConfigGuard,
                              config_path: Path | None = None, lock_path: Path | None = None) -> bool:
-    """Undo mirror_activation only while config still names exactly this result.
+    """Return config to its pre-activation tier/generation (CAS on this result).
 
-    Used after the database journal was restored to the previous selection;
-    a config that has moved on is left untouched (False).
+    True when config now names the expected prior state (reverted, or never
+    mirrored); False when it has moved on, in which case nothing is written.
     """
     from truememory.tier_switch.activation import ConfigGuard
 
@@ -230,7 +230,10 @@ def revert_activation_mirror(result: TierSelection | LegacyTierPolicy, *,
     config_path, lock_path = _paths(config_path, lock_path)
     with ConfigFileLock(lock_path, strict=True), CONFIG_WRITE_LOCK:
         config = _read_config(config_path)
-        if _guard(config) != ConfigGuard(True, result.target.tier, result.generation):
+        current = _guard(config)
+        if current == expected_config:
+            return True
+        if current != ConfigGuard(True, result.target.tier, result.generation):
             return False
         if expected_config.tier_present:
             config["tier"] = expected_config.tier
