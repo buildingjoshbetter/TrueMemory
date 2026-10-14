@@ -188,7 +188,7 @@ class InertCompletionControls(unittest.TestCase):
         opened.assert_not_called()
         removed.assert_not_called()
 
-    def test_legacy_conversion_requires_exact_scope_retains_pointer_and_avoids_live_workers(self) -> None:
+    def test_legacy_conversion_requires_exact_scope_retires_admitted_pointer_and_avoids_live_workers(self) -> None:
         shared = types.ModuleType("truememory.ingest.hooks._shared")
         shared.backlog_transcript_source = lambda value, host: (value["transcript_path"], value["session_id"])
         platform = types.ModuleType("truememory._platform")
@@ -211,7 +211,9 @@ class InertCompletionControls(unittest.TestCase):
             entry = types.SimpleNamespace(path="/synthetic/pointer" + suffix)
             with patch.dict(sys.modules, {shared.__name__: shared, platform.__name__: platform}), \
                     patch.object(Path, "exists", return_value=True), patch.object(Path, "is_symlink", return_value=False), \
-                    patch.object(Path, "unlink") as removed, \
+                    patch.object(Path, "is_file", return_value=True), patch.object(Path, "unlink") as removed, \
+                    patch.object(COMPLETION, "_private_directory"), \
+                    patch.object(COMPLETION, "_lock", side_effect=lambda *args, **kwargs: contextlib.nullcontext(True)), \
                     patch.object(COMPLETION.os, "scandir", return_value=contextlib.nullcontext(iter([entry]))), \
                     patch.object(COMPLETION, "_open_private", return_value=41), \
                     patch.object(COMPLETION.os, "fdopen", side_effect=lambda *args: contextlib.nullcontext(handle)), \
@@ -222,7 +224,8 @@ class InertCompletionControls(unittest.TestCase):
                 COMPLETION.convert_legacy_pointers("synthetic-account", "/synthetic/db", "claude")
             self.assertEqual(capture.call_count, int(admitted))
             self.assertEqual(dispatch.call_count, int(admitted))
-            removed.assert_not_called()
+            # Completion owns an admitted pointer's retries, so only it retires.
+            self.assertEqual(removed.call_count, int(admitted))
             if admitted:
                 self.assertEqual(capture.call_args.args,
                     ("/synthetic/source.jsonl", "synthetic/a", "synthetic-account", "/synthetic/db", "claude"))

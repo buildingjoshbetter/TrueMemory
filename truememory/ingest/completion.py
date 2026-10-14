@@ -31,6 +31,8 @@ MAX_ATTEMPTS = 5
 MAX_RECEIPT_BYTES = 32768
 _KEY = re.compile(r"[0-9a-f]{64}")
 _COUNTS = ("facts_extracted", "facts_stored", "facts_updated", "facts_skipped_gate", "facts_skipped_dedup")
+# Admission refusals that clear once retained captures settle and are released.
+BACKPRESSURE = ("capture_account_quota", "capture_count_limit", "retained_state_limit")
 
 
 class CompletionError(OSError):
@@ -66,8 +68,11 @@ def account_root(user_id: str, db_path: str | None, root: Path | None = None) ->
         raise CompletionError("invalid_account")
     if user_id:
         _text(user_id)
-    base = root or Path(os.environ.get("TRUEMEMORY_BACKLOG_DIR", str(Path.home() / ".truememory" / "backlog"))).parent / "ingest-completion-v1"
-    return base / _digest([user_id, normalized_database(db_path)])
+    return _base(root) / _digest([user_id, normalized_database(db_path)])
+
+
+def _base(root: Path | None = None) -> Path:
+    return root or Path(os.environ.get("TRUEMEMORY_BACKLOG_DIR", str(Path.home() / ".truememory" / "backlog"))).parent / "ingest-completion-v1"
 
 
 def _private_directory(directory: Path) -> None:
@@ -752,54 +757,86 @@ def drain(user_id: str = "", db_path: str | None = None, host: str = "claude") -
             log.warning("Completion drain retained nonterminal work (%s)", type(error).__name__)
 
 
-def convert_legacy_pointers(user_id: str = "", db_path: str | None = None, host: str = "claude") -> None:
-    """Admit current observed bytes; retain every unversioned legacy pointer."""
+def adopt_legacy_pointer(pointer: Path, scope: tuple[str, str | None, str] | None = None) -> Capture | None:
+    """Admit one legacy pointer's current source bytes, then retire the pointer.
+
+    Completion owns retries once the bytes are admitted, so a pointer is never
+    replayed. ``scope`` limits adoption to one account and host; without it the
+    pointer's own validated scope is used. None retains the pointer (another
+    scope, a live claim or an unstable read); ValueError marks it invalid.
+    """
+    if pointer.suffix not in (".json", ".processing"):
+        return None
     from truememory.ingest.hooks._shared import backlog_transcript_source
     from truememory._platform import pid_is_alive
+    base = _base()
+    _private_directory(base)
+    # MCP drainers and SessionStart maintenance adopt one pointer at a time.
+    with _lock(base / "legacy.lock"):
+        try:
+            fd = _open_private(pointer, os.O_RDONLY)
+        except FileNotFoundError:
+            return None
+        with os.fdopen(fd, "rb") as handle:
+            before_stat = os.fstat(handle.fileno())
+            _source_owned(before_stat, handle.fileno())
+            before = _file_identity(before_stat)
+            raw = handle.read(16385)
+            after_stat = os.fstat(handle.fileno())
+            _source_owned(after_stat, handle.fileno())
+            after = _file_identity(after_stat)
+        fd = _open_private(pointer, os.O_RDONLY)
+        with os.fdopen(fd, "rb") as handle:
+            path_stat = os.fstat(handle.fileno())
+            _source_owned(path_stat, handle.fileno())
+            path_after = _file_identity(path_stat)
+        if before != after or after != path_after:
+            return None
+        if len(raw) > 16384 or len(raw) != after[2]:
+            raise ValueError("legacy pointer exceeds its bound")
+        value = json.loads(raw)
+        if type(value) is not dict:
+            raise ValueError("legacy pointer is not an object")
+        if scope is None:
+            from truememory.ingest.hooks._shared import normalize_transcript_host
+            user_id, db_path = value.get("user_id"), value.get("db_path")
+            host = normalize_transcript_host(value.get("transcript_host", "claude"))
+            if type(user_id) is not str or type(db_path) is not str or not host:
+                raise ValueError("legacy pointer scope is invalid")
+        else:
+            user_id, db_path, host = scope
+            if (type(value.get("user_id")) is not str or value["user_id"] != user_id
+                    or type(value.get("db_path")) is not str
+                    or normalized_database(value["db_path"]) != normalized_database(db_path)
+                    or value.get("transcript_host") != host):
+                return None
+        source = backlog_transcript_source(value, host=host)
+        if source is None or value.get("session_id") != source[1]:
+            raise ValueError("legacy pointer source is not admitted")
+        pid = value.get("claimed_pid", 0)
+        if type(pid) is not int or pid < 0:
+            raise ValueError("legacy pointer claim is invalid")
+        if pointer.suffix == ".processing" and (not pid or pid_is_alive(pid)):
+            return None
+        transcript, session = source
+        # A removed transcript can never be admitted; retire its pointer too.
+        capture = admit_capture(transcript, session, user_id, db_path, host) if Path(transcript).is_file() else None
+        with contextlib.suppress(FileNotFoundError):
+            pointer.unlink()
+        return capture
+
+
+def convert_legacy_pointers(user_id: str = "", db_path: str | None = None, host: str = "claude") -> None:
+    """Adopt this account's legacy pointers; each retires once its bytes are admitted."""
     directory = Path(os.environ.get("TRUEMEMORY_BACKLOG_DIR", str(Path.home() / ".truememory" / "backlog")))
     if not directory.exists() or directory.is_symlink():
         return
     with os.scandir(directory) as entries:
-        for entry in islice(entries, MAX_CAPTURES):
-            pointer = Path(entry.path)
-            if pointer.suffix not in (".json", ".processing"):
-                continue
-            try:
-                fd = _open_private(pointer, os.O_RDONLY)
-                with os.fdopen(fd, "rb") as handle:
-                    before_stat = os.fstat(handle.fileno())
-                    _source_owned(before_stat, handle.fileno())
-                    before = _file_identity(before_stat)
-                    raw = handle.read(16385)
-                    after_stat = os.fstat(handle.fileno())
-                    _source_owned(after_stat, handle.fileno())
-                    after = _file_identity(after_stat)
-                fd = _open_private(pointer, os.O_RDONLY)
-                with os.fdopen(fd, "rb") as handle:
-                    path_stat = os.fstat(handle.fileno())
-                    _source_owned(path_stat, handle.fileno())
-                    path_after = _file_identity(path_stat)
-                if before != after or after != path_after or len(raw) > 16384 or len(raw) != after[2]:
-                    continue
-                value = json.loads(raw)
-                if (type(value) is not dict or type(value.get("user_id")) is not str
-                        or value["user_id"] != user_id or type(value.get("db_path")) is not str
-                        or normalized_database(value["db_path"]) != normalized_database(db_path)
-                        or value.get("transcript_host") != host):
-                    continue
-                source = backlog_transcript_source(value, host=host)
-                if source is None:
-                    continue
-                transcript, session = source
-                if value.get("session_id") != session:
-                    continue
-                pid = value.get("claimed_pid", 0)
-                if type(pid) is not int or pid < 0:
-                    continue
-                if pointer.suffix == ".processing" and (not pid or pid_is_alive(pid)):
-                    continue
-                capture = admit_capture(transcript, session, user_id, db_path, host)
-                if dispatch(capture):
-                    return
-            except (OSError, ValueError, TypeError) as error:
-                log.warning("Legacy pointer retained without completion (%s)", type(error).__name__)
+        pointers = [Path(entry.path) for entry in islice(entries, MAX_CAPTURES)]
+    for pointer in pointers:
+        try:
+            capture = adopt_legacy_pointer(pointer, (user_id, db_path, host))
+            if capture is not None and dispatch(capture):
+                return
+        except (OSError, ValueError, TypeError) as error:
+            log.warning("Legacy pointer retained without completion (%s)", type(error).__name__)
