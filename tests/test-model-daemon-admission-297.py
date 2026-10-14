@@ -70,16 +70,16 @@ class DaemonAdmissionControls(unittest.TestCase):
                          "1f18c4eb6d3fc61a08b34cf75a79fdb5ec663570129dd587adc63acedee83082")
 
     def test_automatic_physical_arithmetic_and_eight_GiB_ceiling(self) -> None:
-        for physical_gib, expected_gib in [(8, 2), (16, 4), (32, 8), (64, 8)]:
+        for physical_gib, expected_gib in [(4, 2), (8, 3), (12, 3), (16, 4), (32, 8), (64, 8)]:
             with self.subTest(physical_gib=physical_gib):
                 self.physical.return_value = types.SimpleNamespace(total=physical_gib * GIB)
                 server = self.automatic()
                 self.assertEqual(server._max_rss_bytes, expected_gib * GIB)
-        self.assertEqual(self.physical.call_count, 4)
+        self.assertEqual(self.physical.call_count, 6)
         self.current.assert_not_called()
 
     def test_physical_bytes_floor_division_and_signed64_boundary(self) -> None:
-        for physical, expected in [(4 * GIB + 3, GIB), (2**63 - 1, 8 * GIB)]:
+        for physical, expected in [(4 * GIB + 3, 2 * GIB + 1), (2**63 - 1, 8 * GIB)]:
             with self.subTest(physical=physical):
                 self.physical.return_value = types.SimpleNamespace(total=physical)
                 self.assertEqual(self.automatic()._max_rss_bytes, expected)
@@ -201,7 +201,7 @@ class DaemonAdmissionControls(unittest.TestCase):
         self.assertIn('[executable, "-m", "truememory.model_server"]', client)
         self.assertIn('truememory-model-server = "truememory.model_server:main"', (ROOT / "pyproject.toml").read_text())
         self.assertEqual(hashlib.sha256((ROOT / "truememory/mps_utils.py").read_bytes()).hexdigest(),
-                         "adbe1e27ca5dff795f98b2ea3937b9174205ddd8ec327e8316dd9a56b5e3159a")
+                         "558c979ec15f762bf5bf4b1584b9d7ee9672e33f0f7c82e784b15c9250bd43a9")
 
 
 if __name__ == "__main__":

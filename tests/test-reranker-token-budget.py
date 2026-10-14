@@ -143,3 +143,58 @@ def test_model_server_budget_path_needs_no_input_length_helper(monkeypatch):
     response = ModelServer().handle_request({"op": "rerank", "pairs": pairs, "model_name": "m"})
     assert response["ok"] is True
     assert np.array_equal(np.asarray(response["scores"]), FakeCrossEncoder().predict(pairs, batch_size=len(pairs)))
+
+
+class LegacyTokenizer:
+    model_max_length = 8192
+
+    def __call__(self, first, second, truncation, max_length):
+        return FakeCrossEncoder.tokenizer(None, first, second, truncation, max_length)
+
+
+class LegacyCrossEncoder:
+    """CrossEncoder shape before sentence-transformers 5.5: max_length only."""
+
+    def __init__(self, name=None, device=None, max_length: int | None = None) -> None:
+        self.max_length = max_length
+        self.tokenizer = LegacyTokenizer()
+        self.calls: list[tuple[int, int]] = []
+
+    predict = FakeCrossEncoder.predict
+
+
+@pytest.mark.parametrize("max_length", [None, 8192])
+def test_cap_and_budget_cover_crossencoders_without_max_seq_length(monkeypatch, max_length):
+    model = LegacyCrossEncoder(max_length=max_length)
+    cap_reranker_length(model)
+    assert model.max_length == RERANK_MAX_TOKENS
+    assert not hasattr(model, "max_seq_length")
+    monkeypatch.setattr(rerank_budget, "rerank_token_budget", lambda: RERANK_TOKEN_BUDGET)
+    pairs = _pairs(*([10] * 60 + [5000] * 8))
+    assert max(pair_token_lengths(model, pairs)) == RERANK_MAX_TOKENS
+    budgeted_predict(model, pairs, 64)
+    assert model.calls[0][0] == RERANK_TOKEN_BUDGET // RERANK_MAX_TOKENS ** 2
+
+
+def test_legacy_cap_keeps_shorter_limits():
+    model = LegacyCrossEncoder(max_length=512)
+    cap_reranker_length(model)
+    assert model.max_length == 512
+
+
+def test_model_server_caps_and_slices_legacy_crossencoder(monkeypatch):
+    import sys
+    import types
+
+    from truememory import mps_utils
+    from truememory.model_server import ModelServer
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(CrossEncoder=LegacyCrossEncoder))
+    monkeypatch.setattr(mps_utils, "auto_detect_device", lambda: "cpu")
+    monkeypatch.setattr(rerank_budget, "rerank_token_budget", lambda: RERANK_TOKEN_BUDGET)
+    server = ModelServer()
+    pairs = _pairs(*([30] * 50 + [3000] * 10))
+    response = server.handle_request({"op": "rerank", "pairs": pairs, "model_name": "m"})
+    assert response["ok"] is True
+    assert server._reranker.max_length == RERANK_MAX_TOKENS
+    assert server._reranker.calls[0][0] == RERANK_TOKEN_BUDGET // RERANK_MAX_TOKENS ** 2

@@ -715,7 +715,10 @@ def automatic_budget_bytes() -> int:
         raise MemoryAdmissionRefused("Local automatic physical-memory sensor unavailable") from exc
     if type(physical) is not int or not 0 < physical <= _MAX_BYTES:
         raise MemoryAdmissionRefused("Local physical-memory sensor invalid")
-    budget = min(8 * 1024**3, physical // 4)
+    budget = physical // 4
+    if budget:
+        # Same small-host floor as the model server: Base/Pro need about 2.3 GB.
+        budget = min(8 * 1024**3, max(budget, min(physical // 2, 3 * 1024**3)))
     if not budget:
         raise MemoryAdmissionRefused("Local automatic budget is not positive")
     return budget
