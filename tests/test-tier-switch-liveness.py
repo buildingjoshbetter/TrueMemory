@@ -1219,6 +1219,26 @@ engine.close(); drain()  # Close waits for the bounded background pass.
 emit(hits=len(hits))
 """
 
+TARGET_IDENTITY_CHANGED = """
+stub_models()
+from truememory.embedding_target import EmbeddingTarget, EmbeddingTargetError
+def changed(self):
+    raise EmbeddingTargetError("Prepared target configuration changed; capture a new target")
+EmbeddingTarget.check_configuration = changed  # A certified custom tier edited afterwards.
+from truememory.engine import TrueMemoryEngine
+engine = TrueMemoryEngine(DB)
+out = {}
+for name, call in (("search", lambda: engine.search("synthetic fact number 3", limit=3)),
+                   ("add", lambda: engine.add("stored under a changed target identity", sender="alice"))):
+    try:
+        call()
+        out[name] = "ok"
+    except Exception as error:
+        out[name] = type(error).__name__
+engine.close(); drain()
+emit(**out)
+"""
+
 class RetiredSelectionInPinnedProcess(unittest.TestCase):
     def run_retire(self, config_tier):
         (result,) = run_scenario(steps("""
@@ -1316,6 +1336,21 @@ class BackfillRobustness(unittest.TestCase):
         self.assertEqual(result["child"], {"hits": 3})
         self.assertEqual(result["vectors"], [3, 3])
         self.assertIsNone(result["cursor"])
+
+    def test_target_identity_error_is_surfaced_not_degraded(self):
+        (result,) = run_scenario(steps("""
+            import subprocess
+            seed(10)
+            stub_models()
+            assert switch("edge")["outcome"] == "complete"
+        """, run_child(TARGET_IDENTITY_CHANGED), """
+            conn = connect()
+            emit(child=child, messages=conn.execute("SELECT count(*) FROM messages").fetchone()[0],
+                 cursor=conn.execute("SELECT value FROM metadata WHERE key='vector_backfill_from'").fetchone())
+        """))
+        self.assertEqual(result["child"], {"search": "EmbeddingTargetError", "add": "EmbeddingTargetError"})
+        self.assertEqual((result["messages"], result["cursor"]), (10, None))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -601,13 +601,24 @@ def _project(models: str, projection: Callable[[], None]) -> bool:
         return True
     except (TierRuntimeError, serving.ServingLeaseError, serving.ServingLeaseTimeout):
         raise
-    except Exception:
-        if models == "required":
+    except Exception as error:
+        if models == "required" or _identity_error(error):
             raise
         import logging
         logging.getLogger(__name__).warning(
             "Selected tier models are unavailable; admitting without vector work", exc_info=True)
         return False
+
+
+def _identity_error(error: BaseException) -> bool:
+    """A loaded model that is not the certified target is never mere unavailability."""
+    classes = []
+    for module_name, attribute in (("truememory.embedding_target", "EmbeddingTargetError"),
+                                   ("truememory.model_client", "ServingIdentityMismatchError")):
+        value = getattr(sys.modules.get(module_name), attribute, None)
+        if isinstance(value, type) and issubclass(value, BaseException):
+            classes.append(value)
+    return isinstance(error, tuple(classes))
 
 
 def require_admitted_models() -> None:
