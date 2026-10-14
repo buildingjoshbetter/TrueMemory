@@ -847,12 +847,37 @@ class RebuildManager:
             status TEXT NOT NULL DEFAULT 'pending', action TEXT, total_messages INTEGER DEFAULT 0,
             processed_messages INTEGER DEFAULT 0, progress_pct REAL DEFAULT 0, eta_seconds REAL DEFAULT 0,
             batch_size INTEGER DEFAULT 0, throughput_ips REAL DEFAULT 0, ram_pct REAL DEFAULT 0,
-            pressure REAL, error TEXT, started_at REAL, completed_at REAL, backup_path TEXT, last_heartbeat REAL
+            pressure REAL DEFAULT 0, error TEXT, started_at REAL, completed_at REAL, backup_path TEXT, last_heartbeat REAL
         )"""
-        if _normalized(_schema_sql(conn, "rebuild_status")) != _normalized(expected):
+        # Column shape, not DDL text: defaults differ between create_db releases
+        # but never change what status publication reads or writes.
+        sql = _normalized(_schema_sql(conn, "rebuild_status"))
+        if (not sql.startswith("create table ") or "without rowid" in sql
+                or _status_columns(conn) != _expected_status_columns(expected)
+                or conn.execute("SELECT 1 FROM pragma_index_list('rebuild_status') WHERE origin='pk'").fetchone()):
             raise TierSwitchUnsupportedError("Unsupported rebuild status schema")
         if conn.execute("SELECT 1 FROM main.sqlite_master WHERE type='trigger' AND tbl_name='rebuild_status' COLLATE NOCASE LIMIT 1").fetchone():
             raise TierSwitchUnsupportedError("Status triggers cannot participate in tier publication")
+
+
+def _status_columns(conn: sqlite3.Connection) -> tuple[tuple, ...]:
+    # name, declared type, NOT NULL, primary-key position, hidden/generated.
+    return tuple((row[1].lower(), row[2].upper(), row[3], row[5], row[6])
+                 for row in conn.execute("PRAGMA main.table_xinfo(rebuild_status)"))
+
+
+_EXPECTED_STATUS_COLUMNS: dict[str, tuple[tuple, ...]] = {}
+
+
+def _expected_status_columns(sql: str) -> tuple[tuple, ...]:
+    if sql not in _EXPECTED_STATUS_COLUMNS:
+        reference = sqlite3.connect(":memory:")
+        try:
+            reference.execute(sql)
+            _EXPECTED_STATUS_COLUMNS[sql] = _status_columns(reference)
+        finally:
+            reference.close()
+    return _EXPECTED_STATUS_COLUMNS[sql]
 
 
 def backup_db(db_path: Path | None = None) -> Path:
