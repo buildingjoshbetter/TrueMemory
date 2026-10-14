@@ -466,6 +466,9 @@ class ModelServer:
         self._fast_model_id: str | None = None
         self._fast_generation: object = None
         self._fast_lock = threading.Lock()
+        # CPU constructions are admitted and built one at a time, so two
+        # builds cannot both pass a size check sized for one. Innermost lock.
+        self._construction_lock = threading.Lock()
         # Issue #646 (M-20): exclusive bind-lock fd, held for the process
         # lifetime; released in _cleanup. None until run() acquires it.
         self._lock_fd: int | None = None
@@ -968,6 +971,8 @@ class ModelServer:
         lifetime, as an inference OOM does (issue #577), so a model that
         cannot fit is not rebuilt and refused on every request.
         """
+        # Dropped models are reference cycles; free them before admitting this one.
+        self._discard_models()
         selected = device
         while True:
             resident = selected
@@ -975,33 +980,43 @@ class ModelServer:
                 from truememory.mps_utils import auto_detect_device
                 resident = auto_detect_device()
             # Accelerator weights are not in sampled RSS; only CPU builds are charged.
-            self._memory_stage(stage, deadline, known_bytes=known_bytes if resident == "cpu" else 0,
-                               model_identity=model_identity, device=selected)
-            failed = False
-            try:
-                model = build(selected)
-            except RuntimeError as exc:
-                from truememory.mps_utils import is_mps_oom
-                if selected == "cpu" or not is_mps_oom(exc):
-                    raise
-                failed = True
-            if failed:
-                # Outside the handler, so the failed build's frames are released.
-                self._mark_sticky_cpu(kind)
-                self._discard_models()
-                selected = "cpu"
-                self._check_process_memory(stage, deadline)
-                continue
-            from truememory.mps_utils import prefer_float32_on_cpu
-            prefer_float32_on_cpu(model)
-            try:
-                self._check_process_memory(stage + " completion", deadline)
-            except BaseException:
-                model = None
-                self._discard_models()
-                raise
-            self._release_stage(stage)
-            return model, selected
+            charged = known_bytes if resident == "cpu" else 0
+            with self._construction_slot(charged, deadline):
+                # Admit with the full size, then return the reservation: the
+                # weights reach sampled RSS as they load.
+                self._memory_stage(stage, deadline, known_bytes=charged,
+                                   model_identity=model_identity, device=selected)
+                self._release_stage(stage)
+                failed = False
+                try:
+                    model = build(selected)
+                except RuntimeError as exc:
+                    from truememory.mps_utils import is_mps_oom
+                    if selected == "cpu" or not is_mps_oom(exc):
+                        raise
+                    failed = True
+                if not failed:
+                    from truememory.mps_utils import prefer_float32_on_cpu
+                    prefer_float32_on_cpu(model)
+                    try:
+                        self._check_process_memory(stage + " completion", deadline)
+                    except BaseException:
+                        model = None
+                        self._discard_models()
+                        raise
+                    self._release_stage(stage)
+                    return model, selected
+            # Outside the handler, so the failed build's frames are released.
+            self._mark_sticky_cpu(kind)
+            self._discard_models()
+            selected = "cpu"
+            self._check_process_memory(stage, deadline)
+
+    def _construction_slot(self, charged: int, deadline: _RequestDeadline | None):
+        if not charged:
+            from contextlib import nullcontext
+            return nullcontext()
+        return self._construction_lock if deadline is None else deadline.locked(self._construction_lock)
 
     def _release_stage(self, stage: str) -> None:
         """Return a finished stage's reservation; its bytes are now in sampled RSS."""
@@ -1025,10 +1040,7 @@ class ModelServer:
                 return state.model
 
             # Memory-first replacement: failed construction leaves the cache empty.
-            replacing = self._embed_state is not None
             self._publish_embed_state(None)
-            if replacing:
-                self._discard_models()
             self._check_process_memory("embed construction", deadline)
             device = self._embed_device()
             if deadline is not None:
@@ -1060,11 +1072,8 @@ class ModelServer:
                 return state.model
             # A legacy custom label is not evidence that its constructor did not
             # fall back. Only strict construction can establish that identity.
-            replacing = self._embed_state is not None
             state = None
             self._publish_embed_state(None)
-            if replacing:
-                self._discard_models()
             self._check_process_memory("prepared embed construction", deadline)
             device = self._embed_device()
             deadline.check()
@@ -1108,6 +1117,14 @@ class ModelServer:
                 return None
 
             model_id, generation = state.model_id, state.generation
+            try:
+                physical = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+            except (AttributeError, OSError, ValueError):
+                physical = None
+            if physical is not None and physical <= 8 * 1024**3:
+                # A second CPU copy (2.4 GB in float32 on macOS) does not fit beside
+                # the MPS cap on an 8 GiB host; wait for the main model instead.
+                raise _ProcessMemoryRefused("Model server busy: no room for a fast-lane copy on this host")
             if expected_target is not None and model_id != expected_target.model_id:
                 from truememory.embedding_target import EmbeddingTargetError
                 raise EmbeddingTargetError("Fast encoder residency does not match the serving target")
@@ -1158,11 +1175,8 @@ class ModelServer:
             if self._reranker is not None and self._reranker_name == name:
                 return self._reranker
 
-            replacing = self._reranker is not None
             self._reranker = None
             self._reranker_name = None
-            if replacing:
-                self._discard_models()
             self._check_process_memory("reranker construction", deadline)
             from truememory.mps_utils import auto_detect_device, ensure_mps_memory_budget, resolve_device
             if "rerank" in self._sticky_cpu:
@@ -1293,9 +1307,15 @@ class ModelServer:
                             model = (self._get_fast_encoder(tier, deadline=deadline) if expected_target is None else
                                      self._get_fast_encoder(tier, deadline=deadline, expected_target=expected_target))
                         except _ProcessMemoryRefused:
-                            # Only the second copy does not fit: the main model serves this
-                            # after its slice. A process already over budget stays refused.
+                            # Only the second copy does not fit. Wait briefly for the main
+                            # model; a long batch, or a process over budget, stays refused
+                            # so hook recall falls back to keyword search promptly.
                             self._check_process_memory("fast embed fallback", deadline)
+                            remaining = deadline.remaining()
+                            wait = 1.0 if remaining is None else max(0.0, min(1.0, remaining))
+                            if not self._inference_lock.acquire(timeout=wait):
+                                raise
+                            self._inference_lock.release()
                             model = None
                         deadline.check()
                         if model is None:
@@ -1642,6 +1662,8 @@ class ModelServer:
         deadline: _RequestDeadline,
     ) -> None:
         deadline.check()
+        from truememory.mps_utils import trim_mps_cache
+        trim_mps_cache()
         if throttler is not None:
             throttler.after_batch(count, time.monotonic() - started)
             if throttler.should_flush_cache():

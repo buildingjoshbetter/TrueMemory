@@ -117,6 +117,7 @@ class TestAllocationPreflight(unittest.TestCase):
         self.mps = types.ModuleType("truememory.mps_utils")
         self.mps.is_mps_oom = lambda error: "MPS backend out of memory" in str(error)
         self.mps.prefer_float32_on_cpu = lambda model: model
+        self.mps.trim_mps_cache = lambda: None
         self.mps.flush_mps_cache = Mock()
         reranker = types.ModuleType("truememory.reranker")
         reranker.get_current_reranker_name = lambda: "cross-encoder/ms-marco-MiniLM-L-6-v2"

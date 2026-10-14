@@ -145,6 +145,7 @@ class SharedModelOwnership(unittest.TestCase):
         mps.auto_detect_device = lambda: "cpu"
         mps.ensure_mps_memory_budget = lambda _device: None
         mps.prefer_float32_on_cpu = lambda model: model
+        mps.trim_mps_cache = lambda: None
         namespace = {"_model": None, "_lock": threading.Lock(), "_embedding_dim": 256,
                      "EMBEDDING_MODEL": "qwen3_256", "os": os, "sys": sys,
                      "_model_name": None, "_model_certified": False, "_frozen_embedding_target": None,
