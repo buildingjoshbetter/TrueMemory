@@ -347,6 +347,56 @@ def test_orphan_bytes_from_an_interrupted_admission_are_removed(env):
     assert kept.path.exists() and added.path.exists()
 
 
+def test_a_worker_keeps_its_own_entry_while_it_holds_the_claim(env, monkeypatch):
+    monkeypatch.setattr(completion, "MAX_CAPTURES", 3)
+    session, path = _transcript(env, _turns(6))
+    own = completion.admit_capture(str(path), session, "", "", "claude", root=env.root)
+    attempt = completion.reserve_inline_attempt(own)
+    with completion.worker_claim(own, attempt) as allowed:
+        assert allowed
+        coverage = {"parser_status": "complete", "extractor_status": "complete", "extractor_calls": 1,
+                    "stable": True, "provenance_observed": True, "parser_errors": [], "extractor_errors": [],
+                    "malformed_records": 0, "unrecognized_records": 0,
+                    "source_version": {name: own.metadata[name] for name in ("sha256", "byte_count")}}
+        assert completion.record_receipt(own, types.SimpleNamespace(
+            coverage=coverage, facts_extracted=0, facts_stored=0, facts_updated=0,
+            facts_skipped_gate=0, facts_skipped_dedup=0, trace=[]))
+        # The draining worker admits and finishes other sessions meanwhile.
+        for _ in range(4):
+            other, other_path = _transcript(env, _turns(6))
+            capture = completion.admit_capture(str(other_path), other, "", "", "claude", root=env.root)
+            _complete(capture, completion.reserve_inline_attempt(capture))
+        assert own.key in _state(env)
+        assert (own.directory / (own.key + ".lock")).exists()
+    assert completion.has_receipt(own)
+    assert len(_state(env)) <= 3
+
+
+def test_backpressure_refuses_before_copying_and_stops_conversion(env, monkeypatch):
+    lines = _turns(6, "w" * 2000)
+    size = len("\n".join(lines) + "\n")
+    monkeypatch.setattr(completion, "MAX_ACCOUNT_BYTES", size + 100)
+    live, live_path = _transcript(env, lines)
+    completion.admit_capture(str(live_path), live, "", "", "claude", root=env.root)
+    copied = []
+    real_stream = completion._stream
+    monkeypatch.setattr(completion, "_stream", lambda fd, count, sink=None, **kwargs: (
+        copied.append(count) if sink is not None else None) or real_stream(fd, count, sink=sink, **kwargs))
+    env.backlog.mkdir(parents=True, exist_ok=True)
+    for _ in range(3):
+        session, path = _transcript(env, lines)
+        stop._queue_to_backlog(str(path), session, "", "", reason="synthetic", transcript_host="claude")
+    adopted = []
+    real_adopt = completion.adopt_legacy_pointer
+    monkeypatch.setattr(completion, "adopt_legacy_pointer",
+                        lambda pointer, scope=None: adopted.append(pointer) or real_adopt(pointer, scope))
+    completion.convert_legacy_pointers("", "", "claude")
+    assert copied == []
+    assert len(adopted) == 1
+    assert len(list(env.backlog.glob("*.json"))) == 3
+    assert list((completion.account_root("", "", env.root) / "incoming").iterdir()) == []
+
+
 def test_a_pointer_rewritten_during_adoption_is_kept(env, monkeypatch):
     env.backlog.mkdir(parents=True, exist_ok=True)
     session, path = _transcript(env, _turns(6))

@@ -101,7 +101,7 @@ def load_stop_count(parser: types.ModuleType, text: str, source: str | None = No
                 if isinstance(node, ast.FunctionDef) and node.name == "_has_enough_messages")
     calls: list[Path] = []
 
-    def count(path: Path, minimum: int) -> bool:
+    def count(path: Path, minimum: int, **options: object) -> bool | None:
         if not isinstance(path, Path):
             raise AssertionError("Stop must select the explicit path contract")
         calls.append(path)
@@ -110,14 +110,17 @@ def load_stop_count(parser: types.ModuleType, text: str, source: str | None = No
         with tempfile.TemporaryDirectory(prefix="tm-synthetic-stop-count-") as directory:
             source = Path(directory) / "synthetic-transcript.txt"
             source.write_bytes(text.encode("utf-8"))
-            return parser.has_human_messages(source, minimum)
+            return parser.has_human_messages(source, minimum, **options)
 
     fake = types.SimpleNamespace(has_human_messages=count)
+    limits = types.SimpleNamespace(MAX_CAPTURE_BYTES=16 * 1024 * 1024)
 
     def safe_import(name: str, globals: dict | None = None, locals: dict | None = None,
                     fromlist: tuple = (), level: int = 0) -> object:
         if name == "truememory.ingest.transcript":
             return fake
+        if name == "truememory.ingest.completion":
+            return limits
         raise AssertionError("Stop count imported an unexpected module")
 
     namespace = {"Path": Path, "json": json, "__builtins__": dict(vars(builtins), __import__=safe_import)}

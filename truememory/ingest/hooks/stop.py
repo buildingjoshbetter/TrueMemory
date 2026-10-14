@@ -250,12 +250,14 @@ def _writable_dirs_ok() -> bool:
 def _has_enough_messages(transcript_path: str, min_messages: int) -> bool:
     """Count meaningful canonical human turns, independently of completion coverage.
 
-    JSONL is read record by record and only until the threshold is met, so
-    the hook's time and memory do not grow with the transcript.
+    JSONL is read record by record and only until the threshold is met. A
+    transcript larger than the completion copy limit counts as substantive
+    without being parsed, so hook time and memory stay bounded.
     """
+    from truememory.ingest.completion import MAX_CAPTURE_BYTES
     from truememory.ingest.transcript import has_human_messages
 
-    return has_human_messages(Path(transcript_path), min_messages)
+    return bool(has_human_messages(Path(transcript_path), min_messages, substantive=MAX_CAPTURE_BYTES))
 
 
 def _count_active_ingest_processes() -> int:

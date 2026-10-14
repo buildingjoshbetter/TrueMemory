@@ -383,7 +383,8 @@ class InertPipelineCompletionControls(unittest.TestCase):
         self.pipeline.gate = types.SimpleNamespace(reset_batch=lambda: None, evaluate=lambda *args: decision)
         self.parser = types.ModuleType("truememory.ingest.transcript")
         self.parser_calls = []
-        version = types.SimpleNamespace(stable=True, sha256="0" * 64, byte_count=7)
+        version = types.SimpleNamespace(stable=True, sha256="0" * 64, byte_count=7,
+                                        before=types.SimpleNamespace(inode=7))
         message = types.SimpleNamespace(role="human", timestamp="", content="synthetic")
         self.parser.parse_transcript_outcome = lambda source, **options: self.parser_calls.append(source) or types.SimpleNamespace(messages=[message], status="complete", file_version=version)
         self.extractor = types.ModuleType("truememory.ingest.extractor")

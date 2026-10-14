@@ -211,7 +211,8 @@ def test_worker_proves_the_prefix_while_the_source_keeps_growing(env):
                     "stable": parsed.file_version.stable, "provenance_observed": True,
                     "parser_errors": list(parsed.error_categories), "extractor_errors": [],
                     "malformed_records": parsed.malformed_records, "unrecognized_records": parsed.unrecognized_records,
-                    "source_version": {"sha256": parsed.file_version.sha256, "byte_count": parsed.file_version.byte_count}}
+                    "source_version": {"sha256": parsed.file_version.sha256, "byte_count": parsed.file_version.byte_count,
+                                       "inode": parsed.file_version.before.inode}}
         result = types.SimpleNamespace(coverage=coverage, facts_extracted=0, facts_stored=0, facts_updated=0,
                                        facts_skipped_gate=0, facts_skipped_dedup=0, trace=[])
         assert completion.record_receipt(loaded, result)
@@ -220,11 +221,11 @@ def test_worker_proves_the_prefix_while_the_source_keeps_growing(env):
     assert path.exists(), "a referenced source is never removed"
 
 
-def test_rewritten_source_settles_with_a_recorded_outcome(env):
+def test_removed_replaced_or_truncated_source_settles_with_a_recorded_outcome(env):
     session, path, data = _session(env, _records(8, payload=2000))
     capture = completion.admit_capture(str(path), session, "", "", "claude", root=env.root)
     assert completion.dispatch(capture) > 0
-    path.write_bytes(data.replace(b"synthetic question 0", b"synthetic question X"))
+    path.write_bytes(data[:len(data) // 2])
     with pytest.raises(completion.CompletionError):
         completion.load_capture(capture.key, "", "", "claude", root=env.root)
     entry = _state(capture)[capture.key]
@@ -232,14 +233,56 @@ def test_rewritten_source_settles_with_a_recorded_outcome(env):
     assert entry["outcomes"][-1]["category"] == "source_prefix_changed"
     assert completion.dispatch(capture) == 0
 
-    # A replaced file is caught by dispatch before any worker starts.
-    other, other_path, other_data = _session(env, _records(8, payload=2000))
-    replaced = completion.admit_capture(str(other_path), other, "", "", "claude", root=env.root)
-    replacement = other_path.with_suffix(".replacement")
-    replacement.write_bytes(other_data)
-    os.replace(replacement, other_path)
-    assert completion.dispatch(replaced) == 0
-    assert _state(replaced)[replaced.key]["outcomes"][-1]["category"] == "source_prefix_changed"
+    # A replaced or removed file is caught by dispatch before any worker starts.
+    for change in ("replace", "remove"):
+        other, other_path, other_data = _session(env, _records(8, payload=2000))
+        referenced = completion.admit_capture(str(other_path), other, "", "", "claude", root=env.root)
+        if change == "replace":
+            replacement = other_path.with_suffix(".replacement")
+            replacement.write_bytes(other_data)
+            os.replace(replacement, other_path)
+        else:
+            other_path.unlink()
+        assert completion.dispatch(referenced) == 0
+        assert _state(referenced)[referenced.key]["outcomes"][-1]["category"] == "source_prefix_changed"
+
+    # A parse of a different file than the one referenced never completes.
+    late, late_path, _ = _session(env, _records(8, payload=2000))
+    late_capture = completion.admit_capture(str(late_path), late, "", "", "claude", root=env.root)
+    parsed = transcript.parse_transcript_outcome(late_path, compact=True,
+                                                 byte_limit=late_capture.metadata["byte_count"])
+    coverage = {"parser_status": "complete", "extractor_status": "complete", "extractor_calls": 1, "stable": True,
+                "provenance_observed": True, "parser_errors": [], "extractor_errors": [], "malformed_records": 0,
+                "unrecognized_records": 0, "source_version": {"sha256": parsed.file_version.sha256,
+                                                              "byte_count": parsed.file_version.byte_count,
+                                                              "inode": parsed.file_version.before.inode + 1}}
+    result = types.SimpleNamespace(coverage=coverage, facts_extracted=0, facts_stored=0, facts_updated=0,
+                                   facts_skipped_gate=0, facts_skipped_dedup=0, trace=[])
+    assert not completion.strict_complete(result, late_capture)
+
+
+def test_unreadable_source_is_retried_not_settled(env, monkeypatch):
+    session, path, _ = _session(env, _records(8, payload=2000))
+    capture = completion.admit_capture(str(path), session, "", "", "claude", root=env.root)
+    real = completion._source_state
+
+    def denied(target, fd=None):
+        if fd is None and Path(target) == capture.path:
+            raise PermissionError("synthetic transient denial")
+        return real(target, fd)
+
+    monkeypatch.setattr(completion, "_source_state", denied)
+    assert completion.dispatch(capture) == 0
+    assert _state(capture)[capture.key]["status"] == "queued"
+    assert completion.dispatch(capture) == 0
+    monkeypatch.setattr(completion, "_source_state", real)
+    assert completion.dispatch(capture) > 0
+    monkeypatch.setattr(completion, "_source_state", denied)
+    with pytest.raises(completion.CompletionError):
+        completion.load_capture(capture.key, "", "", "claude", root=env.root)
+    entry = _state(capture)[capture.key]
+    assert entry["status"] == "retry"
+    assert entry["outcomes"][-1]["category"] == "source_unavailable"
 
 
 def test_growing_large_session_supersedes_its_queued_prefix(env):
@@ -292,3 +335,22 @@ def test_cli_parses_exactly_the_referenced_prefix(env, monkeypatch):
     with pytest.raises(SystemExit):
         cli._execute_ingest(args, capture)
     assert calls[0]["byte_limit"] == len(data)
+
+
+def test_session_end_hook_never_reads_a_large_source(env, monkeypatch):
+    session, path, data = _session(env, _records(2, payload=200_000))
+    assert len(data) > completion.MAX_CAPTURE_BYTES
+    reads = []
+    real_stream = completion._stream
+    monkeypatch.setattr(completion, "_stream", lambda fd, count, **kwargs: reads.append(count) or real_stream(fd, count, **kwargs))
+    monkeypatch.setattr(transcript._Stream, "records", lambda self, handle: (_ for _ in ()).throw(
+        AssertionError("the hook parsed a large source")))
+    _end(env, monkeypatch, session, path)
+    # Two human turns would be declined at the copy size; at this size the
+    # session is substantive and the worker decides.
+    assert len(env.spawned) == 1
+    assert reads == [0]
+    command = env.spawned[0]
+    key = command[command.index("--completion-key") + 1]
+    metadata = json.loads((completion.account_root("", "", env.root) / "state.json").read_text())["captures"][key]["metadata"]
+    assert "sha256" not in metadata and metadata["byte_count"] == len(data)

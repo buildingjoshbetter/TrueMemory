@@ -442,7 +442,8 @@ def _capture_from(directory: Path, key: str, entry: dict) -> Capture:
             or metadata.get("host") not in ("claude", "codex", "gemini", "cursor")
             or metadata.get("storage") not in (None, "source_prefix") or type(metadata.get("byte_count")) is not int
             or not 0 <= metadata["byte_count"] <= (MAX_SOURCE_BYTES if metadata.get("storage") else MAX_CAPTURE_BYTES)
-            or type(metadata.get("sha256")) is not str or _KEY.fullmatch(metadata["sha256"]) is None
+            or ("sha256" in metadata if metadata.get("storage") else
+                type(metadata.get("sha256")) is not str or _KEY.fullmatch(metadata["sha256"]) is None)
             or type(metadata.get("file_identity")) is not list or len(metadata["file_identity"]) != 5
             or any(type(value) is not int for value in metadata["file_identity"])
             or type(entry.get("attempts")) is not int or not 0 <= entry["attempts"] <= MAX_ATTEMPTS
@@ -477,7 +478,8 @@ def _claim_free(directory: Path, key: str) -> bool:
 
 
 def _activity(entry: dict) -> float:
-    times = [0, entry.get("admitted_at", 0)] + [item.get("observed_at", 0) for item in entry.get("outcomes", ()) if type(item) is dict]
+    times = [0, entry.get("admitted_at", 0), entry.get("settled_at", 0)]
+    times += [item.get("observed_at", 0) for item in entry.get("outcomes", ()) if type(item) is dict]
     return max(value for value in times if type(value) in (int, float))
 
 
@@ -507,6 +509,7 @@ def _collect(directory: Path, state: dict) -> None:
             changed = True
         if entry["status"] in ("exhausted", "superseded") or has_receipt(capture):
             entry["released"] = changed = True
+            entry.setdefault("settled_at", time.time())
     released = sorted((key for key, entry in captures.items() if type(entry) is dict and entry.get("released") is True),
                       key=lambda key: _activity(captures[key]))
     size = len(_json(state))
@@ -514,6 +517,9 @@ def _collect(directory: Path, state: dict) -> None:
     for key in released:
         if len(captures) < MAX_CAPTURES and size <= MAX_STATE_BYTES // 2:
             break
+        if not _claim_free(directory, key):
+            # A worker still finishing its attempt keeps its own entry.
+            continue
         size -= len(_json({key: captures.pop(key)}))
         evicted.append(key)
     if changed or evicted:
@@ -552,32 +558,51 @@ def _discard(directory: Path, captures: dict, forgotten: list[str] | tuple[str, 
             (directory / (key + ".lock")).unlink()
 
 
-def _prefix_offsets(state: dict, host: str, session_id: str, source: str) -> frozenset[int]:
-    """Byte counts of live captures of this native source that new bytes may supersede."""
-    offsets = set()
+def _candidates(state: dict, host: str, session_id: str, source: str) -> list[dict]:
+    """Metadata of live captures of this native source that new bytes may supersede."""
+    found = []
     for entry in state["captures"].values():
         meta = entry.get("metadata") if type(entry) is dict else None
         if (type(meta) is dict and entry.get("status") in ("queued", "retry") and entry.get("released") is not True
                 and (meta.get("host"), meta.get("session_id"), meta.get("source")) == (host, session_id, source)
                 and type(meta.get("byte_count")) is int):
-            offsets.add(meta["byte_count"])
-    return frozenset(offsets)
+            found.append(meta)
+    return found
 
 
 def _replaced(directory: Path, captures: dict, incoming: dict, prefixes: dict[int, str]) -> list[str]:
-    """Queued or retrying captures of the same native source that the incoming bytes begin with."""
+    """Queued or retrying captures of the same native source that the incoming capture covers.
+
+    A copy is covered when the incoming bytes begin with its exact bytes. A
+    reference is covered by a longer reference to the same file, since both
+    name a prefix of one append-only file.
+    """
     keys = []
     for key, entry in captures.items():
         try:
             meta = _capture_from(directory, key, entry).metadata
         except CompletionError:
             continue
-        if (entry["status"] in ("queued", "retry") and entry.get("released") is not True
+        if meta.get("storage"):
+            covered = (incoming.get("storage") == meta["storage"] and meta["byte_count"] <= incoming["byte_count"]
+                       and meta["file_identity"][1] == incoming["file_identity"][1])
+        else:
+            covered = prefixes.get(meta["byte_count"]) == meta["sha256"]
+        if (entry["status"] in ("queued", "retry") and entry.get("released") is not True and covered
                 and all(meta[name] == incoming[name] for name in ("host", "session_id", "source"))
-                and prefixes.get(meta["byte_count"]) == meta["sha256"]
                 and _claim_free(directory, key)):
             keys.append(key)
     return keys
+
+
+def _room(directory: Path, captures: dict, *, freed_files: int, freed_entries: int, freed_bytes: int,
+          added_bytes: int, added_file: bool) -> None:
+    retained_count, retained_bytes = _capture_inventory(directory / "captures")
+    if (retained_count - freed_files + int(added_file) > MAX_CAPTURES
+            or len(captures) - freed_entries >= MAX_CAPTURES):
+        raise CompletionError("capture_count_limit")
+    if retained_bytes - freed_bytes + added_bytes > MAX_ACCOUNT_BYTES:
+        raise CompletionError("capture_account_quota")
 
 
 def _source_state(path: Path, fd: int | None = None) -> os.stat_result:
@@ -594,12 +619,14 @@ def _source_state(path: Path, fd: int | None = None) -> os.stat_result:
 
 def admit_capture(source: str, session_id: str, user_id: str = "", db_path: str | None = None,
                   host: str = "claude", *, root: Path | None = None) -> Capture:
-    """Admit the observed bytes of ``source``, reading them once in bounded chunks.
+    """Admit ``source`` in time and memory that do not grow with its size.
 
-    Sources up to MAX_CAPTURE_BYTES are copied into the private store. Larger
-    sources are referenced as a prefix: append-only transcripts keep these
-    bytes while they grow, and the worker parses exactly this many bytes and
-    proves them by the same hash. A rewritten source settles the capture.
+    Sources up to MAX_CAPTURE_BYTES are copied into the private store in
+    bounded chunks and hashed. Larger sources are referenced: the capture
+    records the file identity and size, and the worker parses exactly that
+    prefix of the same append-only file, recording the hash of what it read in
+    the receipt. Content proof therefore moves from admission to the worker; a
+    removed, replaced or truncated source settles the capture.
     """
     from truememory.ingest.hooks._shared import is_allowed_transcript, normalize_transcript_host
     host = normalize_transcript_host(host)
@@ -614,8 +641,6 @@ def admit_capture(source: str, session_id: str, user_id: str = "", db_path: str 
     _account_directory(directory)
     for child in ("captures", "receipts", "logs", "incoming"):
         _private_directory(directory / child)
-    with _lock(directory / "state.lock"):
-        offsets = _prefix_offsets(_state(directory), host, session_id, locator)
     incoming = None
     try:
         try:
@@ -625,12 +650,25 @@ def admit_capture(source: str, session_id: str, user_id: str = "", db_path: str 
                 if before[2] > MAX_SOURCE_BYTES:
                     raise CompletionError("capture_limit")
                 copied = before[2] <= MAX_CAPTURE_BYTES
+                with _lock(directory / "state.lock"):
+                    state = _state(directory)
+                    _collect(directory, state)
+                    candidates = _candidates(state, host, session_id, locator)
+                    copies = [meta for meta in candidates if not meta.get("storage")]
+                    if copied:
+                        # Refuse before copying when even superseding cannot make room.
+                        _room(directory, state["captures"], freed_files=len(copies), freed_entries=len(candidates),
+                              freed_bytes=sum(meta["byte_count"] for meta in copies), added_bytes=before[2],
+                              added_file=True)
+                # Older copies are proven prefixes by hash; they never exceed the copy limit.
+                offsets = frozenset(meta["byte_count"] for meta in copies)
+                reach = before[2] if copied else min(max(offsets, default=0), before[2])
                 sink = None
                 if copied:
                     incoming = directory / "incoming" / (uuid.uuid4().hex + ".partial")
                     sink = _open_private(incoming, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 try:
-                    total, digest, prefixes = _stream(fd, before[2], sink=sink, offsets=offsets)
+                    total, digest, prefixes = _stream(fd, reach, sink=sink, offsets=offsets)
                     if sink is not None:
                         os.fsync(sink)
                 finally:
@@ -648,15 +686,17 @@ def admit_capture(source: str, session_id: str, user_id: str = "", db_path: str 
             stable = before == after == path_after and total == before[2]
         else:
             # Appends after the observed size leave the referenced prefix intact.
-            stable = total == before[2] and all(state[:2] == before[:2] and state[2] >= total
-                                                for state in (after, path_after))
+            stable = total == reach and all(state[:2] == before[:2] and state[2] >= before[2]
+                                            for state in (after, path_after))
         if not stable:
             raise CompletionError("source_changed")
         metadata = {"version": 1, "user_id": user_id, "database": normalized_database(db_path),
                     "host": host, "session_id": session_id, "source": locator,
                     "source_suffix": original.suffix.lower(), "file_identity": before,
-                    "byte_count": total, "sha256": digest}
-        if not copied:
+                    "byte_count": before[2]}
+        if copied:
+            metadata["sha256"] = digest
+        else:
             metadata["storage"] = "source_prefix"
         key = _digest(metadata)
         with _lock(directory / "state.lock"):
@@ -673,19 +713,16 @@ def admit_capture(source: str, session_id: str, user_id: str = "", db_path: str 
             _collect(directory, state)
             captures = state["captures"]
             replaced = _replaced(directory, captures, metadata, prefixes)
-            copies = [name for name in replaced if captures[name]["metadata"].get("storage") != "source_prefix"]
-            freed = sum(captures[name]["metadata"]["byte_count"] for name in copies)
-            retained_count, retained_bytes = _capture_inventory(directory / "captures")
+            copies = [name for name in replaced if not captures[name]["metadata"].get("storage")]
             added = int(copied and not capture.path.exists())
-            if (retained_count - len(copies) + added > MAX_CAPTURES
-                    or len(captures) - len(replaced) >= MAX_CAPTURES):
-                raise CompletionError("capture_count_limit")
-            if retained_bytes - freed + added * total > MAX_ACCOUNT_BYTES:
-                raise CompletionError("capture_account_quota")
+            _room(directory, captures, freed_files=len(copies), freed_entries=len(replaced),
+                  freed_bytes=sum(captures[name]["metadata"]["byte_count"] for name in copies),
+                  added_bytes=added * before[2], added_file=bool(added))
             forgotten = []
             for name in replaced:
-                # These exact bytes begin the incoming capture, which covers them.
-                captures[name].update(status="superseded", superseded_by=key, released=True)
+                # The incoming capture covers these bytes (see _replaced).
+                captures[name].update(status="superseded", superseded_by=key, released=True,
+                                      settled_at=time.time())
                 if len(captures) >= MAX_CAPTURES:
                     del captures[name]
                     forgotten.append(name)
@@ -724,10 +761,12 @@ def load_capture(key: str, user_id: str, db_path: str | None, host: str,
         raise CompletionError("capture_scope_mismatch")
     try:
         verify_capture(capture)
-    except CompletionError:
+    except CompletionError as error:
         if _referenced(capture):
-            # A rewritten, truncated or removed source never regains these bytes.
-            record_failure(capture, "source_prefix_changed", terminal=True)
+            # Only a removed, replaced or truncated source is final; other
+            # access errors are retried with backoff.
+            changed = str(error) in ("source_prefix_missing", "capture_version_mismatch")
+            record_failure(capture, "source_prefix_changed" if changed else "source_unavailable", terminal=changed)
         raise
     return capture
 
@@ -736,36 +775,40 @@ def _referenced(capture: Capture) -> bool:
     return capture.metadata.get("storage") == "source_prefix"
 
 
-def verify_capture(capture: Capture) -> None:
-    """Stream-verify the retained copy, or the referenced prefix of the source."""
-    meta = capture.metadata
+def _prefix_state(capture: Capture) -> str:
+    """present, changed (removed, replaced or truncated) or unavailable (retry later)."""
     try:
-        fd = os.open(capture.path, _SOURCE_FLAGS) if _referenced(capture) else _open_private(capture.path, os.O_RDONLY)
+        info = _source_state(capture.path)
+    except FileNotFoundError:
+        return "changed"
+    except OSError:
+        return "unavailable"
+    # The inode names the file; a remount may change st_dev without changing it.
+    if info.st_ino != capture.metadata["file_identity"][1] or info.st_size < capture.metadata["byte_count"]:
+        return "changed"
+    return "present"
+
+
+def verify_capture(capture: Capture) -> None:
+    """Stream-verify a retained copy, or check a referenced source's identity and size."""
+    meta = capture.metadata
+    if _referenced(capture):
+        state = _prefix_state(capture)
+        if state != "present":
+            raise CompletionError("source_unavailable" if state == "unavailable" else "capture_version_mismatch")
+        return
+    try:
+        fd = _open_private(capture.path, os.O_RDONLY)
     except CompletionError:
         raise
     except OSError as error:
         raise CompletionError("capture_version_mismatch") from error
     try:
-        if _referenced(capture):
-            info = _source_state(capture.path, fd)
-            if [info.st_dev, info.st_ino] != meta["file_identity"][:2] or info.st_size < meta["byte_count"]:
-                raise CompletionError("capture_version_mismatch")
-        total, digest, _ = _stream(fd, meta["byte_count"] if _referenced(capture) else MAX_CAPTURE_BYTES + 1)
+        total, digest, _ = _stream(fd, MAX_CAPTURE_BYTES + 1)
     finally:
         os.close(fd)
     if total != meta["byte_count"] or digest != meta["sha256"]:
         raise CompletionError("capture_version_mismatch")
-
-
-def _prefix_present(capture: Capture) -> bool:
-    # Cheap identity check through fstat, the API admission used (Windows stat
-    # and fstat may differ); the worker proves the bytes themselves.
-    try:
-        info = _source_state(capture.path)
-    except OSError:
-        return False
-    return ([info.st_dev, info.st_ino] == capture.metadata["file_identity"][:2]
-            and info.st_size >= capture.metadata["byte_count"])
 
 
 def _save_settled(capture: Capture, state: dict) -> None:
@@ -774,6 +817,7 @@ def _save_settled(capture: Capture, state: dict) -> None:
     settled = entry["status"] in ("complete", "exhausted", "superseded")
     if settled:
         entry["released"] = True
+        entry.setdefault("settled_at", time.time())
     _save_state(capture.directory, state)
     if settled and not _referenced(capture):
         # The receipt or the recorded outcomes are the retained evidence.
@@ -800,7 +844,11 @@ def strict_complete(result: object, capture: Capture | None = None) -> bool:
         return False
     if type(version.get("byte_count")) is not int or version["byte_count"] < 0:
         return False
-    if capture is not None and any(version.get(name) != capture.metadata[name] for name in ("sha256", "byte_count")):
+    if capture is not None and any(version.get(name) != capture.metadata[name]
+                                   for name in ("sha256", "byte_count") if name in capture.metadata):
+        return False
+    if capture is not None and _referenced(capture) and version.get("inode") != capture.metadata["file_identity"][1]:
+        # The parse read the referenced file itself, not a later replacement.
         return False
     values = [getattr(result, name, None) for name in _COUNTS]
     if any(type(value) is not int or value < 0 for value in values) or values[0] != sum(values[1:]):
@@ -952,8 +1000,8 @@ def worker_claim(capture: Capture, attempt: int) -> Iterator[bool]:
         finally:
             with _lock(capture.directory / "state.lock"):
                 state = _state(capture.directory)
-                entry = state["captures"][capture.key]
-                if entry["attempts"] == attempt and entry["status"] == "running":
+                entry = state["captures"].get(capture.key)
+                if entry is not None and entry["attempts"] == attempt and entry["status"] == "running":
                     _outcome(entry, "worker_unproven")
                     _save_settled(capture, state)
 
@@ -996,22 +1044,30 @@ def dispatch(capture: Capture, threshold: float = 0.30) -> int:
         if entry is None or _settled(entry) or has_receipt(capture):
             return 0
     if _referenced(capture):
-        # The hook must not rehash a large source; the worker proves the bytes.
-        present = _prefix_present(capture)
+        # Identity only: the hook never reads a large source; the worker parses it.
+        source = _prefix_state(capture)
     else:
         verify_capture(capture)
-        present = True
-    enough = present and has_human_messages(capture.path, MIN_MESSAGES, byte_limit=capture.metadata["byte_count"])
+        source = "present"
+    enough = None
+    if source == "present":
+        # A reference is larger than the copy limit and counts as substantive.
+        enough = has_human_messages(capture.path, MIN_MESSAGES, byte_limit=capture.metadata["byte_count"],
+                                    substantive=MAX_CAPTURE_BYTES)
+    if source == "unavailable" or (source == "present" and enough is None):
+        # Unreadable right now is not a changed source; a later dispatch retries.
+        return 0
     with _lock(directory / "state.lock"):
         state = _state(directory)
         entry = state["captures"][capture.key]
         if _settled(entry) or has_receipt(capture) or entry["attempts"] >= MAX_ATTEMPTS:
             return 0
-        if not enough:
-            # Observed bytes never gain messages, and a replaced source never
-            # regains them; a longer revision is its own capture.
+        if source == "changed" or not enough:
+            # Observed bytes never gain messages, and a removed, replaced or
+            # truncated source never regains them; a longer revision is its own capture.
             if entry["status"] in ("queued", "retry"):
-                _outcome(entry, "below_minimum_messages" if present else "source_prefix_changed", terminal=True)
+                _outcome(entry, "source_prefix_changed" if source == "changed" else "below_minimum_messages",
+                         terminal=True)
                 _save_settled(capture, state)
             return 0
         if entry.get("next_attempt_at", 0) > time.time():
@@ -1165,3 +1221,6 @@ def convert_legacy_pointers(user_id: str = "", db_path: str | None = None, host:
                 return
         except (OSError, ValueError, TypeError) as error:
             log.warning("Legacy pointer retained without completion (%s)", type(error).__name__)
+            if str(error) in BACKPRESSURE:
+                # Later pointers would be refused too, after copying their bytes.
+                return

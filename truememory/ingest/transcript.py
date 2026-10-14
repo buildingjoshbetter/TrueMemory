@@ -929,8 +929,9 @@ def _decode_record(raw: bytes, errors: set[str]) -> object:
         return _BLANK
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
-        # Counted as one malformed record, like a JSONL null.
+    except ValueError:
+        # Counted as one malformed record, like a JSONL null. ValueError also
+        # covers integer literals beyond the interpreter's digit limit.
         return None
 
 
@@ -958,16 +959,24 @@ def _stream_jsonl_outcome(path: Path, byte_limit: int | None) -> TranscriptOutco
     return _with_source_errors(records.finish(), errors, version)
 
 
-def has_human_messages(source: Path, minimum: int, *, byte_limit: int | None = None) -> bool:
-    """Whether ``source`` holds ``minimum`` meaningful human turns, reading no further than needed."""
+def has_human_messages(source: Path, minimum: int, *, byte_limit: int | None = None,
+                       substantive: int | None = None) -> bool | None:
+    """Whether ``source`` holds ``minimum`` meaningful human turns, reading no further than needed.
+
+    A source larger than ``substantive`` bytes counts as enough without being
+    parsed, which bounds a hook's cost. Counting keeps no message list. None
+    means the source could not be read, which is not the same as too short.
+    """
     def meaningful(message: Message | None) -> bool:
         return message is not None and message.role == "human" and bool(strip_truememory_blocks(message.content).strip())
 
-    if source.suffix.lower() == ".jsonl":
-        records = _Records(allow_strings=False, compact=True)
-        count = 0
-        try:
-            with source.open("rb") as handle:
+    try:
+        with source.open("rb") as handle:
+            if substantive is not None and os.fstat(handle.fileno()).st_size > substantive:
+                return True
+            if source.suffix.lower() == ".jsonl":
+                records = _Records(allow_strings=False, compact=True, keep=False)
+                count = 0
                 for raw in _Stream(byte_limit).records(handle):
                     entry = _decode_record(raw, set())
                     if entry is _BLANK:
@@ -979,11 +988,11 @@ def has_human_messages(source: Path, minimum: int, *, byte_limit: int | None = N
                         return True
                 else:
                     return count >= minimum
-        except (OSError, ValueError):
-            return False
+    except (OSError, ValueError):
+        return None
     outcome = parse_transcript_outcome(source, compact=True, byte_limit=byte_limit)
     if outcome.status == "unreadable":
-        return False
+        return None
     return sum(meaningful(message) for message in outcome.messages) >= minimum
 
 
@@ -1051,7 +1060,7 @@ def _parse_transcript_text_outcome(text: str, *, jsonl: bool = False, compact: b
                 continue
             try:
                 entry = json.loads(line)
-            except json.JSONDecodeError:
+            except ValueError:
                 # None also represents a syntactically valid but unusable JSONL
                 # null; both count as one malformed record.
                 entry = None
@@ -1064,12 +1073,16 @@ class _Records:
 
     ``compact`` drops what extraction never reads: tool and system payloads
     are emptied and assistant text keeps its first 501 stripped characters,
-    which ``format_for_extraction`` renders identically. Message order and
-    indices are unchanged, so provenance scopes stay the same.
+    which ``format_for_extraction`` renders the same way. Message order and
+    indices are unchanged, so provenance scopes stay the same. Two known
+    differences: nested tags that ``strip_truememory_blocks`` would leave
+    behind are stripped again, and the streamed reader splits records on
+    newline bytes only, so raw U+2028/U+2029/U+0085 stay inside their record.
     """
 
-    def __init__(self, *, allow_strings: bool, compact: bool = False) -> None:
-        self.allow_strings, self.compact = allow_strings, compact
+    def __init__(self, *, allow_strings: bool, compact: bool = False, keep: bool = True) -> None:
+        # keep=False only counts: messages are returned but never retained.
+        self.allow_strings, self.compact, self.keep = allow_strings, compact, keep
         self.messages: list[Message | None] = []
         self.total = self.malformed = self.unrecognized = 0
         self.native: list[tuple[int, _CodexRecord]] = []
@@ -1079,7 +1092,9 @@ class _Records:
     def add(self, entry: object) -> Message | None:
         index = self.total
         self.total += 1
-        self.prompts.update(_record_prompts(entry))
+        if self.keep:
+            # Recorded prompts only resolve deferred queue records.
+            self.prompts.update(_record_prompts(entry))
         if isinstance(entry, str) and self.allow_strings:
             return self._keep(Message(role="unknown", content=entry))
         if not isinstance(entry, dict):
@@ -1097,8 +1112,9 @@ class _Records:
             return None
         if entry.get("type") == "queue-operation" and isinstance(entry.get("content"), str):
             # Whether it repeats a recorded prompt is known only after every record.
-            self.deferred.append((len(self.messages), entry))
-            self.messages.append(None)
+            if self.keep:
+                self.deferred.append((len(self.messages), entry))
+                self.messages.append(None)
             return None
         if _claude_context_record(entry, self.prompts):
             return None
@@ -1153,7 +1169,8 @@ class _Records:
 
     def _keep(self, message: Message) -> Message:
         message = self._compact(message)
-        self.messages.append(message)
+        if self.keep:
+            self.messages.append(message)
         return message
 
 
