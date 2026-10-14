@@ -1208,6 +1208,15 @@ class LauncherHandoff(unittest.TestCase):
             with self.subTest(result=result, allowed=allowed), patch.object(BOOT, "_process_identity", process_identity):
                 self.assertIs(BOOT._launcher_unchanged(manifest, launcher_may_exit=allowed), expected)
 
+    def test_unreadable_live_launcher_is_never_taken_as_exited(self) -> None:
+        manifest = {"parent_pid": 4242, "parent_start_ticks": 11, "parent_birth": 3000.5}
+        for allowed in (True, False):
+            with self.subTest(allowed=allowed), \
+                 patch.object(BOOT, "_process_identity", side_effect=BOOT.EnforcementUnavailable("Malformed native process stat framing")), \
+                 patch.object(BOOT, "_read_path", return_value=b"4242 (python3) S 1 0 0"), \
+                 self.assertRaises(BOOT.EnforcementUnavailable):
+                BOOT._launcher_unchanged(manifest, launcher_may_exit=allowed)
+
     def native_handle(self, *, handoff: bool) -> object:
         value = identity()
         runner = BOOT._NativeRunner(object(), SimpleNamespace(), {}, handoff_complete=handoff)
