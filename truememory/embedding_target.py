@@ -113,13 +113,18 @@ def build_target_model(
     if target.model_id == "qwen3_256":
         model_kwargs = {"attn_implementation": "eager"} if sys.platform == "darwin" else None
         admit()
-        return SentenceTransformer(
+        model = SentenceTransformer(
             "Qwen/Qwen3-Embedding-0.6B", truncate_dim=256,
             config_kwargs={"use_cache": False},
             model_kwargs=model_kwargs, device=device,
         )
-    admit()
-    return SentenceTransformer(
-        target.model_id, truncate_dim=target.dimension,
-        trust_remote_code=False, device=device,
-    )
+    else:
+        admit()
+        model = SentenceTransformer(
+            target.model_id, truncate_dim=target.dimension,
+            trust_remote_code=False, device=device,
+        )
+    if type(getattr(model, "max_seq_length", None)) is int:
+        from truememory._embed_budget import cap_embed_length
+        cap_embed_length(model)
+    return model
