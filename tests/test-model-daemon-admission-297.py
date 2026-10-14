@@ -18,7 +18,7 @@ GIB = 1 << 30
 
 
 def load_source(environment: dict[str, str], sensor: object) -> types.ModuleType:
-    names = {"_admission_setting", "_automatic_rss_budget_bytes", "_ProcessMemoryRefused",
+    names = {"_admission_setting", "_automatic_rss_budget_bytes", "_physical_memory_bytes", "_ProcessMemoryRefused",
              "_RequestDeadlineExceeded", "ModelServer", "main"}
     selected = [node for node in ast.parse(SOURCE.read_text()).body
                 if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names]
@@ -209,7 +209,7 @@ class DaemonAdmissionControls(unittest.TestCase):
         self.assertIn('[executable, "-m", "truememory.model_server"]', client)
         self.assertIn('truememory-model-server = "truememory.model_server:main"', (ROOT / "pyproject.toml").read_text())
         self.assertEqual(hashlib.sha256((ROOT / "truememory/mps_utils.py").read_bytes()).hexdigest(),
-                         "cc0f9c02a08b088df8684c7b24b83ecc5c7685951e5fb9ee4d72e6bacd686eb0")
+                         "a09676f73f31c9d690f17445486454eb92c27656f270c7b70a3a4ff315f7cd10")
 
 
 if __name__ == "__main__":
