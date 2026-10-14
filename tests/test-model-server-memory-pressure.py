@@ -21,8 +21,12 @@ MIB = 1024 ** 2
 class FakeRSS:
     """Stands in for psutil; the test sets the sampled resident size."""
 
-    def __init__(self, rss: int) -> None:
+    def __init__(self, rss: int, physical: int = 32 * 1024 ** 3) -> None:
         self.rss = rss
+        self.physical = physical
+
+    def virtual_memory(self) -> types.SimpleNamespace:
+        return types.SimpleNamespace(total=self.physical)
 
     def Process(self) -> FakeRSS:
         return self
@@ -313,19 +317,20 @@ def test_clone_without_room_waits_for_the_main_model(budgeted, monkeypatch):
     server._publish_embed_state(ms._EmbedState(model=Model("cpu"), tier="", model_id="qwen3_256"))
     # 1,200 MiB resident plus a 2.4 GB CPU clone exceeds the 3,072 MiB budget.
     rss.rss = 1200 * MIB
-    released = threading.Event()
+    held = threading.Event()
 
-    def inference():
+    def short_slice():
         with server._inference_lock:
-            released.wait(5)
+            held.set()
+            time.sleep(0.2)
 
-    worker = threading.Thread(target=inference)
+    worker = threading.Thread(target=short_slice)
     worker.start()
+    held.wait()
     try:
         with server._memory_scope():
             assert server._handle_fast_embed(["synthetic"], "") is None
     finally:
-        released.set()
         worker.join()
     assert builds == [] and server._fast_encoder is None
 
@@ -363,3 +368,110 @@ def test_short_deadline_bounds_the_bookkeeping_wait(plain, monkeypatch):
     finally:
         done.set()
         worker.join()
+
+
+def test_loading_model_does_not_reserve_its_size_against_concurrent_work(budgeted, monkeypatch):
+    server, rss = budgeted
+    monkeypatch.setattr(mps_utils, "auto_detect_device", lambda: "cpu")
+    seen = []
+
+    def build(model_id, device):
+        # Half-loaded: 1,700 MiB resident. Another request is admitted on RSS alone.
+        rss.rss = 1700 * MIB
+
+        def concurrent():
+            with server._memory_scope():
+                try:
+                    server._check_process_memory("synthetic concurrent slice")
+                    seen.append("admitted")
+                except ms._ProcessMemoryRefused:
+                    seen.append("refused")
+
+        worker = threading.Thread(target=concurrent)
+        worker.start()
+        worker.join()
+        rss.rss = 2900 * MIB
+        return Model(device)
+
+    monkeypatch.setattr(server, "_build_embed_model", build)
+    with server._lock:
+        server._get_embed_model("base")
+    assert seen == ["admitted"]
+
+
+def test_cpu_constructions_are_built_one_at_a_time(plain, monkeypatch):
+    monkeypatch.setattr(mps_utils, "auto_detect_device", lambda: "cpu")
+    active, peak = [0], [0]
+
+    def build(selected):
+        active[0] += 1
+        peak[0] = max(peak[0], active[0])
+        time.sleep(0.05)
+        active[0] -= 1
+        return Model(selected)
+
+    workers = [threading.Thread(target=plain._construct_model,
+                                args=("embed", "synthetic construction", "cpu", None, build),
+                                kwargs={"known_bytes": 1}) for _ in range(3)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    assert peak[0] == 1
+
+
+def test_dropped_models_are_freed_before_each_construction(plain, monkeypatch):
+    order = []
+    monkeypatch.setattr(plain, "_discard_models", lambda: order.append("discard"))
+    plain._construct_model("embed", "synthetic construction", "cpu", None,
+                           lambda selected: order.append("build") or Model(selected))
+    assert order[:2] == ["discard", "build"]
+
+
+def test_fallback_waits_at_most_a_second_for_a_long_batch(budgeted, monkeypatch):
+    server, rss = budgeted
+    monkeypatch.setattr(server, "_build_embed_model", lambda model_id, device: Model(device))
+    server._publish_embed_state(ms._EmbedState(model=Model("cpu"), tier="", model_id="qwen3_256"))
+    rss.rss = 1200 * MIB
+    release = threading.Event()
+
+    def long_batch():
+        with server._inference_lock:
+            release.wait(5)
+
+    worker = threading.Thread(target=long_batch)
+    worker.start()
+    started = time.monotonic()
+    try:
+        with server._memory_scope(), pytest.raises(ms._ProcessMemoryRefused):
+            server._handle_fast_embed(["synthetic"], "", ms._RequestDeadline(time.monotonic() + 5))
+        assert 0.9 <= time.monotonic() - started < 2.0
+    finally:
+        release.set()
+        worker.join()
+
+
+def test_small_hosts_never_build_a_fast_lane_copy(budgeted, monkeypatch):
+    server, rss = budgeted
+    sizes = {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 8 * 1024 ** 3 // 4096}
+    monkeypatch.setattr(ms.os, "sysconf", lambda name: sizes[name])
+    builds = []
+    monkeypatch.setattr(server, "_build_embed_model", lambda model_id, device: builds.append(device) or Model(device))
+    server._publish_embed_state(ms._EmbedState(model=Model("mps"), tier="", model_id="qwen3_256"))
+    with server._fast_lock, server._memory_scope(), pytest.raises(ms._ProcessMemoryRefused):
+        server._get_fast_encoder("")
+    assert builds == []
+
+
+@pytest.mark.parametrize("cached_mib, emptied", [(600, True), (100, False)])
+def test_long_batches_return_cached_mps_heaps(monkeypatch, cached_mib, emptied):
+    calls = []
+    torch = types.SimpleNamespace(mps=types.SimpleNamespace(
+        driver_allocated_memory=lambda: (1700 + cached_mib) * MIB,
+        current_allocated_memory=lambda: 1700 * MIB,
+        empty_cache=lambda: calls.append("empty"),
+    ))
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(mps_utils, "_mps_budget", object())
+    mps_utils.trim_mps_cache()
+    assert (calls == ["empty"]) is emptied

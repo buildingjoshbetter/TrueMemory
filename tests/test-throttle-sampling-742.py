@@ -197,6 +197,8 @@ class TestThrottleSampling(unittest.TestCase):
 
     def test_cpu_can_use_real_thermal_evidence_without_probing_mps(self) -> None:
         throttler = self.throttler_module.DynamicThrottler("cpu")
+        # No process MPS budget, independent of what earlier tests configured.
+        throttler._budget_snapshot = Mock(return_value=None)
         self.throttler_module.read_mps_memory = Mock(side_effect=AssertionError("MPS must not be probed"))
         self.throttler_module.read_thermal_pressure = Mock(return_value={"status": "ok", "scheduler_limit": 100})
         for seconds in range(0, 61, 10):

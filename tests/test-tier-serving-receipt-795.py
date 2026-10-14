@@ -101,6 +101,7 @@ class TestServingReceipts(unittest.TestCase):
         self.server._build_embed_model = build
         self.fixture.mps.auto_detect_device = lambda: "cpu"
         self.fixture.mps.is_mps_oom = lambda exc: "MPS backend out of memory" in str(exc)
+        self.fixture.mps.trim_mps_cache = lambda: None
         modules = patch.dict(sys.modules, {
             "sentence_transformers": types.SimpleNamespace(CrossEncoder=Reranker),
             "truememory.reranker": types.SimpleNamespace(get_current_reranker_name=lambda: "synthetic/default"),

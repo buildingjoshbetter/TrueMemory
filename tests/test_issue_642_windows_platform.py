@@ -97,7 +97,8 @@ class TestSpawnKwargs:
         assert "creationflags" not in kw
 
     @pytest.mark.parametrize("modname", [
-        "truememory.mcp_server",
+        # The MCP backlog drainer delegates its spawn to completion.dispatch.
+        "truememory.ingest.completion",
         "truememory.ingest.cli",
         "truememory.ingest.hooks.session_start",
         "truememory.ingest.hooks.stop",
@@ -114,7 +115,7 @@ class TestSpawnKwargs:
         src = open(mod.__file__, encoding="utf-8").read()
         # session_start/cli/mcp_server must reference spawn_kwargs.
         if modname in (
-            "truememory.mcp_server",
+            "truememory.ingest.completion",
             "truememory.ingest.cli",
             "truememory.ingest.hooks.session_start",
         ):

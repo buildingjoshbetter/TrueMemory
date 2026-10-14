@@ -118,7 +118,7 @@ def _intensity_budget(intensity: str) -> int:
         return RECALL_BUDGET_CHARS
     return int(RECALL_BUDGET_CHARS * _INTENSITY_BUDGET_MULTIPLIER.get(intensity, 1.0))
 ONBOARDED_MARKER = Path.home() / ".truememory" / ".onboarded"
-BACKLOG_DIR = Path.home() / ".truememory" / "backlog"
+BACKLOG_DIR = Path(os.environ.get("TRUEMEMORY_BACKLOG_DIR", str(Path.home() / ".truememory" / "backlog")))
 _DRAIN_CAP = 3
 _SCAN_MARKER = Path.home() / ".truememory" / ".last_stale_scan"
 _SCAN_INTERVAL = 900  # 15 minutes
@@ -235,6 +235,12 @@ def _check_email_needed() -> str:
     return ""
 
 
+def _completion_scope() -> tuple[str, str]:
+    """The account the installed hook writes to, as passed to the maintenance child."""
+    return (os.environ.get("TRUEMEMORY_COMPLETION_USER", os.environ.get("TRUEMEMORY_USER_ID", "")),
+            os.environ.get("TRUEMEMORY_COMPLETION_DB", os.environ.get("TRUEMEMORY_DB_PATH", "")))
+
+
 def _drain_backlog(host: str = "claude") -> None:
     """Process queued sessions from the backlog directory.
 
@@ -247,8 +253,7 @@ def _drain_backlog(host: str = "claude") -> None:
     """
     if os.environ.get("TRUEMEMORY_MAINTENANCE_CHILD") == "1":
         from truememory.ingest.completion import drain, convert_legacy_pointers
-        user_id = os.environ.get("TRUEMEMORY_COMPLETION_USER", os.environ.get("TRUEMEMORY_USER_ID", ""))
-        db_path = os.environ.get("TRUEMEMORY_COMPLETION_DB", os.environ.get("TRUEMEMORY_DB_PATH", ""))
+        user_id, db_path = _completion_scope()
         try:
             drain(user_id, db_path, host)
             convert_legacy_pointers(user_id, db_path, host)
@@ -552,7 +557,9 @@ def _scan_stale_sessions() -> None:
             _commit_watermark(now)
             return
 
-        from truememory.ingest.hooks._shared import EXTRACTED_DIR, _safe_session_id, mark_session_extracted
+        from truememory.ingest.hooks._shared import (
+            _safe_session_id, mark_session_extracted, should_extract_session,
+        )
         from truememory.ingest.hooks.stop import _queue_to_backlog
 
         uuid_re = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
@@ -593,8 +600,10 @@ def _scan_stale_sessions() -> None:
                 if not safe_id:
                     continue
 
-                marker = EXTRACTED_DIR / safe_id
-                if marker.exists():
+                # A handled session is skipped only until it grows, so a live
+                # session adopted mid-way and then killed without SessionEnd
+                # still has its later content queued.
+                if not should_extract_session(session_id, entry.path):
                     continue
 
                 # M-15: skip if a backlog claim already exists for this session.
@@ -623,8 +632,11 @@ def _scan_stale_sessions() -> None:
                     oldest_deferred_mtime = cutoff
                     break
 
+                # These transcripts belong to the Claude install whose hook
+                # started this scan, so they are queued for its account.
+                user_id, db_path = _completion_scope()
                 _queue_to_backlog(
-                    str(transcript), session_id, "", "",
+                    str(transcript), session_id, user_id, db_path,
                     reason="stale_session_recovery",
                 )
                 queued += 1

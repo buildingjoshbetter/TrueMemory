@@ -113,6 +113,7 @@ class TestIssue736RequestDeadlines(unittest.TestCase):
         mps = types.ModuleType("truememory.mps_utils")
         mps.is_mps_oom = lambda error: "MPS backend out of memory" in str(error)
         mps.prefer_float32_on_cpu = lambda model: model
+        mps.trim_mps_cache = lambda: None
         mps.flush_mps_cache = lambda: None
         mps.ensure_mps_memory_budget = lambda device: None
         mps_patch = patch.dict("sys.modules", {"truememory.mps_utils": mps})
@@ -256,7 +257,8 @@ class TestIssue736RequestDeadlines(unittest.TestCase):
                 self.server._reranker = failed_model if op == "rerank" else None
                 self.server._reranker_name = "fixture" if op == "rerank" else None
                 mps = sys.modules["truememory.mps_utils"]
-                mps.flush_mps_cache = lambda: expensive_recovery.append("flush")
+                flushes: list[str] = []
+                mps.flush_mps_cache = lambda: flushes.append("flush")
                 mps.auto_detect_device = lambda: "mps"
                 mps.resolve_device = lambda device: device
                 reranker_module = types.ModuleType("truememory.reranker")
@@ -276,6 +278,7 @@ class TestIssue736RequestDeadlines(unittest.TestCase):
                     self.assertIsNone(self.server._reranker_name)
                     self.assertEqual(devices, [])
                     self.assertEqual(expensive_recovery, [])
+                    self.assertEqual(flushes, [])
 
                     # A fresh budget reloads on CPU, then reuses that instance.
                     for _ in range(2):
@@ -285,6 +288,8 @@ class TestIssue736RequestDeadlines(unittest.TestCase):
                     self.assertEqual(failed_model.calls, 1)
                     self.assertEqual(cpu_model.calls, 2)
                     self.assertEqual(expensive_recovery, [])
+                    # One collection before the single CPU construction, none for dead work.
+                    self.assertEqual(flushes, ["flush"])
                     if op == "embed":
                         self.assertIs(self.server._embed_state.model, cpu_model)
                     else:

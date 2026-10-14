@@ -1815,7 +1815,7 @@ def _preload_models():
 _BACKLOG_DRAIN_INTERVAL_NORMAL = _env_int("TRUEMEMORY_DRAIN_INTERVAL_SEC", 30, lo=1)
 _BACKLOG_DRAIN_INTERVAL_IDLE = 120
 _BACKLOG_LARGE_THRESHOLD = 20
-_BACKLOG_DIR = Path.home() / ".truememory" / "backlog"
+_BACKLOG_DIR = Path(os.environ.get("TRUEMEMORY_BACKLOG_DIR", str(Path.home() / ".truememory" / "backlog")))
 
 
 _cleanup_counter = 0
@@ -1888,94 +1888,33 @@ def _reap_children() -> None:
 
 
 def _drain_batch_from_backlog(markers: list[Path]) -> None:
-    """Fill all available spawn slots from the backlog.
+    """Move queued sessions into the completion store and dispatch their captures.
 
-    Uses atomic rename (.json → .processing) to prevent TOCTOU races where
-    multiple drainers read the same marker before either acquires the flock.
+    A marker retires once its transcript bytes are admitted; completion then owns
+    attempts, the extraction budget and the spawn cap, so a marker is never
+    replayed. Invalid markers (including transcripts outside the allowed roots,
+    M-90) are quarantined; backpressure leaves the rest queued for a later tick.
     """
-    import subprocess as _subprocess
-    from truememory.hooks.core import spawn_gate, register_spawned_pid
+    from truememory.ingest.completion import BACKPRESSURE, CompletionError, adopt_legacy_pointer, dispatch
+    from truememory.ingest.hooks._shared import _quarantine_marker, cleanup_stale_processing
 
-    backlog_dir = markers[0].parent if markers else None
-    if backlog_dir:
-        from truememory.ingest.hooks._shared import cleanup_stale_processing
-        cleanup_stale_processing(backlog_dir)
+    if markers:
+        cleanup_stale_processing(markers[0].parent)
 
     for marker_path in markers:
-        claimed_path = marker_path.with_suffix(".processing")
         try:
-            marker_path.rename(claimed_path)
-        except (FileNotFoundError, OSError):
-            continue
-
-        try:
-            data = json.loads(claimed_path.read_text(encoding="utf-8"))
-            transcript = data.get("transcript_path", "")
-            if not transcript or not Path(transcript).exists():
-                claimed_path.unlink(missing_ok=True)
-                continue
-
-            from truememory.ingest.hooks._shared import check_extraction_budget, record_stale_processing_pid
-            if not check_extraction_budget():
-                log.info("Backlog drainer: extraction budget exhausted, pausing until next hour")
-                try:
-                    claimed_path.rename(marker_path)
-                except OSError:
-                    pass
+            capture = adopt_legacy_pointer(marker_path)
+            if capture is not None:
+                dispatch(capture)
+        except ValueError:
+            log.warning("Backlog drainer: quarantined invalid marker %s", marker_path.name)
+            _quarantine_marker(marker_path)
+        except CompletionError as error:
+            log.info("Backlog drainer: completion retained %s (%s)", marker_path.name, error)
+            if str(error) in BACKPRESSURE:
                 return
-
-            with spawn_gate() as allowed:
-                if not allowed:
-                    try:
-                        claimed_path.rename(marker_path)
-                    except OSError:
-                        pass
-                    return
-
-                cmd = [
-                    sys.executable, "-m", "truememory.ingest.cli",
-                    "ingest", transcript,
-                ]
-                session_id = data.get("session_id", "")
-                if session_id:
-                    cmd.extend(["--session", session_id])
-                if data.get("user_id"):
-                    cmd.extend(["--user", data["user_id"]])
-                if data.get("db_path"):
-                    cmd.extend(["--db", data["db_path"]])
-                from truememory.ingest.hooks._shared import _safe_session_id
-                _log_dir = Path.home() / ".truememory" / "logs"
-                _log_dir.mkdir(parents=True, exist_ok=True)
-                _safe_sid = _safe_session_id(data.get('session_id', 'unknown')) or 'unknown'
-                _log_file = open(
-                    _log_dir / f"{_safe_sid}.log",
-                    "a", encoding="utf-8",
-                )
-                try:
-                    from truememory import _platform
-                    proc = _subprocess.Popen(
-                        cmd,
-                        stdout=_log_file,
-                        stderr=_subprocess.STDOUT,
-                        stdin=_subprocess.DEVNULL,
-                        **_platform.spawn_kwargs(),
-                    )
-                finally:
-                    _log_file.close()
-                register_spawned_pid(proc.pid)
-                record_stale_processing_pid(claimed_path, proc.pid)
-
-            # NOTE (issue #422): do NOT unlink the .processing claim on spawn.
-            # The spawned ingest CLI removes it on confirmed success
-            # (clear_backlog_processing); a worker that exits non-zero leaves it
-            # so cleanup_stale_processing restores it to .json and re-queues the
-            # session instead of dropping it silently.
-            log.info("Backlog drainer: spawned session %s", data.get("session_id", "?"))
         except Exception:
-            try:
-                claimed_path.rename(marker_path)
-            except OSError:
-                pass
+            log.debug("Backlog drainer: marker %s retained", marker_path.name, exc_info=True)
 
 
 def _start_backlog_drainer() -> None:
@@ -2392,6 +2331,13 @@ def main():
         except (ConnectionError, OSError) as error:
             shared_ready = False
             log.warning("Shared model-server readiness failed: %s", error)
+        except (RuntimeError, ValueError, TypeError) as error:
+            # A required process memory cap fails closed per request; it must
+            # not take down the tools that need no model server.
+            if "TRUEMEMORY_REQUIRE_PROCESS_MEMORY_CAP" not in os.environ:
+                raise
+            shared_ready = False
+            log.error("Required process memory cap unavailable; capped model serving is refused: %s", error)
         if not shared_ready:
             log.warning(
                 "Shared model server unavailable; inference will retry it. "

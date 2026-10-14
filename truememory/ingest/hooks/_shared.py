@@ -516,7 +516,8 @@ def cleanup_stale_processing(backlog_dir: Path) -> None:
             pass
 
 
-def mark_session_extracted(session_id: str, transcript_path: str, spawned_pid: int = 0) -> None:
+def mark_session_extracted(session_id: str, transcript_path: str, spawned_pid: int = 0, *,
+                           running: bool = True) -> None:
     """Record that a session's transcript was extracted at its current size.
 
     Written by the ingest CLI on successful completion, and also by
@@ -528,6 +529,8 @@ def mark_session_extracted(session_id: str, transcript_path: str, spawned_pid: i
             from a hook, pass the Popen PID so the liveness check in
             should_extract_session() can detect a running extraction.
             When called from the CLI itself, defaults to os.getpid().
+        running: False records that the session is handled without naming a
+            live extraction, so a long-lived caller never blocks later ones.
     """
     if not session_id or session_id == "unknown":
         return
@@ -545,7 +548,7 @@ def mark_session_extracted(session_id: str, transcript_path: str, spawned_pid: i
         _atomic_write_text(marker, json.dumps({
             "size": current_size,
             "timestamp": time.time(),
-            "pid": spawned_pid or os.getpid(),
+            "pid": (spawned_pid or os.getpid()) if running else 0,
         }))
     except OSError:
         pass
