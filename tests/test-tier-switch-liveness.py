@@ -1267,6 +1267,14 @@ emit(result=result, seconds=round(time.monotonic() - started, 1))
 """
 
 
+LONG_MAINTENANCE_OWNER = """
+from truememory.maintenance import maintenance_owner
+with maintenance_owner(DB):  # A long consolidation run.
+    print("HELD", flush=True)
+    time.sleep(60)
+"""
+
+
 class RetiredSelectionInPinnedProcess(unittest.TestCase):
     def run_retire(self, config_tier):
         (result,) = run_scenario(steps("""
@@ -1361,8 +1369,8 @@ class BackfillRobustness(unittest.TestCase):
                  vectors=[conn.execute(f"SELECT count(*) FROM {table} WHERE rowid IN (11, 12, 13)").fetchone()[0]
                           for table in ("vec_messages_edge", "vec_messages_sep_edge")])
         """))
-        self.assertEqual(result["child"], {"hits": 3})
-        self.assertEqual(result["vectors"], [3, 3])
+        self.assertEqual(result["child"].get("hits"), 3, result["child"])
+        self.assertEqual(result["vectors"], [3, 3], result["child"])
         self.assertIsNone(result["cursor"])
 
     def test_target_identity_error_is_surfaced_not_degraded(self):
@@ -1449,6 +1457,46 @@ class ActivationFairness(unittest.TestCase):
         self.assertLess(result["local"]["seconds"], 8)
         self.assertEqual(result["outcome"], "complete")
 
+
+
+    def test_fresh_open_fails_at_once_behind_a_long_owner_while_activation_waits(self):
+        (result,) = run_scenario("""
+            import subprocess
+            seed(20)
+            stub_models(delay=0.02)
+            from contextlib import contextmanager
+            from truememory import maintenance
+            from truememory.tier_switch.manager import RebuildManager
+            holding, waiting = threading.Event(), threading.Event()
+            finalize = RebuildManager._finalize_rebuild
+            def finalize_behind_the_owner(self, *args, **kwargs):
+                holding.wait(60)
+                return finalize(self, *args, **kwargs)
+            RebuildManager._finalize_rebuild = finalize_behind_the_owner
+            wanted = maintenance.maintenance_wanted
+            @contextmanager
+            def noted_wait(path):
+                with wanted(path) as asked:
+                    waiting.set()  # The activation now waits behind the owner.
+                    yield asked
+            maintenance.maintenance_wanted = noted_wait
+            manager = switch("edge", join=False)["manager"]
+            worker = manager._active_thread
+            owner = subprocess.Popen([sys.executable, "-c", PRELUDE_SOURCE + %r], stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, text=True)
+            assert owner.stdout.readline().startswith("HELD")
+            holding.set()
+            assert waiting.wait(30)
+            fresh = subprocess.run([sys.executable, "-c", PRELUDE_SOURCE + %r], capture_output=True, text=True)
+            owner.kill(); owner.wait()
+            worker.join(60)
+            lines = [json.loads(line[7:]) for line in fresh.stdout.splitlines() if line.startswith("RESULT ")]
+            emit(fresh=lines[0] if lines else fresh.stderr[-2000:], outcome=manager._last_outcome)
+        """ % (LONG_MAINTENANCE_OWNER, FRESH_OPEN))
+        # Unchanged behaviour behind a long owner: refuse at once, not after 10 s.
+        self.assertEqual(result["fresh"].get("result"), "MaintenanceBusyError", result["fresh"])
+        self.assertLess(result["fresh"]["seconds"], 2)
+        self.assertEqual(result["outcome"], "complete")
 
 
 class ProcessProjectionScope(unittest.TestCase):

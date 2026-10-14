@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -696,12 +697,13 @@ class RebuildManager:
     @staticmethod
     @contextlib.contextmanager
     def _publication_window(path: Path, *, deadline: float, cancelled: threading.Event | None = None,
-                            mark: bool = True):
+                            mark: bool = True, on_wait: Callable[[], None] | None = None):
         """Own maintenance (bounded wait) around one short job publication step.
 
         The activation marker lets fresh opens elsewhere wait for this window
         instead of failing on maintenance; it is only a liveness hint. A
-        caller that already holds it passes ``mark=False``.
+        caller that manages it passes ``mark=False`` and ``on_wait``, called
+        when maintenance turns out to be busy.
         """
         from truememory.maintenance import MaintenanceBusyError, maintenance_owner, maintenance_wanted
         from truememory.tier_switch.job import acquire_tier_activation_lock
@@ -716,6 +718,8 @@ class RebuildManager:
                     except MaintenanceBusyError:
                         if (cancelled is not None and cancelled.is_set()) or time.monotonic() + 0.05 >= deadline:
                             raise
+                        if on_wait is not None:
+                            on_wait()
                         asked = asked or wanting.enter_context(maintenance_wanted(path))
                         time.sleep(0.05)
             activation = acquire_tier_activation_lock(path, timeout=0.5) if mark else None
@@ -1050,14 +1054,24 @@ class RebuildManager:
         bound = time.monotonic() + 600 if deadline is None else deadline
         self._prove_target_runtime(intent, deadline=bound)
         self._served_tier = None
-        result = snapshot = None
-        # Held across drain retries: fresh opens elsewhere keep waiting through
-        # the gaps that hand maintenance back, instead of failing in them.
-        marker = acquire_tier_activation_lock(job.database_path, timeout=0.5)
+        result = snapshot = marker = None
+
+        def queued() -> None:
+            # Fresh opens elsewhere wait on the marker; never behind another owner.
+            nonlocal marker
+            if marker is not None:
+                marker.release()
+                marker = None
+
         try:
             while result is None:
                 with self._publication_window(job.database_path, deadline=bound, cancelled=self._cancel_requested,
-                                              mark=marker is None):
+                                              mark=False, on_wait=queued):
+                    # Taken once maintenance is ours and kept across drain
+                    # retries, so fresh opens wait through the gaps that hand
+                    # maintenance back instead of failing in them.
+                    if marker is None:
+                        marker = acquire_tier_activation_lock(job.database_path, timeout=0.5)
                     try:
                         with exclusive_activation(deadline=min(bound, time.monotonic() + _WRITER_DRAIN_SECONDS),
                                                   cancelled=self._cancel_requested):

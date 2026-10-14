@@ -237,13 +237,25 @@ def _wanted_by_other_locked(path: Path) -> bool:
     return False
 
 
-def maintenance_wanted_elsewhere(db_path: str | os.PathLike[str]) -> bool:
-    """Another thread or process is waiting to own maintenance (a tier activation)."""
+def maintenance_handoff_pending(db_path: str | os.PathLike[str]) -> bool:
+    """A waiting tier activation is about to take maintenance, which is free now.
+
+    Fresh opens wait for such a handoff, never behind an owner that may run on.
+    """
     path = canonical_database_path(db_path)
     if path is None:
         return False
     with _registry_lock:
-        return _wanted_by_other_locked(path)
+        if path in _held_paths or not _wanted_by_other_locked(path):
+            return False
+        try:
+            probe = try_file_lock(Path(str(path) + ".maintenance.lock"))
+        except OSError:
+            return False
+        if probe is None:
+            return False
+        os.close(probe)
+        return True
 
 
 @contextmanager
