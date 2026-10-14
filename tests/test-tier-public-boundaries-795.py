@@ -725,15 +725,31 @@ class TestPublicBoundaries(unittest.TestCase):
                              for sql in statements))
         self.assertFalse(self.conn.in_transaction)
 
-    def test_policy_loaded_runtime_cannot_be_inherited_by_unselected_database(self) -> None:
+    def test_policy_loaded_runtime_is_reset_not_inherited_by_unselected_database(self) -> None:
+        # A journal retired elsewhere leaves this projection behind; the legacy
+        # database is served from its configured tier, never from the policy.
         policy = self.seed_policy()
-        self.install_policy_projectors()
+        vector, reranker, _ = self.install_policy_projectors()
         self.api.apply_runtime_policy(policy)
+        resets = []
+        def set_embedding_model(tier):
+            resets.append(("embedding", tier))
+            vector.EMBEDDING_MODEL, vector._runtime_policy_tier, vector._frozen_embedding_target = "model2vec", None, None
+        def set_active_tier(tier):
+            resets.append(("reranker", tier))
+            reranker._frozen_reranker_id, reranker._active_tier = None, tier
+        vector.configured_tier, vector.set_embedding_model = (lambda: "edge"), set_embedding_model
+        vector.resolve_tier = lambda: "edge"
+        vector._active_vec_table, vector._active_sep_table = (lambda conn: "vec_messages"), (lambda conn: "vec_messages_sep")
+        reranker.set_active_tier = set_active_tier
+        reranker.get_current_reranker_name = lambda: "cross-encoder/ms-marco-MiniLM-L-6-v2"
         other = sqlite3.connect(":memory:")
         self.addCleanup(other.close)
-        with self.assertRaises(self.api.TierRuntimeError):
-            with self.api.serving_operation(other):
-                self.fail("Unselected database silently inherited another policy")
+        with self.api.serving_operation(other) as operation:
+            self.assertEqual(operation.key[:4], ("legacy", "model2vec", "256", "edge"))
+            self.assertIsNone(operation.policy)
+        self.assertEqual(resets, [("embedding", "edge"), ("reranker", "edge")])
+        self.assertIsNone(self.api.runtime_acknowledgement())
 
 
     def maintenance_runner(self, *, owner=None, run_layers=None):

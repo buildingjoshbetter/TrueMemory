@@ -481,7 +481,14 @@ def serving_operation(
     else:
         vector, _ = _modules()
         if vector._frozen_embedding_target is not None or getattr(vector, "_runtime_policy_tier", None) is not None:
-            raise TierRuntimeError("Legacy database requires explicit coherent runtime selection")
+            # This process projected a selection that is gone (retired by an
+            # open elsewhere, or rolled back): serve the configured legacy tier.
+            if borrowed:
+                raise TierRuntimeError("Legacy database requires explicit coherent runtime selection")
+            try:
+                reset_legacy_runtime(vector.configured_tier(), deadline=deadline, cancelled=cancelled)
+            except serving.ServingLeaseError as error:
+                raise TierRuntimeError("Legacy database requires explicit coherent runtime selection") from error
         if reranker_id is not None:
             _, reranker = _modules()
             if reranker._model is None or reranker._model_name != reranker_id:
@@ -745,12 +752,37 @@ def engine_source_operation(function: Callable[P, R]) -> Callable[P, R]:
 
 
 def engine_fallback_operation(function: Callable[P, R]) -> Callable[P, R]:
-    """Admit with selected models when they load, otherwise without vectors."""
+    """Admit with selected models when they load, otherwise without them.
+
+    A tier activation committing between admission and the writer rolls the
+    first attempt back; a top-level call is retried once under the new selection.
+    """
     @wraps(function)
     def wrapped(engine: object, *args: object, **kwargs: object) -> R:
+        retry = current_runtime_operation() is None and not _in_caller_transaction(engine)
+        try:
+            with engine_serving_operation(engine, models="optional"):
+                return function(engine, *args, **kwargs)
+        except Exception as error:
+            if not retry or not _selection_changed(error):
+                raise
         with engine_serving_operation(engine, models="optional"):
             return function(engine, *args, **kwargs)
     return wrapped
+
+
+def _in_caller_transaction(engine: object) -> bool:
+    conn = getattr(engine, "conn", None)
+    try:
+        return conn is not None and conn.in_transaction
+    except sqlite3.ProgrammingError:
+        return False
+
+
+def _selection_changed(error: BaseException) -> bool:
+    writer = sys.modules.get("truememory.tier_switch.writer")
+    changed = getattr(writer, "WriterSelectionChanged", None)
+    return changed is not None and (isinstance(error, changed) or isinstance(error.__cause__, changed))
 
 
 def raise_if_serving_rejection(error: BaseException) -> None:

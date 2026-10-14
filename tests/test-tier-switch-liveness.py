@@ -774,6 +774,40 @@ sys.stdin.readline()
 owner.__exit__(None, None, None)
 """
 
+ADD_ACROSS_COMMIT = """
+stub_models()
+from truememory.engine import TrueMemoryEngine
+from truememory.tier_switch import writer
+engine = TrueMemoryEngine(DB); engine.get_all(limit=1); drain()
+capture = writer.capture_writer_selection
+def capture_before_the_commit(conn):
+    # The selection is captured under the legacy admission; the activation
+    # commit lands before the writer opens.
+    captured = capture(conn)
+    probe = sqlite3.connect(DB); started = time.monotonic()
+    while time.monotonic() - started < 60 and not probe.execute(
+            "SELECT 1 FROM metadata WHERE key='tier_selected_v1'").fetchone():
+        time.sleep(0.05)
+    probe.close()
+    return captured
+writer.capture_writer_selection = capture_before_the_commit
+print("READY", flush=True)
+try:
+    added = engine.add("hook capture racing the activation commit", sender="alice")["id"]
+except Exception as error:
+    added = type(error).__name__ + ": " + str(error)[:120]
+engine.close(); drain()
+emit(added=added)
+"""
+
+RETIRE_BY_OPENING = """
+stub_models()
+from truememory.engine import TrueMemoryEngine
+engine = TrueMemoryEngine(DB); engine.get_all(limit=1); engine.close(); drain()
+emit(opened=True)
+"""
+
+
 class ProjectionFaultsAfterCommit(unittest.TestCase):
     def test_used_selection_is_kept_and_other_processes_keep_working(self):
         (result,) = run_scenario("""
@@ -894,6 +928,61 @@ class ActivationEdgeCases(unittest.TestCase):
         self.assertIsNone(result["state"]["selected"])
         self.assertEqual(result["state"]["marker"], "failed")
         self.assertEqual(result["state"]["status_rows"], [[1, "failed"]])
+
+    def test_add_racing_the_activation_commit_is_retried_and_kept(self):
+        (result,) = run_scenario("""
+            import subprocess
+            seed(20)
+            stub_models(delay=0.02)
+            process = subprocess.Popen([sys.executable, "-c", PRELUDE_SOURCE + %r], stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True)
+            assert process.stdout.readline().startswith("READY")
+            outcome = switch("edge")["outcome"]
+            out, err = process.communicate(timeout=120)
+            lines = [json.loads(line[7:]) for line in out.splitlines() if line.startswith("RESULT ")]
+            conn = connect()
+            emit(outcome=outcome, child=lines[0] if lines else err[-2000:],
+                 messages=conn.execute("SELECT count(*) FROM messages").fetchone()[0],
+                 vector=conn.execute("SELECT count(*) FROM vec_messages_edge WHERE rowid=21").fetchone()[0])
+        """ % ADD_ACROSS_COMMIT)
+        self.assertEqual(result["outcome"], "complete")
+        self.assertEqual(result["child"], {"added": 21})
+        self.assertEqual((result["messages"], result["vector"]), (21, 1))
+
+    def test_process_serving_a_retired_journal_returns_to_legacy(self):
+        (result,) = run_scenario(steps("""
+            import subprocess
+            seed(10)
+            stub_models()
+            assert switch("edge")["outcome"] == "complete"
+            process = subprocess.Popen([sys.executable, "-c", PRELUDE_SOURCE + %r], stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            assert process.stdout.readline().startswith("OPEN")
+            process.stdin.write("go\\n"); process.stdin.flush()
+            process.stdout.readline()
+            # 0.7.6.1 switches back to base with exactly these database and config effects.
+            conn = connect()
+            mid = conn.execute("INSERT INTO messages(content,sender) VALUES ('added by 0.7.6.1 after its switch','a')").lastrowid
+            conn.execute("INSERT INTO vec_messages_basepro(rowid,embedding) VALUES (?,?)", (mid, vec(mid)))
+            conn.execute("INSERT INTO vec_messages_sep_basepro(rowid,embedding) VALUES (?,?)", (mid, vec(-mid)))
+            conn.execute("INSERT OR REPLACE INTO vector_cache_registry(tier_group,vec_table,sep_table,last_embedded_id,"
+                         "vector_count,model_name,embedding_dim,last_updated,created) VALUES ('basepro','vec_messages_basepro',"
+                         "'vec_messages_sep_basepro',?,?,'Qwen3-Embedding-0.6B',256,0,0)", (mid, mid))
+            conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES ('embed_model','qwen3_256')")
+            conn.commit(); conn.close()
+            config = json.loads(CONFIG.read_text()); config["tier"] = "base"; CONFIG.write_text(json.dumps(config))
+        """ % LONG_RUNNING, run_child(RETIRE_BY_OPENING), """
+            out, err = process.communicate("go\\n", timeout=120)
+            lines = [json.loads(line[7:]) for line in out.splitlines() if line.startswith("RESULT ")]
+            emit(retired=child, state=state(), other=lines[0] if lines else err[-2000:])
+        """))
+        self.assertEqual(result["retired"], {"opened": True})
+        self.assertIsNone(result["state"]["selected"])
+        other = result["other"]
+        self.assertIsInstance(other, dict, other)
+        self.assertEqual((other["window"], other["get_all"], other["add"]), (11, 12, 13))
+        self.assertIsInstance(other["search"], list, other["search"])
+
 
 if __name__ == "__main__":
     unittest.main()
