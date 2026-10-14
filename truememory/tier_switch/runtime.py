@@ -108,9 +108,11 @@ _acknowledged: tuple[str, ...] | None = None
 _pid = os.getpid()
 # The database whose selection or policy the process-global projection serves.
 # Only that database's legacy admission (its journal was retired or restored)
-# may reset it; any other legacy database refuses, so a process alternating
-# between a controlled and a legacy store never reloads models per call.
+# resets it to the configured tier. Another legacy store is served from its own
+# recorded identity: without touching the projection when it needs no models
+# or shares the loaded embedding space, otherwise by reloading (logged once).
 _projected_database: tuple[str, object] | None = None
+_foreign_reload_logged = False
 # Last model identity refusal from a projection, for status reports.
 _last_identity_error: str | None = None
 _OWNER_POLL_SECONDS = 0.05
@@ -267,6 +269,74 @@ def _pin_process_tier(tier: str) -> None:
         os.environ["TRUEMEMORY_EMBED_MODEL"] = tier
 
 
+@dataclass(frozen=True)
+class _ForeignStore:
+    tier: str
+    model_id: str
+    dimension: int
+    tables: tuple[str, str]
+    shared: bool  # Same embedding space as the loaded projection.
+
+
+def _foreign_store(conn: sqlite3.Connection) -> _ForeignStore:
+    """Plan for a legacy store other than the one this process's projection serves.
+
+    The store's recorded embed_model/embed_dim and the registry pair for that
+    group decide; a store without a recorded embedder adopts the loaded one,
+    as legacy serving always did. An identity no tier provides is refused.
+    """
+    from truememory.embedding_target import EmbeddingTarget
+    from truememory.tier_switch.projection import _guard, _paths, _read_config
+
+    vector, _ = _modules()
+    loaded = (vector.EMBEDDING_MODEL, vector._embedding_dim)
+    refused = "This store's recorded embedding model is not available to this process"
+    try:
+        metadata = dict(conn.execute(
+            "SELECT key, value FROM main.metadata WHERE key IN ('embed_model','embed_dim')"))
+        if "embed_model" in metadata:
+            model = metadata["embed_model"]
+            dimension = int(metadata["embed_dim"]) if "embed_dim" in metadata else vector.get_embedding_dim(model)
+        else:
+            model, dimension = loaded
+        try:
+            configured = _guard(_read_config(_paths(None, None)[0])).tier
+        except Exception:
+            configured = "edge"
+        target = None
+        for tier in dict.fromkeys((configured, "edge", "base", "pro")):
+            try:
+                candidate = EmbeddingTarget.capture(tier)
+            except ValueError:
+                continue
+            if (candidate.model_id, candidate.dimension) == (model, dimension):
+                target = candidate
+                break
+        if target is None:
+            raise TierRuntimeError(refused)
+        row = conn.execute("SELECT vec_table, sep_table, embedding_dim FROM main.vector_cache_registry "
+                           "WHERE tier_group=?", (target.tier_group,)).fetchone()
+    except TierRuntimeError:
+        raise
+    except Exception as error:
+        raise TierRuntimeError(refused) from error
+    generic = ("vec_messages", "vec_messages_sep")
+    tables = generic if row is None else (row[0], row[1])
+    if tables not in (target.tables, generic) or (row is not None and row[2] not in (None, target.dimension)):
+        raise TierRuntimeError("Legacy database requires explicit coherent runtime selection")
+    return _ForeignStore(target.tier, target.model_id, target.dimension, tables, (model, dimension) == loaded)
+
+
+def _note_foreign_reload(plan: _ForeignStore) -> None:
+    global _foreign_reload_logged
+    if not _foreign_reload_logged:
+        _foreign_reload_logged = True
+        import logging
+        logging.getLogger(__name__).info(
+            "Serving a store with another embedding model (%s) in this process; models reload "
+            "whenever calls alternate between it and the tier-controlled store", plan.model_id)
+
+
 def _legacy_reset_tier(conn: sqlite3.Connection) -> str:
     """The store's configured tier, verified against its legacy pair and metadata.
 
@@ -384,6 +454,9 @@ class ServingOperation:
     # False only for controlled admissions that did not (or could not) project
     # the selected models: SQL-only bodies may run, model use is refused.
     models_ready: bool = field(default=True, compare=False)
+    # A legacy store served beside another store's projection: it attaches to
+    # its own stable pair and never initializes from the loaded model.
+    foreign: bool = field(default=False, compare=False)
 
     def fork_child(self) -> RuntimeChild:
         if current_operation(self._connection) is not self:
@@ -415,7 +488,7 @@ class RuntimeChild:
                                          original.reranker_id, original.key, connection, lease, original._database,
                                          original.borrowed, original.policy,
                                          original._connection_lock if connection is original._connection else None,
-                                         original._defer_maintenance, original.models_ready)
+                                         original._defer_maintenance, original.models_ready, original.foreign)
             lease.check_admission()
             with _bound(operation):
                 yield operation
@@ -505,6 +578,7 @@ def serving_operation(
     conn: sqlite3.Connection, *, deadline: float | None = None,
     cancelled: threading.Event | None = None, connection_lock: object | None = None,
     reranker_id: str | None = None, _defer_maintenance: bool = False, models: str = "required",
+    _foreign_reload: bool = True,
 ) -> Iterator[ServingOperation]:
     """Admit one public operation on a captured database selection.
 
@@ -533,7 +607,7 @@ def serving_operation(
         selection = _read_selection(conn)
         policy = _read_policy(conn) if selection is None else None
         borrowed = conn.in_transaction
-    ready = True
+    ready, foreign = True, None
     if selection is not None:
         effective = selection.reranker_id if reranker_id is None else reranker_id
         if not _ready(selection, effective):
@@ -554,22 +628,39 @@ def serving_operation(
                 models, lambda: _prepare_legacy_policy(policy, effective, deadline=deadline, cancelled=cancelled))
         key = policy_key(policy, effective)
     else:
-        vector, _ = _modules()
-        if vector._frozen_embedding_target is not None or getattr(vector, "_runtime_policy_tier", None) is not None:
-            # This process projected a selection that is gone (retired by an
-            # open elsewhere, or rolled back): serve the configured legacy tier.
-            if borrowed:
-                raise TierRuntimeError("Legacy database requires explicit coherent runtime selection")
+        vector, reranker = _modules()
+        home = _projected_database
+        if (home is not None or vector._frozen_embedding_target is not None
+                or getattr(vector, "_runtime_policy_tier", None) is not None):
             with _connection_read(conn, connection_lock, deadline, cancelled):
-                if _projected_database not in (None, _database_identity(conn)):
-                    raise TierRuntimeError("Another database's tier selection is loaded in this process; "
-                                           "serve this legacy database from a separate process")
-                tier = _legacy_reset_tier(conn)
-            try:
-                reset_legacy_runtime(tier, deadline=deadline, cancelled=cancelled)
-            except serving.ServingLeaseError as error:
-                raise TierRuntimeError("Legacy database requires explicit coherent runtime selection") from error
-        if reranker_id is not None:
+                # The controlled store reaching here lost its selection (retired
+                # elsewhere, or rolled back); any other store is foreign to it.
+                if home not in (None, _database_identity(conn)):
+                    foreign = _foreign_store(conn)
+            if foreign is not None and (models == "none" or not _foreign_reload or (
+                    foreign.shared and reranker_id in (None, reranker.get_current_reranker_name()))):
+                pass  # Served beside whatever is loaded, which stays as it is.
+            else:
+                if borrowed:
+                    raise TierRuntimeError("Legacy database requires explicit coherent runtime selection")
+                if foreign is None:
+                    with _connection_read(conn, connection_lock, deadline, cancelled):
+                        tier = _legacy_reset_tier(conn)
+                else:
+                    _note_foreign_reload(foreign)
+                    tier = foreign.tier
+                try:
+                    reset_legacy_runtime(tier, deadline=deadline, cancelled=cancelled)
+                except serving.ServingLeaseError as error:
+                    raise TierRuntimeError("Legacy database requires explicit coherent runtime selection") from error
+                if foreign is not None:
+                    # Still the controlled store's process: later stores stay foreign.
+                    _projected_database, foreign = home, None
+        if foreign is not None:
+            effective = (reranker.get_current_reranker_name() if foreign.shared else reranker_id) or "unloaded"
+            key = ("legacy", foreign.model_id, str(foreign.dimension), foreign.tier, effective)
+            ready = foreign.shared
+        if foreign is None and reranker_id is not None:
             _, reranker = _modules()
             if reranker._model is None or reranker._model_name != reranker_id:
                 if borrowed:
@@ -583,7 +674,8 @@ def serving_operation(
                     except Exception as error:
                         # Legacy retrieval already reports optional reranker unavailability.
                         raise_if_serving_rejection(error)
-        key = _legacy_key(reranker_id)
+        if foreign is None:
+            key = _legacy_key(reranker_id)
     with serving.operation_lease(key, deadline=deadline, cancelled=cancelled, blocking=not borrowed) as lease:
         # A competing process can commit selection while this thread waits.
         # Refuse rather than loop through unbounded native reconciliation.
@@ -591,8 +683,15 @@ def serving_operation(
             observed = _read_selection(conn)
             observed_policy = _read_policy(conn) if observed is None else None
             vector, reranker = _modules()
-            tables = (selection.tables if selection is not None else policy.tables if policy is not None else
-                      (vector._active_vec_table(conn), vector._active_sep_table(conn)))
+            if selection is not None or policy is not None:
+                tables = selection.tables if selection is not None else policy.tables
+            elif foreign is not None:
+                tables = foreign.tables
+                if _foreign_store(conn) != foreign:
+                    raise AdmissionSelectionChanged("Store or loaded model changed during admission",
+                                                    borrowed=borrowed)
+            else:
+                tables = (vector._active_vec_table(conn), vector._active_sep_table(conn))
             database = _database_identity(conn)
         if _authority_key(observed, observed_policy) != _authority_key(selection, policy):
             raise AdmissionSelectionChanged("Database selection changed during runtime admission", borrowed=borrowed)
@@ -605,13 +704,16 @@ def serving_operation(
             if ready and not _policy_ready(policy, effective):
                 raise AdmissionSelectionChanged("Process policy changed during runtime admission", borrowed=borrowed)
             tables, tier = policy.tables, policy.target.tier
+        elif foreign is not None:
+            tier = foreign.tier
         else:
             if key != _legacy_key(reranker_id):
                 raise AdmissionSelectionChanged("Legacy runtime changed during admission", borrowed=borrowed)
             tier = vector.resolve_tier()
             effective = reranker.get_current_reranker_name() if reranker_id is None else reranker_id
         operation = ServingOperation(selection, tables, tier, effective, key, conn, lease,
-                                     database, borrowed, policy, connection_lock, _defer_maintenance, ready)
+                                     database, borrowed, policy, connection_lock, _defer_maintenance, ready,
+                                     foreign is not None)
         lease.check_admission()
         if ready and (selection is not None or policy is not None):
             _projected_database = database
@@ -990,12 +1092,16 @@ def maintenance_serving_operation(
     conn: sqlite3.Connection, *, cancelled: threading.Event | None = None,
     deadline: float | None = None, connection_lock: object | None = None,
 ) -> Iterator[bool]:
-    """Called only under maintenance ownership; controlled derived vectors defer."""
+    """Called only under maintenance ownership; controlled derived vectors defer.
+
+    So do a foreign store's in another embedding space: background maintenance
+    never reloads this process's models.
+    """
     serving._control(None, deadline, cancelled)
     _check(deadline, cancelled)
     current = current_operation(conn)
     if current is not None:
-        if current.selection is not None or current.policy is not None:
+        if current.selection is not None or current.policy is not None or not current.models_ready:
             yield False
             return
     else:
@@ -1004,8 +1110,9 @@ def maintenance_serving_operation(
         if controlled:
             yield False
             return
-    with serving_operation(conn, cancelled=cancelled, deadline=deadline, connection_lock=connection_lock):
-        yield True
+    with serving_operation(conn, cancelled=cancelled, deadline=deadline, connection_lock=connection_lock,
+                           _foreign_reload=False) as operation:
+        yield operation.models_ready
 
 
 @contextmanager

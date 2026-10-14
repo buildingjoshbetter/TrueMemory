@@ -787,7 +787,8 @@ class TrueMemoryEngine:
                         self.conn.enable_load_extension(True)
                         sqlite_vec.load(self.conn)
                         self.conn.enable_load_extension(False)
-                        local_only = not _preparing and _legacy_initialization_is_local(self.conn, operation)
+                        local_only = ((not _preparing or operation.foreign)
+                                      and _legacy_initialization_is_local(self.conn, operation))
                         # init_vec_table() runs _check_embedder_compatibility(),
                         # which raises TrueMemoryMigrationError on a dim/model
                         # mismatch. That must NOT be swallowed as a generic

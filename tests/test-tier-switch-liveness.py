@@ -60,9 +60,9 @@ def load_vec(conn):
 def connect():
     conn = sqlite3.connect(DB); load_vec(conn); return conn
 
-def seed(n=40, group="basepro", tables=None):
+def seed(n=40, group="basepro", tables=None, path=None):
     from truememory.storage import create_db
-    conn = create_db(DB); load_vec(conn)
+    conn = create_db(path or DB); load_vec(conn)
     model = "qwen3_256" if group == "basepro" else "model2vec"
     tables = tables or (f"vec_messages_{group}", f"vec_messages_sep_{group}")
     conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES ('embed_model',?)", (model,))
@@ -1649,40 +1649,74 @@ class ActivationFairness(unittest.TestCase):
 
 
 class ProcessProjectionScope(unittest.TestCase):
-    def test_other_legacy_store_refuses_instead_of_reloading_models(self):
-        # One process alternating a controlled store and an unrelated legacy
-        # store used to reset and reload both models on every switch.
+    def test_other_stores_are_served_beside_a_controlled_store(self):
+        # A library process keeps a controlled store and opens others: SQL-only
+        # calls and a store in the same embedding space need no reload; a store
+        # in another space is served by reloading, logged once.
         (result,) = run_scenario("""
             seed(10)
             stub_models()
-            import model2vec
+            import model2vec, sentence_transformers
             from truememory import vector_search
+            from truememory.tier_switch import runtime
             loads = {"legacy": 0, "frozen": 0}
             def legacy_load(*args, **kwargs):
                 loads["legacy"] += 1
                 return FakeEncoder()
             model2vec.StaticModel.from_pretrained = staticmethod(legacy_load)
+            sentence_transformers.SentenceTransformer = legacy_load
             frozen = vector_search._load_frozen_embedding_target
             def frozen_load(target, timeout=None):
                 loads["frozen"] += 1
                 return frozen(target, timeout)
             vector_search._load_frozen_embedding_target = frozen_load
+            notes = []
+            class Notes(logging.Handler):
+                def emit(self, record):
+                    notes.append(record.getMessage())
+            runtime_log = logging.getLogger("truememory.tier_switch.runtime")
+            runtime_log.addHandler(Notes()); runtime_log.setLevel(logging.INFO)
             assert switch("edge")["outcome"] == "complete"
+            same, other = str(HOME / "same.db"), str(HOME / "other.db")
+            seed(5, group="edge", path=same)
+            seed(5, group="basepro", path=other)
             from truememory.engine import TrueMemoryEngine
-            controlled, legacy = TrueMemoryEngine(DB), TrueMemoryEngine(str(HOME / "other.db"))
-            def attempt(call):
-                try:
-                    return len(call())
-                except Exception as error:
-                    return type(error).__name__
-            before = dict(loads)
-            calls = [[attempt(lambda: controlled.search("synthetic fact", limit=3)),
-                      attempt(lambda: legacy.get_all(limit=3))] for _ in range(5)]
-            controlled.close(); legacy.close(); drain()
-            emit(calls=calls, loads={name: loads[name] - before[name] for name in loads})
+            controlled, shared, foreign = (TrueMemoryEngine(path) for path in (DB, same, other))
+            controlled.search("synthetic fact", limit=3)
+            def counted(calls):
+                before = dict(loads)
+                values = [call() for call in calls]
+                return values, {name: loads[name] - before[name] for name in loads}
+            out = {"sql_only": counted([lambda: len(foreign.get_all(limit=100)), lambda: foreign.delete(2),
+                                        lambda: len(shared.get_all(limit=100))])}
+            out["same_space"] = counted([lambda: len(shared.search("synthetic fact", limit=3)),
+                                         lambda: shared.add("same space", sender="alice")["id"],
+                                         lambda: len(controlled.search("synthetic fact", limit=3))] * 3)
+            out["other_space"] = counted([lambda: len(foreign.search("synthetic fact", limit=3)),
+                                          lambda: foreign.add("other space", sender="alice")["id"],
+                                          lambda: len(controlled.search("synthetic fact", limit=3)),
+                                          lambda: controlled.add("controlled", sender="alice")["id"]] * 2)
+            for engine in (controlled, shared, foreign):
+                engine.close()
+            drain()
+            vectors = {}
+            for name, path, group, rows in (("same", same, "edge", (6, 7, 8)), ("other", other, "basepro", (2, 6, 7)),
+                                            ("controlled", DB, "edge", (11, 12))):
+                conn = sqlite3.connect(path); load_vec(conn)
+                vectors[name] = [conn.execute(f"SELECT count(*) FROM vec_messages_{group} WHERE rowid=?", (row,)).fetchone()[0]
+                                 for row in rows]
+                conn.close()
+            emit(out=out, vectors=vectors, reload_notes=sum("another embedding model" in note for note in notes))
         """)
-        self.assertEqual(result["calls"], [[3, "TierRuntimeError"]] * 5)
-        self.assertEqual(result["loads"], {"legacy": 0, "frozen": 0})
+        out = result["out"]
+        self.assertEqual(out["sql_only"], [[5, True, 5], {"legacy": 0, "frozen": 0}])
+        self.assertEqual(out["same_space"][0], [3, 6, 3, 3, 7, 3, 3, 8, 3])
+        self.assertEqual(out["same_space"][1], {"legacy": 0, "frozen": 0})
+        self.assertEqual(out["other_space"][0], [3, 6, 3, 11, 3, 7, 3, 12])
+        self.assertEqual(out["other_space"][1], {"legacy": 2, "frozen": 2})  # One reload per switch.
+        # The deleted row's vectors are gone from its own pair; new rows have vectors in their own space.
+        self.assertEqual(result["vectors"], {"same": [1, 1, 1], "other": [0, 1, 1], "controlled": [1, 1]})
+        self.assertEqual(result["reload_notes"], 1)
 
 if __name__ == "__main__":
     unittest.main()
