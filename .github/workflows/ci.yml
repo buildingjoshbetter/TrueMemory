@@ -52,9 +52,6 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: Install dependencies
         run: pip install -e ".[all,dev]"
-      - name: Trace synthetic Windows file ownership
-        if: runner.os == 'Windows'
-        run: python tests/native/windows-owned-file-diagnostics-v2.py
       - name: Run tests (gate — deterministic, no network)
         # Issue #426: exclude `network`-marked tests (real HuggingFace model
         # downloads) from the gate so a transient HfHubHTTPError can't fail CI
