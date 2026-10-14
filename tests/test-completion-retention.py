@@ -413,3 +413,32 @@ def test_a_pointer_rewritten_during_adoption_is_kept(env, monkeypatch):
     monkeypatch.setattr(completion, "admit_capture", admit)
     assert completion.adopt_legacy_pointer(pointer) is not None
     assert json.loads(pointer.read_text())["reason"] == "newer"
+
+
+def test_leaked_state_temporaries_never_wedge_saves(env, monkeypatch):
+    # A crash between creating and replacing state.json used to leave a
+    # temporary that counted against MAX_STATE_BYTES forever.
+    session, path = _transcript(env, _turns(6))
+    capture = completion.admit_capture(str(path), session, "", "", "claude", root=env.root)
+    for _ in range(8):
+        fd = os.open(capture.directory / f"state-{uuid.uuid4().hex}.pending", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.write(fd, b"x" * (1024 * 1024))
+        os.close(fd)
+    other, other_path = _transcript(env, _turns(6))
+    completion.admit_capture(str(other_path), other, "", "", "claude", root=env.root)
+    assert completion.reserve_inline_attempt(capture) == 1
+    assert list(capture.directory.glob("state-*.pending")) == []
+
+
+def test_unprocessed_pointers_survive_backlog_pruning(env):
+    env.backlog.mkdir(parents=True, exist_ok=True)
+    session, path = _transcript(env, _turns(6))
+    stop._queue_to_backlog(str(path), session, "", "", reason="synthetic", transcript_host="claude")
+    pointer = env.backlog / f"{session}.json"
+    corrupt = env.backlog / "broken.corrupt"
+    corrupt.write_text("synthetic")
+    old = time.time() - 40 * 86400
+    for item in (pointer, corrupt):
+        os.utime(item, (old, old))
+    assert stop._writable_dirs_ok()
+    assert pointer.exists() and not corrupt.exists()

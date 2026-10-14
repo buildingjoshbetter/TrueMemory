@@ -217,20 +217,28 @@ def _state(directory: Path) -> dict:
 
 
 def _save_state(directory: Path, value: dict) -> None:
+    # Every save holds state.lock, so a temporary found here was left by an
+    # interrupted save; state.json is the only evidence and stays untouched.
+    for leaked in directory.glob("state-*.pending"):
+        with contextlib.suppress(FileNotFoundError):
+            leaked.unlink()
     payload = _json(value)
-    retained = sum(path.lstat().st_size for path in directory.glob("state-*.pending"))
-    if len(payload) + retained > MAX_STATE_BYTES:
+    if len(payload) > MAX_STATE_BYTES:
         raise CompletionError("retained_state_limit")
     if (directory / "state.json").is_symlink():
         raise CompletionError("unsafe_state")
-    # Unique failed temporaries are retained rather than replacing evidence.
     temporary = directory / ("state-" + uuid.uuid4().hex + ".pending")
     fd = _open_private(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, directory / "state.json")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, directory / "state.json")
+    except BaseException:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise
     _sync_directory(directory)
 
 

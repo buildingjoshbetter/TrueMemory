@@ -85,14 +85,14 @@ def _sanitize_session_id(session_id: str) -> str:
     return safe or "unknown"
 
 
-def _prune_old_files(directory: Path, retention_days: int = 30) -> None:
-    """Delete files in directory older than retention_days."""
+def _prune_old_files(directory: Path, retention_days: int = 30, *, keep: tuple[str, ...] = ()) -> None:
+    """Delete files in directory older than retention_days, except suffixes in ``keep``."""
     if not directory.exists():
         return
     cutoff = time.time() - (retention_days * 86400)
     for path in directory.iterdir():
         try:
-            if path.is_file() and path.stat().st_mtime < cutoff:
+            if path.suffix not in keep and path.is_file() and path.stat().st_mtime < cutoff:
                 path.unlink()
         except OSError:
             continue
@@ -223,7 +223,8 @@ def _writable_dirs_ok() -> bool:
 
     _prune_old_files(TRACE_DIR)
     _prune_old_files(LOG_DIR)
-    _prune_old_files(BACKLOG_DIR)
+    # Queued pointers are work, not logs: adoption retires them, age never does.
+    _prune_old_files(BACKLOG_DIR, keep=(".json", ".processing"))
 
     # Check disk free space — abort if less than 10 MB available
     try:
