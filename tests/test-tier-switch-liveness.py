@@ -1478,6 +1478,58 @@ class ActivationFairness(unittest.TestCase):
 
 
 
+    def test_reads_queued_behind_the_activation_writer_are_retried(self):
+        (result,) = run_scenario("""
+            seed(30)
+            stub_models(delay=0.02)
+            from truememory.engine import TrueMemoryEngine
+            from truememory.tier_switch import serving
+            from truememory.tier_switch.manager import RebuildManager
+            from truememory.tier_switch.runtime import engine_serving_operation
+            # One engine (connection) per queued call: this is about admission,
+            # not about threads sharing one sqlite connection.
+            engine, *readers = [TrueMemoryEngine(DB) for _ in range(5)]
+            for each in (engine, *readers):
+                each.get_all(limit=1)
+            drain()
+            held = threading.Event()
+            def reader():
+                with engine_serving_operation(engine):
+                    held.set(); time.sleep(2)
+            finalize = RebuildManager._finalize_rebuild
+            def finalize_during_a_read(self, *args, **kwargs):
+                threading.Thread(target=reader, daemon=True).start()
+                held.wait(10)
+                return finalize(self, *args, **kwargs)
+            RebuildManager._finalize_rebuild = finalize_during_a_read
+            manager = switch("edge", join=False)["manager"]
+            worker = manager._active_thread
+            held.wait(60)
+            started = time.monotonic()
+            while not serving._DEFAULT_GATE._waiting_writers and time.monotonic() - started < 30:
+                time.sleep(0.005)
+            queued = bool(serving._DEFAULT_GATE._waiting_writers)
+            results = {}
+            def call(name, function):
+                try:
+                    results[name] = function()
+                except Exception as error:
+                    results[name] = type(error).__name__
+            calls = {"get_all": lambda: len(readers[0].get_all(limit=100)), "get": lambda: readers[1].get(1)["id"],
+                     "get_stats": lambda: readers[2].get_stats()["message_count"],
+                     "search_simple": lambda: len(readers[3].search_simple("synthetic fact", limit=3))}
+            threads = [threading.Thread(target=call, args=item) for item in calls.items()]
+            [thread.start() for thread in threads]; [thread.join(60) for thread in threads]
+            worker.join(60)
+            for each in (engine, *readers):
+                each.close()
+            drain()
+            emit(queued=queued, results=results, outcome=manager._last_outcome)
+        """)
+        self.assertTrue(result["queued"])
+        self.assertEqual(result["results"], {"get_all": 30, "get": 1, "get_stats": 30, "search_simple": 3})
+        self.assertEqual(result["outcome"], "complete")
+
     def test_fresh_open_fails_at_once_behind_a_long_owner_while_activation_waits(self):
         (result,) = run_scenario("""
             import subprocess

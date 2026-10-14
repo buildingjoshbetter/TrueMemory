@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
 from typing import TYPE_CHECKING, ParamSpec, TypeVar
@@ -34,6 +34,10 @@ class TierRuntimeError(RuntimeError):
 
 class AdmissionSelectionChanged(TierRuntimeError):
     """The selection changed while this admission waited; nothing ran yet."""
+
+    def __init__(self, message: str, *, borrowed: bool) -> None:
+        super().__init__(message)
+        self.borrowed = borrowed  # Read under the engine writer, unlike a later in_transaction.
 
 
 class SelectedModelsUnavailable(RuntimeError):
@@ -589,19 +593,19 @@ def serving_operation(
                       (vector._active_vec_table(conn), vector._active_sep_table(conn)))
             database = _database_identity(conn)
         if _authority_key(observed, observed_policy) != _authority_key(selection, policy):
-            raise AdmissionSelectionChanged("Database selection changed during runtime admission")
+            raise AdmissionSelectionChanged("Database selection changed during runtime admission", borrowed=borrowed)
         vector, reranker = _modules()
         if selection is not None:
             if ready and not _ready(selection, effective):
-                raise AdmissionSelectionChanged("Process selection changed during runtime admission")
+                raise AdmissionSelectionChanged("Process selection changed during runtime admission", borrowed=borrowed)
             tables, tier, effective = selection.tables, selection.target.tier, effective
         elif policy is not None:
             if ready and not _policy_ready(policy, effective):
-                raise AdmissionSelectionChanged("Process policy changed during runtime admission")
+                raise AdmissionSelectionChanged("Process policy changed during runtime admission", borrowed=borrowed)
             tables, tier = policy.tables, policy.target.tier
         else:
             if key != _legacy_key(reranker_id):
-                raise AdmissionSelectionChanged("Legacy runtime changed during admission")
+                raise AdmissionSelectionChanged("Legacy runtime changed during admission", borrowed=borrowed)
             tier = vector.resolve_tier()
             effective = reranker.get_current_reranker_name() if reranker_id is None else reranker_id
         operation = ServingOperation(selection, tables, tier, effective, key, conn, lease,
@@ -819,11 +823,15 @@ def engine_serving_operation(
 
 def engine_handle_operation(function: Callable[P, R]) -> Callable[P, R]:
     """Pin a handle-only operation without vector initialization or scheduling."""
+    @contextmanager
+    def admit(engine: object) -> Iterator[ServingOperation]:
+        open_engine_for_operation(engine)
+        with serving_operation(engine.conn, connection_lock=engine._write_lock) as operation:
+            yield operation
+
     @wraps(function)
     def wrapped(engine: object, *args: object, **kwargs: object) -> R:
-        open_engine_for_operation(engine)
-        with serving_operation(engine.conn, connection_lock=engine._write_lock):
-            return function(engine, *args, **kwargs)
+        return admitted_call(engine, lambda: admit(engine), lambda: function(engine, *args, **kwargs))
     return wrapped
 
 
@@ -831,7 +839,8 @@ def engine_operation(function: Callable[P, R]) -> Callable[P, R]:
     """Initialize before pinning the public call's immutable table selection."""
     @wraps(function)
     def wrapped(engine: object, *args: object, **kwargs: object) -> R:
-        return _admitted_call(engine, function, args, kwargs, models="required")
+        return admitted_call(engine, lambda: engine_serving_operation(engine, models="required"),
+                             lambda: function(engine, *args, **kwargs))
     return wrapped
 
 
@@ -839,7 +848,8 @@ def engine_source_operation(function: Callable[P, R]) -> Callable[P, R]:
     """Admit a source-only operation without selected-model readiness."""
     @wraps(function)
     def wrapped(engine: object, *args: object, **kwargs: object) -> R:
-        return _admitted_call(engine, function, args, kwargs, models="none")
+        return admitted_call(engine, lambda: engine_serving_operation(engine, models="none"),
+                             lambda: function(engine, *args, **kwargs))
     return wrapped
 
 
@@ -851,37 +861,35 @@ def engine_fallback_operation(function: Callable[P, R]) -> Callable[P, R]:
     """
     @wraps(function)
     def wrapped(engine: object, *args: object, **kwargs: object) -> R:
-        return _admitted_call(engine, function, args, kwargs, models="optional", retry_writer=True)
+        return admitted_call(engine, lambda: engine_serving_operation(engine, models="optional"),
+                             lambda: function(engine, *args, **kwargs), retry_writer=True)
     return wrapped
 
 
-def _admitted_call(engine: object, function: Callable[..., R], args: tuple, kwargs: dict, *,
-                   models: str, retry_writer: bool = False) -> R:
+def admitted_call(engine: object, admit: Callable[[], AbstractContextManager[object]], body: Callable[[], R], *,
+                  retry_writer: bool = False) -> R:
     """Retry a top-level call once when a selection change refused it before any effect.
 
     Admission refusals happen before the body runs; a writer refusal rolled
     back the body's transaction. Nested calls and caller transactions refuse.
     """
-    retry = current_runtime_operation() is None and not _in_caller_transaction(engine)
-    started = False
+    nested = current_runtime_operation() is not None
+    started = borrowed = False
     try:
-        with engine_serving_operation(engine, models=models):
-            started = True
-            return function(engine, *args, **kwargs)
+        with admit() as operation:
+            started, borrowed = True, operation.borrowed
+            return body()
     except Exception as error:
-        admission = not started and isinstance(error, AdmissionSelectionChanged)
-        if not retry or not (admission or (retry_writer and _selection_changed(error))):
+        # A caller transaction is judged as admission recorded it: on a shared
+        # connection a live in_transaction may be another thread's read.
+        if not started and isinstance(error, AdmissionSelectionChanged):
+            retry = not error.borrowed
+        else:
+            retry = started and retry_writer and not borrowed and _selection_changed(error)
+        if nested or not retry:
             raise
-    with engine_serving_operation(engine, models=models):
-        return function(engine, *args, **kwargs)
-
-
-def _in_caller_transaction(engine: object) -> bool:
-    conn = getattr(engine, "conn", None)
-    try:
-        return conn is not None and conn.in_transaction
-    except sqlite3.ProgrammingError:
-        return False
+    with admit():
+        return body()
 
 
 def _selection_changed(error: BaseException) -> bool:

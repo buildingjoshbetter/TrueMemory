@@ -707,9 +707,10 @@ class TrueMemoryEngine:
         Standalone callers (get, get_all, stats, directive listing) only read
         SQL, so a controlled database never waits on native model readiness.
         """
-        from truememory.tier_switch.runtime import engine_serving_operation
-        with engine_serving_operation(self, _suppress_maintenance=_suppress_maintenance, models="none"):
-            self._initialize_connection(_suppress_maintenance=_suppress_maintenance)
+        from truememory.tier_switch.runtime import admitted_call, engine_serving_operation
+        admitted_call(self, lambda: engine_serving_operation(self, _suppress_maintenance=_suppress_maintenance,
+                                                             models="none"),
+                      lambda: self._initialize_connection(_suppress_maintenance=_suppress_maintenance))
 
     def _initialize_connection(self, *, _suppress_maintenance: bool = False,
                                _preparing: bool = False) -> None:
