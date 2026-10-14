@@ -240,10 +240,10 @@ class InertCompletionControls(unittest.TestCase):
 
     def test_automatic_maintenance_failure_never_falls_back_to_legacy_cleanup(self) -> None:
         source = ROOT / "truememory/ingest/hooks/session_start.py"
-        node = next(node for node in ast.parse(source.read_text(encoding="utf-8")).body
-                    if isinstance(node, ast.FunctionDef) and node.name == "_drain_backlog")
+        nodes = [node for node in ast.parse(source.read_text(encoding="utf-8")).body
+                 if isinstance(node, ast.FunctionDef) and node.name in ("_drain_backlog", "_completion_scope")]
         namespace = {"os": os, "log": logging.getLogger(__name__)}
-        exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), str(source), "exec"), namespace)
+        exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), str(source), "exec"), namespace)
         module = types.ModuleType("truememory.ingest.completion")
         def retained_failure(*args):
             raise COMPLETION.CompletionError("synthetic retained failure")

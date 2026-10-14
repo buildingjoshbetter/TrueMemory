@@ -239,3 +239,74 @@ def test_stale_scan_reaches_a_crashed_session_behind_handled_ones(env, monkeypat
     assert len(sessions) == len(set(sessions)), "a handled session was queued again"
     assert not list(env.backlog.glob("*.json"))
     assert all((env.home / ".truememory" / "extracted" / name).exists() for name in short + [crashed])
+
+
+def _long_session(env) -> tuple[str, Path]:
+    session = str(uuid.uuid4())
+    path = env.projects / f"{session}.jsonl"
+    rows = []
+    for index in range(6):
+        rows.append({"type": "user", "message": {"role": "user", "content": f"early question {index}"}})
+        rows.append({"type": "assistant", "message": {"role": "assistant",
+                     "content": [{"type": "text", "text": "early answer " + "x" * 900}]}})
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    return session, path
+
+
+def _scan_env(env, monkeypatch):
+    from truememory.ingest.hooks import session_start, stop
+
+    monkeypatch.setattr(session_start, "_SCAN_MARKER", env.home / ".truememory" / ".last_stale_scan")
+    monkeypatch.setattr(session_start, "BACKLOG_DIR", env.backlog)
+    monkeypatch.setattr(stop, "BACKLOG_DIR", env.backlog)
+    monkeypatch.setattr(_shared, "EXTRACTED_DIR", env.home / ".truememory" / "extracted")
+    return session_start
+
+
+def _rescan(session_start) -> None:
+    marker = session_start._SCAN_MARKER
+    marker.write_text(str(float(marker.read_text() or 0) - session_start._SCAN_INTERVAL - 1))
+
+
+def test_a_session_adopted_mid_way_still_has_its_later_content_queued(env, monkeypatch):
+    # A live session adopted by the scanner and then killed without SessionEnd
+    # must still have the content written after adoption ingested.
+    session_start = _scan_env(env, monkeypatch)
+    session, path = _long_session(env)
+    session_start._scan_stale_sessions()
+    completion.convert_legacy_pointers("", "", "claude")
+    first = os.path.getsize(path)
+    with path.open("a", encoding="utf-8") as handle:
+        for index in range(3):
+            handle.write(json.dumps({"type": "user", "message": {"role": "user", "content": f"late question {index}"}}) + "\n")
+            handle.write(json.dumps({"type": "assistant", "message": {"role": "assistant",
+                                     "content": [{"type": "text", "text": "late answer " + "x" * 900}]}}) + "\n")
+    for _ in range(2):
+        _rescan(session_start)
+        session_start._scan_stale_sessions()
+        completion.convert_legacy_pointers("", "", "claude")
+    state = json.loads((completion.account_root("", "") / "state.json").read_text())["captures"]
+    counts = sorted(entry["metadata"]["byte_count"] for entry in state.values())
+    assert counts == [first, os.path.getsize(path)]
+
+
+def test_scanner_queues_for_the_account_of_the_hook_that_started_it(env, monkeypatch):
+    session_start = _scan_env(env, monkeypatch)
+    monkeypatch.setenv("TRUEMEMORY_COMPLETION_USER", "synthetic-profile")
+    monkeypatch.setenv("TRUEMEMORY_COMPLETION_DB", str(env.home / "profile.db"))
+    session, path = _long_session(env)
+    session_start._scan_stale_sessions()
+    pointer = json.loads((env.backlog / f"{session}.json").read_text())
+    assert (pointer["user_id"], pointer["db_path"]) == ("synthetic-profile", str(env.home / "profile.db"))
+    completion.convert_legacy_pointers("synthetic-profile", str(env.home / "profile.db"), "claude")
+    assert not (env.backlog / f"{session}.json").exists()
+    assert len(env.spawned) == 1
+
+
+def test_mcp_drainer_reads_the_configured_backlog_directory(tmp_path):
+    custom = tmp_path / "custom-backlog"
+    probe = ("import truememory.mcp_server as server, truememory.ingest.hooks.session_start as start; "
+             "print(server._BACKLOG_DIR); print(start.BACKLOG_DIR)")
+    output = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True,
+                            env={**os.environ, "TRUEMEMORY_BACKLOG_DIR": str(custom), "HOME": str(tmp_path)})
+    assert output.stdout.split() == [str(custom), str(custom)]

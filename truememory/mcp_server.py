@@ -1815,7 +1815,7 @@ def _preload_models():
 _BACKLOG_DRAIN_INTERVAL_NORMAL = _env_int("TRUEMEMORY_DRAIN_INTERVAL_SEC", 30, lo=1)
 _BACKLOG_DRAIN_INTERVAL_IDLE = 120
 _BACKLOG_LARGE_THRESHOLD = 20
-_BACKLOG_DIR = Path.home() / ".truememory" / "backlog"
+_BACKLOG_DIR = Path(os.environ.get("TRUEMEMORY_BACKLOG_DIR", str(Path.home() / ".truememory" / "backlog")))
 
 
 _cleanup_counter = 0
