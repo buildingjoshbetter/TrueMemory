@@ -957,7 +957,8 @@ def _search_operation(*, reranker_id: str | None = None) -> Iterator[tuple[Memor
     from truememory.tier_switch.runtime import engine_serving_operation
 
     memory = _get_memory()
-    with engine_serving_operation(memory._engine, reranker_override=reranker_id) as operation:
+    # Optional models: without them search degrades to keyword results, as legacy does.
+    with engine_serving_operation(memory._engine, reranker_override=reranker_id, models="optional") as operation:
         yield memory, operation
 
 

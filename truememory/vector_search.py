@@ -292,6 +292,10 @@ def get_model():
     if configured_memory:
         from truememory.memory_budget import validate_local_policy
         validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
+    import sys
+    admitted = getattr(sys.modules.get("truememory.tier_switch.runtime"), "require_admitted_models", None)
+    if admitted is not None:
+        admitted()
     if _model is not None:
         return _model  # Fast path, no lock needed
     from truememory.tier_switch.runtime import require_model_load_allowed
@@ -1429,6 +1433,103 @@ def _foreground_vector_publication(
                 yield _validate_foreground_vector_target(conn, identity, message_id, selection=selection)
         except WriterSelectionChanged as exc:
             raise VectorPublicationChanged(str(exc)) from exc
+
+
+# Smallest message id that may still lack vectors in the served pair. Written
+# inside the writer that stored a memory without them; consumed by bounded
+# backfill passes, so the work survives restarts.
+_BACKFILL_KEY = "vector_backfill_from"
+
+
+def note_vectorless(conn: sqlite3.Connection, message_id: int) -> None:
+    """Record, inside the caller's writer, that a stored memory needs vectors."""
+    try:
+        conn.execute(
+            "INSERT INTO metadata(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+            "value = CAST(MIN(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)",
+            (_BACKFILL_KEY, str(int(message_id))),
+        )
+    except sqlite3.OperationalError:
+        logger.debug("Vector backfill cursor was not recorded", exc_info=True)
+
+
+def vector_coverage(conn: sqlite3.Connection, tables: tuple[str, str]) -> dict:
+    """Count memories without a vector in the served completion table."""
+    vectorless, first = conn.execute(
+        f'SELECT count(*), min(m.id) FROM messages m WHERE NOT EXISTS '
+        f'(SELECT 1 FROM main."{tables[0]}" v WHERE v.rowid = m.id)'
+    ).fetchone()
+    cursor = conn.execute("SELECT value FROM metadata WHERE key=?", (_BACKFILL_KEY,)).fetchone()
+    return {"table": tables[0], "vectorless": vectorless, "first_vectorless_id": first,
+            "backfill_from": None if cursor is None else cursor[0]}
+
+
+def backfill_missing_vectors(conn: sqlite3.Connection, *, write_lock: object,
+                             budget: int = 32, window: int = 256) -> int:
+    """Embed a bounded, resumable batch of memories stored without vectors.
+
+    Runs inside an admitted operation whose models are ready. One pass scans at
+    most ``window`` ids from the recorded cursor and publishes at most
+    ``budget`` missing pairs, each under the writer and model fences with the
+    source row rechecked; encoding happens outside the engine writer lock.
+    """
+    import sys
+    from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
+
+    runtime = sys.modules.get("truememory.tier_switch.runtime")
+    operation = runtime.current_operation(conn) if runtime is not None else None
+    if operation is None or not operation.models_ready or conn.in_transaction:
+        return 0  # A caller transaction must not absorb a batch of foreign writes.
+    vec_table = operation.tables[0]
+    with write_lock:
+        cursor = conn.execute("SELECT value FROM metadata WHERE key=?", (_BACKFILL_KEY,)).fetchone()
+        if cursor is None:
+            return 0
+        try:
+            start = int(cursor[0])
+        except (TypeError, ValueError):
+            start = 0
+        rows = conn.execute(
+            "SELECT id, content, sender, recipient, timestamp FROM messages WHERE id >= ? ORDER BY id LIMIT ?",
+            (start, window),
+        ).fetchall()
+        missing = [row for row in rows
+                   if conn.execute(f'SELECT 1 FROM main."{vec_table}" WHERE rowid=?', (row[0],)).fetchone() is None]
+    batch = missing[:budget]
+    published = 0
+    if batch:
+        with write_lock:
+            model, identity = _capture_rebuild_model(conn)
+        completion = _encode_with_mps_fallback(model, [row[1] for row in batch])
+        separation = _encode_with_mps_fallback(model, [_build_sep_text(row[2], row[3], row[4], row[1]) for row in batch])
+        selection = capture_writer_selection(conn)
+        for row, left, right in zip(batch, completion, separation):
+            with write_lock, _foreground_vector_publication(conn, identity, row[0], selection=selection) as tables:
+                current = conn.execute("SELECT id, content, sender, recipient, timestamp FROM messages WHERE id=?",
+                                       (row[0],)).fetchone()
+                if (current != tuple(row)
+                        or conn.execute(f'SELECT 1 FROM main."{tables[0]}" WHERE rowid=?', (row[0],)).fetchone()):
+                    continue  # Changed, deleted or published meanwhile.
+                conn.execute(f'INSERT INTO main."{tables[0]}"(rowid, embedding) VALUES (?, ?)',
+                             (row[0], serialize_f32(left)))
+                conn.execute(f'DELETE FROM main."{tables[1]}" WHERE rowid=?', (row[0],))
+                conn.execute(f'INSERT INTO main."{tables[1]}"(rowid, embedding) VALUES (?, ?)',
+                             (row[0], serialize_f32(right)))
+                _write_foreground_embedder_metadata_no_commit(conn, identity, selection=selection)
+                published += 1
+    if len(missing) > len(batch):
+        resume = str(batch[-1][0] + 1)
+    elif len(rows) == window:
+        resume = str(rows[-1][0] + 1)
+    else:
+        resume = None
+    # Compare-and-set: a smaller cursor noted meanwhile by another add survives.
+    with write_lock, writer_transaction(conn, capture_writer_selection(conn)):
+        if resume is None:
+            conn.execute("DELETE FROM metadata WHERE key=? AND value=?", (_BACKFILL_KEY, cursor[0]))
+        else:
+            conn.execute("UPDATE metadata SET value=? WHERE key=? AND value=?", (resume, _BACKFILL_KEY, cursor[0]))
+    return published
 
 
 def _build_streamed_vectors(

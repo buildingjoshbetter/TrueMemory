@@ -1167,6 +1167,7 @@ class TrueMemoryEngine:
             }
             new_id = insert_message(self.conn, msg)
 
+            vector_stored = False
             if pre_embedding is not None:
                 from truememory.vector_search import VectorPublicationChanged, _validate_foreground_vector_target
                 try:
@@ -1187,12 +1188,17 @@ class TrueMemoryEngine:
                             (new_id, serialize_f32(pre_sep_embedding)),
                         )
                     _write_foreground_embedder_metadata_no_commit(self.conn, pre_identity, selection=write_selection)
+                    vector_stored = True
                 except VectorPublicationChanged:
                     raise
                 except Exception as _serving_error:
                     from truememory.tier_switch.runtime import raise_if_serving_rejection
                     raise_if_serving_rejection(_serving_error)
                     logger.warning("Failed to store embedding for message %s during add()", new_id, exc_info=True)
+            if self._has_vectors and not vector_stored:
+                # Kept FTS-only for now; a later add with working models backfills it.
+                from truememory.vector_search import note_vectorless
+                note_vectorless(self.conn, new_id)
 
             # Incrementally update entity profile.
             # Skip for directives (#637 M-08): directive content must never
@@ -1216,6 +1222,14 @@ class TrueMemoryEngine:
                 if style_result.error_category is not None:
                     logger.debug("Style append %s for message %s: %s",
                                  style_result.outcome, new_id, style_result.error_category)
+
+        if vector_stored:
+            # Never fails the committed add: a retry would duplicate the memory.
+            try:
+                from truememory.vector_search import backfill_missing_vectors
+                backfill_missing_vectors(self.conn, write_lock=self._write_lock)
+            except Exception:
+                logger.debug("Vector backfill pass did not complete", exc_info=True)
 
         self._maybe_auto_consolidate()
 
@@ -2298,7 +2312,7 @@ class TrueMemoryEngine:
     # Search — full 6-layer pipeline
     # ──────────────────────────────────────────────────────────────────────
 
-    @engine_operation
+    @engine_fallback_operation
     def search_vectors_raw(self, query: str, limit: int = 5) -> list[dict] | None:
         """Pure vector cosine similarity search, or None if unavailable.
 
@@ -2317,7 +2331,7 @@ class TrueMemoryEngine:
             raise_if_serving_rejection(_serving_error)
             return None
 
-    @engine_operation
+    @engine_fallback_operation
     def search(self, query: str, limit: int = 10, _skip_surprise_boost: bool = False, _skip_reranker: bool = False, _skip_salience_guard: bool = False, include_directives: bool = False, landmark_sender: str | None = None) -> list[dict]:
         """
         Main search pipeline.
@@ -2748,7 +2762,7 @@ class TrueMemoryEngine:
     # Search — agentic multi-round retrieval
     # ──────────────────────────────────────────────────────────────────────
 
-    @engine_operation
+    @engine_fallback_operation
     def search_agentic(
         self,
         query: str,
@@ -3256,6 +3270,7 @@ class TrueMemoryEngine:
 
         stats["clustering"] = self.get_clustering_health()
         stats["maintenance"]["style"] = self.get_style_health()
+        stats["vector_coverage"] = self.get_vector_coverage(seed_backfill=True)
 
         # Add live DB stats if connected.
         if self.conn:
@@ -3276,6 +3291,31 @@ class TrueMemoryEngine:
                 logger.debug("Failed to get db size in get_stats()", exc_info=True)
 
         return stats
+
+    def get_vector_coverage(self, *, seed_backfill: bool = False) -> dict | None:
+        """Memories missing from the served vector pair; never opens the database.
+
+        ``seed_backfill`` records the first gap (older failures left no cursor)
+        so the next add with working models starts filling it.
+        """
+        if self.conn is None or not self._has_vectors:
+            return None
+        from truememory.tier_switch.runtime import serving_operation
+        from truememory.vector_search import note_vectorless, vector_coverage
+        try:
+            with serving_operation(self.conn, connection_lock=self._write_lock, models="none") as operation:
+                coverage = vector_coverage(self.conn, operation.tables)
+                if seed_backfill and coverage["vectorless"] and coverage["backfill_from"] is None:
+                    from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
+                    try:
+                        with self._write_lock, writer_transaction(self.conn, capture_writer_selection(self.conn)):
+                            note_vectorless(self.conn, coverage["first_vectorless_id"])
+                        coverage["backfill_from"] = str(coverage["first_vectorless_id"])
+                    except Exception:
+                        logger.debug("Vector backfill cursor was not seeded", exc_info=True)
+                return coverage
+        except Exception as error:
+            return {"status": "unavailable", "error_category": type(error).__name__[:64]}
 
     def close(self):
         """Detach this engine; a shared worker retains its own connection."""

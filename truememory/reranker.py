@@ -284,6 +284,10 @@ def get_reranker(
 
     name = model_name or get_current_reranker_name()
     from truememory.tier_switch.runtime import current_runtime_operation, TierRuntimeError
+    import sys
+    admitted = getattr(sys.modules.get("truememory.tier_switch.runtime"), "require_admitted_models", None)
+    if admitted is not None:
+        admitted()
     operation = current_runtime_operation()
     if operation is not None and name != operation.reranker_id:
         raise TierRuntimeError("Reranker override must be captured before serving admission")

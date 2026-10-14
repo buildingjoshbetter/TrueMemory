@@ -440,8 +440,7 @@ out["delete"] = engine.delete(2)
 engine._ensure_connection()
 out["directives"] = engine.conn.execute("SELECT count(*) FROM messages WHERE directive=1").fetchone()[0]
 try:
-    engine.search("fact", limit=3)
-    out["search"] = "ok"
+    out["search"] = [row.get("id") for row in engine.search("synthetic fact number 3", limit=3)]
 except Exception as error:
     out["search"] = type(error).__name__
 engine.close(); drain()
@@ -476,7 +475,9 @@ class ControlledDatabasesWithoutModels(unittest.TestCase):
         self.assertEqual(child["add"], 11)
         self.assertTrue(child["delete"])
         self.assertEqual(child["directives"], 0)
-        self.assertNotEqual(child["search"], "ok")
+        # Keyword (FTS) results, exactly like a legacy store without its model.
+        self.assertIsInstance(child["search"], list, child["search"])
+        self.assertIn(4, child["search"])
         self.assertEqual((result["vector"], result["count"]), (0, 10))
 
     def test_policy_controlled_database(self):
@@ -759,6 +760,42 @@ engine.close(); drain()
 emit(added=added, served=served, back=switch("base").get("outcome"), state=state())
 """
 
+ADD_IN_CALLER_TRANSACTION = """
+stub_models()
+from truememory.engine import TrueMemoryEngine
+engine = TrueMemoryEngine(DB)
+engine._ensure_connection()
+engine.conn.execute("BEGIN")
+try:
+    borrowed = engine.add("inside a caller transaction", sender="alice")["id"]
+except Exception as error:
+    borrowed = type(error).__name__
+engine.conn.rollback()
+clean = engine.add("after the caller transaction", sender="alice")["id"]
+engine.close(); drain()
+emit(borrowed=borrowed, clean=clean)
+"""
+
+ADD_WITHOUT_MODELS = """
+stub_models(embeddings_available=lambda: False, rerankers_available=lambda name: False)
+from truememory.engine import TrueMemoryEngine
+engine = TrueMemoryEngine(DB)
+ids = [engine.add(f"captured while models were down {i}", sender="alice")["id"] for i in range(3)]
+coverage = engine.get_stats()["vector_coverage"]
+engine.close(); drain()
+emit(ids=ids, coverage=coverage)
+"""
+
+ADD_WITH_MODELS = """
+stub_models()
+from truememory.engine import TrueMemoryEngine
+engine = TrueMemoryEngine(DB)
+added = engine.add("models are back", sender="alice")["id"]
+coverage = engine.get_stats()["vector_coverage"]
+engine.close(); drain()
+emit(added=added, coverage=coverage)
+"""
+
 HOLD_MAINTENANCE = """
 from truememory.maintenance import MaintenanceBusyError, maintenance_owner
 sys.stdin.readline()
@@ -937,6 +974,44 @@ class ConfigChangesFromOlderReleases(unittest.TestCase):
         self.assertEqual(result["switched"], "complete")
         self.assertEqual(result["state"]["selected"], "base")
         self.assertEqual(result["config"], "base")
+
+
+class VectorlessMemories(unittest.TestCase):
+    def test_add_in_caller_transaction_refuses_instead_of_dropping_vectors(self):
+        (result,) = run_scenario(steps("""
+            import subprocess
+            seed(10)
+            stub_models()
+            assert switch("edge")["outcome"] == "complete"
+        """, run_child(ADD_IN_CALLER_TRANSACTION), """
+            conn = connect()
+            emit(child=child, messages=conn.execute("SELECT count(*) FROM messages").fetchone()[0],
+                 clean_vector=conn.execute("SELECT count(*) FROM vec_messages_edge WHERE rowid=?",
+                                           (child.get("clean", -1),)).fetchone()[0])
+        """))
+        self.assertEqual(result["child"].get("borrowed"), "TierRuntimeError", result["child"])
+        self.assertEqual((result["child"]["clean"], result["clean_vector"], result["messages"]), (11, 1, 11))
+
+    def test_vectorless_memories_are_counted_and_backfilled(self):
+        (result,) = run_scenario(steps("""
+            import subprocess
+            seed(10)
+            stub_models()
+            assert switch("edge")["outcome"] == "complete"
+        """, run_child(ADD_WITHOUT_MODELS), """
+            offline = child
+        """, run_child(ADD_WITH_MODELS), """
+            conn = connect()
+            emit(offline=offline, online=child,
+                 vectors=[conn.execute(f"SELECT count(*) FROM {table} WHERE rowid IN (11, 12, 13, 14)").fetchone()[0]
+                          for table in ("vec_messages_edge", "vec_messages_sep_edge")])
+        """))
+        offline, online = result["offline"], result["online"]
+        self.assertEqual(offline.get("ids"), [11, 12, 13], offline)
+        self.assertEqual((offline["coverage"]["vectorless"], offline["coverage"]["backfill_from"]), (3, "11"))
+        self.assertEqual(online.get("added"), 14, online)
+        self.assertEqual((online["coverage"]["vectorless"], online["coverage"]["backfill_from"]), (0, None))
+        self.assertEqual(result["vectors"], [4, 4])
 
 
 class ActivationEdgeCases(unittest.TestCase):

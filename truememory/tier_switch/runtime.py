@@ -32,6 +32,14 @@ class TierRuntimeError(RuntimeError):
     """The process cannot safely serve the captured database selection."""
 
 
+class SelectedModelsUnavailable(RuntimeError):
+    """This admission runs without its tier's models; callers degrade (FTS only).
+
+    Deliberately not a serving rejection: search steps fall back exactly as a
+    legacy embedding failure does.
+    """
+
+
 class ConnectionWriteLock:
     """Identify Engine-owned SQL without claiming ownership of caller SQL."""
 
@@ -464,7 +472,9 @@ def serving_operation(
     if selection is not None:
         effective = selection.reranker_id if reranker_id is None else reranker_id
         if not _ready(selection, effective):
-            if borrowed and models == "required":
+            if borrowed and models != "none":
+                # A caller transaction cannot wait for model loading; never
+                # silently store or search without the vectors it could have.
                 raise TierRuntimeError("Runtime reconciliation requires a clean connection")
             ready = not borrowed and models != "none" and _project(
                 models, lambda: apply_frozen_selection(selection, deadline=deadline, cancelled=cancelled,
@@ -473,7 +483,7 @@ def serving_operation(
     elif policy is not None:
         effective = policy.reranker_id if reranker_id is None else reranker_id
         if not _policy_ready(policy, effective):
-            if borrowed and models == "required":
+            if borrowed and models != "none":
                 raise TierRuntimeError("Policy reconciliation requires a clean connection")
             ready = not borrowed and models != "none" and _project(
                 models, lambda: _prepare_legacy_policy(policy, effective, deadline=deadline, cancelled=cancelled))
@@ -554,6 +564,13 @@ def _project(models: str, projection: Callable[[], None]) -> bool:
         logging.getLogger(__name__).warning(
             "Selected tier models are unavailable; admitting without vector work", exc_info=True)
         return False
+
+
+def require_admitted_models() -> None:
+    """Refuse model use inside a controlled admission whose models did not load."""
+    operation = getattr(_local, "operation", None)
+    if operation is not None and not operation.models_ready:
+        raise SelectedModelsUnavailable("Selected tier models are unavailable for this operation")
 
 
 def require_model_load_allowed() -> None:

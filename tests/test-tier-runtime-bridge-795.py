@@ -376,8 +376,8 @@ class TestRuntimeBridge(unittest.TestCase):
     def test_engine_and_hybrid_outer_boundaries_are_present(self) -> None:
         engine = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
         klass = next(node for node in engine.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
-        boundaries = {"search": "engine_operation", "search_agentic": "engine_operation",
-                      "search_vectors_raw": "engine_operation", "update": "engine_operation",
+        boundaries = {"search": "engine_fallback_operation", "search_agentic": "engine_fallback_operation",
+                      "search_vectors_raw": "engine_fallback_operation", "update": "engine_operation",
                       "add": "engine_fallback_operation", "delete": "engine_source_operation",
                       "delete_all": "engine_source_operation"}
         for name, boundary in boundaries.items():
