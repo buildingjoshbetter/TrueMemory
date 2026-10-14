@@ -152,6 +152,11 @@ _held_fds: set[int] = set()
 _held_paths: dict[Path, int] = {}
 _owner_waiters: dict[Path, tuple[int, int, "MaintenanceCoordinator"]] = {}
 _thread_owners = threading.local()
+# Held while a tier activation waits to own maintenance. New owners in every
+# process yield to it, so a short publication step cannot starve behind owners
+# that release and re-acquire back to back (relaunching consolidation).
+_WANTED_SUFFIX = ".maintenance.wanted"
+_wanting: dict[Path, tuple[int, threading.Thread]] = {}
 
 
 class _AutomaticAdmission(NamedTuple):
@@ -192,6 +197,10 @@ def _acquire_owner(path: Path, on_busy: Callable[[], None] | None = None) -> int
             if on_busy is not None:
                 on_busy()
             return None
+        if _wanted_by_other_locked(path):
+            if on_busy is not None:
+                on_busy()
+            return None
         fd = try_file_lock(Path(str(path) + ".maintenance.lock"))
         if fd is not None:
             _held_fds.add(fd)
@@ -209,6 +218,61 @@ def _acquire_owner(path: Path, on_busy: Callable[[], None] | None = None) -> int
         elif on_busy is not None:
             on_busy()
         return fd
+
+
+def _wanted_by_other_locked(path: Path) -> bool:
+    held = _wanting.get(path)
+    if held is not None:
+        return held[1] is not threading.current_thread()
+    wanted = Path(str(path) + _WANTED_SUFFIX)
+    if not wanted.exists():
+        return False  # No activation has ever waited on this database.
+    try:
+        probe = try_file_lock(wanted)
+    except OSError:
+        return False  # Fairness is best effort; never block owners on a probe fault.
+    if probe is None:
+        return True
+    os.close(probe)
+    return False
+
+
+def maintenance_wanted_elsewhere(db_path: str | os.PathLike[str]) -> bool:
+    """Another thread or process is waiting to own maintenance (a tier activation)."""
+    path = canonical_database_path(db_path)
+    if path is None:
+        return False
+    with _registry_lock:
+        return _wanted_by_other_locked(path)
+
+
+@contextmanager
+def maintenance_wanted(db_path: str | os.PathLike[str]) -> Iterator[bool]:
+    """Ask new maintenance owners in every process to yield to this thread.
+
+    Yields False when the request could not be registered (best effort).
+    """
+    path = canonical_database_path(db_path)
+    fd = None
+    if path is not None:
+        try:
+            fd = try_file_lock(Path(str(path) + _WANTED_SUFFIX))
+        except OSError:
+            fd = None
+    if fd is not None:
+        with _registry_lock:
+            _held_fds.add(fd)
+            _wanting[path] = (fd, threading.current_thread())
+    try:
+        yield fd is not None
+    finally:
+        if fd is not None:
+            with _registry_lock:
+                if _wanting.get(path, (None,))[0] == fd:
+                    del _wanting[path]
+                if fd in _held_fds:
+                    _held_fds.discard(fd)
+                    os.close(fd)
 
 
 def _release_owner(fd: int) -> None:
@@ -365,7 +429,7 @@ def _active_initialization_receipt(path: Path, *, expected: tuple | None = None)
 
 
 def _after_fork() -> None:
-    global _registry_lock, _coordinators, _held_fds, _held_paths, _owner_waiters, _thread_owners
+    global _registry_lock, _coordinators, _held_fds, _held_paths, _owner_waiters, _thread_owners, _wanting
     # The child must not prolong its parent's ownership by retaining an
     # inherited descriptor. Inherited coordinator objects reject child use.
     for fd in _held_fds:
@@ -373,6 +437,7 @@ def _after_fork() -> None:
     _held_fds = set()
     _held_paths = {}
     _owner_waiters = {}
+    _wanting = {}
     _thread_owners = threading.local()
     for coordinator in tuple(_coordinators.values()):
         coordinator._admission_owner = None

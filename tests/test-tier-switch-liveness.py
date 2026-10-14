@@ -1239,6 +1239,34 @@ engine.close(); drain()
 emit(**out)
 """
 
+BACK_TO_BACK_MAINTENANCE = """
+from truememory.maintenance import MaintenanceBusyError, maintenance_owner
+stop = HOME / "stop-maintenance"
+cycles = refused = 0
+print("STARTED", flush=True)
+while not stop.exists():
+    try:
+        with maintenance_owner(DB):  # Like consolidation relaunching on pending adds.
+            cycles += 1
+            time.sleep(1.0)
+    except MaintenanceBusyError:
+        refused += 1
+        time.sleep(0.001)
+emit(cycles=cycles, refused=refused)
+"""
+
+FRESH_OPEN = """
+stub_models()
+from truememory.engine import TrueMemoryEngine
+started = time.monotonic()
+try:
+    result = len(TrueMemoryEngine(DB).get_all(limit=100))
+except Exception as error:
+    result = type(error).__name__
+emit(result=result, seconds=round(time.monotonic() - started, 1))
+"""
+
+
 class RetiredSelectionInPinnedProcess(unittest.TestCase):
     def run_retire(self, config_tier):
         (result,) = run_scenario(steps("""
@@ -1350,6 +1378,76 @@ class BackfillRobustness(unittest.TestCase):
         """))
         self.assertEqual(result["child"], {"search": "EmbeddingTargetError", "add": "EmbeddingTargetError"})
         self.assertEqual((result["messages"], result["cursor"]), (10, None))
+
+
+class ActivationFairness(unittest.TestCase):
+    def test_activation_is_not_starved_by_back_to_back_maintenance(self):
+        (result,) = run_scenario("""
+            import subprocess
+            seed(20)
+            stub_models(delay=0.02)
+            manager = switch("edge", join=False)["manager"]
+            worker = manager._active_thread
+            holder = subprocess.Popen([sys.executable, "-c", PRELUDE_SOURCE + %r], stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, text=True)
+            holder.stdout.readline()
+            worker.join(30)
+            finished = not worker.is_alive()
+            if not finished:
+                manager.cancel(); worker.join(30)
+            (HOME / "stop-maintenance").touch()
+            out, err = holder.communicate(timeout=30)
+            lines = [json.loads(line[7:]) for line in out.splitlines() if line.startswith("RESULT ")]
+            emit(finished=finished, outcome=manager._last_outcome, holder=lines[0] if lines else err[-2000:],
+                 state=state())
+        """ % BACK_TO_BACK_MAINTENANCE)
+        self.assertTrue(result["finished"], result)
+        self.assertEqual(result["outcome"], "complete")
+        self.assertGreater(result["holder"]["refused"], 0)
+        self.assertEqual(result["state"]["selected"], "edge")
+
+    def test_reader_drain_never_outlasts_fresh_opens_elsewhere(self):
+        # A 12 s reader in the worker's process (a long tool call) at activation.
+        (result,) = run_scenario("""
+            import subprocess
+            seed(30)
+            stub_models(delay=0.02)
+            from truememory.engine import TrueMemoryEngine
+            from truememory.tier_switch.manager import RebuildManager
+            from truememory.tier_switch.runtime import engine_serving_operation
+            engine = TrueMemoryEngine(DB); engine.get_all(limit=1); drain()
+            held = threading.Event()
+            def long_reader():
+                with engine_serving_operation(engine):
+                    held.set(); time.sleep(12)
+            finalize = RebuildManager._finalize_rebuild
+            def finalize_during_a_long_read(self, *args, **kwargs):
+                threading.Thread(target=long_reader, daemon=True).start()
+                held.wait(10)
+                return finalize(self, *args, **kwargs)
+            RebuildManager._finalize_rebuild = finalize_during_a_long_read
+            manager = switch("edge", join=False)["manager"]
+            worker = manager._active_thread
+            held.wait(60); time.sleep(0.5)
+            local = {}
+            def local_read():
+                started = time.monotonic()
+                try:
+                    local["result"] = len(engine.get_all(limit=100))
+                except Exception as error:
+                    local["result"] = type(error).__name__
+                local["seconds"] = round(time.monotonic() - started, 1)
+            reader = threading.Thread(target=local_read); reader.start()
+            fresh = subprocess.run([sys.executable, "-c", PRELUDE_SOURCE + %r], capture_output=True, text=True)
+            reader.join(30); worker.join(60)
+            lines = [json.loads(line[7:]) for line in fresh.stdout.splitlines() if line.startswith("RESULT ")]
+            engine.close(); drain()
+            emit(fresh=lines[0] if lines else fresh.stderr[-2000:], local=local, outcome=manager._last_outcome)
+        """ % FRESH_OPEN)
+        self.assertEqual(result["fresh"].get("result"), 30, result["fresh"])
+        self.assertEqual(result["local"].get("result"), 30, result["local"])
+        self.assertLess(result["local"]["seconds"], 8)
+        self.assertEqual(result["outcome"], "complete")
 
 
 if __name__ == "__main__":

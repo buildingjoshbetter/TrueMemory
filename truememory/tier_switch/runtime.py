@@ -32,6 +32,10 @@ class TierRuntimeError(RuntimeError):
     """The process cannot safely serve the captured database selection."""
 
 
+class AdmissionSelectionChanged(TierRuntimeError):
+    """The selection changed while this admission waited; nothing ran yet."""
+
+
 class SelectedModelsUnavailable(RuntimeError):
     """This admission runs without its tier's models; callers degrade (FTS only).
 
@@ -569,19 +573,19 @@ def serving_operation(
                       (vector._active_vec_table(conn), vector._active_sep_table(conn)))
             database = _database_identity(conn)
         if _authority_key(observed, observed_policy) != _authority_key(selection, policy):
-            raise TierRuntimeError("Database selection changed during runtime admission")
+            raise AdmissionSelectionChanged("Database selection changed during runtime admission")
         vector, reranker = _modules()
         if selection is not None:
             if ready and not _ready(selection, effective):
-                raise TierRuntimeError("Process selection changed during runtime admission")
+                raise AdmissionSelectionChanged("Process selection changed during runtime admission")
             tables, tier, effective = selection.tables, selection.target.tier, effective
         elif policy is not None:
             if ready and not _policy_ready(policy, effective):
-                raise TierRuntimeError("Process policy changed during runtime admission")
+                raise AdmissionSelectionChanged("Process policy changed during runtime admission")
             tables, tier = policy.tables, policy.target.tier
         else:
             if key != _legacy_key(reranker_id):
-                raise TierRuntimeError("Legacy runtime changed during admission")
+                raise AdmissionSelectionChanged("Legacy runtime changed during admission")
             tier = vector.resolve_tier()
             effective = reranker.get_current_reranker_name() if reranker_id is None else reranker_id
         operation = ServingOperation(selection, tables, tier, effective, key, conn, lease,
@@ -809,8 +813,7 @@ def engine_operation(function: Callable[P, R]) -> Callable[P, R]:
     """Initialize before pinning the public call's immutable table selection."""
     @wraps(function)
     def wrapped(engine: object, *args: object, **kwargs: object) -> R:
-        with engine_serving_operation(engine):
-            return function(engine, *args, **kwargs)
+        return _admitted_call(engine, function, args, kwargs, models="required")
     return wrapped
 
 
@@ -818,8 +821,7 @@ def engine_source_operation(function: Callable[P, R]) -> Callable[P, R]:
     """Admit a source-only operation without selected-model readiness."""
     @wraps(function)
     def wrapped(engine: object, *args: object, **kwargs: object) -> R:
-        with engine_serving_operation(engine, models="none"):
-            return function(engine, *args, **kwargs)
+        return _admitted_call(engine, function, args, kwargs, models="none")
     return wrapped
 
 
@@ -831,16 +833,29 @@ def engine_fallback_operation(function: Callable[P, R]) -> Callable[P, R]:
     """
     @wraps(function)
     def wrapped(engine: object, *args: object, **kwargs: object) -> R:
-        retry = current_runtime_operation() is None and not _in_caller_transaction(engine)
-        try:
-            with engine_serving_operation(engine, models="optional"):
-                return function(engine, *args, **kwargs)
-        except Exception as error:
-            if not retry or not _selection_changed(error):
-                raise
-        with engine_serving_operation(engine, models="optional"):
-            return function(engine, *args, **kwargs)
+        return _admitted_call(engine, function, args, kwargs, models="optional", retry_writer=True)
     return wrapped
+
+
+def _admitted_call(engine: object, function: Callable[..., R], args: tuple, kwargs: dict, *,
+                   models: str, retry_writer: bool = False) -> R:
+    """Retry a top-level call once when a selection change refused it before any effect.
+
+    Admission refusals happen before the body runs; a writer refusal rolled
+    back the body's transaction. Nested calls and caller transactions refuse.
+    """
+    retry = current_runtime_operation() is None and not _in_caller_transaction(engine)
+    started = False
+    try:
+        with engine_serving_operation(engine, models=models):
+            started = True
+            return function(engine, *args, **kwargs)
+    except Exception as error:
+        admission = not started and isinstance(error, AdmissionSelectionChanged)
+        if not retry or not (admission or (retry_writer and _selection_changed(error))):
+            raise
+    with engine_serving_operation(engine, models=models):
+        return function(engine, *args, **kwargs)
 
 
 def _in_caller_transaction(engine: object) -> bool:

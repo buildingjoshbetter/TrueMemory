@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Literal
 
 from truememory.embedding_target import EmbeddingTarget
-from truememory.maintenance import MaintenanceUnavailableError, canonical_database_path
+from truememory.maintenance import MaintenanceUnavailableError, canonical_database_path, maintenance_wanted_elsewhere
 from truememory.rebuild_source import read_rebuild_revision
 
 
@@ -116,7 +116,11 @@ def tier_activation_in_progress(db_path: str | os.PathLike[str]) -> bool:
     if lock is None:
         return True
     lock.release()
-    return False
+    # Waiting for maintenance counts: owners yield to it, so it starts shortly.
+    try:
+        return maintenance_wanted_elsewhere(db_path)
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 @contextmanager

@@ -38,8 +38,10 @@ _LOCK_PATH = _TRUEMEMORY_DIR / "rebuild.lock"
 _SOURCE_RESTARTS = 2
 _ACTIVATION_RETRIES = 3
 # How long the activation commit waits for this process's readers to drain
-# while it owns maintenance, before releasing it and retrying.
-_WRITER_DRAIN_SECONDS = 30.0
+# while it owns maintenance, before releasing it and retrying. Kept well below
+# the fresh-open wait (storage.DEFAULT_BUSY_TIMEOUT_MS, 10 s): opens elsewhere
+# get maintenance in the gap between attempts instead of failing.
+_WRITER_DRAIN_SECONDS = 4.0
 _CATCH_UP_ROUNDS = 5
 
 
@@ -699,17 +701,21 @@ class RebuildManager:
         The activation marker lets fresh opens elsewhere wait for this window
         instead of failing on maintenance; it is only a liveness hint.
         """
-        from truememory.maintenance import MaintenanceBusyError, maintenance_owner
+        from truememory.maintenance import MaintenanceBusyError, maintenance_owner, maintenance_wanted
         from truememory.tier_switch.job import acquire_tier_activation_lock
         with contextlib.ExitStack() as stack:
-            while True:
-                try:
-                    stack.enter_context(maintenance_owner(path))
-                    break
-                except MaintenanceBusyError:
-                    if (cancelled is not None and cancelled.is_set()) or time.monotonic() + 0.1 >= deadline:
-                        raise
-                    time.sleep(0.1)
+            # While waiting, new owners everywhere yield; the current one finishes.
+            with contextlib.ExitStack() as wanting:
+                asked = False
+                while True:
+                    try:
+                        stack.enter_context(maintenance_owner(path))
+                        break
+                    except MaintenanceBusyError:
+                        if (cancelled is not None and cancelled.is_set()) or time.monotonic() + 0.05 >= deadline:
+                            raise
+                        asked = asked or wanting.enter_context(maintenance_wanted(path))
+                        time.sleep(0.05)
             activation = acquire_tier_activation_lock(path, timeout=0.5)
             if activation is not None:
                 stack.callback(activation.release)

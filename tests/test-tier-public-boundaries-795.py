@@ -36,7 +36,8 @@ def enter_context(test_case: unittest.TestCase, context: contextlib.AbstractCont
 def definitions(path: str, names: set[str], namespace: dict, *, methods: bool = False) -> types.ModuleType:
     if path == "maintenance.py" and "_acquire_owner" in names:
         names = names | {"_AutomaticAdmission", "_automatic_admission_locked"}
-        namespace = {"threading": threading, "weakref": weakref, **namespace}
+        namespace = {"threading": threading, "weakref": weakref, "_wanted_by_other_locked": lambda path: False,
+                     **namespace}
     tree = ast.parse((ROOT / "truememory" / path).read_text(encoding="utf-8"))
     if methods:
         cls = next(node for node in tree.body if isinstance(node, ast.ClassDef))

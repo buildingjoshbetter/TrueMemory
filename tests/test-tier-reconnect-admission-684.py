@@ -206,7 +206,7 @@ class Fixture:
             "_coordinators": self.coordinators, "_held_paths": self.held_paths,
             "_held_fds": set(), "_thread_owners": threading.local(),
             "try_file_lock": file_lock, "_release_owner": release,
-            "canonical_database_path": lambda value: value,
+            "canonical_database_path": lambda value: value, "_wanted_by_other_locked": lambda path: False,
         })
         self.maintenance._active_initialization_receipt = lambda path: nullcontext(None)
         self.runtime = definitions("tier_switch/runtime.py", {"open_engine_for_operation"}, {
