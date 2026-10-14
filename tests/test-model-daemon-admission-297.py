@@ -32,6 +32,7 @@ def load_source(environment: dict[str, str], sensor: object) -> types.ModuleType
             module.created_workers.append(kwargs)
 
     module.__dict__.update({"os": types.SimpleNamespace(environ=environment), "psutil": sensor,
+                           "sys": types.SimpleNamespace(platform="linux"),
                            "threading": threading, "ThreadPoolExecutor": Workers,
                            "time": types.SimpleNamespace(time=lambda: 0.0),
                            "_MAX_MESSAGE_SIZE": 10 * 1024 * 1024, "logging": logging,
@@ -77,6 +78,13 @@ class DaemonAdmissionControls(unittest.TestCase):
                 self.assertEqual(server._max_rss_bytes, expected_gib * GIB)
         self.assertEqual(self.physical.call_count, 6)
         self.current.assert_not_called()
+
+    def test_macos_small_hosts_keep_room_for_float32_cpu_models(self) -> None:
+        self.module.sys = types.SimpleNamespace(platform="darwin")
+        for physical_gib, expected_gib in [(4, 2), (8, 4), (12, 4), (16, 4), (32, 8)]:
+            with self.subTest(physical_gib=physical_gib):
+                self.physical.return_value = types.SimpleNamespace(total=physical_gib * GIB)
+                self.assertEqual(self.automatic()._max_rss_bytes, expected_gib * GIB)
 
     def test_physical_bytes_floor_division_and_signed64_boundary(self) -> None:
         for physical, expected in [(4 * GIB + 3, 2 * GIB + 1), (2**63 - 1, 8 * GIB)]:
@@ -201,7 +209,7 @@ class DaemonAdmissionControls(unittest.TestCase):
         self.assertIn('[executable, "-m", "truememory.model_server"]', client)
         self.assertIn('truememory-model-server = "truememory.model_server:main"', (ROOT / "pyproject.toml").read_text())
         self.assertEqual(hashlib.sha256((ROOT / "truememory/mps_utils.py").read_bytes()).hexdigest(),
-                         "f6643a6a06175218a9af42df14a5837d56ae4b1ee500712e0bfbc5b5c78f51dc")
+                         "f160139bc6c405ddb0d6139830e8ae17adf12626b7a5ceb67b15ffc35a6e5613")
 
 
 if __name__ == "__main__":

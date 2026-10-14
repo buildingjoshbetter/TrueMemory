@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import os
+import sys
 import threading
 from typing import Literal
 import weakref
@@ -717,8 +718,9 @@ def automatic_budget_bytes() -> int:
         raise MemoryAdmissionRefused("Local physical-memory sensor invalid")
     budget = physical // 4
     if budget:
-        # Same small-host floor as the model server: Base/Pro need about 2.3 GB.
-        budget = min(8 * 1024**3, max(budget, min(physical // 2, 3 * 1024**3)))
+        # Same small-host floor as the model server (float32 Qwen on macOS CPU).
+        floor = (4 if sys.platform == "darwin" else 3) * 1024**3
+        budget = min(8 * 1024**3, max(budget, min(physical // 2, floor)))
     if not budget:
         raise MemoryAdmissionRefused("Local automatic budget is not positive")
     return budget
@@ -845,6 +847,12 @@ class AllocationSession:
     def defer_to_exception(self, error: BaseException) -> None:
         # The exception already owns its traceback; the ticket must follow that lifetime.
         error.__dict__.setdefault("_truememory_allocation_sessions", []).append(self)
+
+    def release(self, label: str) -> None:
+        """Return one finished stage's reservation before the session closes."""
+        lease = self._leases.pop(label, None)
+        if lease is not None:
+            lease.close()
 
     def close(self) -> None:
         if self._closed:

@@ -78,14 +78,14 @@ class BudgetTestCase(unittest.TestCase):
 
 class TestMPSBudget(BudgetTestCase):
     def test_preserved_intended_byte_curve(self) -> None:
-        # Every curve point is below the 3.25 GiB floor for resident Base/Pro models.
-        for physical, expected in ((8, 3.25), (12, 3.25), (16, 3.25),
-                                   (18, 3.25), (24, 3.25), (32, 3.25), (64, 3.25)):
+        # Every curve point is below the 4 GiB floor for resident Base/Pro models.
+        for physical, expected in ((8, 4), (12, 4), (16, 4),
+                                   (18, 4), (24, 4), (32, 4), (64, 4)):
             with self.subTest(physical=physical):
                 self.assertEqual(self.budget._default_mps_budget_bytes(physical * GIB), int(expected * GIB))
 
     def test_differing_recommended_sizes_enforce_the_same_bytes(self) -> None:
-        for recommended, fraction in ((20, 0.1625), (25, 0.13)):
+        for recommended, fraction in ((20, 0.2), (25, 0.16)):
             with self.subTest(recommended=recommended):
                 self.fresh()
                 def query() -> int:
@@ -93,8 +93,8 @@ class TestMPSBudget(BudgetTestCase):
                     return recommended * GIB
                 self.recommended.side_effect = query
                 policy = self.budget.ensure_mps_memory_budget("mps")
-                self.assertEqual(policy.intended_bytes, int(3.25 * GIB))
-                self.assertEqual(policy.effective_bytes, int(3.25 * GIB))
+                self.assertEqual(policy.intended_bytes, int(4 * GIB))
+                self.assertEqual(policy.effective_bytes, int(4 * GIB))
                 self.assertEqual(policy.recommended_bytes, recommended * GIB)
                 self.assertEqual(policy.fraction, fraction)
                 self.assertEqual((policy.source, policy.enforcement), ("automatic", "enforced"))
@@ -133,7 +133,7 @@ class TestMPSBudget(BudgetTestCase):
 
     def test_low_high_conflicts_fail_before_model_allocation(self) -> None:
         for env, expected_queries in (({HIGH: "0.1", LOW: "0.2"}, 0),
-                                      ({LOW: "1.8"}, 0), ({LOW: "0.2"}, 1)):
+                                      ({LOW: "1.8"}, 0), ({LOW: "0.3"}, 1)):
             with self.subTest(env=env):
                 self.fresh(env)
                 with self.assertRaisesRegex(self.budget.MPSBudgetError, "low watermark exceeds"):
@@ -230,7 +230,7 @@ class TestMPSBudget(BudgetTestCase):
         self.assertEqual(len(results), 8)
         self.assertTrue(all(result is results[0] for result in results))
         self.recommended.assert_called_once_with()
-        self.setter.assert_called_once_with(0.1625)
+        self.setter.assert_called_once_with(0.2)
 
 
 class TestFactoryCoverage(BudgetTestCase):
@@ -284,7 +284,8 @@ class TestFactoryCoverage(BudgetTestCase):
         tree = ast.parse((SOURCE / "model_server.py").read_text(encoding="utf-8"))
         server = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "ModelServer")
         names = {"_build_embed_model", "_get_reranker", "_mark_sticky_cpu", "_flush_mps_cache",
-                 "_check_process_memory", "_construct_model", "_discard_models", "_memory_stage"}
+                 "_check_process_memory", "_construct_model", "_discard_models", "_memory_stage",
+                 "_release_stage"}
         server.body = [node for node in server.body if isinstance(node, ast.FunctionDef) and node.name in names
                        or isinstance(node, ast.Assign) and any(
                            isinstance(target, ast.Name) and target.id == "_MODEL_WEIGHT_BYTES"
@@ -330,7 +331,7 @@ class TestFactoryCoverage(BudgetTestCase):
                     self.assertEqual(self.factories[0][1]["device"],
                                      {"mps": "mps", "auto": None, "cpu": "cpu", "cuda": "cuda:0"}[device])
                     if device in ("mps", "auto"):
-                        self.assertEqual(self.events, ["recommended", ("set", 0.1625), "construct"])
+                        self.assertEqual(self.events, ["recommended", ("set", 0.2), "construct"])
                     else:
                         self.assertEqual(self.events, ["construct"])
                         self.assertNotIn(LOW, self.env)
@@ -343,9 +344,9 @@ class TestFactoryCoverage(BudgetTestCase):
         server._get_reranker("synthetic/reranker")
         self.local_reranker().get_reranker("synthetic/reranker", device="mps")
         self.assertEqual(len(self.factories), 4)
-        self.assertEqual(self.events[:2], ["recommended", ("set", 0.1625)])
+        self.assertEqual(self.events[:2], ["recommended", ("set", 0.2)])
         self.recommended.assert_called_once_with()
-        self.setter.assert_called_once_with(0.1625)
+        self.setter.assert_called_once_with(0.2)
 
     def test_cpu_fast_encoder_sticky_reranker_and_explicit_cpu_skip_budget(self) -> None:
         server = self.server()
@@ -385,7 +386,7 @@ class TestFactoryCoverage(BudgetTestCase):
         self.assertIsNone(rerank._model)
         self.assertIsNone(server._reranker)
         self.assertIsNone(self.budget.get_mps_memory_budget())
-        self.setter.assert_called_once_with(0.1625)
+        self.setter.assert_called_once_with(0.2)
 
     def test_server_sticky_flags_do_not_switch_the_whole_shared_throttler_to_cpu(self) -> None:
         server = self.server()
@@ -444,7 +445,7 @@ class TestThrottlerBudget(BudgetTestCase):
     def test_memory_and_growth_use_effective_bytes_not_physical_ram(self) -> None:
         policy = self.budget.ensure_mps_memory_budget("mps")
         throttler = self.module.DynamicThrottler("mps")
-        self.assertEqual(throttler.mps_cap_gb, 3.25)
+        self.assertEqual(throttler.mps_cap_gb, 4.0)
         for ratio, status in ((0.84, "ok"), (0.85, "warning"), (0.95, "critical")):
             with self.subTest(ratio=ratio):
                 self.now += 20
@@ -452,7 +453,7 @@ class TestThrottlerBudget(BudgetTestCase):
                 readings = throttler._read_all_channels()
                 self.assertAlmostEqual(readings["mps_level"]["ratio"], ratio)
                 self.assertEqual(readings["mps_level"]["status"], status)
-        self.assertEqual(throttler.growth_tracker._cap_gb, 3.25)
+        self.assertEqual(throttler.growth_tracker._cap_gb, 4.0)
         self.assertAlmostEqual(readings["growth_rate"]["slope_pct"], 10)
         self.assertEqual(throttler._build_metrics()["mps_budget"], {
             "scope": "process_mps_allocator",
@@ -488,7 +489,7 @@ class TestThrottlerBudget(BudgetTestCase):
         self.assertEqual(throttler._read_all_channels()["mps_level"]["status"], "unknown")
         self.budget.ensure_mps_memory_budget("mps")
         self.assertEqual(throttler._read_all_channels()["mps_level"]["status"], "ok")
-        self.assertEqual(throttler.mps_cap_gb, 3.25)
+        self.assertEqual(throttler.mps_cap_gb, 4.0)
 
     def test_mixed_device_daemon_keeps_monitoring_the_surviving_mps_model(self) -> None:
         policy = self.budget.ensure_mps_memory_budget("mps")
