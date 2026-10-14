@@ -1239,20 +1239,31 @@ engine.close(); drain()
 emit(**out)
 """
 
+# Consolidation relaunching on pending adds: 2 s runs back to back. A relaunch
+# re-acquires at once; that is modelled without any release gap (no timing
+# luck either way), releasing only when the product's acquisition rule would
+# refuse the relaunch. Releases older code never makes, so it can only starve.
 BACK_TO_BACK_MAINTENANCE = """
-from truememory.maintenance import MaintenanceBusyError, maintenance_owner
-stop = HOME / "stop-maintenance"
-cycles = refused = 0
-print("STARTED", flush=True)
-while not stop.exists():
-    try:
-        with maintenance_owner(DB):  # Like consolidation relaunching on pending adds.
-            cycles += 1
-            time.sleep(1.0)
-    except MaintenanceBusyError:
-        refused += 1
-        time.sleep(0.001)
-emit(cycles=cycles, refused=refused)
+import truememory.maintenance as maintenance
+path = maintenance.canonical_database_path(DB)
+refuses_relaunch = getattr(maintenance, "_wanted_by_other_locked", None)
+end = time.monotonic() + 60
+fd, announced = None, False
+while time.monotonic() < end:
+    if fd is None:
+        fd = maintenance._acquire_owner(path)
+        if fd is None:
+            time.sleep(0.001)
+            continue
+        if not announced:
+            announced = True
+            print("HELD", flush=True)
+    time.sleep(2.0)
+    with maintenance._registry_lock:
+        refused = refuses_relaunch is not None and refuses_relaunch(path)
+    if refused:
+        maintenance._release_owner(fd)
+        fd = None
 """
 
 FRESH_OPEN = """
@@ -1394,24 +1405,32 @@ class ActivationFairness(unittest.TestCase):
             import subprocess
             seed(20)
             stub_models(delay=0.02)
+            from truememory.tier_switch.manager import RebuildManager
+            holding, activating = threading.Event(), threading.Event()
+            finalize = RebuildManager._finalize_rebuild
+            def finalize_once_maintenance_is_busy(self, *args, **kwargs):
+                holding.wait(60)  # Deterministic: the holder owns maintenance before activation.
+                activating.set()
+                return finalize(self, *args, **kwargs)
+            RebuildManager._finalize_rebuild = finalize_once_maintenance_is_busy
             manager = switch("edge", join=False)["manager"]
             worker = manager._active_thread
             holder = subprocess.Popen([sys.executable, "-c", PRELUDE_SOURCE + %r], stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE, text=True)
-            holder.stdout.readline()
-            worker.join(30)
-            finished = not worker.is_alive()
+            assert holder.stdout.readline().startswith("HELD")
+            holding.set()
+            activating.wait(60)
+            started = time.monotonic()
+            worker.join(12)
+            finished, seconds = not worker.is_alive(), round(time.monotonic() - started, 1)
             if not finished:
                 manager.cancel(); worker.join(30)
-            (HOME / "stop-maintenance").touch()
-            out, err = holder.communicate(timeout=30)
-            lines = [json.loads(line[7:]) for line in out.splitlines() if line.startswith("RESULT ")]
-            emit(finished=finished, outcome=manager._last_outcome, holder=lines[0] if lines else err[-2000:],
-                 state=state())
+            holder.kill(); holder.wait()
+            emit(finished=finished, seconds=seconds, outcome=manager._last_outcome, state=state())
         """ % BACK_TO_BACK_MAINTENANCE)
         self.assertTrue(result["finished"], result)
+        self.assertLess(result["seconds"], 12)
         self.assertEqual(result["outcome"], "complete")
-        self.assertGreater(result["holder"]["refused"], 0)
         self.assertEqual(result["state"]["selected"], "edge")
 
     def test_reader_drain_never_outlasts_fresh_opens_elsewhere(self):
