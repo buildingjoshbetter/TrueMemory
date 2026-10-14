@@ -409,5 +409,62 @@ class ActivationFailuresKeepPreviousServing(unittest.TestCase):
         self.assertEqual(result["final"]["selected"], "edge")
 
 
+
+CHILD_WITHOUT_MODELS = """
+stub_models(embeddings_available=lambda: False, rerankers_available=lambda name: False)
+from truememory.engine import TrueMemoryEngine
+engine = TrueMemoryEngine(DB)
+out = {"get_all": len(engine.get_all(limit=100)), "get": engine.get(1)["content"]}
+out["add"] = engine.add("stored without vectors", sender="alice")["id"]
+out["delete"] = engine.delete(2)
+engine._ensure_connection()
+out["directives"] = engine.conn.execute("SELECT count(*) FROM messages WHERE directive=1").fetchone()[0]
+try:
+    engine.search("fact", limit=3)
+    out["search"] = "ok"
+except Exception as error:
+    out["search"] = type(error).__name__
+engine.close(); drain()
+emit(**out)
+"""
+
+
+class ControlledDatabasesWithoutModels(unittest.TestCase):
+    def run_child(self, switch_to):
+        (result,) = run_scenario("""
+            import subprocess
+            seed(10)
+            stub_models()
+            switched = switch(%r)["outcome"]
+            child = subprocess.run([sys.executable, "-c", PRELUDE_SOURCE + %r], capture_output=True, text=True)
+            lines = [json.loads(line[7:]) for line in child.stdout.splitlines() if line.startswith("RESULT ")]
+            conn = connect()
+            table = "vec_messages_edge" if %r == "edge" else "vec_messages_basepro"
+            emit(switched=switched, child=lines[0] if lines else child.stderr[-3000:], state=state(),
+                 vector=conn.execute(f"SELECT count(*) FROM {table} WHERE rowid=11").fetchone()[0],
+                 count=conn.execute("SELECT count(*) FROM messages").fetchone()[0])
+        """ % (switch_to, CHILD_WITHOUT_MODELS, switch_to))
+        return result
+
+    def assert_source_operations(self, result, selected):
+        self.assertEqual(result["switched"], "complete")
+        self.assertEqual(result["state"]["selected"], selected)
+        child = result["child"]
+        self.assertIsInstance(child, dict, child)
+        self.assertEqual(child["get_all"], 10)
+        self.assertEqual(child["get"], "synthetic fact number 0")
+        self.assertEqual(child["add"], 11)
+        self.assertTrue(child["delete"])
+        self.assertEqual(child["directives"], 0)
+        self.assertNotEqual(child["search"], "ok")
+        self.assertEqual((result["vector"], result["count"]), (0, 10))
+
+    def test_policy_controlled_database(self):
+        self.assert_source_operations(self.run_child("pro"), "pro")
+
+    def test_certified_selection(self):
+        self.assert_source_operations(self.run_child("edge"), "edge")
+
+
 if __name__ == "__main__":
     unittest.main()

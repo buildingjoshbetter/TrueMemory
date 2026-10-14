@@ -307,6 +307,9 @@ class ServingOperation:
     policy: LegacyTierPolicy | None = None
     _connection_lock: object | None = field(default=None, repr=False, compare=False)
     _defer_maintenance: bool = field(default=False, repr=False, compare=False)
+    # False only for controlled admissions that did not (or could not) project
+    # the selected models: SQL-only bodies may run, model use is refused.
+    models_ready: bool = field(default=True, compare=False)
 
     def fork_child(self) -> RuntimeChild:
         if current_operation(self._connection) is not self:
@@ -338,7 +341,7 @@ class RuntimeChild:
                                          original.reranker_id, original.key, connection, lease, original._database,
                                          original.borrowed, original.policy,
                                          original._connection_lock if connection is original._connection else None,
-                                         original._defer_maintenance)
+                                         original._defer_maintenance, original.models_ready)
             lease.check_admission()
             with _bound(operation):
                 yield operation
@@ -427,9 +430,18 @@ def _connection_read(
 def serving_operation(
     conn: sqlite3.Connection, *, deadline: float | None = None,
     cancelled: threading.Event | None = None, connection_lock: object | None = None,
-    reranker_id: str | None = None, _defer_maintenance: bool = False,
+    reranker_id: str | None = None, _defer_maintenance: bool = False, models: str = "required",
 ) -> Iterator[ServingOperation]:
+    """Admit one public operation on a captured database selection.
+
+    ``models`` applies to controlled databases only: "required" projects the
+    selected embedding and reranker before admission, "none" never does (SQL-
+    only bodies such as get/delete), and "optional" projects when possible and
+    otherwise admits with models_ready=False (FTS-only add).
+    """
     serving._control(None, deadline, cancelled)
+    if models not in _MODEL_MODES:
+        raise TierRuntimeError("Unsupported model admission mode")
     if reranker_id is not None:
         _reranker_id(reranker_id)
     current = current_operation(conn)
@@ -446,19 +458,23 @@ def serving_operation(
         selection = _read_selection(conn)
         policy = _read_policy(conn) if selection is None else None
         borrowed = conn.in_transaction
+    ready = True
     if selection is not None:
         effective = selection.reranker_id if reranker_id is None else reranker_id
         if not _ready(selection, effective):
-            if borrowed:
+            if borrowed and models == "required":
                 raise TierRuntimeError("Runtime reconciliation requires a clean connection")
-            apply_frozen_selection(selection, deadline=deadline, cancelled=cancelled, reranker_id=effective)
+            ready = not borrowed and models != "none" and _project(
+                models, lambda: apply_frozen_selection(selection, deadline=deadline, cancelled=cancelled,
+                                                       reranker_id=effective))
         key = selection_key(selection, effective)
     elif policy is not None:
         effective = policy.reranker_id if reranker_id is None else reranker_id
         if not _policy_ready(policy, effective):
-            if borrowed:
+            if borrowed and models == "required":
                 raise TierRuntimeError("Policy reconciliation requires a clean connection")
-            _prepare_legacy_policy(policy, effective, deadline=deadline, cancelled=cancelled)
+            ready = not borrowed and models != "none" and _project(
+                models, lambda: _prepare_legacy_policy(policy, effective, deadline=deadline, cancelled=cancelled))
         key = policy_key(policy, effective)
     else:
         vector, _ = _modules()
@@ -490,11 +506,11 @@ def serving_operation(
             raise TierRuntimeError("Database selection changed during runtime admission")
         vector, reranker = _modules()
         if selection is not None:
-            if not _ready(selection, effective):
+            if ready and not _ready(selection, effective):
                 raise TierRuntimeError("Process selection changed during runtime admission")
             tables, tier, effective = selection.tables, selection.target.tier, effective
         elif policy is not None:
-            if not _policy_ready(policy, effective):
+            if ready and not _policy_ready(policy, effective):
                 raise TierRuntimeError("Process policy changed during runtime admission")
             tables, tier = policy.tables, policy.target.tier
         else:
@@ -503,10 +519,29 @@ def serving_operation(
             tier = vector.resolve_tier()
             effective = reranker.get_current_reranker_name() if reranker_id is None else reranker_id
         operation = ServingOperation(selection, tables, tier, effective, key, conn, lease,
-                                     database, borrowed, policy, connection_lock, _defer_maintenance)
+                                     database, borrowed, policy, connection_lock, _defer_maintenance, ready)
         lease.check_admission()
         with _bound(operation):
             yield operation
+
+
+_MODEL_MODES = frozenset({"required", "optional", "none"})
+
+
+def _project(models: str, projection: Callable[[], None]) -> bool:
+    """Run model projection; only optional admission survives a model fault."""
+    try:
+        projection()
+        return True
+    except (TierRuntimeError, serving.ServingLeaseError, serving.ServingLeaseTimeout):
+        raise
+    except Exception:
+        if models == "required":
+            raise
+        import logging
+        logging.getLogger(__name__).warning(
+            "Selected tier models are unavailable; admitting without vector work", exc_info=True)
+        return False
 
 
 def require_model_load_allowed() -> None:
@@ -647,7 +682,7 @@ def _legacy_initialization_is_local(conn: sqlite3.Connection, operation: Serving
 @contextmanager
 def engine_serving_operation(
     engine: object, *, reranker_override: str | None = None,
-    _suppress_maintenance: bool = False,
+    _suppress_maintenance: bool = False, models: str = "required",
 ) -> Iterator[ServingOperation]:
     """Finish cold initialization before capturing tables for the public body."""
     open_engine_for_operation(engine)
@@ -658,13 +693,15 @@ def engine_serving_operation(
     try:
         if cold:
             with serving_operation(engine.conn, connection_lock=engine._write_lock,
-                                   reranker_id=reranker_override, _defer_maintenance=owns_scope) as preparing:
+                                   reranker_id=reranker_override, _defer_maintenance=owns_scope,
+                                   models=models) as preparing:
                 engine._initialize_connection(_suppress_maintenance=True, _preparing=owns_scope)
                 initialized = True
                 if parent is not None and current_operation(engine.conn) is not preparing:
                     raise TierRuntimeError("Initialization changed the captured serving operation")
         with serving_operation(engine.conn, connection_lock=engine._write_lock,
-                               reranker_id=reranker_override, _defer_maintenance=owns_scope) as operation:
+                               reranker_id=reranker_override, _defer_maintenance=owns_scope,
+                               models=models) as operation:
             yield operation
     finally:
         if owns_scope and not _suppress_maintenance and (initialized or not cold):
@@ -689,6 +726,24 @@ def engine_operation(function: Callable[P, R]) -> Callable[P, R]:
     @wraps(function)
     def wrapped(engine: object, *args: object, **kwargs: object) -> R:
         with engine_serving_operation(engine):
+            return function(engine, *args, **kwargs)
+    return wrapped
+
+
+def engine_source_operation(function: Callable[P, R]) -> Callable[P, R]:
+    """Admit a source-only operation without selected-model readiness."""
+    @wraps(function)
+    def wrapped(engine: object, *args: object, **kwargs: object) -> R:
+        with engine_serving_operation(engine, models="none"):
+            return function(engine, *args, **kwargs)
+    return wrapped
+
+
+def engine_fallback_operation(function: Callable[P, R]) -> Callable[P, R]:
+    """Admit with selected models when they load, otherwise without vectors."""
+    @wraps(function)
+    def wrapped(engine: object, *args: object, **kwargs: object) -> R:
+        with engine_serving_operation(engine, models="optional"):
             return function(engine, *args, **kwargs)
     return wrapped
 

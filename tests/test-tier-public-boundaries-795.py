@@ -2118,7 +2118,8 @@ class TestColdPublicInitialization(unittest.TestCase):
         self.namespace_values = self.namespace(_HAS_VECTOR=True, _HAS_HYBRID=True,
             init_vec_table=self.vector.init_vec_table, TrueMemoryMigrationError=RuntimeError,
             resolve_tier=lambda: "edge", logger=logging.getLogger("synthetic-initialization"),
-            engine_operation=self.api.engine_operation)
+            engine_operation=self.api.engine_operation, engine_fallback_operation=self.api.engine_fallback_operation,
+            engine_source_operation=self.api.engine_source_operation)
         self.methods = definitions("engine.py", {"_ensure_connection", "_initialize_connection", "_maybe_auto_consolidate",
             "_maybe_startup_consolidate", "search_vectors_raw"}, self.namespace_values, methods=True)
         self.engine = types.SimpleNamespace(conn=self.conn, ready=False, _runtime_initialized=False,
@@ -2340,6 +2341,7 @@ class TestBorrowedPublicCompatibility(unittest.TestCase):
             "add", "delete_all", "search_simple"}, self.namespace(
             _validate_add_content=validators._validate_add_content, _validate_delete_user=validators._validate_delete_user,
             engine_operation=self.api.engine_operation, engine_handle_operation=self.api.engine_handle_operation,
+            engine_fallback_operation=self.api.engine_fallback_operation, engine_source_operation=self.api.engine_source_operation,
             search_fts=fts.search_fts, sqlite3=sqlite3, _HAS_VECTOR=False, _HAS_HYBRID=False), methods=True)
         self.engine = types.SimpleNamespace(conn=self.conn, ready=False, _runtime_initialized=False,
             _write_lock=threading.Lock(), _init_lock=threading.Lock(), _has_vectors=False,

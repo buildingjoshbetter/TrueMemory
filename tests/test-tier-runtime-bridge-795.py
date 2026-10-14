@@ -376,9 +376,13 @@ class TestRuntimeBridge(unittest.TestCase):
     def test_engine_and_hybrid_outer_boundaries_are_present(self) -> None:
         engine = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
         klass = next(node for node in engine.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
-        for name in ("search", "search_agentic", "search_vectors_raw", "add", "update", "delete", "delete_all"):
+        boundaries = {"search": "engine_operation", "search_agentic": "engine_operation",
+                      "search_vectors_raw": "engine_operation", "update": "engine_operation",
+                      "add": "engine_fallback_operation", "delete": "engine_source_operation",
+                      "delete_all": "engine_source_operation"}
+        for name, boundary in boundaries.items():
             node = next(node for node in klass.body if isinstance(node, ast.FunctionDef) and node.name == name)
-            self.assertIn("engine_operation", [ast.unparse(value) for value in node.decorator_list])
+            self.assertIn(boundary, [ast.unparse(value) for value in node.decorator_list])
         hybrid = ast.parse((ROOT / "truememory/hybrid.py").read_text(encoding="utf-8"))
         function = next(node for node in hybrid.body if isinstance(node, ast.FunctionDef) and node.name == "search_hybrid")
         self.assertIn("database_operation", [ast.unparse(value) for value in function.decorator_list])
@@ -449,7 +453,7 @@ class TestRuntimeBridge(unittest.TestCase):
                 self.fail("Nested control must reach the forked child")
         child.close()
 
-    def test_actual_selected_engine_init_reconciles_before_validation_and_keeps_schedule(self) -> None:
+    def test_actual_selected_engine_init_validates_without_model_projection_and_keeps_schedule(self) -> None:
         selected = self.select()
         tree = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
         source = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
@@ -458,8 +462,10 @@ class TestRuntimeBridge(unittest.TestCase):
         }]
         calls = []
         def validate(conn):
+            # Connection initialization is SQL-only: vector operations project models.
             self.assertEqual(self.api.current_operation(conn).selection, selected)
-            self.assertEqual(self.api.runtime_acknowledgement(), self.api.selection_key(selected))
+            self.assertFalse(self.api.current_operation(conn).models_ready)
+            self.assertIsNone(self.api.runtime_acknowledgement())
             calls.append("validate")
         def imports(name, globals=None, locals=None, fromlist=(), level=0):
             if name == "sqlite_vec":

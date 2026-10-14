@@ -48,7 +48,9 @@ from truememory.storage import (
 from truememory.fts_search import search_fts
 from truememory._platform import _env_int
 
-from truememory.tier_switch.runtime import engine_handle_operation, engine_operation
+from truememory.tier_switch.runtime import (
+    engine_fallback_operation, engine_handle_operation, engine_operation, engine_source_operation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -698,9 +700,13 @@ class TrueMemoryEngine:
                 candidate.close()
 
     def _ensure_connection(self, *, _suppress_maintenance: bool = False) -> None:
-        """Reconcile committed selection before any vector compatibility work."""
+        """Initialize the connection; selected models are projected by vector operations.
+
+        Standalone callers (get, get_all, stats, directive listing) only read
+        SQL, so a controlled database never waits on native model readiness.
+        """
         from truememory.tier_switch.runtime import engine_serving_operation
-        with engine_serving_operation(self, _suppress_maintenance=_suppress_maintenance):
+        with engine_serving_operation(self, _suppress_maintenance=_suppress_maintenance, models="none"):
             self._initialize_connection(_suppress_maintenance=_suppress_maintenance)
 
     def _initialize_connection(self, *, _suppress_maintenance: bool = False,
@@ -1065,7 +1071,7 @@ class TrueMemoryEngine:
     # ──────────────────────────────────────────────────────────────────────
 
     @_validate_add_content
-    @engine_operation
+    @engine_fallback_operation
     def add(
         self,
         content: str,
@@ -1096,10 +1102,17 @@ class TrueMemoryEngine:
 
         from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
         write_selection = capture_writer_selection(self.conn)
+        import sys
+        runtime = sys.modules.get("truememory.tier_switch.runtime")
+        operation = runtime.current_operation(self.conn) if runtime is not None else None
 
         pre_embedding = None
         pre_sep_embedding = None
-        if self._has_vectors:
+        if not getattr(operation, "models_ready", True):
+            # The selected tier's models could not load: keep the memory (FTS),
+            # exactly like a legacy embedding failure, instead of losing it.
+            logger.warning("Selected embedding model unavailable; storing memory without vectors")
+        elif self._has_vectors:
             from truememory.vector_search import VectorPublicationChanged
             try:
                 from truememory.vector_search import (
@@ -1285,7 +1298,7 @@ class TrueMemoryEngine:
         """Compatibility entry point; the coordinator owns the worker handle."""
         self._maybe_auto_consolidate()
 
-    @engine_operation
+    @engine_source_operation
     def delete(self, memory_id: int) -> bool:
         """Delete a memory by ID.
 
@@ -1301,7 +1314,7 @@ class TrueMemoryEngine:
         return deleted
 
     @_validate_delete_user
-    @engine_operation
+    @engine_source_operation
     def delete_all(self, user_id: str | None = None) -> bool:
         """Delete all memories, optionally filtered by user.
 
