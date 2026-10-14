@@ -3,7 +3,8 @@
 Each SessionEnd retains one immutable copy of the transcript. These controls
 pin the retention contract: settled bytes are released (receipts stay), a
 growing session supersedes its own queued prefix, short sessions are never
-retained, and quota refusals leave a visible backlog pointer.
+retained, quota refusals leave a visible backlog pointer, and outcomes that the
+same bytes would reproduce are not re-extracted five times.
 """
 from __future__ import annotations
 
@@ -234,6 +235,42 @@ def test_short_capture_from_another_path_settles_and_is_released(env):
     assert not short.path.exists()
     assert _state(env)[short.key]["released"] is True
     assert env.spawned == []
+
+
+def test_reproducible_unproven_outcome_is_recorded_once(env):
+    session, path = _transcript(env, _turns(6))
+    capture = completion.admit_capture(str(path), session, "", "", "claude", root=env.root)
+    attempt = completion.reserve_inline_attempt(capture)
+    with completion.worker_claim(capture, attempt) as allowed:
+        assert allowed
+        coverage = {"parser_status": "complete", "extractor_status": "heuristic", "extractor_calls": 0,
+                    "stable": True, "provenance_observed": True, "parser_errors": [],
+                    "malformed_records": 0, "unrecognized_records": 0,
+                    "source_version": {name: capture.metadata[name] for name in ("sha256", "byte_count")}}
+        result = types.SimpleNamespace(coverage=coverage, facts_extracted=1, facts_stored=1, facts_updated=0,
+                                       facts_skipped_gate=0, facts_skipped_dedup=0, trace=[{"action": "stored"}])
+        assert completion.record_receipt(capture, result) is False
+    entry = _state(env)[capture.key]
+    assert entry["status"] == "exhausted" and entry["attempts"] == 1
+    assert completion.reserve_inline_attempt(capture) == 0
+    assert completion.dispatch(capture) == 0
+    assert env.spawned == []
+
+
+@pytest.mark.parametrize(("coverage", "expected"), [
+    ({"parser_status": "partial", "extractor_status": "complete"}, True),
+    ({"parser_status": "malformed", "extractor_status": "unobserved"}, True),
+    ({"parser_status": "complete", "extractor_status": "heuristic"}, True),
+    ({"parser_status": "complete", "extractor_status": "limited", "extractor_errors": ["chunk_limit"]}, True),
+    ({"parser_status": "unreadable", "extractor_status": "unobserved"}, False),
+    ({"parser_status": "unreadable", "extractor_status": "complete"}, False),
+    ({"parser_status": "complete", "extractor_status": "limited", "extractor_errors": ["fact_limit"]}, False),
+    ({"parser_status": "complete", "extractor_status": "partial", "extractor_errors": ["provider_error"]}, False),
+    ({"parser_status": "complete", "extractor_status": "failed"}, False),
+    (None, False),
+])
+def test_only_outcomes_the_same_bytes_reproduce_are_terminal(coverage, expected):
+    assert completion._reproducible(coverage) is expected
 
 
 def test_state_entries_are_bounded_and_receipts_keep_evicted_bytes_settled(env, monkeypatch):

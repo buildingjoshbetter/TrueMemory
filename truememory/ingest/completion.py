@@ -716,6 +716,20 @@ def record_failure(capture: Capture, category: str, details: dict | None = None,
         _save_state(capture.directory, state)
 
 
+def _reproducible(coverage: object) -> bool:
+    """Coverage that the same immutable bytes and configuration would repeat."""
+    if type(coverage) is not dict:
+        return False
+    # Parser outcomes are a function of the retained bytes; unreadable is I/O.
+    if coverage.get("parser_status") in ("partial", "salvaged", "malformed"):
+        return True
+    if coverage.get("parser_status") != "complete":
+        return False
+    errors = coverage.get("extractor_errors")
+    return coverage.get("extractor_status") in ("heuristic", "unobserved") or (
+        coverage.get("extractor_status") == "limited" and type(errors) is list and "chunk_limit" in errors)
+
+
 def record_receipt(capture: Capture, result: object) -> bool:
     if not strict_complete(result, capture):
         coverage = getattr(result, "coverage", None)
@@ -723,7 +737,7 @@ def record_receipt(capture: Capture, result: object) -> bool:
                    "counts": {name: getattr(result, name, None) for name in (
                        "facts_extracted", "facts_stored", "facts_updated", "facts_skipped_gate", "facts_skipped_dedup")},
                    "actions": [entry.get("action") for entry in getattr(result, "trace", []) if type(entry) is dict]}
-        record_failure(capture, "coverage_unproven", details)
+        record_failure(capture, "coverage_unproven", details, terminal=_reproducible(coverage))
         return False
     verify_capture(capture)
     receipt = {"version": 1, "capture_key": capture.key, "scope": capture.metadata,
