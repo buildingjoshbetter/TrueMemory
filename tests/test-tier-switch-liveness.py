@@ -1913,6 +1913,40 @@ class SwitchStaging(unittest.TestCase):
         self.assertEqual(result["encodes"], 0)
         self.assertEqual(result["state"], {"selected": None, "acknowledged": None, "marker": None, "status_rows": []})
 
+    def test_status_row_reports_the_whole_store_and_live_throughput(self):
+        # Background switches wrote no live metrics, and the final row counted
+        # only the last catch-up round (2/2 after a two-row tail).
+        (result,) = run_scenario("""
+            seed(40)
+            stub_models()
+            encode = FakeLease.encode
+            appended = []
+            def append_once(self, texts, **kwargs):
+                if not appended:
+                    conn = sqlite3.connect(DB)
+                    for i in range(2):
+                        appended.append(conn.execute(
+                            "INSERT INTO messages(content,sender,recipient,timestamp) VALUES (?,?,?,?)",
+                            (f"appended during the rebuild {i}", "bob", "", "2026-01-02T00:00:00")).lastrowid)
+                    conn.commit(); conn.close()
+                return encode(self, texts, **kwargs)
+            FakeLease.encode = append_once
+            outcome = switch("edge")["outcome"]
+            conn = sqlite3.connect(DB)
+            row = conn.execute("SELECT status, processed_messages, total_messages, batch_size, "
+                               "last_heartbeat > started_at FROM rebuild_status").fetchone()
+            count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
+            conn.close()
+            emit(outcome=outcome, appended=len(appended), row=row, count=count)
+        """)
+        self.assertEqual(result["outcome"], "complete")
+        self.assertEqual(result["appended"], 2)
+        status, processed, total, batch_size, heartbeat = result["row"]
+        self.assertEqual((status, processed, total), ("complete", 42, 42))
+        self.assertEqual(result["count"], 42)
+        self.assertGreaterEqual(batch_size, 1)
+        self.assertEqual(heartbeat, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

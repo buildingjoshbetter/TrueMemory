@@ -47,6 +47,7 @@ _CATCH_UP_ROUNDS = 5
 # How long staging a switch waits for maintenance another process owns. New
 # owners yield meanwhile, so only the pass already running must finish.
 _STAGING_MAINTENANCE_SECONDS = 60.0
+_HEARTBEAT_SECONDS = 1.0
 
 
 class TierSwitchUnsupportedError(RuntimeError):
@@ -798,8 +799,9 @@ class RebuildManager:
         # commits need no fsync; activation below switches back to FULL.
         conn.execute("PRAGMA synchronous=NORMAL")
         device = "cpu" if job.target.tier_group == "edge" else _detect_device()
-        worker = RebuildWorker(conn, job.target.tier, job.target.tier_group,
-                               DynamicThrottler(device=device), status_id, progress_callback)
+        throttler = DynamicThrottler(device=device)
+        worker = RebuildWorker(conn, job.target.tier, job.target.tier_group, throttler, status_id,
+                               self._status_heartbeat(job.database_path, status_id, throttler, progress_callback))
         with self._state_lock:
             self._active_worker = worker
             if self._cancel_requested.is_set():
@@ -901,10 +903,51 @@ class RebuildManager:
         self._last_outcome = "complete"
 
     @staticmethod
+    def _status_heartbeat(path: Path, status_id: int, throttler: DynamicThrottler,
+                          forward: "StatusCallback | None") -> "StatusCallback":
+        """Record live throughput on a short connection of its own, at most once a second.
+
+        Never on the job connection: its source fence counts that connection's
+        changes. A busy database skips a beat instead of stalling the encode.
+        """
+        last = -_HEARTBEAT_SECONDS
+
+        def heartbeat(processed: int, total: int, metrics: dict) -> None:
+            nonlocal last
+            if time.monotonic() - last >= _HEARTBEAT_SECONDS:
+                last = time.monotonic()
+                eta = throttler.get_eta_seconds(max(0, total - processed))
+                try:
+                    import psutil
+                    ram_pct = psutil.virtual_memory().percent
+                except Exception:
+                    ram_pct = None
+                try:
+                    status = sqlite3.connect(Path(path).absolute().as_uri() + "?mode=rw", uri=True, timeout=0.25)
+                    try:
+                        with status:
+                            status.execute(
+                                "UPDATE main.rebuild_status SET batch_size=?, throughput_ips=?, eta_seconds=?, "
+                                "ram_pct=?, last_heartbeat=? WHERE id=? AND completed_at IS NULL",
+                                (metrics.get("batch_size"), throttler.get_throughput(),
+                                 eta if eta != float("inf") else None, ram_pct, time.time(), status_id))
+                    finally:
+                        status.close()
+                except sqlite3.Error:
+                    log.debug("Tier rebuild heartbeat skipped", exc_info=True)
+            if forward is not None:
+                forward(processed, total, metrics)
+        return heartbeat
+
+    @staticmethod
     def _terminal_status(conn: sqlite3.Connection, status_id: int, status: str, processed: int, total: int) -> None:
         from truememory.tier_switch.activation import _transaction
         with _transaction(conn, write=True):
             RebuildManager._guard_status(conn)
+            if status == "complete":
+                # The activated pair covers every memory; the last round's manifest
+                # counts only that round's delta.
+                processed = total = conn.execute("SELECT count(*) FROM main.messages").fetchone()[0]
             conn.execute("UPDATE rebuild_status SET status=?, processed_messages=?, total_messages=?, progress_pct=?, completed_at=? WHERE id=?",
                          (status, processed, total, 100.0 if status == "complete" else 100.0 * processed / max(1,total), time.time(), status_id))
 
