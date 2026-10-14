@@ -644,6 +644,51 @@ class TestRuntimeBridge(unittest.TestCase):
         conn.rollback()
         self.assertEqual(conn.execute("SELECT value FROM synthetic").fetchall(), [])
 
+    def test_admission_never_reads_a_connection_another_thread_owns(self) -> None:
+        # A writer in sqlite3_step holds SQLite's connection mutex through its busy
+        # wait; in_transaction waits for that mutex with the GIL held, so the
+        # process froze until the wait failed with "database is locked".
+        api = self.api
+        owned, release = threading.Event(), threading.Event()
+        foreign_reads, failures = [], []
+        class Connection:
+            @property
+            def in_transaction(self):
+                holder = lock._owner
+                if holder is not None and holder[0] != threading.get_ident():
+                    foreign_reads.append(threading.current_thread().name)
+                return False
+        class Engine:
+            pass
+        engine = Engine()
+        engine.conn = conn = Connection()
+        lock = api.ConnectionWriteLock(engine)
+        def holder():
+            try:
+                with lock:
+                    owned.set()
+                    if not release.wait(2):
+                        raise AssertionError("Synthetic holder release timed out")
+            except BaseException as exc:
+                failures.append(exc)
+        thread = threading.Thread(target=holder)
+        thread.start()
+        try:
+            self.assertTrue(owned.wait(2))
+            with self.assertRaises(api.serving.ServingLeaseTimeout):
+                with api._connection_read(conn, lock, api.time.monotonic() + 0.2, None):
+                    self.fail("The writer is owned by another thread")
+            with api._connection_read(conn, threading.Lock(), None, None, transaction_owner=lock):
+                pass
+        finally:
+            release.set()
+            thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(foreign_reads, [])
+        with api._connection_read(conn, threading.Lock(), None, None, transaction_owner=lock):
+            self.assertFalse(lock.locked())
+
     def test_connection_probe_error_preserves_handle_under_both_locks(self) -> None:
         tree = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
         source = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")

@@ -86,6 +86,11 @@ class ConnectionWriteLock:
             raise
         return True
 
+    def holder_borrowed(self) -> bool:
+        """Another thread holds this lock while a caller's transaction is open."""
+        owner = self._owner
+        return owner is not None and owner[0] != threading.get_ident() and owner[2]
+
     def owns_other_transaction(self, conn: sqlite3.Connection) -> bool:
         owner = self._owner
         return (owner is not None and owner[0] != threading.get_ident()
@@ -556,16 +561,36 @@ def _connection_read(
         _check(deadline, cancelled)
         yield
         return
-    acquired = False
-    try:
+    def in_transaction() -> bool:
         try:
-            borrowed = conn is not None and conn.in_transaction
+            return conn is not None and conn.in_transaction
         except sqlite3.ProgrammingError as exc:
             if not allow_closed or str(exc) != "Cannot operate on a closed database.":
                 raise
-            borrowed = False
+            return False
+
+    acquired = False
+    try:
         owner = lock if transaction_owner is None else transaction_owner
-        if (borrowed and not (
+        if isinstance(owner, ConnectionWriteLock):
+            # Read the connection only while owning its writer: a thread inside
+            # sqlite3_step (a busy wait lasts up to the timeout) holds SQLite's
+            # connection mutex, and in_transaction waits for that mutex with the
+            # GIL held, freezing every thread, including the one that must commit.
+            if not owner.acquire(blocking=False):
+                borrowed = owner.holder_borrowed()
+            elif lock is owner:
+                acquired, borrowed = True, False
+            else:
+                try:
+                    borrowed = in_transaction()
+                finally:
+                    owner.release()
+        else:
+            borrowed = in_transaction()
+        if acquired:
+            pass
+        elif (borrowed and not (
                 isinstance(owner, ConnectionWriteLock) and owner.owns_other_transaction(conn))):
             _check(deadline, cancelled)
             acquired = lock.acquire(blocking=False)

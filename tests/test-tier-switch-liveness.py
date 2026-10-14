@@ -1817,6 +1817,42 @@ class SharedEngineThreads(unittest.TestCase):
         self.assertEqual(result["errors"], {})
         self.assertEqual(result["ops"], ["add", "delete", "get", "get_all", "search"])
 
+    def test_a_write_waiting_on_another_connection_does_not_freeze_the_process(self):
+        # The waiting writer holds SQLite's connection mutex; a second thread that
+        # read the connection then held the GIL until the wait failed, so the
+        # other connection could never commit and the write failed as locked.
+        (result,) = run_scenario("""
+            import model2vec
+            model2vec.StaticModel.from_pretrained = staticmethod(lambda *args, **kwargs: FakeEncoder())
+            from truememory.engine import TrueMemoryEngine
+            engine = TrueMemoryEngine(DB)
+            engine.add("first memory", sender="alice")
+            drain()
+            engine.conn.execute("PRAGMA busy_timeout=4000")
+            other = sqlite3.connect(DB, isolation_level=None, check_same_thread=False)
+            other.execute("BEGIN IMMEDIATE")
+            results = {}
+            def call(name, body):
+                try:
+                    results[name] = body()
+                except Exception as error:
+                    results[name] = f"{type(error).__name__}: {error}"
+            writer = threading.Thread(target=call, args=("add", lambda: engine.add("waits for the commit", sender="alice")["id"]))
+            writer.start()
+            time.sleep(0.5)
+            started = time.monotonic()
+            reader = threading.Thread(target=call, args=("get", lambda: engine.get(1)["content"]))
+            reader.start()
+            time.sleep(0.2)
+            other.execute("COMMIT")
+            committed = time.monotonic() - started
+            writer.join(10); reader.join(10)
+            engine.close(); other.close()
+            emit(results=results, committed_within_a_second=committed < 1.0)
+        """, tier="edge")
+        self.assertEqual(result["results"], {"add": 2, "get": "first memory"})
+        self.assertTrue(result["committed_within_a_second"])
+
 
 if __name__ == "__main__":
     unittest.main()
