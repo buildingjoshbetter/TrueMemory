@@ -10,6 +10,7 @@ import gc
 import logging
 import math
 import os
+import sys
 import threading
 from _thread import LockType
 from collections.abc import Callable, Iterator
@@ -112,10 +113,16 @@ def _positive_bytes(value: object, name: str) -> int:
     return value
 
 
+# Base/Pro keep Qwen3-Embedding (1.11 GiB) and the ModernBERT reranker
+# (0.56 GiB) resident. Measured on Apple silicon, one long batch needs about
+# 1.5 GiB more, so smaller caps pushed long memories onto the CPU.
+_MPS_MIN_BUDGET_BYTES = int(3.25 * _GIB)
+
+
 def _default_mps_budget_bytes(physical_bytes: int) -> int:
     physical_bytes = _positive_bytes(physical_bytes, "Physical memory")
     target = min(0.08 * physical_bytes, 2.5 * _GIB) if physical_bytes >= 16 * _GIB else 0.19 * physical_bytes
-    return int(max(target, 1.5 * _GIB))
+    return int(max(target, _MPS_MIN_BUDGET_BYTES))
 
 
 def _watermark_ratio(name: str, value: str) -> float:
@@ -291,6 +298,24 @@ def is_mps_oom(exc: Exception) -> bool:
     )
 
 
+def prefer_float32_on_cpu(model: object) -> object:
+    """Run a CPU-resident half-precision model in float32 on macOS.
+
+    PyTorch has no fast bfloat16 CPU path on Apple silicon: Qwen3-Embedding
+    took 709 ms per query in bfloat16 and 83 ms in float32.
+    """
+    if sys.platform != "darwin" or not callable(getattr(model, "parameters", None)):
+        return model
+    device = getattr(model, "device", None)
+    if getattr(device, "type", device) != "cpu":
+        return model
+    import torch
+    parameter = next(iter(model.parameters()), None)
+    if parameter is not None and parameter.dtype in (torch.bfloat16, torch.float16):
+        model.float()
+    return model
+
+
 def flush_mps_cache() -> None:
     """Run garbage collection, then flush MPS/CUDA cache.
 
@@ -345,6 +370,7 @@ def encode_with_mps_fallback(model: object, texts: object, **kwargs: object) -> 
         # release its tensors. Move live weights before flushing freed storage.
         if hasattr(model, "to"):
             model.to("cpu")
+            prefer_float32_on_cpu(model)
         flush_mps_cache()
         if bounded:
             from truememory._embed_budget import budgeted_encode

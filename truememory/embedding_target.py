@@ -110,6 +110,7 @@ def build_target_model(
     ensure_mps_memory_budget(device)
     from sentence_transformers import SentenceTransformer
 
+    from truememory.mps_utils import prefer_float32_on_cpu
     if target.model_id == "qwen3_256":
         model_kwargs = {"attn_implementation": "eager"} if sys.platform == "darwin" else None
         admit()
@@ -124,6 +125,7 @@ def build_target_model(
             target.model_id, truncate_dim=target.dimension,
             trust_remote_code=False, device=device,
         )
+    prefer_float32_on_cpu(model)
     if type(getattr(model, "max_seq_length", None)) is int:
         from truememory._embed_budget import cap_embed_length
         cap_embed_length(model)

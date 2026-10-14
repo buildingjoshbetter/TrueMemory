@@ -340,6 +340,8 @@ def get_model():
                             model_kwargs=_mkwargs or None,
                             device=device,
                         )
+                        from truememory.mps_utils import prefer_float32_on_cpu
+                        prefer_float32_on_cpu(_model)
                         _embedding_dim = 256
                     elif resolved not in _MODEL_DIMS:
                         # Custom tier: load arbitrary SentenceTransformer model.
