@@ -187,3 +187,30 @@ def test_cpu_models_ignore_the_mps_allocation(monkeypatch):
     _on_mps(monkeypatch, model, allocated_mib=1500)
     model.device = "cpu"
     assert accelerator_token_budget(model, EMBED_TOKEN_BUDGET) == EMBED_TOKEN_BUDGET
+
+
+def test_server_embed_loop_fits_the_free_mps_allocation(monkeypatch):
+    from truememory.model_server import ModelServer, _EmbedState
+
+    monkeypatch.setattr(embed_budget, "embed_token_budget", lambda: EMBED_TOKEN_BUDGET)
+    model = FakeEmbedder(EMBED_MAX_TOKENS)
+    _on_mps(monkeypatch, model, allocated_mib=1190, cap_mib=4096)
+    server = ModelServer()
+    server._embed_state = _EmbedState(model=model, tier="", model_id="model2vec")
+    texts = _texts(*([30] * 40 + [1000] * 8))
+    response = server.handle_request({"op": "embed", "texts": texts, "tier": ""})
+    assert response["ok"] is True
+    assert np.array_equal(np.asarray(response["vectors"]), FakeEmbedder().encode(texts))
+    # 80% of the free 2,906 MiB over 16 heads x 48 bytes: 3,174,345 tokens^2, so three 1,002-token texts.
+    fit = int(2906 * 1024 ** 2 * 0.8) // (16 * 48)
+    assert model.calls[0][0] == fit // 1002 ** 2 == 3
+
+
+def test_attention_heads_are_read_through_sentence_transformer_modules():
+    import types
+
+    from truememory._rerank_budget import _attention_heads
+    module = types.SimpleNamespace(auto_model=types.SimpleNamespace(config=types.SimpleNamespace(num_attention_heads=16)))
+    model = types.SimpleNamespace(_first_module=lambda: module)
+    assert _attention_heads(model) == 16
+    assert _attention_heads(types.SimpleNamespace()) is None
