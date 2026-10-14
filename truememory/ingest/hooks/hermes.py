@@ -415,7 +415,7 @@ class Store:
                 else:
                     self.snapshot(name)
                 if turn_key not in turns:
-                    turns[turn_key] = {"ordinal": len(turns) + 1, "snapshot": name,
+                    turns[turn_key] = {"ordinal": _next_ordinal(turns), "snapshot": name,
                                        "context_state": "pending", "context_attempts": 0,
                                        "context_retry_at": 0.0, "context_requested": False}
                 turn_state = turns[turn_key]
@@ -515,6 +515,10 @@ class Store:
                      if item.get("released") and turns.get(item.get("turn"), {}).get("ordinal", 0) < horizon]:
             # Old released entries are bounded; their bytes are already gone.
             del state["captures"][name]
+        referenced = {item.get("turn") for item in state["captures"].values()}
+        for key in [key for key, turn in turns.items() if turn.get("ordinal", 0) < horizon and key not in referenced]:
+            # Ordinals continue from the latest kept turn, so old turns can go too.
+            del turns[key]
         for entry in os.scandir(self.path):
             # A snapshot written by a capture whose state save then failed.
             if _SNAPSHOT.match(entry.name) and entry.name not in state["captures"]:
@@ -529,6 +533,11 @@ class Store:
             for item in state["captures"].values():
                 item["flush"] = True
             self.save(state)
+
+
+def _next_ordinal(turns: dict[str, dict]) -> int:
+    # Older turns are pruned, so count from the latest ordinal, not the length.
+    return max((turn.get("ordinal", 0) for turn in turns.values()), default=0) + 1
 
 
 def _recall(snapshot: dict[str, object], ordinal: int) -> str:
@@ -790,7 +799,7 @@ def _emit_direct_context(store: Store, payload: dict[str, object], output: TextI
     if not isinstance(extra, dict):
         return False
     try:
-        ordinal = len(store.state()["turns"]) + 1
+        ordinal = _next_ordinal(store.state()["turns"])
     except (OSError, ValueError):
         ordinal = 2
     snapshot = {"user": store.user, "db": store.db, "session_id": store.session,

@@ -183,7 +183,9 @@ class HermesSpoolRetention(unittest.TestCase):
         self.assertLessEqual(len(list(self.store.path.glob("*.context.json"))), 1)
         self.assertEqual(state["turns"][key]["context_state"], "ready")
         self.assertLessEqual(len(state["captures"]), 2 * (BRIDGE.RETAINED_TURNS + 2))
-        self.assertEqual(len(state["turns"]), 150)
+        # Old turns are pruned too; ordinals keep counting from the latest.
+        self.assertLessEqual(len(state["turns"]), BRIDGE.RETAINED_TURNS + 2)
+        self.assertEqual(state["turns"][key]["ordinal"], 150)
 
     def test_finished_sessions_are_collected_when_the_account_is_full(self) -> None:
         sessions = []
