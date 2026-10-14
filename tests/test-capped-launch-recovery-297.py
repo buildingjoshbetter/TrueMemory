@@ -5,12 +5,14 @@ import ast
 import copy
 from contextlib import ExitStack
 from dataclasses import asdict, replace
+import hashlib
 import os
 from pathlib import Path
+import socket
 import sys
 import tempfile
 import time
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -45,7 +47,7 @@ def evidence(value: object) -> object:
 
 def owned_handle(*, cap: int = CAP) -> object:
     value = identity(cap)
-    runner = SimpleNamespace(stop_complete=False, store=SimpleNamespace(directory=75))
+    runner = SimpleNamespace(stop_complete=False, store=SimpleNamespace(directory=75), manifest={"deadline": 1000.0})
     scope = SimpleNamespace(mount_point="/synthetic", pidfd_device=101, pidfd_inode=103)
     record = BOOT.LinuxProvisionalLaunch(value, runner, 72, scope, object())
     adapter = SimpleNamespace(_close_resolved=MagicMock())
@@ -363,9 +365,19 @@ class FailedLaunchClaimRetirement(unittest.TestCase):
         claim_path, retain, outcome = self.run_start(MagicMock(return_value=handle), abandon=abandon, handed_off=True)
         self.assertIs(outcome, False)
         abandon.assert_not_called()
-        retain.assert_called_once_with(handle)
+        retain.assert_called_once_with(handle, handed_off=True)
         claim = BOOT._strict_json(claim_path.read_bytes())
         self.assertEqual(claim["child"], {"pid": 77, "born": 1234.5})
+
+    def test_integrity_failure_after_handoff_is_still_abandoned(self) -> None:
+        for error in (BOOT.EnforcementUnavailable("foreign member at ready"), ValueError("foreign ready receipt")):
+            handle = self.handle(error)
+            abandon = MagicMock(return_value=True)
+            with self.subTest(error=type(error).__name__):
+                claim_path, retain, _ = self.run_start(MagicMock(return_value=handle), abandon=abandon, handed_off=True)
+                abandon.assert_called_once()
+                retain.assert_not_called()
+                self.assertFalse(claim_path.exists())
 
     def test_budget_expiry_before_handoff_is_abandoned(self) -> None:
         handle = self.handle(TimeoutError("synthetic hook budget"))
@@ -1008,6 +1020,7 @@ class ConsoleLauncherFailure(unittest.TestCase):
 
     def run_main(self, abandon: list[bool], *, error: BaseException | None = None,
                  handed_off: bool = False) -> tuple[Path, MagicMock, MagicMock, BaseException | None]:
+        self.enforced = MagicMock()
         home = private_directory()
         error = error if error is not None else BOOT.EnforcementUnavailable("synthetic census")
         handle = SimpleNamespace(pid=77, record=SimpleNamespace(pidfd=72, identity=SimpleNamespace(birth_time=1234.5)),
@@ -1026,6 +1039,7 @@ class ConsoleLauncherFailure(unittest.TestCase):
                     (BOOT, "launch_owned_linux", MagicMock(return_value=handle)),
                     (BOOT, "abandon_owned_launch", abandon_mock), (BOOT, "release_exited_launch", release),
                     (BOOT, "launch_handed_off", lambda target: handed_off),
+                    (BOOT, "enforce_startup_deadline", self.enforced),
                     (BOOT.select, "select", lambda read, write, error, timeout: (read, [], []))):
                 stack.enter_context(patch.object(target, name, value))
             try:
@@ -1054,7 +1068,12 @@ class ConsoleLauncherFailure(unittest.TestCase):
         self.assertIsNone(raised)
         abandon.assert_not_called()
         self.assertTrue(claim.exists())
+        self.enforced.assert_called_once()
         release.assert_called_once()
+
+    def test_failed_launch_is_not_held_to_a_startup_deadline(self) -> None:
+        self.run_main([True])
+        self.enforced.assert_not_called()
 
 
 @unittest.skipIf(sys.platform == "win32", "Linux-only launcher; POSIX synthetic fixtures")
@@ -1219,16 +1238,346 @@ class LauncherHandoff(unittest.TestCase):
             self.assertIs(BOOT.generation_ready(GENERATION), False)
 
     def test_claimed_daemon_liveness_uses_start_ticks(self) -> None:
-        home = self.evidence_home(ready=True, identity_payload={"main_pid": 43, "start_ticks": 47})
-        for result, pid, expected in (((47, 9999.0), 43, True), ((48, 1000.5), 43, False),
-                                      (FileNotFoundError(), 43, False), ((47, 1000.5), 44, False)):
+        home = self.evidence_home(ready=True, identity_payload={"main_pid": 43, "start_ticks": 47, "boot_id": "boot"})
+        for result, pid, boot, expected in (((47, 9999.0), 43, "boot", True), ((48, 1000.5), 43, "boot", False),
+                                            (FileNotFoundError(), 43, "boot", False), ((47, 1000.5), 44, "boot", False),
+                                            ((47, 9999.0), 43, "next-boot", False)):
             def process_identity(target: int) -> tuple[int, float]:
                 if isinstance(result, BaseException):
                     raise result
                 return result
-            with self.subTest(result=result, pid=pid), patch.object(BOOT.Path, "home", return_value=home), \
-                 patch.object(BOOT, "_process_identity", process_identity):
+            with self.subTest(result=result, pid=pid, boot=boot), patch.object(BOOT.Path, "home", return_value=home), \
+                 patch.object(BOOT, "_boot_id", return_value=boot), patch.object(BOOT, "_process_identity", process_identity):
                 self.assertIs(BOOT.claimed_daemon_live(GENERATION, pid), expected)
+
+
+@unittest.skipIf(sys.platform == "win32", "Linux-only launcher; POSIX synthetic fixtures")
+class StartupDeadlineEnforcement(unittest.TestCase):
+    """N1: a handed-off child that misses its own startup deadline no longer holds the claim."""
+
+    def enforce(self, *, exited: bool = False, ready_at: float | None = None) -> tuple[MagicMock, float]:
+        handle = owned_handle()  # manifest deadline 1000.0
+        clock = [995.0]
+        abandon = MagicMock(return_value=True)
+
+        def wait(read: list[int], write: list[int], errors: list[int], timeout: float) -> tuple[list, list, list]:
+            self.assertEqual(read, [72])
+            clock[0] += timeout
+            return [], [], []
+
+        with patch.object(BOOT.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(BOOT.select, "select", wait), patch.object(BOOT, "_owned_exited", return_value=exited), \
+             patch.object(BOOT, "_ready_published", side_effect=lambda record: ready_at is not None and clock[0] >= ready_at), \
+             patch.object(BOOT, "abandon_owned_launch", abandon):
+            BOOT.enforce_startup_deadline(handle)
+        return abandon, clock[0]
+
+    def test_stalled_child_is_terminated_at_its_deadline(self) -> None:
+        abandon, now = self.enforce()
+        abandon.assert_called_once()
+        self.assertGreaterEqual(now, 1000.0 + BOOT._CLEANUP_GRACE)
+        self.assertLess(now, 1000.0 + BOOT._CLEANUP_GRACE + 1.0)
+
+    def test_ready_child_is_kept(self) -> None:
+        abandon, now = self.enforce(ready_at=997.0)
+        abandon.assert_not_called()
+        self.assertLess(now, 1000.0)
+
+    def test_exited_child_is_left_to_release(self) -> None:
+        abandon, _ = self.enforce(exited=True)
+        abandon.assert_not_called()
+
+    def test_ready_receipt_is_read_from_the_owned_store(self) -> None:
+        directory = private_directory()
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            record = SimpleNamespace(runner=SimpleNamespace(store=SimpleNamespace(directory=descriptor)))
+            self.assertIs(BOOT._ready_published(record), False)
+            write_private(directory / "ready-v1.json", b"{}")
+            self.assertIs(BOOT._ready_published(record), True)
+        finally:
+            os.close(descriptor)
+
+    def evidence(self, *, deadline_offset: float, ready: bool = False, boot: str = "boot") -> Path:
+        home = private_directory()
+        directory = home / ".truememory" / "memory-cap-launches" / GENERATION
+        directory.mkdir(parents=True, mode=0o700)
+        write_private(directory / "manifest-v1.json",
+                      BOOT._canonical({"boot_id": boot, "deadline": time.monotonic() + deadline_offset}))
+        if ready:
+            write_private(directory / "ready-v1.json", b"{}")
+        return home
+
+    def test_expiry_is_read_from_the_generation_manifest(self) -> None:
+        for offset, ready, boot, expected in ((-10.0, False, "boot", True), (-10.0, True, "boot", False),
+                                              (30.0, False, "boot", False), (-10.0, False, "other", False),
+                                              (-1.0, False, "boot", False)):
+            home = self.evidence(deadline_offset=offset, ready=ready, boot=boot)
+            with self.subTest(offset=offset, ready=ready, boot=boot), patch.object(BOOT.Path, "home", return_value=home), \
+                 patch.object(BOOT, "_boot_id", return_value="boot"):
+                self.assertIs(BOOT.generation_startup_expired(GENERATION), expected)
+        with patch.object(BOOT.Path, "home", return_value=private_directory()):
+            self.assertIs(BOOT.generation_startup_expired(GENERATION), False)
+
+    def start(self, *, expired: bool) -> MagicMock:
+        directory = private_directory()
+        claim = {"generation": GENERATION, "launcher": {"pid": 101, "born": 2000.5}, "child": {"pid": 43, "born": 1000.5}}
+        births = {43: 1000.5, 101: None, os.getpid(): 3000.5}
+        spawn = MagicMock(side_effect=OSError("synthetic stop after the launch decision"))
+        environment = {key: value for key, value in os.environ.items() if key != "TRUEMEMORY_MODEL_SERVER_MAX_RSS_MB"}
+        environment[FLAG] = "1"
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, environment, clear=True))
+            for target, name, value in (
+                    (client.sys, "platform", "linux"), (client, "use_model_server", lambda: True),
+                    (client, "_TRUEMEMORY_DIR", directory), (client, "START_STATE_PATH", directory / "claim.json"),
+                    (client, "_server_ready", lambda: False), (client, "read_start_claim", lambda path: copy.deepcopy(claim)),
+                    (client, "_write_start_claim", lambda value: None), (client, "process_birth", lambda pid: births[pid]),
+                    (client, "try_file_lock", lambda path: os.open(os.devnull, os.O_RDONLY)),
+                    (client, "_spawn_server", spawn),
+                    (BOOT, "_physical_total", lambda: 4 * CAP), (BOOT, "_required_linux_support", lambda *args: None),
+                    (BOOT, "generation_startup_expired", lambda generation: expired)):
+                stack.enter_context(patch.object(target, name, value))
+            client._start_server(wait_timeout=0.3)
+        return spawn
+
+    def test_expired_pending_claim_is_relaunched_by_any_client(self) -> None:
+        self.start(expired=True).assert_called_once()
+
+    def test_pending_claim_within_its_budget_is_waited_on(self) -> None:
+        self.start(expired=False).assert_not_called()
+
+    def test_kept_launch_is_held_to_its_deadline_by_the_watcher(self) -> None:
+        handle = SimpleNamespace(record=SimpleNamespace(pidfd=72))
+        order: list[str] = []
+
+        class Inline:
+            def __init__(self, target: object, name: str, daemon: bool) -> None:
+                self.target = target
+
+            def start(self) -> None:
+                self.target()
+
+        import select as select_module
+        import threading as threading_module
+        with patch.object(threading_module, "Thread", Inline), \
+             patch.object(select_module, "select", lambda *args: order.append("wait") or ([72], [], [])), \
+             patch.object(BOOT, "enforce_startup_deadline", lambda target: order.append("enforce")), \
+             patch.object(BOOT, "release_exited_launch", lambda target: order.append("release") or True), \
+             patch.object(client, "_owned_capped_launches", []):
+            client._retain_owned_capped_launch(handle, handed_off=True)
+        self.assertEqual(order, ["enforce", "wait", "release"])
+
+
+BOOT_ID = "12345678-1234-1234-1234-123456789abc"
+LAUNCHER = 4242
+
+
+@unittest.skipIf(sys.platform == "win32", "Linux-only launcher; POSIX synthetic fixtures")
+class RestoreAfterHandoff(unittest.TestCase):
+    """N2/N4: the re-executed workload restores its gate after its launcher exits, and only then."""
+
+    def setUp(self) -> None:
+        self.home = private_directory()
+        state = self.home / ".truememory"
+        self.directory = state / "memory-cap-launches" / GENERATION
+        self.directory.mkdir(parents=True, mode=0o700)
+        for path in (state, state / "memory-cap-launches", self.directory):
+            os.chmod(path, 0o700)
+        claim_path = state / "model_server.start.json"
+        bootstrap_sha = BOOT._hash_path(Path(BOOT.__file__).absolute(), bound=1048576)
+        manifest = {"version": 1, "generation": GENERATION, "uid": os.getuid(), "boot_id": BOOT_ID,
+                    "slice_unit": "app-truememory" + GENERATION + ".slice",
+                    "service_unit": "truememory-memory" + GENERATION + ".service", "cap_bytes": CAP, "swap_bytes": 0,
+                    "bootstrap_sha256": bootstrap_sha, "deadline": time.monotonic() + 60.0,
+                    "parent_pid": LAUNCHER, "parent_start_ticks": 11, "parent_birth": 3000.5,
+                    "claim_path": str(claim_path), "ancestor_memory_max": [],
+                    "forwarded_names": ["SYNTHETIC"], "interpreter": BOOT._executable_pin(os.path.abspath(sys.executable))}
+        manifest_raw = BOOT._canonical(manifest)
+        write_private(self.directory / "manifest-v1.json", manifest_raw)
+        self.identity = BOOT.LinuxInvocationIdentity(
+            1, GENERATION, BOOT_ID, os.getuid(), manifest["slice_unit"], "b" * 32, 29, 31, 37,
+            "/user.slice/app.slice/" + manifest["slice_unit"], manifest["service_unit"], "c" * 32, 31, 41,
+            "/user.slice/app.slice/" + manifest["slice_unit"] + "/" + manifest["service_unit"],
+            os.getpid(), 99, 5000.5, CAP, 0, bootstrap_sha, hashlib.sha256(manifest_raw).hexdigest())
+        identity_raw = BOOT._canonical(asdict(self.identity))
+        write_private(self.directory / "identity-v1.json", identity_raw)
+        left, self.peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.descriptor = os.dup(left.fileno())
+        left.close()
+        metadata = os.fstat(self.descriptor)
+        self.barrier = {"descriptor": self.descriptor, "device": 7, "inode": metadata.st_ino}
+        identity_sha = hashlib.sha256(identity_raw).hexdigest()
+        write_private(self.directory / "pre-reexec-v1.json",
+                      BOOT._canonical(BOOT._preexec_payload(self.identity, identity_sha, self.barrier)))
+        claim_raw = BOOT._canonical({"generation": GENERATION, "launcher": {"pid": LAUNCHER, "born": 3000.5},
+                                     "child": {"pid": os.getpid(), "born": 5000.5}})
+        write_private(claim_path, claim_raw)
+        write_private(self.directory / "receipt-000001.json", BOOT._canonical({
+            "version": 1, "sequence": 1, "previous_sha256": "0" * 64, "phase": "claim-durable-before-release",
+            "payload": {"claim_sha256": hashlib.sha256(claim_raw).hexdigest()}, "monotonic": 1.0}))
+        self.environment = {FLAG: "1", "TRUEMEMORY_CAP_MANIFEST": str(self.directory / "manifest-v1.json"),
+                            "TRUEMEMORY_CAP_IDENTITY_SHA256": identity_sha, "TRUEMEMORY_CAP_BARRIER_FD": str(self.descriptor)}
+
+    def tearDown(self) -> None:
+        context = BOOT._child_context
+        BOOT._child_context = None
+        if context is not None:
+            context[2].close()
+        try:
+            os.close(self.descriptor)
+        except OSError:
+            pass
+        self.peer.close()
+
+    def restore(self, launcher: object, *, peer_uid: int | None = None, peer_open: bool = True) -> None:
+        if not peer_open:
+            self.peer.close()
+        real_fstat, real_read = os.fstat, BOOT._read_path
+
+        def fstat(descriptor: int) -> os.stat_result:
+            result = real_fstat(descriptor)
+            if descriptor != self.descriptor:
+                return result
+            # macOS reports st_dev -1 for sockets; Linux reports the sockfs device.
+            return SimpleNamespace(st_dev=7, st_ino=result.st_ino, st_uid=result.st_uid, st_mode=result.st_mode)
+
+        def process_identity(pid: int) -> tuple[int, float]:
+            if pid == os.getpid():
+                return 99, 5000.5
+            if isinstance(launcher, BaseException):
+                raise launcher
+            return launcher
+
+        def read_path(path: Path, *, bound: int = 65536) -> bytes:
+            if str(path) == f"/proc/{LAUNCHER}/stat":
+                return f"{LAUNCHER} (python3) Z 1 0 0".encode()
+            return real_read(path, bound=bound)
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, self.environment))
+            for target, name, value in (
+                    (BOOT.sys, "platform", "linux"), (BOOT, "_boot_id", lambda: BOOT_ID),
+                    (BOOT, "_process_identity", process_identity), (BOOT, "_read_path", read_path),
+                    (BOOT.os, "fstat", fstat), (BOOT, "child_gate", lambda identity, deadline: None),
+                    (BOOT, "_peer", lambda endpoint: (LAUNCHER, os.getuid() if peer_uid is None else peer_uid))):
+                stack.enter_context(patch.object(target, name, value))
+            BOOT._restore_child_context()
+
+    def test_live_launcher_acknowledgement_is_delivered(self) -> None:
+        self.restore((11, 3000.5))
+        self.assertTrue((self.directory / "first-import-v1.json").exists())
+        self.assertIn(b"gate_passed", self.peer.recv(4096))
+
+    def test_exited_launcher_is_accepted_after_handoff(self) -> None:
+        self.restore(FileNotFoundError(), peer_open=False)
+        self.assertTrue((self.directory / "first-import-v1.json").exists())
+
+    def test_zombie_launcher_counts_as_exited(self) -> None:
+        self.restore(BOOT.EnforcementUnavailable("Workload process is absent or unreaped"), peer_open=False)
+        self.assertTrue((self.directory / "first-import-v1.json").exists())
+
+    def test_reused_launcher_pid_is_refused(self) -> None:
+        with self.assertRaises(BOOT.EnforcementUnavailable):
+            self.restore((12, 3000.5))
+        self.assertIsNone(BOOT._child_context)
+
+    def test_live_launcher_that_closed_the_barrier_is_refused(self) -> None:
+        with self.assertRaises((BrokenPipeError, ConnectionResetError)):
+            self.restore((11, 3000.5), peer_open=False)
+
+    def test_foreign_barrier_peer_is_refused(self) -> None:
+        with self.assertRaises(BOOT.EnforcementUnavailable):
+            self.restore((11, 3000.5), peer_uid=os.getuid() + 1)
+
+    def test_only_a_zombie_state_counts_as_unreaped(self) -> None:
+        for line, expected in ((b"4242 (a) Z 1", True), (b"4242 (a (b)) Z 1", True), (b"4242 (a) S 1", False)):
+            with self.subTest(line=line), patch.object(BOOT, "_read_path", return_value=line):
+                self.assertIs(BOOT._process_unreaped(LAUNCHER), expected)
+        with patch.object(BOOT, "_read_path", side_effect=FileNotFoundError()):
+            self.assertIs(BOOT._process_unreaped(LAUNCHER), True)
+
+
+@unittest.skipIf(sys.platform == "win32", "Linux-only launcher; POSIX synthetic fixtures")
+class HandoffBoundary(unittest.TestCase):
+    """N4: handoff starts only once the environment is sent; the child budget outlives a hook budget."""
+
+    def barrier(self, *, environment_error: BaseException | None = None,
+                acknowledgement_error: BaseException | None = None) -> object:
+        home = private_directory()
+        claim_path = home / "model_server.start.json"
+        value = BOOT.LinuxInvocationIdentity(**{**asdict(identity()), "uid": os.getuid()})
+        write_private(claim_path, BOOT._canonical({"generation": GENERATION, "launcher": {"pid": LAUNCHER, "born": 3000.5},
+                                                  "child": {"pid": value.main_pid, "born": value.birth_time}}))
+        forwarded = {"SYNTHETIC": "1", FLAG: "1", "TRUEMEMORY_CAP_CHILD": "1", "TRUEMEMORY_MODEL_SERVER_GENERATION": GENERATION}
+        manifest = {"claim_path": str(claim_path), "parent_pid": LAUNCHER, "parent_birth": 3000.5,
+                    "parent_start_ticks": 11, "forwarded_names": sorted(forwarded)}
+        store = SimpleNamespace(append=MagicMock(return_value=(1, "f" * 64)), observe=MagicMock())
+        runner = BOOT._NativeRunner(object(), store, manifest, forwarded=MappingProxyType(forwarded))
+        record = BOOT.LinuxProvisionalLaunch(value, runner, 72, object(), SimpleNamespace(connection=object()))
+        adapter = BOOT.LinuxAdapter()
+        replies = [{"generation": GENERATION, "manifest_sha256": value.manifest_sha256, "preexec_gate_passed": True},
+                   {"generation": GENERATION, "manifest_sha256": value.manifest_sha256, "gate_passed": True}]
+
+        def send(endpoint: object, packet: dict, deadline: float) -> None:
+            if "forwarded_environment" in packet and environment_error is not None:
+                raise environment_error
+
+        def receive(endpoint: object, deadline: float) -> dict:
+            if len(replies) == 1 and acknowledgement_error is not None:
+                raise acknowledgement_error
+            return replies.pop(0)
+
+        with patch.object(adapter, "inspect", return_value=evidence(value)), \
+             patch.object(BOOT, "_verified_psutil_birth", lambda pid, birth: birth), \
+             patch.object(BOOT, "_process_identity", lambda pid: (11, 3000.5)), \
+             patch.object(BOOT, "_packet_send", send), patch.object(BOOT, "_packet_receive", receive), \
+             patch.object(adapter, "_await_ready", lambda *args: None):
+            try:
+                adapter.barrier(record, value, time.monotonic() + 10.0)
+            except TimeoutError:
+                pass
+        return runner
+
+    def test_environment_send_timeout_is_not_a_handoff(self) -> None:
+        self.assertIs(self.barrier(environment_error=TimeoutError("synthetic")).handoff_complete, False)
+
+    def test_sent_environment_is_a_handoff_even_without_acknowledgement(self) -> None:
+        self.assertIs(self.barrier(acknowledgement_error=TimeoutError("synthetic")).handoff_complete, True)
+
+    def test_completed_barrier_is_a_handoff(self) -> None:
+        self.assertIs(self.barrier().handoff_complete, True)
+
+    def test_child_startup_budget_outlives_a_short_caller_budget(self) -> None:
+        home = private_directory()
+        captured: dict = {}
+
+        class Captured(Exception):
+            pass
+
+        def store(path: Path, manifest: dict) -> None:
+            captured.update(manifest)
+            raise Captured()
+
+        caller_deadline = time.monotonic() + 5.0
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {"PATH": "/usr/bin", FLAG: "1"}, clear=True))
+            for target, name, value in (
+                    (BOOT.sys, "platform", "linux"), (BOOT.Path, "home", lambda: home),
+                    (BOOT, "_required_linux_support", lambda *args: (29, "/synthetic", "/user.slice/app.slice", ())),
+                    (BOOT, "_sweep_retired_generations", lambda **kwargs: 0),
+                    (BOOT, "_hash_path", lambda *args, **kwargs: "d" * 64),
+                    (BOOT, "_executable_pin", lambda path: {"path": path}),
+                    (BOOT, "_process_identity", lambda pid: (11, 3000.5)), (BOOT, "_boot_id", lambda: BOOT_ID),
+                    (BOOT, "_EvidenceStore", store)):
+                stack.enter_context(patch.object(target, name, value))
+            stack.enter_context(patch.object(BOOT.os, "pidfd_open", lambda pid: 0, create=True))
+            stack.enter_context(patch.object(BOOT.socket, "SO_PEERCRED", 17, create=True))
+            with self.assertRaises(Captured):
+                BOOT.LinuxAdapter().start(BOOT.LinuxDaemonLaunchPolicy(1, CAP, 0), GENERATION,
+                                          os.path.abspath(sys.executable), caller_deadline)
+        self.assertGreaterEqual(captured["deadline"], caller_deadline + BOOT._CHILD_STARTUP_SECONDS - 5.0 - 1.0)
+        self.assertGreater(captured["deadline"], caller_deadline + 50.0)
 
 
 if __name__ == "__main__":

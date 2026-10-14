@@ -2069,10 +2069,67 @@ def claimed_daemon_live(generation: str, pid: int) -> bool:
     if type(recorded) is not dict or recorded.get("main_pid") != pid or type(recorded.get("start_ticks")) is not int:
         return False
     try:
+        # Start ticks restart at every boot.
+        if recorded.get("boot_id") != _boot_id():
+            return False
         ticks, _ = _process_identity(pid)
     except (OSError, RuntimeError, ValueError):
         return False
     return ticks == recorded["start_ticks"]
+
+
+def generation_startup_expired(generation: str) -> bool:
+    """A generation that has not published its ready receipt by its startup deadline.
+
+    Its workload refuses to publish after that deadline, so its claim no longer
+    stands for a launch in progress.
+    """
+    _hex(generation, 32, "generation")
+    try:
+        directory = _open_directory(_evidence_root() / generation, uid=os.getuid())
+        try:
+            try:
+                os.stat("ready-v1.json", dir_fd=directory, follow_symlinks=False)
+                return False
+            except FileNotFoundError:
+                pass
+            raw, _ = _private_artifact(directory, "manifest-v1.json")
+        finally:
+            os.close(directory)
+        manifest = _strict_json(raw)
+        if type(manifest) is not dict or manifest.get("boot_id") != _boot_id():
+            return False
+        deadline = manifest.get("deadline")
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return type(deadline) is float and math.isfinite(deadline) and time.monotonic() > deadline + _CLEANUP_GRACE
+
+
+def enforce_startup_deadline(handle: OwnedLinuxLaunch) -> None:
+    """Hold a handed-off launch to its own startup deadline.
+
+    Returns once the workload published its ready receipt or exited. A workload
+    still starting after its deadline can no longer publish, so it is
+    terminated through its pinned pidfd instead of holding its claim pending.
+    """
+    record, _ = _validate_handle(handle)
+    expiry = record.runner.manifest["deadline"] + _CLEANUP_GRACE
+    while True:
+        if _owned_exited(record) or _ready_published(record):
+            return
+        remaining = expiry - time.monotonic()
+        if remaining <= 0:
+            abandon_owned_launch(handle)
+            return
+        select.select([record.pidfd], [], [], min(1.0, remaining))
+
+
+def _ready_published(record: LinuxProvisionalLaunch) -> bool:
+    try:
+        os.stat("ready-v1.json", dir_fd=record.runner.store.directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
 
 
 _termination_context = threading.local()
@@ -4070,12 +4127,28 @@ def _child_bundle(manifest_path: str, *, launcher_may_exit: bool = False) -> tup
 
 
 def _launcher_unchanged(manifest: dict[str, object], *, launcher_may_exit: bool) -> bool:
-    """The launcher is still its recorded incarnation, or has exited when allowed."""
+    """The launcher is still its recorded incarnation, or has exited when allowed.
+
+    A zombie has exited even though its parent has not reaped it yet.
+    """
     try:
         current = _process_identity(manifest["parent_pid"])
     except FileNotFoundError:
         return launcher_may_exit
+    except EnforcementUnavailable:
+        if _process_unreaped(manifest["parent_pid"]):
+            return launcher_may_exit
+        raise
     return current == (manifest["parent_start_ticks"], manifest["parent_birth"])
+
+
+def _process_unreaped(pid: int) -> bool:
+    try:
+        raw = _read_path(Path(f"/proc/{pid}/stat"), bound=8192).decode("ascii")
+    except FileNotFoundError:
+        return True
+    fields = raw[raw.rfind(")") + 2:].split()
+    return bool(fields) and fields[0] == "Z"
 
 
 def _child_main(manifest_path: str) -> None:
@@ -4348,6 +4421,7 @@ def main() -> None:
         _write_console_claim(claim_path, claim)
         handle = None
         unresolved = None
+        handed_off = False
         try:
             handle = launch_owned_linux(policy, generation=generation, python_executable=os.path.abspath(sys.executable), deadline=deadline)
             child_born = _verified_psutil_birth(handle.pid, handle.record.identity.birth_time)
@@ -4355,7 +4429,8 @@ def main() -> None:
             _write_console_claim(claim_path, claim)
             handle.release_after_claim(claim, deadline=deadline)
         except (OSError, RuntimeError, ValueError, TypeError, TimeoutError) as error:
-            if not (isinstance(error, TimeoutError) and handle is not None and launch_handed_off(handle)):
+            handed_off = isinstance(error, TimeoutError) and handle is not None and launch_handed_off(handle)
+            if not handed_off:
                 # A failed generation must neither block later launches nor run unowned.
                 try:
                     _retire_console_claim(directory, claim_path.name, generation)
@@ -4371,6 +4446,8 @@ def main() -> None:
         os.close(directory)
     if unresolved is not None and abandon_owned_launch(handle):
         raise unresolved
+    if handed_off:
+        enforce_startup_deadline(handle)
     # The foreground console retains ownership through exit, including a
     # failed launch whose workload could not be terminated.
     while not select.select([handle.record.pidfd], [], [], 1.0)[0]:

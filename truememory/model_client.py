@@ -389,7 +389,7 @@ def _start_server(wait_timeout: float | None = None) -> bool:
                             # Never trust a PID file or remove endpoint files.
                             # A held bind lock is the daemon's ownership proof.
                             previous = read_start_claim(START_STATE_PATH)
-                            if not _launch_is_pending(previous):
+                            if not _launch_is_pending(previous) or (required_cap and _capped_startup_expired(previous)):
                                 if launched:
                                     return False  # At most one launch per caller.
                                 born = process_birth(os.getpid())
@@ -426,7 +426,7 @@ def _start_server(wait_timeout: float | None = None) -> bool:
                                     # workload received everything it needs, so
                                     # it finishes starting under its claim and
                                     # later clients join it once it is ready.
-                                    _retain_owned_capped_launch(child)
+                                    _retain_owned_capped_launch(child, handed_off=True)
                                     raise
                                 # Invalidate this generation; a late child must
                                 # not publish after its launch failed, and later
@@ -510,6 +510,14 @@ def _verify_retained_capped_server(policy: object, deadline: float) -> None:
         raise EnforcementUnavailable("Required capped daemon is not live")
 
 
+def _capped_startup_expired(claim: dict | None) -> bool:
+    """A claimed child that missed its startup deadline no longer holds the launch."""
+    if claim is None or claim.get("child") is None:
+        return False
+    from truememory_memory_bootstrap import generation_startup_expired
+    return generation_startup_expired(claim["generation"])
+
+
 def _capped_launch_continues(handle: object | None, error: BaseException) -> bool:
     if handle is None or not isinstance(error, TimeoutError):
         return False
@@ -534,21 +542,24 @@ def _abandon_capped_launch(handle: object | None, deadline: float) -> None:
     _retain_owned_capped_launch(handle, terminate=True)
 
 
-def _retain_owned_capped_launch(handle: object, *, terminate: bool = False) -> None:
+def _retain_owned_capped_launch(handle: object, *, terminate: bool = False, handed_off: bool = False) -> None:
     """Retain native resources; an uncertain lifetime never triggers a live stop.
 
     With terminate, the watcher first finishes the owned termination of a
-    failed launch outside the start lock.
+    failed launch outside the start lock. A handed-off launch is held to its
+    own startup deadline before it is watched until exit.
     """
     import select
     import threading
-    from truememory_memory_bootstrap import abandon_owned_launch, release_exited_launch
+    from truememory_memory_bootstrap import abandon_owned_launch, enforce_startup_deadline, release_exited_launch
     _owned_capped_launches.append(handle)
 
     def observe_exit() -> None:
         try:
             if terminate and abandon_owned_launch(handle):
                 return
+            if handed_off:
+                enforce_startup_deadline(handle)
             while not select.select([handle.record.pidfd], [], [], 1.0)[0]:
                 pass
             if not release_exited_launch(handle):
