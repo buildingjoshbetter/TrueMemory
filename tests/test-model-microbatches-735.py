@@ -628,8 +628,6 @@ def load_order_runtime() -> dict:
             return mps
         if name == "truememory.reranker":
             return types.SimpleNamespace(get_current_reranker_name=lambda: "Alibaba-NLP/gte-reranker-modernbert-base")
-        if name == "truememory._rerank_budget":
-            return builtins.__import__(name, *args, **kwargs)
         raise AssertionError("Unexpected runtime import: " + name)
 
     numpy, clock = OrderNP(), FakeClock()

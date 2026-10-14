@@ -339,8 +339,9 @@ def get_reranker(
                     from sentence_transformers import CrossEncoder
                     _check(control)
                     _model = CrossEncoder(name, device=device)
-                    from truememory._rerank_budget import cap_reranker_length
-                    cap_reranker_length(_model)
+                    if type(getattr(_model, "max_seq_length", None)) is int:
+                        from truememory._rerank_budget import cap_reranker_length
+                        cap_reranker_length(_model)
                     if budget_owner is not None:
                         bind_model_owner(_model, budget_owner)
             except BaseException:
@@ -449,8 +450,11 @@ def rerank(
             scope = nullcontext()
         with scope as memory:
             with _own_model(model):
-                from truememory._rerank_budget import budgeted_predict
-                scores = budgeted_predict(model, pairs, batch_size)
+                if getattr(model, "tokenizer", None) is not None and type(getattr(model, "max_seq_length", None)) is int:
+                    from truememory._rerank_budget import budgeted_predict
+                    scores = budgeted_predict(model, pairs, batch_size)
+                else:
+                    scores = model.predict(pairs, batch_size=batch_size, show_progress_bar=False)
                 if memory is not None:
                     memory.retain_buffer(scores)
 

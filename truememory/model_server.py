@@ -1078,8 +1078,9 @@ class ModelServer:
                 self._memory_stage("reranker construction", deadline,
                                    model_identity=(name, 0, "reranker"), device=device)
             model = CrossEncoder(name, device=device)
-            from truememory._rerank_budget import cap_reranker_length
-            cap_reranker_length(model)
+            if type(getattr(model, "max_seq_length", None)) is int:
+                from truememory._rerank_budget import cap_reranker_length
+                cap_reranker_length(model)
             self._check_process_memory("reranker construction completion", deadline)
             self._reranker = model
             self._reranker_name = name
@@ -1444,10 +1445,15 @@ class ModelServer:
                                 order = self._rerank_global_order(reranker, pairs, limit, deadline)
                                 if order is not None:
                                     recovery_name = self._reranker_name
-                                from truememory._rerank_budget import budgeted_slices, pair_token_lengths, rerank_token_budget
-                                lengths = pair_token_lengths(reranker, pairs)
-                                slices = (None if lengths is None else
-                                          budgeted_slices(lengths, limit, rerank_token_budget()))
+                                slices = None
+                                if (getattr(reranker, "tokenizer", None) is not None
+                                        and type(getattr(reranker, "max_seq_length", None)) is int):
+                                    from truememory._rerank_budget import (
+                                        budgeted_slices, pair_token_lengths, rerank_token_budget,
+                                    )
+                                    lengths = pair_token_lengths(reranker, pairs)
+                                    slices = (None if lengths is None else
+                                              budgeted_slices(lengths, limit, rerank_token_budget()))
                                 if slices is not None:
                                     # Long pairs: smaller longest-first batches bound attention scratch.
                                     order = np.array([index for group in slices for index in group], dtype=np.intp)
