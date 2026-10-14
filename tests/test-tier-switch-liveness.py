@@ -1016,11 +1016,14 @@ class VectorlessMemories(unittest.TestCase):
 
 class ActivationEdgeCases(unittest.TestCase):
     def test_cancel_while_waiting_for_maintenance_ends_the_job(self):
+        # Waiting for maintenance must not hold this process's serving writer.
         (result,) = run_scenario("""
             import subprocess
             seed(20)
             stub_models(delay=0.02)
+            from truememory.engine import TrueMemoryEngine
             from truememory.tier_switch.manager import RebuildManager
+            engine = TrueMemoryEngine(DB); engine.get_all(limit=1); drain()
             holder = subprocess.Popen([sys.executable, "-c", PRELUDE_SOURCE + %r], stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE, text=True)
             finalize = RebuildManager._finalize_rebuild
@@ -1035,12 +1038,21 @@ class ActivationEdgeCases(unittest.TestCase):
             manager = switch("edge", join=False)["manager"]
             worker = manager._active_thread
             activating.wait(60); time.sleep(0.5)
+            served = threading.Event()
+            def serve():
+                engine.get_all(limit=5)
+                engine.add("stored while activation waits for maintenance", sender="bob")
+                served.set()
+            threading.Thread(target=serve, daemon=True).start()
+            responsive = served.wait(5)
             manager.cancel()
             worker.join(60)
             stopped = not worker.is_alive()
             holder.communicate("release\\n", timeout=30)
-            emit(stopped=stopped, outcome=manager._last_outcome, state=state())
+            served.wait(30); engine.close(); drain()
+            emit(responsive=responsive, stopped=stopped, outcome=manager._last_outcome, state=state())
         """ % HOLD_MAINTENANCE)
+        self.assertTrue(result["responsive"])
         self.assertTrue(result["stopped"])
         self.assertNotEqual(result["outcome"], "activation_pending")
         self.assertIsNone(result["state"]["selected"])
