@@ -127,6 +127,8 @@ _CODEX_PHASES = {"commentary", "partial_answer", "final_answer"}
 _CODEX_START = {"task_started", "turn_started"}
 _CODEX_END = {"task_complete", "turn_complete"}
 _CODEX_ANY = object()
+# Payload keys _reconcile_codex reads (lifecycle mode and turn context).
+_CODEX_RECONCILED = ("collaboration_mode_kind", "collaboration_mode", "turn_id")
 _CODEX_WHITE_SPACE = "\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
 _CodexCitation = tuple[tuple[tuple[str, int, int, str], ...], tuple[str, ...]]
 
@@ -1102,6 +1104,15 @@ class _Records:
             return None
         native = _decode_codex_record(entry)
         if native is not None:
+            if self.compact:
+                # Reconciliation reads only these payload keys after decoding;
+                # tool output and other payload bodies need not stay in memory.
+                native.payload = {key: native.payload[key] for key in _CODEX_RECONCILED if key in native.payload}
+                if (native.kind == "response_item" and not native.role and native.projection is None
+                        and not (native.malformed or native.unrecognized or native.errors)):
+                    # A clean tool or reasoning item has no role or projection,
+                    # so reconciliation can neither credit nor reject it.
+                    return None
             self.native.append((index, native))
             return self._keep(native.message) if native.message is not None else None
         top_type = entry.get("type") or entry.get("role") or "unknown"

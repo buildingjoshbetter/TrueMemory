@@ -354,3 +354,51 @@ def test_session_end_hook_never_reads_a_large_source(env, monkeypatch):
     key = command[command.index("--completion-key") + 1]
     metadata = json.loads((completion.account_root("", "", env.root) / "state.json").read_text())["captures"][key]["metadata"]
     assert "sha256" not in metadata and metadata["byte_count"] == len(data)
+
+
+def _codex_rollout(turns: int, output: int, *, plan: bool = False) -> list[dict]:
+    def response(role: str, text: str, turn: str) -> dict:
+        return {"type": "response_item", "timestamp": "2026-10-14T00:00:00Z",
+                "payload": {"type": "message", "role": role, "id": "i",
+                            "content": [{"type": "input_text" if role == "user" else "output_text", "text": text}],
+                            "internal_chat_message_metadata_passthrough": {"turn_id": turn}}}
+    records = [{"type": "session_meta", "payload": {"id": "s", "cwd": "/synthetic"}}]
+    for index in range(turns):
+        turn = f"t{index}"
+        records.append({"type": "event_msg", "payload": {"type": "task_started", "turn_id": turn,
+                                                         "collaboration_mode_kind": "plan" if plan else "default"}})
+        records.append({"type": "turn_context", "payload": {"turn_id": turn, "cwd": "/synthetic",
+                        "collaboration_mode": {"mode": "plan" if plan else "default", "settings": {"model": "m"}}}})
+        records.append(response("user", f"question {index}", turn))
+        records.append({"type": "event_msg", "payload": {"type": "user_message", "message": f"question {index}",
+                                                         "images": [], "audio": None}})
+        for call in range(3):
+            records.append({"type": "response_item", "payload": {"type": "function_call", "name": "shell",
+                                                                 "arguments": "{}", "call_id": f"c{call}"}})
+            records.append({"type": "response_item", "payload": {"type": "function_call_output", "call_id": f"c{call}",
+                                                                 "output": "o" * output}})
+        answer = f"<proposed_plan>\nstep {index}\n</proposed_plan>" if plan else f"answer {index}"
+        records.append({"type": "event_msg", "payload": {"type": "agent_message", "message": answer}})
+        records.append(response("assistant", answer, turn))
+        records.append({"type": "event_msg", "payload": {"type": "task_complete", "turn_id": turn,
+                                                         "last_agent_message": answer}})
+    return records
+
+
+@pytest.mark.parametrize("plan", [False, True])
+def test_codex_compact_keeps_only_what_reconciliation_reads(tmp_path, plan):
+    path = tmp_path / "rollout.jsonl"
+    rows = _codex_rollout(6, 20_000, plan=plan)
+    _write(path, rows)
+    full = transcript.parse_transcript_outcome(path)
+    compact = transcript.parse_transcript_outcome(path, compact=True)
+    assert (compact.status, compact.total_records, compact.malformed_records, compact.unrecognized_records,
+            compact.error_categories) == (full.status, full.total_records, full.malformed_records,
+                                         full.unrecognized_records, full.error_categories)
+    assert transcript.format_for_extraction(compact.messages) == transcript.format_for_extraction(full.messages)
+    records = transcript._Records(allow_strings=False, compact=True)
+    for row in rows:
+        records.add(row)
+    assert all(set(record.payload) <= set(transcript._CODEX_RECONCILED) for _, record in records.native)
+    # Tool calls and outputs are not retained at all.
+    assert len(records.native) == len(rows) - 6 * 6
