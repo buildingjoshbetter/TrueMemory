@@ -4,11 +4,13 @@ from __future__ import annotations
 import ast
 import copy
 from contextlib import ExitStack
+import errno
 from dataclasses import asdict, replace
 import hashlib
 import os
 from pathlib import Path
 import socket
+import stat
 import sys
 import tempfile
 import time
@@ -1580,13 +1582,437 @@ class HandoffBoundary(unittest.TestCase):
                     (BOOT, "_process_identity", lambda pid: (11, 3000.5)), (BOOT, "_boot_id", lambda: BOOT_ID),
                     (BOOT, "_EvidenceStore", store)):
                 stack.enter_context(patch.object(target, name, value))
-            stack.enter_context(patch.object(BOOT.os, "pidfd_open", lambda pid: 0, create=True))
+            stack.enter_context(patch.object(BOOT, "_pidfd_supported", lambda: True))
             stack.enter_context(patch.object(BOOT.socket, "SO_PEERCRED", 17, create=True))
             with self.assertRaises(Captured):
                 BOOT.LinuxAdapter().start(BOOT.LinuxDaemonLaunchPolicy(1, CAP, 0), GENERATION,
                                           os.path.abspath(sys.executable), caller_deadline)
         self.assertGreaterEqual(captured["deadline"], caller_deadline + BOOT._CHILD_STARTUP_SECONDS - 5.0 - 1.0)
         self.assertGreater(captured["deadline"], caller_deadline + 50.0)
+
+
+def short_private_directory() -> Path:
+    # macOS limits sun_path to 104 bytes, so socket fixtures need a short root.
+    path = Path(tempfile.mkdtemp(dir="/private/tmp" if sys.platform == "darwin" else None)).resolve()
+    os.chmod(path, 0o700)
+    return path
+
+
+def parse_environment_file(raw: bytes) -> dict[str, str]:
+    """systemd's EnvironmentFile= rules for the double-quoted form the launcher writes."""
+    text, result, index = raw.decode("utf-8"), {}, 0
+    while index < len(text):
+        equals = text.index("=", index)
+        name = text[index:equals]
+        if text[equals + 1] != '"':
+            raise AssertionError("value is not double quoted")
+        position, value = equals + 2, []
+        while True:
+            character = text[position]
+            if character == "\\":
+                escaped = text[position + 1]
+                if escaped not in '"\\`$':
+                    raise AssertionError(f"unexpected escape {escaped!r}")
+                value.append(escaped)
+                position += 2
+            elif character == '"':
+                position += 1
+                break
+            else:
+                value.append(character)
+                position += 1
+        if text[position] != "\n":
+            raise AssertionError("assignment does not end the line")
+        result[name] = "".join(value)
+        index = position + 1
+    return result
+
+
+class PidfdFallback(unittest.TestCase):
+    """D1: interpreters without os.pidfd_open/signal.pidfd_send_signal use the raw syscalls."""
+
+    def linux(self, machine: str = "x86_64") -> ExitStack:
+        stack = ExitStack()
+        stack.enter_context(patch.object(BOOT.sys, "platform", "linux"))
+        stack.enter_context(patch.object(BOOT.os, "uname", lambda: SimpleNamespace(machine=machine)))
+        return stack
+
+    def without_native(self) -> ExitStack:
+        stack = ExitStack()
+        stack.enter_context(patch.object(BOOT.os, "pidfd_open", None, create=True))
+        stack.enter_context(patch.object(BOOT.signal, "pidfd_send_signal", None, create=True))
+        return stack
+
+    def test_unified_syscall_numbers_for_supported_architectures(self) -> None:
+        for machine in ("x86_64", "aarch64"):
+            with self.subTest(machine=machine), self.linux(machine):
+                self.assertEqual((BOOT._pidfd_syscall("pidfd_open"), BOOT._pidfd_syscall("pidfd_send_signal")), (434, 424))
+        with self.linux("riscv64"):
+            self.assertIsNone(BOOT._pidfd_syscall("pidfd_open"))
+        with patch.object(BOOT.sys, "platform", "darwin"):
+            self.assertIsNone(BOOT._pidfd_syscall("pidfd_open"))
+
+    def test_native_functions_are_preferred(self) -> None:
+        raw = MagicMock()
+        native_open, native_signal = MagicMock(return_value=9), MagicMock()
+        with self.linux(), patch.object(BOOT.os, "pidfd_open", native_open, create=True), \
+             patch.object(BOOT.signal, "pidfd_send_signal", native_signal, create=True), patch.object(BOOT, "_raw_syscall", raw):
+            self.assertEqual(BOOT._pidfd_open(43), 9)
+            BOOT._pidfd_send_signal(9, BOOT.signal.SIGTERM)
+        native_signal.assert_called_once_with(9, BOOT.signal.SIGTERM, None, 0)
+        raw.assert_not_called()
+
+    def test_fallback_opens_and_signals_through_syscalls(self) -> None:
+        raw = MagicMock(return_value=11)
+        with self.linux("aarch64"), self.without_native(), patch.object(BOOT, "_raw_syscall", raw):
+            self.assertIs(BOOT._pidfd_supported(), True)
+            self.assertEqual(BOOT._pidfd_open(43), 11)
+            BOOT._pidfd_send_signal(11, BOOT.signal.SIGKILL)
+        self.assertEqual([call.args for call in raw.call_args_list], [(434, 43, 0), (424, 11, int(BOOT.signal.SIGKILL), 0, 0)])
+
+    def test_unsupported_architecture_fails_closed(self) -> None:
+        with self.linux("riscv64"), self.without_native():
+            self.assertIs(BOOT._pidfd_supported(), False)
+            with self.assertRaises(BOOT.EnforcementUnavailable):
+                BOOT._pidfd_open(43)
+            with self.assertRaises(BOOT.EnforcementUnavailable):
+                BOOT._pidfd_send_signal(11, BOOT.signal.SIGTERM)
+
+    def raw(self, result: int, error: int = 0) -> tuple[object, MagicMock]:
+        function = MagicMock(return_value=result)
+        library = SimpleNamespace(syscall=function)
+        with patch.object(BOOT.ctypes, "CDLL", lambda name, use_errno: library), \
+             patch.object(BOOT.ctypes, "get_errno", lambda: error), patch.object(BOOT.ctypes, "set_errno", lambda value: 0):
+            try:
+                return BOOT._raw_syscall(434, 43, 0), function
+            except OSError as failure:
+                return failure, function
+
+    def test_raw_syscall_passes_long_arguments_and_returns_the_result(self) -> None:
+        result, function = self.raw(7)
+        self.assertEqual(result, 7)
+        self.assertEqual([argument.value for argument in function.call_args.args], [434, 43, 0])
+        self.assertIs(function.restype, BOOT.ctypes.c_long)
+
+    def test_raw_syscall_errors_map_to_errno_specific_exceptions(self) -> None:
+        for error, expected in ((errno.ESRCH, ProcessLookupError), (errno.EPERM, PermissionError),
+                                (errno.ENOSYS, OSError), (errno.EINVAL, OSError)):
+            with self.subTest(error=error):
+                failure, _ = self.raw(-1, error)
+                self.assertIsInstance(failure, expected)
+                self.assertEqual(failure.errno, error)
+
+    def test_owned_signal_requires_only_the_signal_primitive(self) -> None:
+        with self.linux("x86_64"), self.without_native():
+            self.assertIs(BOOT._pidfd_available(BOOT.signal, "pidfd_send_signal"), True)
+        with self.linux("riscv64"), self.without_native():
+            self.assertIs(BOOT._pidfd_available(BOOT.signal, "pidfd_send_signal"), False)
+
+    def test_owned_termination_signals_through_the_fallback(self) -> None:
+        value = identity()
+        store = SimpleNamespace(directory=75, path=Path("/synthetic/evidence"),
+                                metadata=SimpleNamespace(st_dev=211, st_ino=223, st_uid=1000),
+                                verify=lambda: None, append=lambda phase, payload: (1, "f" * 64))
+        scope = BOOT._NativeScope(29, "/synthetic", 70, 71, (), pidfd_device=101, pidfd_inode=103)
+        runner = BOOT._NativeRunner(object(), store, {"version": 1})
+        endpoint = BOOT._NativeEndpoint(SimpleNamespace(fileno=lambda: 73), SimpleNamespace(fileno=lambda: 74),
+                                        value.main_pid, value.uid, {}, 107, 109, 113, 127)
+        record = BOOT.LinuxProvisionalLaunch(value, runner, 72, scope, endpoint)
+        resources = BOOT._termination_resources(record)
+        exited = [False]
+        raw = MagicMock(side_effect=lambda *args: exited.__setitem__(0, True) or 0)
+        fcntl = SimpleNamespace(F_DUPFD_CLOEXEC=1030, fcntl=lambda descriptor, command, minimum: 90)
+        with self.linux("x86_64"), self.without_native(), ExitStack() as stack:
+            for target, name, replacement in (
+                    (BOOT.time, "monotonic", lambda: 1000.0),
+                    (BOOT.os, "fstat", lambda descriptor: SimpleNamespace(st_dev=101, st_ino=103)),
+                    (BOOT.os, "close", lambda descriptor: None),
+                    (BOOT.select, "select", lambda read, write, errors, timeout: ((list(read) if exited[0] else []), [], [])),
+                    (BOOT, "_read_path", lambda *args, **kwargs: b"Pid: 43\nNSpid: 43\n"),
+                    (BOOT.importlib, "import_module", lambda name: fcntl), (BOOT, "_raw_syscall", raw)):
+                stack.enter_context(patch.object(target, name, replacement))
+            self.assertIs(BOOT._signal_owned_pidfd(record, value, resources, BOOT.signal.SIGTERM, 1005.0), True)
+        raw.assert_called_once_with(424, 90, int(BOOT.signal.SIGTERM), 0, 0)
+
+    def test_required_support_accepts_fallback_primitives(self) -> None:
+        class PastPrimitives(Exception):
+            pass
+
+        def manager(environment: object) -> None:
+            raise PastPrimitives()
+
+        for supported, expected in ((True, PastPrimitives), (False, BOOT.EnforcementUnavailable)):
+            with self.subTest(supported=supported), self.linux("x86_64"), \
+                 patch.object(BOOT, "_pidfd_supported", lambda: supported), \
+                 patch.object(BOOT.socket, "SO_PEERCRED", 17, create=True), \
+                 patch.object(BOOT, "_manager_environment", manager), self.assertRaises(expected):
+                BOOT._required_linux_support(BOOT.LinuxDaemonLaunchPolicy(1, CAP, 0), time.monotonic() + 10.0)
+
+
+class EnvironmentFileRendering(unittest.TestCase):
+    """D2: values reach the manager through a file systemd parses back exactly."""
+
+    def test_values_round_trip_through_systemd_quoting(self) -> None:
+        values = {"PLAIN": "value", "SPACES": "  padded value  ", "QUOTE": 'say "hi"', "BACKSLASH": "a\\b\\",
+                  "DOLLAR": "$HOME and ${PATH}", "BACKTICK": "`id`", "NEWLINE": "one\ntwo\n", "TAB": "a\tb",
+                  "EMPTY": "", "EQUALS": "a=b=c", "HASH": "#not a comment", "UNICODE": "caf\u00e9 \u2713"}
+        self.assertEqual(parse_environment_file(BOOT._environment_file(values)), values)
+
+    def test_non_utf8_value_is_refused_by_name_only(self) -> None:
+        with self.assertRaises(BOOT.EnforcementUnavailable) as caught:
+            BOOT._environment_file({"BROKEN": "secret\udcff"})
+        self.assertIn("BROKEN", str(caught.exception))
+        self.assertNotIn("secret", str(caught.exception))
+
+    def test_invalid_names_are_refused(self) -> None:
+        with self.assertRaises(BOOT.EnforcementUnavailable):
+            BOOT._environment_file({"BAD-NAME": "x"})
+
+
+@unittest.skipIf(sys.platform == "win32", "Linux-only launcher; POSIX synthetic fixtures")
+class RuntimeBarrierDirectory(unittest.TestCase):
+    """D3: the barrier lives in a short owner-only runtime directory, whatever HOME is."""
+
+    def test_generation_directory_is_owner_only_and_short(self) -> None:
+        root = short_private_directory() / "truememory-cap"
+        with patch.object(BOOT, "_runtime_root", lambda: root):
+            path = BOOT._prepare_runtime_generation(GENERATION)
+        self.assertEqual(path, root / GENERATION)
+        self.assertEqual(stat.S_IMODE(os.stat(root).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o700)
+        self.assertLessEqual(len(os.fsencode(str(path / BOOT._BARRIER_NAME))), BOOT._SUN_PATH_MAX)
+
+    def test_shared_or_linked_runtime_roots_are_refused(self) -> None:
+        base = short_private_directory()
+        shared = base / "shared"
+        shared.mkdir(mode=0o700)
+        os.chmod(shared, 0o755)
+        linked = base / "linked"
+        linked.symlink_to(base / "elsewhere")
+        (base / "elsewhere").mkdir(mode=0o700)
+        for root, expected in ((shared, BOOT.EnforcementUnavailable), (linked, OSError)):
+            with self.subTest(root=root.name), patch.object(BOOT, "_runtime_root", lambda: root), self.assertRaises(expected):
+                BOOT._prepare_runtime_generation(GENERATION)
+
+    def test_overlong_barrier_path_is_refused_before_bind(self) -> None:
+        root = short_private_directory() / "truememory-cap"
+        with patch.object(BOOT, "_runtime_root", lambda: root), patch.object(BOOT, "_SUN_PATH_MAX", 20), \
+             self.assertRaises(BOOT.EnforcementUnavailable):
+            BOOT._prepare_runtime_generation(GENERATION)
+
+    def test_discard_removes_barrier_and_environment(self) -> None:
+        root = short_private_directory() / "truememory-cap"
+        with patch.object(BOOT, "_runtime_root", lambda: root):
+            path = BOOT._prepare_runtime_generation(GENERATION)
+            write_private(path / BOOT._ENVIRONMENT_NAME, b"A=\"1\"\n")
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                listener.bind(str(path / BOOT._BARRIER_NAME))
+            finally:
+                listener.close()
+            BOOT._discard_runtime_generation(GENERATION)
+            self.assertFalse(path.exists())
+            BOOT._discard_runtime_generation(GENERATION)  # idempotent
+
+    def test_retirement_discards_crash_leftovers(self) -> None:
+        root = short_private_directory() / "truememory-cap"
+        home = private_directory()
+        (home / ".truememory" / "memory-cap-launches" / GENERATION).mkdir(parents=True, mode=0o700)
+        with patch.object(BOOT, "_runtime_root", lambda: root), patch.object(BOOT.Path, "home", return_value=home):
+            path = BOOT._prepare_runtime_generation(GENERATION)
+            write_private(path / BOOT._ENVIRONMENT_NAME, b"SECRET=\"value\"\n")
+            self.assertIs(BOOT._mark_generation_retired(GENERATION), True)
+        self.assertFalse(path.exists())
+
+    def test_child_connects_to_the_runtime_barrier(self) -> None:
+        root = short_private_directory() / "truememory-cap"
+        evidence = private_directory() / GENERATION
+        evidence.mkdir(mode=0o700)
+        descriptor = os.open(evidence, os.O_RDONLY)
+        connected: list[str] = []
+
+        class Endpoint:
+            def settimeout(self, value: float) -> None:
+                pass
+
+            def connect(self, address: str) -> None:
+                connected.append(address)
+                raise ConnectionRefusedError("synthetic absent launcher")
+
+            def close(self) -> None:
+                pass
+
+        manifest = {"deadline": time.monotonic() + 30.0, "generation": GENERATION, "bootstrap_sha256": "d" * 64}
+        with patch.object(BOOT.sys, "platform", "linux"), \
+             patch.object(BOOT.sys, "flags", SimpleNamespace(no_site=1, isolated=1)), \
+             patch.object(BOOT, "_runtime_root", lambda: root), \
+             patch.object(BOOT, "_child_bundle", lambda path: (descriptor, evidence / "manifest-v1.json", manifest, "e" * 64)), \
+             patch.object(BOOT, "_process_identity", lambda pid: (11, 3000.5)), \
+             patch.object(BOOT.socket, "socket", lambda *args: Endpoint()), self.assertRaises(ConnectionRefusedError):
+            BOOT._child_main(str(evidence / "manifest-v1.json"))
+        self.assertEqual(connected, [str(root / GENERATION / BOOT._BARRIER_NAME)])
+        self.assertTrue((evidence / "child-startup-failed-v1.json").exists())
+
+
+@unittest.skipIf(sys.platform == "win32", "Linux-only launcher; POSIX synthetic fixtures")
+class LaunchArgumentsAndCleanup(unittest.TestCase):
+    """D2/D3: start() passes no environment values in argv, binds safely for any HOME, and cleans up."""
+
+    SECRET = 'tok-"quoted"-$VALUE-`x`'
+
+    def start(self, *, home_length: int = 0, systemd_run_error: BaseException | None = None,
+              bind_error: BaseException | None = None, systemd_run_succeeds: bool = False,
+              child_connects: bool = False) -> tuple[list[list[str]], dict, Path, Path, MagicMock]:
+        base = private_directory()
+        home = base
+        if home_length:
+            home = base / ("h" * max(1, home_length - len(str(base)) - 1))
+            home.mkdir(mode=0o700)
+        runtime = short_private_directory() / "truememory-cap"
+        slice_relative = "/user.slice/app.slice/app-truememory" + GENERATION + ".slice"
+        commands: list[list[str]] = []
+        observed: dict = {}
+        error = systemd_run_error if systemd_run_error is not None else BOOT.EnforcementUnavailable("synthetic stop")
+
+        def run(arguments: list[str], deadline: float, **kwargs: object) -> tuple[object, bytes]:
+            commands.append(list(arguments))
+            if arguments[0] == "/usr/bin/busctl":
+                return SimpleNamespace(), b""
+            if arguments[0] != "/usr/bin/systemd-run":
+                raise AssertionError(arguments)
+            observed["kwargs"] = kwargs
+            environment_path = Path(next(item for item in arguments if item.startswith("--property=EnvironmentFile=")).split("=", 2)[2])
+            observed["environment_path"] = environment_path
+            observed["mode"] = stat.S_IMODE(os.stat(environment_path).st_mode)
+            observed["directory_mode"] = stat.S_IMODE(os.stat(environment_path.parent).st_mode)
+            observed["environment"] = parse_environment_file(environment_path.read_bytes())
+            barrier = environment_path.parent / BOOT._BARRIER_NAME
+            observed["barrier"] = barrier
+            observed["barrier_is_socket"] = stat.S_ISSOCK(os.stat(barrier).st_mode)
+            if child_connects:
+                # Stand in for the started child reaching the barrier.
+                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                client.connect(str(barrier))
+                observed["client"] = client
+                return SimpleNamespace(), b""
+            if systemd_run_succeeds:
+                return SimpleNamespace(), b""
+            raise error
+
+        def peer(connection: object) -> tuple[int, int]:
+            # The first step after accept: the barrier path must already be gone.
+            observed["runtime_after_accept"] = (runtime / GENERATION).exists()
+            raise BOOT.EnforcementUnavailable("synthetic stop after accept")
+
+        real_left = BOOT._left
+
+        def left(deadline: float) -> float:
+            # The first wait after a successful systemd-run is the barrier accept.
+            if systemd_run_succeeds and "environment_path" in observed and "after_run" not in observed:
+                observed["after_run"] = observed["environment_path"].exists()
+                raise TimeoutError("synthetic: stop before accept")
+            return real_left(deadline)
+
+        real_open = BOOT._open_directory
+
+        def open_directory(path: Path, *, uid: int | None = None) -> int:
+            if str(path).startswith("/synthetic"):
+                return os.open(os.devnull, os.O_RDONLY)
+            return real_open(path, uid=uid)
+
+        slice_properties = {"LoadState": "loaded", "ActiveState": "active", "InvocationID": "b" * 32,
+                            "ControlGroup": slice_relative, "MemoryMax": str(CAP), "MemorySwapMax": "0"}
+        abandon = MagicMock(return_value=True)
+        environment = {"PATH": "/usr/bin", "SECRET_TOKEN": self.SECRET, "MULTILINE": "a\nb"}
+
+        class Listener:
+            def bind(self, address: str) -> None:
+                raise bind_error
+
+            def close(self) -> None:
+                pass
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, environment, clear=True))
+            for target, name, value in (
+                    (BOOT.sys, "platform", "linux"), (BOOT.Path, "home", lambda: home),
+                    (BOOT, "_pidfd_supported", lambda: True),
+                    (BOOT, "_required_linux_support", lambda *args: (29, "/synthetic", "/user.slice/app.slice", ())),
+                    (BOOT, "_sweep_retired_generations", lambda **kwargs: 0),
+                    (BOOT, "_executable_pin", lambda path: {"path": path}),
+                    (BOOT, "_process_identity", lambda pid: (11, 3000.5)), (BOOT, "_boot_id", lambda: BOOT_ID),
+                    (BOOT, "_runtime_root", lambda: runtime), (BOOT, "_run_command", run), (BOOT, "_left", left),
+                    (BOOT, "_peer", peer),
+                    (BOOT, "_properties", lambda unit, names, deadline: {key: slice_properties[key] for key in names}),
+                    (BOOT, "_open_directory", open_directory), (BOOT, "_filesystem_magic", lambda descriptor: None),
+                    (BOOT, "_read_at", lambda descriptor, name: {"memory.max": str(CAP), "memory.swap.max": "0", "memory.current": "0"}[name]),
+                    (BOOT, "_controller_events", lambda *args: ()),
+                    (BOOT, "_recursive_members", lambda descriptor, relative: ((relative, ()),))):
+                stack.enter_context(patch.object(target, name, value))
+            stack.enter_context(patch.object(BOOT.socket, "SO_PEERCRED", 17, create=True))
+            stack.enter_context(patch.object(BOOT.LinuxAdapter, "_abandon_partial", abandon))
+            if bind_error is not None:
+                stack.enter_context(patch.object(BOOT.socket, "socket", lambda *args: Listener()))
+            if child_connects:
+                expected = (BOOT.EnforcementUnavailable,)
+            elif systemd_run_succeeds:
+                expected = (TimeoutError,)
+            else:
+                expected = (type(error), type(bind_error) if bind_error is not None else type(error))
+            try:
+                with self.assertRaises(expected):
+                    BOOT.LinuxAdapter().start(BOOT.LinuxDaemonLaunchPolicy(1, CAP, 0), GENERATION,
+                                              os.path.abspath(sys.executable), time.monotonic() + 10.0)
+            finally:
+                if "client" in observed:
+                    observed["client"].close()
+        evidence = home / ".truememory" / "memory-cap-launches" / GENERATION
+        return commands, observed, runtime, evidence, abandon
+
+    def test_no_environment_value_or_name_only_setenv_reaches_argv(self) -> None:
+        commands, observed, _, _, _ = self.start()
+        launch = next(command for command in commands if command[0] == "/usr/bin/systemd-run")
+        self.assertFalse(any(item.startswith("--setenv") or item.startswith("-E") for item in launch))
+        self.assertFalse(any(self.SECRET in item or "MULTILINE" in item for item in launch))
+        self.assertEqual(observed["kwargs"], {})
+
+    def test_environment_file_is_private_complete_and_exact(self) -> None:
+        _, observed, _, _, _ = self.start()
+        self.assertEqual((observed["mode"], observed["directory_mode"]), (0o600, 0o700))
+        self.assertEqual(observed["environment"], {"PATH": "/usr/bin", "SECRET_TOKEN": self.SECRET, "MULTILINE": "a\nb",
+                                                   "TRUEMEMORY_MODEL_SERVER_GENERATION": GENERATION, FLAG: "1",
+                                                   "TRUEMEMORY_CAP_CHILD": "1"})
+
+    def test_environment_file_is_removed_once_the_manager_has_started_the_child(self) -> None:
+        _, observed, _, _, _ = self.start(systemd_run_succeeds=True)
+        self.assertIs(observed["after_run"], False)
+
+    def test_barrier_path_is_removed_as_soon_as_the_child_connects(self) -> None:
+        _, observed, runtime, _, _ = self.start(child_connects=True)
+        self.assertIs(observed["runtime_after_accept"], False)
+        self.assertEqual(list(runtime.iterdir()), [])
+
+    def test_environment_file_and_runtime_directory_are_removed_after_a_failed_launch(self) -> None:
+        _, observed, runtime, _, abandon = self.start()
+        self.assertFalse(observed["environment_path"].exists())
+        self.assertFalse((runtime / GENERATION).exists())
+        abandon.assert_called_once()
+
+    def test_barrier_binds_in_the_runtime_directory_for_a_long_home(self) -> None:
+        commands, observed, runtime, evidence, _ = self.start(home_length=220)
+        self.assertGreater(len(str(evidence)), 200)
+        self.assertTrue(any(command[0] == "/usr/bin/systemd-run" for command in commands))
+        self.assertIs(observed["barrier_is_socket"], True)
+        self.assertEqual(observed["barrier"], runtime / GENERATION / BOOT._BARRIER_NAME)
+        self.assertLessEqual(len(os.fsencode(str(observed["barrier"]))), BOOT._SUN_PATH_MAX)
+
+    def test_bind_failure_runs_launch_cleanup(self) -> None:
+        commands, _, runtime, evidence, abandon = self.start(bind_error=OSError("AF_UNIX path too long"))
+        abandon.assert_called_once()
+        self.assertFalse(any(command[0] == "/usr/bin/busctl" for command in commands))
+        phases = [BOOT._strict_json(path.read_bytes())["phase"] for path in sorted(evidence.glob("receipt-*.json"))]
+        self.assertEqual(phases, ["startup-unresolved"])
+        self.assertFalse((runtime / GENERATION).exists())
 
 
 if __name__ == "__main__":
