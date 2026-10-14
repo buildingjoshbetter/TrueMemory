@@ -1079,6 +1079,16 @@ def _settled(entry: dict) -> bool:
     return entry["status"] in ("exhausted", "superseded") or entry.get("released") is True
 
 
+def _idle(directory: Path, key: str, entry: dict) -> bool:
+    """No attempt is in progress: queued, retrying, or its worker died before an outcome."""
+    from truememory._platform import pid_is_alive
+    if entry["status"] in ("queued", "retry"):
+        return True
+    pid = entry.get("worker_pid", 0)
+    return (entry["status"] in ("pending", "running") and not (type(pid) is int and pid > 0 and pid_is_alive(pid))
+            and _claim_free(directory, key))
+
+
 def reserve_inline_attempt(capture: Capture) -> int:
     from truememory._platform import pid_is_alive
     with _lock(capture.directory / (capture.key + ".lock"), blocking=False) as allowed:
@@ -1135,7 +1145,7 @@ def dispatch(capture: Capture, threshold: float = 0.30) -> int:
         with _lock(directory / "state.lock"):
             state = _state(directory)
             entry = state["captures"].get(capture.key)
-            if entry is not None and entry["status"] in ("queued", "retry") and not _settled(entry):
+            if entry is not None and not _settled(entry) and _idle(directory, capture.key, entry):
                 now = time.time()
                 seen = [value for value in entry.get("unavailable", ()) if type(value) in (int, float)]
                 entry["unavailable"] = seen = (seen + [now])[-MAX_ATTEMPTS:]
@@ -1148,12 +1158,19 @@ def dispatch(capture: Capture, threshold: float = 0.30) -> int:
     with _lock(directory / "state.lock"):
         state = _state(directory)
         entry = state["captures"][capture.key]
-        if _settled(entry) or has_receipt(capture) or entry["attempts"] >= MAX_ATTEMPTS:
+        if _settled(entry) or has_receipt(capture):
+            return 0
+        if entry["attempts"] >= MAX_ATTEMPTS:
+            if entry["status"] in ("pending", "running") and _idle(directory, capture.key, entry):
+                # The final attempt's worker exited without recording an outcome.
+                _outcome(entry, "worker_lost")
+                _save_settled(capture, state)
             return 0
         if source == "changed" or not enough:
             # Observed bytes never gain messages, and a removed, replaced or
             # truncated source never regains them; a longer revision is its own capture.
-            if entry["status"] in ("queued", "retry"):
+            # A worker that died before claiming leaves nothing that could still finish.
+            if _idle(directory, capture.key, entry):
                 category = "below_minimum_messages" if source == "present" else (
                     "source_prefix_changed" if _referenced(capture) else "capture_version_mismatch")
                 _outcome(entry, category, terminal=True)

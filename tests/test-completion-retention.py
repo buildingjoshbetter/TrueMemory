@@ -514,3 +514,58 @@ def test_receipts_are_bounded_keeping_the_newest_per_source(env, monkeypatch):
         # The latest revision of every source still deduplicates a re-fired hook.
         again = completion.admit_capture(str(path), session, "", "", "claude", root=env.root)
         assert completion.has_receipt(again)
+
+
+def test_a_dead_worker_never_leaves_its_entry_pending_after_the_source_changes(env, monkeypatch):
+    # Pre-fix: a worker that died before claiming left its entry pending
+    # forever once the referenced source was removed or became unreadable.
+    monkeypatch.setattr(completion, "MAX_CAPTURE_BYTES", 256)
+    env.worker.pid = _dead_pid()
+    session, path = _transcript(env, _turns(6))
+    removed = completion.admit_capture(str(path), session, "", "", "claude", root=env.root)
+    assert completion.dispatch(removed) == env.worker.pid
+    assert _state(env)[removed.key]["status"] == "pending"
+    path.unlink()
+    assert completion.dispatch(removed) == 0
+    entry = _state(env)[removed.key]
+    assert (entry["status"], entry["outcomes"][-1]["category"]) == ("exhausted", "source_prefix_changed")
+
+    other, other_path = _transcript(env, _turns(6))
+    unreadable = completion.admit_capture(str(other_path), other, "", "", "claude", root=env.root)
+    assert completion.dispatch(unreadable) == env.worker.pid
+    real_state, real_time = completion._source_state, time.time
+
+    def denied(target, fd=None):
+        if fd is None and Path(target) == unreadable.path:
+            raise PermissionError("synthetic persistent denial")
+        return real_state(target, fd)
+
+    monkeypatch.setattr(completion, "_source_state", denied)
+    now = real_time()
+    for index in range(completion.MAX_ATTEMPTS):
+        monkeypatch.setattr(completion.time, "time", lambda: now + index * 900)
+        assert completion.dispatch(unreadable) == 0
+    entry = _state(env)[unreadable.key]
+    assert (entry["status"], entry["outcomes"][-1]["category"]) == ("exhausted", "source_unavailable")
+    monkeypatch.setattr(completion, "_source_state", real_state)
+    monkeypatch.setattr(completion.time, "time", real_time)
+
+    # The last attempt's dead worker settles at dispatch, not only at the next admission.
+    final, final_path = _transcript(env, _turns(6))
+    lost = completion.admit_capture(str(final_path), final, "", "", "claude", root=env.root)
+    with completion._lock(lost.directory / "state.lock"):
+        state = completion._state(lost.directory)
+        state["captures"][lost.key].update(attempts=completion.MAX_ATTEMPTS, status="pending", worker_pid=env.worker.pid)
+        completion._save_state(lost.directory, state)
+    assert completion.dispatch(lost) == 0
+    entry = _state(env)[lost.key]
+    assert (entry["status"], entry["outcomes"][-1]["category"]) == ("exhausted", "worker_lost")
+
+    # A live worker still owns its attempt and records the outcome itself.
+    env.worker.pid = os.getpid()
+    live, live_path = _transcript(env, _turns(6))
+    running = completion.admit_capture(str(live_path), live, "", "", "claude", root=env.root)
+    assert completion.dispatch(running) == os.getpid()
+    live_path.unlink()
+    assert completion.dispatch(running) == 0
+    assert _state(env)[running.key]["status"] == "pending"
