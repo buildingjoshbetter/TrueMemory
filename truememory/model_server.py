@@ -722,13 +722,17 @@ class ModelServer:
             mkwargs = {}
             if sys.platform == "darwin":
                 mkwargs["attn_implementation"] = "eager"
-            return SentenceTransformer(
+            model = SentenceTransformer(
                 "Qwen/Qwen3-Embedding-0.6B",
                 truncate_dim=256,
                 config_kwargs={"use_cache": False},
                 model_kwargs=mkwargs or None,
                 device=device,
             )
+            if type(getattr(model, "max_seq_length", None)) is int:
+                from truememory._embed_budget import cap_embed_length
+                cap_embed_length(model)
+            return model
         if model_id not in ("model2vec", "minilm", "bge-small", "qwen3_256"):
             # Custom model: require explicit opt-in for arbitrary downloads
             if os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "").strip() != "1":
@@ -748,11 +752,15 @@ class ModelServer:
             from truememory.mps_utils import ensure_mps_memory_budget
             ensure_mps_memory_budget(device)
             from sentence_transformers import SentenceTransformer
-            return SentenceTransformer(
+            model = SentenceTransformer(
                 model_id, truncate_dim=custom_dim,
                 trust_remote_code=False,
                 device=device,
             )
+            if type(getattr(model, "max_seq_length", None)) is int:
+                from truememory._embed_budget import cap_embed_length
+                cap_embed_length(model)
+            return model
         from model2vec import StaticModel
         return StaticModel.from_pretrained(
             "minishlab/potion-base-8M", force_download=False
@@ -1336,6 +1344,7 @@ class ModelServer:
                     vectors = None
                     offset = 0
                     order = None
+                    steps = None
                     while offset < len(texts) or vectors is None:
                         retry = None
                         with deadline.locked(self._lock):
@@ -1352,18 +1361,36 @@ class ModelServer:
                                          else self._get_prepared_embed_model(target, deadline))
                                 self._check_serving_embed_model(model, expected_target)
                                 order = self._embed_global_order(model, texts, limit, deadline)
+                                if (getattr(model, "tokenizer", None) is not None
+                                        and type(getattr(model, "max_seq_length", None)) is int):
+                                    from truememory._embed_budget import embed_token_budget, text_token_lengths
+                                    from truememory._rerank_budget import budgeted_slices
+                                    lengths = text_token_lengths(model, texts)
+                                    slices = (None if lengths is None else
+                                              budgeted_slices(lengths, limit, embed_token_budget()))
+                                    if slices is not None:
+                                        # Long texts: smaller longest-first batches bound attention memory.
+                                        order = np.array([index for group in slices for index in group], dtype=np.intp)
+                                        steps, start = {}, 0
+                                        for group in slices:
+                                            steps[start] = len(group)
+                                            start += len(group)
                             while offset < len(texts) or vectors is None:
                                 deadline.check()
-                                indices = None if order is None else self._embed_slice_indices(
-                                    model, texts, order, offset, limit, deadline,
-                                )
+                                step = limit if steps is None else steps[offset]
+                                if steps is not None:
+                                    indices = order[offset:offset + step]
+                                else:
+                                    indices = None if order is None else self._embed_slice_indices(
+                                        model, texts, order, offset, limit, deadline,
+                                    )
                                 batch = (texts[offset:offset + limit] if indices is None else
                                          [texts[index] for index in indices])
                                 self._check_process_memory("embed slice", deadline)
                                 deadline.check()
                                 recover = False
                                 try:
-                                    values = model.encode(batch, batch_size=limit, show_progress_bar=False)
+                                    values = model.encode(batch, batch_size=step, show_progress_bar=False)
                                 except RuntimeError as exc:
                                     from truememory.mps_utils import is_mps_oom
                                     if not is_mps_oom(exc):
@@ -1387,7 +1414,7 @@ class ModelServer:
                             self._check_process_memory("embed CPU retry", deadline)
                             deadline.check()
                             log.warning("MPS OOM during encoding; retrying microbatch on CPU")
-                            values = model.encode(retry, batch_size=limit, show_progress_bar=False)
+                            values = model.encode(retry, batch_size=len(retry) or limit, show_progress_bar=False)
                             if target is not None or expected_target is not None:
                                 check_target_vectors(target or expected_target, values, len(retry))
                             vectors = _store_batch_result(

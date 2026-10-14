@@ -17,19 +17,24 @@ def cap_reranker_length(model: object) -> None:
         model.max_seq_length = RERANK_MAX_TOKENS
 
 
-def rerank_token_budget(available: int | None = None) -> int:
-    """Per-batch attention budget, reduced while the host is short of memory."""
+def memory_pressure_divisor(available: int | None = None) -> int:
+    """1 normally, 2 below 6 GiB available and 4 below 2 GiB."""
     if available is None:
         try:
             import psutil
             available = psutil.virtual_memory().available
         except (ImportError, OSError):
-            return RERANK_TOKEN_BUDGET
+            return 1
     if available < 2 * 1024 ** 3:
-        return RERANK_TOKEN_BUDGET // 4
+        return 4
     if available < 6 * 1024 ** 3:
-        return RERANK_TOKEN_BUDGET // 2
-    return RERANK_TOKEN_BUDGET
+        return 2
+    return 1
+
+
+def rerank_token_budget(available: int | None = None) -> int:
+    """Per-batch attention budget, reduced while the host is short of memory."""
+    return RERANK_TOKEN_BUDGET // memory_pressure_divisor(available)
 
 
 def pair_token_lengths(model: object, pairs: list) -> list[int] | None:
