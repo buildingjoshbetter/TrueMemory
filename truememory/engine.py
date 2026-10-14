@@ -3299,6 +3299,16 @@ class TrueMemoryEngine:
 
         return stats
 
+    def get_tier_identity(self) -> dict | None:
+        """Whether the selected tier's certified model still matches its settings; never opens the store."""
+        if self.conn is None:
+            return None
+        from truememory.tier_switch.runtime import tier_identity_report
+        try:
+            return tier_identity_report(self.conn, self._write_lock)
+        except Exception as error:
+            return {"status": "unavailable", "error": type(error).__name__}
+
     def get_vector_coverage(self, *, seed_backfill: bool = False) -> dict | None:
         """Memories missing from the served vector pair; never opens the database.
 

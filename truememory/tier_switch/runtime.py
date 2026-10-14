@@ -111,6 +111,8 @@ _pid = os.getpid()
 # may reset it; any other legacy database refuses, so a process alternating
 # between a controlled and a legacy store never reloads models per call.
 _projected_database: tuple[str, object] | None = None
+# Last model identity refusal from a projection, for status reports.
+_last_identity_error: str | None = None
 _OWNER_POLL_SECONDS = 0.05
 
 
@@ -622,12 +624,16 @@ _MODEL_MODES = frozenset({"required", "optional", "none"})
 
 def _project(models: str, projection: Callable[[], None]) -> bool:
     """Run model projection; only optional admission survives a model fault."""
+    global _last_identity_error
     try:
         projection()
+        _last_identity_error = None
         return True
     except (TierRuntimeError, serving.ServingLeaseError, serving.ServingLeaseTimeout):
         raise
     except Exception as error:
+        if _identity_error(error):
+            _last_identity_error = f"{type(error).__name__}: {str(error)[:300]}"
         if models == "required" or _identity_error(error):
             raise
         import logging
@@ -645,6 +651,46 @@ def _identity_error(error: BaseException) -> bool:
         if isinstance(value, type) and issubclass(value, BaseException):
             classes.append(value)
     return isinstance(error, tuple(classes))
+
+
+def tier_identity_report(conn: sqlite3.Connection, connection_lock: object | None = None) -> dict | None:
+    """Name why a selected tier's certified model no longer matches its configuration.
+
+    None for a legacy store. The selected identity is what the store's vectors
+    and this process's models were certified with; the configured identity is
+    what the tier settings resolve to now.
+    """
+    from truememory.embedding_target import EmbeddingTarget
+
+    with _connection_read(conn, connection_lock, None, None):
+        state = read_activation_state(conn)
+    result = state.selection or state.legacy_policy
+    if result is None:
+        return None
+
+    def identity(target: EmbeddingTarget) -> dict:
+        return {"tier": target.tier, "model_id": target.model_id, "dimension": target.dimension}
+
+    selected = result.target
+    report: dict = {"status": "ok", "selected": identity(selected)}
+    try:
+        configured = EmbeddingTarget.capture(selected.tier)
+        problem = None if configured == selected else "Configured model differs from the certified selection"
+    except ValueError as error:  # EmbeddingTargetError, or an unresolvable custom tier.
+        configured, problem = None, f"{type(error).__name__}: {str(error)[:300]}"
+    report["configured"] = None if configured is None else identity(configured)
+    if problem is None and _last_identity_error is None:
+        return report
+    if selected.tier == "custom":
+        settings = (f"set TRUEMEMORY_CUSTOM_EMBED_MODEL={selected.model_id} and "
+                    f"TRUEMEMORY_CUSTOM_EMBED_DIM={selected.dimension} again")
+    else:
+        settings = "restore this release's built-in model settings for the tier"
+    report.update(
+        status="degraded", error="EmbeddingTargetError", detail=problem or _last_identity_error,
+        remedy=(f"Searches and adds are refused until the identities match: {settings}, or switch tiers "
+                f"(truememory_configure) to re-embed every memory with the configured model."))
+    return report
 
 
 def require_admitted_models() -> None:

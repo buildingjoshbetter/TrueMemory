@@ -451,7 +451,9 @@ class TestMCPClusteringHealth(HealthFixture):
         self.assertIn("clustering", result["degradation"])
         self.assertEqual(result["degradation"]["clustering"]["availability"], "unavailable")
         self.assertEqual(result["degradation"]["clustering"]["missing_dependencies"], ["hdbscan"])
-        self.assertIsNone(result["vector_coverage"])  # Status never opens the store for coverage.
+        # Status never opens the store for coverage or tier identity.
+        self.assertIsNone(result["vector_coverage"])
+        self.assertIsNone(result["tier_identity"])
         server["_get_memory"].assert_not_called()
 
     def test_stats_tool_includes_the_same_clustering_health(self) -> None:

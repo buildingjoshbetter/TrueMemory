@@ -1304,6 +1304,22 @@ drain()
 emit(closed=closed)
 """
 
+CUSTOM_IDENTITY_CHANGED = """
+os.environ["TRUEMEMORY_CUSTOM_EMBED_MODEL"] = "synthetic/embed-b"  # Edited after certification.
+stub_models()
+from truememory.engine import TrueMemoryEngine
+engine = TrueMemoryEngine(DB)
+listed = len(engine.get_all(limit=100))
+try:
+    engine.search("synthetic fact number 3", limit=3)
+    search = "ok"
+except Exception as error:
+    search = type(error).__name__
+report = engine.get_tier_identity()
+engine.close(); drain()
+emit(listed=listed, search=search, report=report)
+"""
+
 LONG_MAINTENANCE_OWNER = """
 from truememory.maintenance import maintenance_owner
 with maintenance_owner(DB):  # A long consolidation run.
@@ -1438,6 +1454,27 @@ class BackfillRobustness(unittest.TestCase):
         """))
         self.assertLess(result["child"].get("closed", 99), 1.5, result["child"])
         self.assertEqual((result["vectors"], result["cursor"]), (0, ["11"]))
+
+
+class TierIdentityStatus(unittest.TestCase):
+    def test_status_names_a_custom_tier_identity_mismatch(self):
+        (result,) = run_scenario(steps("""
+            import subprocess
+            seed(10)
+            os.environ.update(TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD="1", TRUEMEMORY_CUSTOM_EMBED_MODEL="synthetic/embed-a",
+                              TRUEMEMORY_CUSTOM_EMBED_DIM="256")
+            stub_models()
+            assert switch("custom")["outcome"] == "complete"
+        """, run_child(CUSTOM_IDENTITY_CHANGED), """
+            emit(child=child)
+        """))
+        child = result["child"]
+        self.assertEqual((child.get("listed"), child.get("search")), (10, "EmbeddingTargetError"), child)
+        report = child["report"]
+        self.assertEqual((report["status"], report["error"]), ("degraded", "EmbeddingTargetError"))
+        self.assertEqual(report["selected"], {"tier": "custom", "model_id": "synthetic/embed-a", "dimension": 256})
+        self.assertEqual(report["configured"], {"tier": "custom", "model_id": "synthetic/embed-b", "dimension": 256})
+        self.assertIn("TRUEMEMORY_CUSTOM_EMBED_MODEL=synthetic/embed-a", report["remedy"])
 
 
 class ActivationFairness(unittest.TestCase):
