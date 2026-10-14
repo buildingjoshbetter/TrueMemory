@@ -1861,8 +1861,8 @@ class LaunchArgumentsAndCleanup(unittest.TestCase):
     SECRET = 'tok-"quoted"-$VALUE-`x`'
 
     def start(self, *, home_length: int = 0, systemd_run_error: BaseException | None = None,
-              bind_error: BaseException | None = None,
-              systemd_run_succeeds: bool = False) -> tuple[list[list[str]], dict, Path, Path, MagicMock]:
+              bind_error: BaseException | None = None, systemd_run_succeeds: bool = False,
+              child_connects: bool = False) -> tuple[list[list[str]], dict, Path, Path, MagicMock]:
         base = private_directory()
         home = base
         if home_length:
@@ -1889,9 +1889,20 @@ class LaunchArgumentsAndCleanup(unittest.TestCase):
             barrier = environment_path.parent / BOOT._BARRIER_NAME
             observed["barrier"] = barrier
             observed["barrier_is_socket"] = stat.S_ISSOCK(os.stat(barrier).st_mode)
+            if child_connects:
+                # Stand in for the started child reaching the barrier.
+                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                client.connect(str(barrier))
+                observed["client"] = client
+                return SimpleNamespace(), b""
             if systemd_run_succeeds:
                 return SimpleNamespace(), b""
             raise error
+
+        def peer(connection: object) -> tuple[int, int]:
+            # The first step after accept: the barrier path must already be gone.
+            observed["runtime_after_accept"] = (runtime / GENERATION).exists()
+            raise BOOT.EnforcementUnavailable("synthetic stop after accept")
 
         real_left = BOOT._left
 
@@ -1931,6 +1942,7 @@ class LaunchArgumentsAndCleanup(unittest.TestCase):
                     (BOOT, "_executable_pin", lambda path: {"path": path}),
                     (BOOT, "_process_identity", lambda pid: (11, 3000.5)), (BOOT, "_boot_id", lambda: BOOT_ID),
                     (BOOT, "_runtime_root", lambda: runtime), (BOOT, "_run_command", run), (BOOT, "_left", left),
+                    (BOOT, "_peer", peer),
                     (BOOT, "_properties", lambda unit, names, deadline: {key: slice_properties[key] for key in names}),
                     (BOOT, "_open_directory", open_directory), (BOOT, "_filesystem_magic", lambda descriptor: None),
                     (BOOT, "_read_at", lambda descriptor, name: {"memory.max": str(CAP), "memory.swap.max": "0", "memory.current": "0"}[name]),
@@ -1941,10 +1953,19 @@ class LaunchArgumentsAndCleanup(unittest.TestCase):
             stack.enter_context(patch.object(BOOT.LinuxAdapter, "_abandon_partial", abandon))
             if bind_error is not None:
                 stack.enter_context(patch.object(BOOT.socket, "socket", lambda *args: Listener()))
-            expected = (TimeoutError,) if systemd_run_succeeds else (type(error), type(bind_error) if bind_error is not None else type(error))
-            with self.assertRaises(expected):
-                BOOT.LinuxAdapter().start(BOOT.LinuxDaemonLaunchPolicy(1, CAP, 0), GENERATION,
-                                          os.path.abspath(sys.executable), time.monotonic() + 10.0)
+            if child_connects:
+                expected = (BOOT.EnforcementUnavailable,)
+            elif systemd_run_succeeds:
+                expected = (TimeoutError,)
+            else:
+                expected = (type(error), type(bind_error) if bind_error is not None else type(error))
+            try:
+                with self.assertRaises(expected):
+                    BOOT.LinuxAdapter().start(BOOT.LinuxDaemonLaunchPolicy(1, CAP, 0), GENERATION,
+                                              os.path.abspath(sys.executable), time.monotonic() + 10.0)
+            finally:
+                if "client" in observed:
+                    observed["client"].close()
         evidence = home / ".truememory" / "memory-cap-launches" / GENERATION
         return commands, observed, runtime, evidence, abandon
 
@@ -1965,6 +1986,11 @@ class LaunchArgumentsAndCleanup(unittest.TestCase):
     def test_environment_file_is_removed_once_the_manager_has_started_the_child(self) -> None:
         _, observed, _, _, _ = self.start(systemd_run_succeeds=True)
         self.assertIs(observed["after_run"], False)
+
+    def test_barrier_path_is_removed_as_soon_as_the_child_connects(self) -> None:
+        _, observed, runtime, _, _ = self.start(child_connects=True)
+        self.assertIs(observed["runtime_after_accept"], False)
+        self.assertEqual(list(runtime.iterdir()), [])
 
     def test_environment_file_and_runtime_directory_are_removed_after_a_failed_launch(self) -> None:
         _, observed, runtime, _, abandon = self.start()
