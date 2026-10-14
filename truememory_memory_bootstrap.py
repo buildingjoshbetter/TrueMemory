@@ -2253,6 +2253,63 @@ def _same_termination_resources(record: LinuxProvisionalLaunch, identity: LinuxI
     _termination_owner_guard(record)
 
 
+# Some interpreter builds (python-build-standalone, as installed by uv) omit
+# os.pidfd_open and signal.pidfd_send_signal. Both syscalls postdate the
+# per-architecture tables, so x86_64 and aarch64 share these numbers.
+_PIDFD_SYSCALLS = {"x86_64": {"pidfd_send_signal": 424, "pidfd_open": 434},
+                   "aarch64": {"pidfd_send_signal": 424, "pidfd_open": 434}}
+
+
+def _pidfd_syscall(name: str) -> int | None:
+    if sys.platform != "linux" or ctypes.sizeof(ctypes.c_long) != 8:
+        return None
+    return _PIDFD_SYSCALLS.get(os.uname().machine, {}).get(name)
+
+
+def _pidfd_available(module: object, name: str) -> bool:
+    return callable(getattr(module, name, None)) or _pidfd_syscall(name) is not None
+
+
+def _pidfd_supported() -> bool:
+    return _pidfd_available(os, "pidfd_open") and _pidfd_available(signal, "pidfd_send_signal")
+
+
+def _raw_syscall(number: int, *arguments: int) -> int:
+    """libc syscall(2); a failure raises the errno-specific OSError subclass."""
+    function = ctypes.CDLL(None, use_errno=True).syscall
+    function.restype = ctypes.c_long
+    ctypes.set_errno(0)
+    result = function(ctypes.c_long(number), *(ctypes.c_long(argument) for argument in arguments))
+    if result < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return result
+
+
+def _pidfd_open(pid: int) -> int:
+    native = getattr(os, "pidfd_open", None)
+    if callable(native):
+        return native(pid)
+    number = _pidfd_syscall("pidfd_open")
+    if number is None:
+        raise EnforcementUnavailable("pidfd_open is unavailable")
+    _integer(pid, "pidfd target", positive=True)
+    # The kernel always sets close-on-exec on a new pidfd.
+    return _integer(_raw_syscall(number, pid, 0), "pidfd")
+
+
+def _pidfd_send_signal(pidfd: int, requested_signal: int) -> None:
+    native = getattr(signal, "pidfd_send_signal", None)
+    if callable(native):
+        native(pidfd, requested_signal, None, 0)
+        return
+    number = _pidfd_syscall("pidfd_send_signal")
+    if number is None:
+        raise EnforcementUnavailable("Atomic pidfd signaling is unavailable")
+    _integer(pidfd, "pidfd")
+    _raw_syscall(number, pidfd, int(requested_signal), 0, 0)
+
+
 def _pidfd_pin(descriptor: int, device: int, inode: int) -> None:
     _integer(descriptor, "pidfd")
     _integer(device, "pidfd device")
@@ -2316,7 +2373,7 @@ def _signal_owned_pidfd(record: LinuxProvisionalLaunch, identity: LinuxInvocatio
             return True
         raise EnforcementUnavailable("Pidfd target disappeared without observed exit")
     fcntl = importlib.import_module("fcntl")
-    if not hasattr(fcntl, "F_DUPFD_CLOEXEC") or not callable(getattr(signal, "pidfd_send_signal", None)):
+    if not hasattr(fcntl, "F_DUPFD_CLOEXEC") or not _pidfd_available(signal, "pidfd_send_signal"):
         raise EnforcementUnavailable("Atomic pidfd signaling is unavailable")
     duplicate = fcntl.fcntl(original, fcntl.F_DUPFD_CLOEXEC, 3)
     _integer(duplicate, "private pidfd")
@@ -2337,7 +2394,7 @@ def _signal_owned_pidfd(record: LinuxProvisionalLaunch, identity: LinuxInvocatio
         _pidfd_pin(original, device, inode)
         _pidfd_pin(duplicate, device, inode)
         try:
-            signal.pidfd_send_signal(duplicate, requested_signal, None, 0)
+            _pidfd_send_signal(duplicate, requested_signal)
         except ProcessLookupError:
             if not _pidfd_exited(duplicate, device, inode):
                 raise EnforcementUnavailable("ESRCH without actual retained pidfd exit")
@@ -3039,7 +3096,7 @@ def _ancestor_limits(mount_point: str, relative: str, cap_bytes: int) -> tuple[t
 def _required_linux_support(policy: LinuxDaemonLaunchPolicy, deadline: float) -> tuple[int, str, str, tuple[tuple[str, str], ...]]:
     _validate_policy(policy)
     _deadline(deadline)
-    if sys.platform != "linux" or not hasattr(os, "pidfd_open") or not hasattr(socket, "SO_PEERCRED"):
+    if sys.platform != "linux" or not _pidfd_supported() or not hasattr(socket, "SO_PEERCRED"):
         raise EnforcementUnavailable("Required Linux ownership primitives are unavailable")
     if ctypes.sizeof(ctypes.c_long) != 8 or os.uname().machine not in ("x86_64", "aarch64"):
         raise EnforcementUnavailable("Required Linux filesystem ABI is unsupported")
@@ -3167,7 +3224,85 @@ def _retire_generation_units(generation: str, *, mount_point: str, parent_relati
     return _stop_unit(slice_unit, deadline) and service_stopped
 
 
+_BARRIER_NAME = "barrier-v1.sock"
+_ENVIRONMENT_NAME = "environment-v1"
+_SUN_PATH_MAX = 107
+
+
+def _runtime_root() -> Path:
+    # The owner-only tmpfs runtime directory keeps the barrier path short for
+    # any HOME and keeps the environment file off persistent storage.
+    return Path(f"/run/user/{os.getuid()}") / "truememory-cap"
+
+
+def _prepare_runtime_generation(generation: str) -> Path:
+    _hex(generation, 32, "generation")
+    root = _runtime_root()
+    root.mkdir(mode=0o700, exist_ok=True)
+    descriptor = _open_directory(root, uid=os.getuid())
+    try:
+        if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o700:
+            raise EnforcementUnavailable("Runtime launch directory must be owner-only")
+        os.mkdir(generation, mode=0o700, dir_fd=descriptor)
+    finally:
+        os.close(descriptor)
+    path = root / generation
+    if len(os.fsencode(str(path / _BARRIER_NAME))) > _SUN_PATH_MAX:
+        raise EnforcementUnavailable("Barrier socket path exceeds the AF_UNIX limit")
+    return path
+
+
+def _discard_runtime_generation(generation: str) -> None:
+    """Remove a generation's barrier socket and environment file; best effort."""
+    try:
+        _hex(generation, 32, "generation")
+        root = _open_directory(_runtime_root(), uid=os.getuid())
+    except (OSError, RuntimeError, ValueError):
+        return
+    try:
+        try:
+            directory = os.open(generation, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root)
+        except OSError:
+            return
+        try:
+            for name in (_ENVIRONMENT_NAME, _BARRIER_NAME):
+                try:
+                    os.unlink(name, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
+        except OSError:
+            pass
+        finally:
+            os.close(directory)
+        try:
+            os.rmdir(generation, dir_fd=root)
+        except OSError:
+            pass
+    finally:
+        os.close(root)
+
+
+def _environment_file(forwarded: Mapping[str, str]) -> bytes:
+    """Render an EnvironmentFile= body that systemd parses back to these exact values.
+
+    Inside double quotes the manager unescapes only backslash, double quote,
+    backtick and dollar, and keeps every other character, newlines included.
+    """
+    lines = []
+    for name in sorted(forwarded):
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None:
+            raise EnforcementUnavailable("Malformed application environment forwarding")
+        value = forwarded[name]
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise EnforcementUnavailable(f"Environment variable {name} is not valid UTF-8 and cannot be forwarded") from None
+        lines.append(name + '="' + re.sub(r'([\\"`$])', r"\\\1", value) + '"\n')
+    return "".join(lines).encode("utf-8")
+
+
 def _mark_generation_retired(generation: str) -> bool:
+    _discard_runtime_generation(generation)
     try:
         _hex(generation, 32, "generation")
         directory = _open_directory(_evidence_root() / generation, uid=os.getuid())
@@ -3333,7 +3468,7 @@ def adopt_exit_cleanup(evidence: LinuxScopeEvidence) -> bool:
             return False
         _adopted_generations.add(identity.generation)
     try:
-        pidfd = os.pidfd_open(identity.main_pid)
+        pidfd = _pidfd_open(identity.main_pid)
     except OSError:
         _adopted_generations.discard(identity.generation)
         return False
@@ -3486,7 +3621,7 @@ class LinuxAdapter:
         _validate_policy(policy)
         _hex(generation, 32, "generation")
         _deadline(deadline)
-        if sys.platform != "linux" or not hasattr(os, "pidfd_open") or not hasattr(socket, "SO_PEERCRED"):
+        if sys.platform != "linux" or not _pidfd_supported() or not hasattr(socket, "SO_PEERCRED"):
             raise EnforcementUnavailable("Required Linux ownership primitives are unavailable")
         if not Path(python_executable).is_absolute() or not os.access(python_executable, os.X_OK):
             raise EnforcementUnavailable("Owned interpreter must be an absolute executable")
@@ -3533,16 +3668,17 @@ class LinuxAdapter:
                     "ancestor_memory_max": ancestors}
         store = _EvidenceStore(path, manifest)
         _unresolved_launches.append(store)
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        _unresolved_launches.append(listener)
-        listener.bind(str(path / "barrier-v1.sock"))
-        os.chmod(path / "barrier-v1.sock", 0o600)
-        listener.listen(1)
-        store.append("prepared", {"generation": generation, "kernel_cap_bytes": policy.cap_bytes, "swap_bytes": 0,
-                                  "metric": _METRIC, "physical_hard_cap": False, "dynamic_registry_cap": False})
-        connection = record = None
+        listener = connection = record = None
         descriptors: list[int] = []
         try:
+            runtime = _prepare_runtime_generation(generation)
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            _unresolved_launches.append(listener)
+            listener.bind(str(runtime / _BARRIER_NAME))
+            os.chmod(runtime / _BARRIER_NAME, 0o600)
+            listener.listen(1)
+            store.append("prepared", {"generation": generation, "kernel_cap_bytes": policy.cap_bytes, "swap_bytes": 0,
+                                      "metric": _METRIC, "physical_hard_cap": False, "dynamic_registry_cap": False})
             _run_command(["/usr/bin/busctl", "--user", "call", "org.freedesktop.systemd1",
                           "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "StartTransientUnit",
                           "ssa(sv)a(sa(sv))", slice_unit, "fail", "3", "MemoryAccounting", "b", "true",
@@ -3570,21 +3706,38 @@ class LinuxAdapter:
             os.fsync(stderr_fd)
             os.close(stderr_fd)
             os.fsync(store.directory)
+            # Values never appear in argv, which every local user can read.
+            # systemd 249 rejects a name-only --setenv, so the manager loads
+            # them from an owner-only file that exists only until exec.
+            runtime_fd = _open_directory(runtime, uid=os.getuid())
+            try:
+                _exclusive_file(runtime_fd, _ENVIRONMENT_NAME, _environment_file(forwarded))
+            finally:
+                os.close(runtime_fd)
             # --collect unloads a failed service at exit so no stale failure
             # degrades the user manager; a successful exit remains for capture.
             arguments = ["/usr/bin/systemd-run", "--user", "--collect", "--unit=" + service_unit, "--slice=" + slice_unit,
                          "--service-type=exec", "--property=MemoryMax=infinity", "--property=MemorySwapMax=infinity",
                          "--property=RemainAfterExit=yes", "--property=StandardOutput=null",
                          "--property=StandardError=append:" + str(path / "stderr-v1.log"),
+                         "--property=EnvironmentFile=" + str(runtime / _ENVIRONMENT_NAME),
                          "--working-directory=" + os.getcwd()]
-            arguments.extend("--setenv=" + name for name in sorted(forwarded))
             arguments.extend([python_executable, "-I", "-S", str(bootstrap), "--child", str(path / "manifest-v1.json")])
-            runner_process, _ = _run_command(arguments, deadline, environment=forwarded)
+            try:
+                runner_process, _ = _run_command(arguments, deadline)
+            finally:
+                # Type=exec returns after exec, when the manager has read the file.
+                try:
+                    os.unlink(runtime / _ENVIRONMENT_NAME)
+                except FileNotFoundError:
+                    pass
             runner = _NativeRunner(runner_process, store, manifest, forwarded=MappingProxyType(dict(forwarded)))
             _unresolved_launches.append(runner)
             listener.settimeout(_left(deadline))
             connection, _ = listener.accept()
             _unresolved_launches.append(connection)
+            # The barrier is connected; its path is no longer needed.
+            _discard_runtime_generation(generation)
             peer_pid, peer_uid = _peer(connection)
             if peer_uid != os.getuid():
                 raise EnforcementUnavailable("Barrier workload UID differs")
@@ -3608,7 +3761,7 @@ class LinuxAdapter:
             endpoint = _NativeEndpoint(listener, connection, peer_pid, peer_uid, hello,
                                        listener_meta.st_dev, listener_meta.st_ino,
                                        connection_meta.st_dev, connection_meta.st_ino)
-            pidfd = os.pidfd_open(main_pid)
+            pidfd = _pidfd_open(main_pid)
             _unresolved_launches.append(pidfd)
             descriptors.append(pidfd)
             pidfd_meta = os.fstat(pidfd)
@@ -3628,6 +3781,7 @@ class LinuxAdapter:
                 pass
             self._abandon_partial(store, listener, connection, record, policy, generation, mount_point,
                                   parent_relative, descriptors, cleanup_deadline(deadline))
+            _discard_runtime_generation(generation)
             raise
 
     def abandon(self, record: LinuxProvisionalLaunch, policy: LinuxDaemonLaunchPolicy, *, deadline: float) -> bool:
@@ -3639,7 +3793,7 @@ class LinuxAdapter:
                                      record.identity.slice_relative_path.rsplit("/", 1)[0],
                                      [record.pidfd, scope.slice_fd, scope.service_fd], deadline)
 
-    def _abandon_partial(self, store: _EvidenceStore, listener: socket.socket, connection: socket.socket | None,
+    def _abandon_partial(self, store: _EvidenceStore, listener: socket.socket | None, connection: socket.socket | None,
                          record: LinuxProvisionalLaunch | None, policy: LinuxDaemonLaunchPolicy, generation: str,
                          mount_point: str, parent_relative: str, descriptors: list[int], deadline: float) -> bool:
         """Terminate or release a failed launch, then retire its units.
@@ -4163,7 +4317,7 @@ def _child_main(manifest_path: str) -> None:
         ticks, _ = _process_identity(os.getpid())
         endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         endpoint.settimeout(_left(deadline))
-        endpoint.connect(str(path.parent / "barrier-v1.sock"))
+        endpoint.connect(str(_runtime_root() / generation / _BARRIER_NAME))
         parent_pid, parent_uid = _peer(endpoint)
         if parent_pid != manifest["parent_pid"] or parent_uid != os.getuid() or _process_identity(parent_pid)[0] != manifest["parent_start_ticks"]:
             raise EnforcementUnavailable("Child barrier is not its authenticated parent incarnation")
