@@ -1465,9 +1465,12 @@ class ModelServer:
                             while offset < len(pairs) or scores is None:
                                 deadline.check()
                                 step = limit if steps is None else steps[offset]
-                                indices = None if order is None else self._rerank_slice_indices(
-                                    reranker, pairs, order, offset, step, deadline,
-                                )
+                                if steps is not None:
+                                    indices = order[offset:offset + step]
+                                else:
+                                    indices = None if order is None else self._rerank_slice_indices(
+                                        reranker, pairs, order, offset, step, deadline,
+                                    )
                                 batch = (pairs[offset:offset + step] if indices is None else
                                          [pairs[index] for index in indices])
                                 self._check_process_memory("reranker slice", deadline)

@@ -128,3 +128,18 @@ def test_model_server_short_rerank_unchanged(monkeypatch):
 @pytest.mark.parametrize("length", [1, 512, 513, 1024])
 def test_batch_size_never_zero_or_above_limit(length):
     assert 1 <= budget_batch_size(length, 64, RERANK_TOKEN_BUDGET) <= 64
+
+
+def test_model_server_budget_path_needs_no_input_length_helper(monkeypatch):
+    from truememory.model_server import ModelServer
+
+    class WithoutInputLength(FakeCrossEncoder):
+        _input_length = None
+
+    fake = WithoutInputLength()
+    monkeypatch.setattr(ModelServer, "_get_reranker", lambda self, model_name=None, deadline=None: fake)
+    monkeypatch.setattr(rerank_budget, "rerank_token_budget", lambda: RERANK_TOKEN_BUDGET)
+    pairs = _pairs(*([30] * 20 + [1500] * 3))
+    response = ModelServer().handle_request({"op": "rerank", "pairs": pairs, "model_name": "m"})
+    assert response["ok"] is True
+    assert np.array_equal(np.asarray(response["scores"]), FakeCrossEncoder().predict(pairs, batch_size=len(pairs)))
