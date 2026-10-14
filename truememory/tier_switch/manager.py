@@ -695,11 +695,13 @@ class RebuildManager:
 
     @staticmethod
     @contextlib.contextmanager
-    def _publication_window(path: Path, *, deadline: float, cancelled: threading.Event | None = None):
+    def _publication_window(path: Path, *, deadline: float, cancelled: threading.Event | None = None,
+                            mark: bool = True):
         """Own maintenance (bounded wait) around one short job publication step.
 
         The activation marker lets fresh opens elsewhere wait for this window
-        instead of failing on maintenance; it is only a liveness hint.
+        instead of failing on maintenance; it is only a liveness hint. A
+        caller that already holds it passes ``mark=False``.
         """
         from truememory.maintenance import MaintenanceBusyError, maintenance_owner, maintenance_wanted
         from truememory.tier_switch.job import acquire_tier_activation_lock
@@ -716,7 +718,7 @@ class RebuildManager:
                             raise
                         asked = asked or wanting.enter_context(maintenance_wanted(path))
                         time.sleep(0.05)
-            activation = acquire_tier_activation_lock(path, timeout=0.5)
+            activation = acquire_tier_activation_lock(path, timeout=0.5) if mark else None
             if activation is not None:
                 stack.callback(activation.release)
             yield
@@ -1039,6 +1041,7 @@ class RebuildManager:
         between leaves an unacknowledged selection that the next open mirrors).
         """
         from truememory.tier_switch.activation import commit_certified_selection
+        from truememory.tier_switch.job import acquire_tier_activation_lock
         from truememory.tier_switch.serving import ServingLeaseTimeout, exclusive_activation
 
         if intent is None or job is None or plan is None or (target_tier, to_group) != (job.target.tier, job.target.tier_group):
@@ -1047,9 +1050,13 @@ class RebuildManager:
         self._prove_target_runtime(intent, deadline=bound)
         self._served_tier = None
         result = snapshot = None
+        # Held across drain retries: fresh opens elsewhere keep waiting through
+        # the gaps that hand maintenance back, instead of failing in them.
+        marker = acquire_tier_activation_lock(job.database_path, timeout=0.5)
         try:
             while result is None:
-                with self._publication_window(job.database_path, deadline=bound, cancelled=self._cancel_requested):
+                with self._publication_window(job.database_path, deadline=bound, cancelled=self._cancel_requested,
+                                              mark=marker is None):
                     try:
                         with exclusive_activation(deadline=min(bound, time.monotonic() + _WRITER_DRAIN_SECONDS),
                                                   cancelled=self._cancel_requested):
@@ -1066,6 +1073,9 @@ class RebuildManager:
             if result is None and self._activation_committed(job, intent):
                 self._last_outcome = "activation_pending"
             raise
+        finally:
+            if marker is not None:
+                marker.release()
         self._last_outcome = "activation_pending"
         try:
             self._project_result(conn, result, intent)
