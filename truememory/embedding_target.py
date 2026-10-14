@@ -83,6 +83,14 @@ class EmbeddingTarget:
         return cls(value["tier"], value["model_id"], value["dimension"], value["tier_group"])
 
 
+_REPOSITORIES = {"model2vec": "minishlab/potion-base-8M", "qwen3_256": "Qwen/Qwen3-Embedding-0.6B"}
+
+
+def model_repository(model_id: str) -> str:
+    """The Hugging Face repository (or local path) a target's model loads from."""
+    return _REPOSITORIES.get(model_id, model_id)
+
+
 def check_target_vectors(target: EmbeddingTarget, vectors: object, count: int) -> None:
     if getattr(vectors, "shape", None) != (count, target.dimension):
         raise EmbeddingTargetError("Actual embedding output does not match the prepared target dimension")
@@ -104,7 +112,7 @@ def build_target_model(
         from model2vec import StaticModel
 
         admit()
-        return StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
+        return StaticModel.from_pretrained(model_repository(target.model_id), force_download=False)
 
     from truememory.mps_utils import ensure_mps_memory_budget
     ensure_mps_memory_budget(device)
@@ -114,7 +122,7 @@ def build_target_model(
         model_kwargs = {"attn_implementation": "eager"} if sys.platform == "darwin" else None
         admit()
         return SentenceTransformer(
-            "Qwen/Qwen3-Embedding-0.6B", truncate_dim=256,
+            model_repository(target.model_id), truncate_dim=256,
             config_kwargs={"use_cache": False},
             model_kwargs=model_kwargs, device=device,
         )

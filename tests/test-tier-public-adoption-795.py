@@ -152,6 +152,7 @@ class Harness:
                 MaintenanceBusyError=type("MaintenanceBusyError", (RuntimeError,), {}),
                 maintenance_wanted=lambda path: contextlib.nullcontext(),
             ),
+            "truememory.tier_switch.preflight": types.SimpleNamespace(missing_models=lambda tier: []),
             "truememory.rebuild_source": types.SimpleNamespace(
                 ensure_rebuild_tracking=lambda conn: self.events.append("tracking"),
                 RebuildSourceChanged=RebuildSourceChanged,

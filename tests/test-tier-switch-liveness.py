@@ -108,8 +108,11 @@ class FakeReranker:
     def predict(self, pairs, **kwargs):
         return [0.5 for _ in pairs]
 
-def stub_models(delay=0.0, rerankers_available=lambda name: True, embeddings_available=lambda: True):
+def stub_models(delay=0.0, rerankers_available=lambda name: True, embeddings_available=lambda: True,
+                cached=lambda repository: True):
     from truememory import vector_search, reranker
+    from truememory.tier_switch import preflight
+    preflight.cached_snapshot = cached
     @contextmanager
     def prepare(target, *, timeout=None):
         yield FakeLease(target, delay)
@@ -1887,6 +1890,28 @@ class SwitchStaging(unittest.TestCase):
         self.assertEqual(result["outcome"], "complete")
         self.assertTrue(result["waited"])
         self.assertEqual(result["state"]["selected"], "edge")
+
+    def test_switch_without_cached_models_fails_before_any_work(self):
+        # With downloads off, a missing reranker surfaced only at activation,
+        # after every memory had been re-embedded for the target.
+        (result,) = run_scenario("""
+            seed(20)
+            missing = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            stub_models(cached=lambda repository: repository != missing,
+                        rerankers_available=lambda name: name != missing)
+            encodes = []
+            encode = FakeLease.encode
+            def counted(self, texts, **kwargs):
+                encodes.append(len(texts))
+                return encode(self, texts, **kwargs)
+            FakeLease.encode = counted
+            refused = switch("edge")
+            emit(error=refused.get("error"), message=refused.get("message"), encodes=len(encodes), state=state())
+        """)
+        self.assertEqual(result["error"], "TierSwitchUnsupportedError")
+        self.assertIn("models that are not downloaded: cross-encoder/ms-marco-MiniLM-L-6-v2.", result["message"])
+        self.assertEqual(result["encodes"], 0)
+        self.assertEqual(result["state"], {"selected": None, "acknowledged": None, "marker": None, "status_rows": []})
 
 
 if __name__ == "__main__":

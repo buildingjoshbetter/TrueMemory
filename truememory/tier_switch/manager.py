@@ -543,6 +543,8 @@ class RebuildManager:
                 return None
             if set(old_tables).intersection(target.tables) or old_target.tier_group == target.tier_group:
                 raise TierSwitchUnsupportedError("Rebuilding the serving pair requires an alternate inactive slot")
+            # Only a rebuild loads models during the switch; check before any of its work.
+            self._require_cached_models(target_tier)
             ok, message = preflight_ram_check(target.tier_group)
             if not ok:
                 raise RuntimeError(message)
@@ -692,6 +694,18 @@ class RebuildManager:
             conn.execute("UPDATE rebuild_status SET status=?, completed_at=?, error=? "
                          "WHERE id=? AND status IN ('pending','running') AND (? IS NULL OR tier_group=?)",
                          (status, time.time(), error[:1000], status_id, group, group))
+
+    @staticmethod
+    def _require_cached_models(target_tier: str) -> None:
+        from truememory.tier_switch.preflight import missing_models
+        missing = missing_models(target_tier)
+        if missing:
+            example = (f", for example with `truememory-ingest upgrade-tier {target_tier}`"
+                       if target_tier in ("edge", "base", "pro") else "")
+            raise TierSwitchUnsupportedError(
+                f"The {target_tier} tier needs models that are not downloaded: {', '.join(missing)}. "
+                f"Model downloads are off in this process (HF_HUB_OFFLINE or TRANSFORMERS_OFFLINE); "
+                f"download them with network access{example}, then retry")
 
     @contextlib.contextmanager
     def _staging_window(self, path: Path):
