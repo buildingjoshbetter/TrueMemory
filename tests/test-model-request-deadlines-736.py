@@ -156,14 +156,16 @@ class TestIssue736RequestDeadlines(unittest.TestCase):
         self.assertEqual(self.server._lock.timeouts, [1.0])
 
     def test_fast_lock_expiry_does_not_fall_back_to_main(self) -> None:
-        self.server._lock = FakeLock(self.clock, contended=True)
+        self.server._inference_lock = FakeLock(self.clock, contended=True)
+        self.server._lock = FakeLock(self.clock)
         self.server._fast_lock = FakeLock(self.clock, wait_at=1)
         self.assert_expired(self.server.handle_request(self.request(single=True)))
         self.assertEqual(self.loads, [])
         self.assertEqual(self.server._lock.calls, 0)
 
     def test_fast_lock_timeout_does_not_release_an_unowned_lock(self) -> None:
-        self.server._lock = FakeLock(self.clock, contended=True)
+        self.server._inference_lock = FakeLock(self.clock, contended=True)
+        self.server._lock = FakeLock(self.clock)
         self.server._fast_lock = FakeLock(self.clock, wait_at=1, time_out=True)
         self.assert_expired(self.server.handle_request(self.request(single=True)))
         self.assertEqual(self.loads, [])

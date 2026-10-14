@@ -292,7 +292,12 @@ def is_mps_oom(exc: Exception) -> bool:
 
 
 def flush_mps_cache() -> None:
-    """Flush MPS/CUDA cache and run garbage collection."""
+    """Run garbage collection, then flush MPS/CUDA cache.
+
+    Models are reference cycles; collecting first returns their freed
+    storage to the allocator before its cache is emptied.
+    """
+    gc.collect()
     try:
         import torch
         if get_mps_memory_budget() is not None and hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
@@ -301,7 +306,6 @@ def flush_mps_cache() -> None:
             torch.cuda.empty_cache()
     except Exception:
         pass
-    gc.collect()
 
 
 def encode_with_model_ownership(model: object, texts: object, **kwargs: object) -> object:
