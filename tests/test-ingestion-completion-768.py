@@ -514,9 +514,15 @@ class FilesystemCompletionControls(unittest.TestCase):
 
     def test_limits_backpressure_preserve_original_and_prior_capture(self) -> None:
         first = self.capture()
-        with patch.object(COMPLETION, "MAX_CAPTURE_BYTES", len(self.data) - 1):
-            with self.assertRaises(COMPLETION.CompletionError):
+        with patch.object(COMPLETION, "MAX_SOURCE_BYTES", len(self.data) - 1):
+            with self.assertRaisesRegex(COMPLETION.CompletionError, "capture_limit"):
                 self.capture("other-session")
+        # Above the copy limit the source is referenced, never copied.
+        with patch.object(COMPLETION, "MAX_CAPTURE_BYTES", len(self.data) - 1):
+            referenced = self.capture("referenced-session")
+        self.assertEqual(referenced.metadata["storage"], "source_prefix")
+        self.assertEqual(referenced.path, self.source.resolve())
+        self.assertEqual(len(list((first.directory / "captures").iterdir())), 1)
         self.assertEqual(self.source.read_bytes(), self.data)
         self.assertEqual(first.path.read_bytes(), self.data)
         with patch.object(COMPLETION, "MAX_ACCOUNT_BYTES", len(self.data)):
@@ -538,7 +544,10 @@ class FilesystemCompletionControls(unittest.TestCase):
         state = json.loads((capture.directory / "state.json").read_text(encoding="utf-8"))["captures"][capture.key]
         self.assertEqual(state["status"], "exhausted")
         self.assertEqual(len(state["outcomes"]), 5)
-        self.assertEqual(capture.path.read_bytes(), self.data)
+        # Exhausted bytes are released at once; the outcomes are the evidence.
+        self.assertTrue(state["released"])
+        self.assertFalse(capture.path.exists())
+        self.assertEqual(self.source.read_bytes(), self.data)
         self.assertFalse(COMPLETION.has_receipt(capture))
 
     def test_os_claim_is_exclusive_and_exception_does_not_complete(self) -> None:

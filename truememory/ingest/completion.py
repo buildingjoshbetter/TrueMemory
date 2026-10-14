@@ -24,6 +24,9 @@ from typing import Iterator
 
 log = logging.getLogger(__name__)
 MAX_CAPTURE_BYTES = 16 * 1024 * 1024
+# Larger append-only sources are referenced as a hash-verified prefix instead
+# of copied, so retained disk does not grow with transcript size.
+MAX_SOURCE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_ACCOUNT_BYTES = 64 * 1024 * 1024
 MAX_CAPTURES = 1024
 MAX_STATE_BYTES = 8 * 1024 * 1024
@@ -33,6 +36,9 @@ _KEY = re.compile(r"[0-9a-f]{64}")
 _COUNTS = ("facts_extracted", "facts_stored", "facts_updated", "facts_skipped_gate", "facts_skipped_dedup")
 # Admission refusals that clear once retained captures settle and are released.
 BACKPRESSURE = ("capture_account_quota", "capture_count_limit", "retained_state_limit")
+_CHUNK = 1024 * 1024
+_BINARY = getattr(os, "O_BINARY", 0)
+_SOURCE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | _BINARY
 
 
 class CompletionError(OSError):
@@ -119,9 +125,9 @@ def _open_private(path: Path, flags: int) -> int:
         except FileExistsError:
             if flags & os.O_EXCL:
                 raise
-            fd = os.open(path, (flags & ~(os.O_CREAT | os.O_EXCL)) | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            fd = os.open(path, (flags & ~(os.O_CREAT | os.O_EXCL)) | getattr(os, "O_NOFOLLOW", 0) | _BINARY, 0o600)
     else:
-        fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0) | _BINARY, 0o600)
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
@@ -253,6 +259,37 @@ def _immutable(path: Path, data: bytes) -> None:
 
 def _file_identity(info: os.stat_result) -> list[int]:
     return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+
+
+def _stream(fd: int, count: int, *, sink: int | None = None,
+            offsets: set[int] | frozenset[int] = frozenset()) -> tuple[int, str, dict[int, str]]:
+    """Hash, and optionally copy, at most ``count`` bytes in bounded chunks.
+
+    Digests at ``offsets`` are returned too, so an older capture can be proven
+    a prefix of these bytes without holding either in memory.
+    """
+    digest = hashlib.sha256()
+    marks = sorted(value for value in offsets if 0 <= value <= count)
+    prefixes: dict[int, str] = {}
+    total = 0
+    while marks and marks[0] == 0:
+        prefixes[marks.pop(0)] = digest.hexdigest()
+    while total < count:
+        chunk = os.read(fd, min(_CHUNK, count - total))
+        if not chunk:
+            break
+        view, position = memoryview(chunk), 0
+        while marks and marks[0] <= total + len(chunk):
+            cut = marks.pop(0) - total
+            digest.update(view[position:cut])
+            position = cut
+            prefixes[total + cut] = digest.copy().hexdigest()
+        digest.update(view[position:])
+        written = 0
+        while sink is not None and written < len(chunk):
+            written += os.write(sink, view[written:])
+        total += len(chunk)
+    return total, digest.hexdigest(), prefixes
 
 
 def _windows_security(handle: int, *, private: bool = False) -> bool:
@@ -402,7 +439,8 @@ def _capture_from(directory: Path, key: str, entry: dict) -> Capture:
         raise CompletionError("invalid_capture")
     if (type(metadata.get("version")) is not int or metadata["version"] != 1
             or metadata.get("host") not in ("claude", "codex", "gemini", "cursor")
-            or type(metadata.get("byte_count")) is not int or not 0 <= metadata["byte_count"] <= MAX_CAPTURE_BYTES
+            or metadata.get("storage") not in (None, "source_prefix") or type(metadata.get("byte_count")) is not int
+            or not 0 <= metadata["byte_count"] <= (MAX_SOURCE_BYTES if metadata.get("storage") else MAX_CAPTURE_BYTES)
             or type(metadata.get("sha256")) is not str or _KEY.fullmatch(metadata["sha256"]) is None
             or type(metadata.get("file_identity")) is not list or len(metadata["file_identity"]) != 5
             or any(type(value) is not int for value in metadata["file_identity"])
@@ -415,8 +453,13 @@ def _capture_from(directory: Path, key: str, entry: dict) -> Capture:
     _text(metadata.get("database"))
     if type(metadata.get("user_id")) is not str or "\0" in metadata["user_id"]:
         raise CompletionError("invalid_capture")
-    suffix = ".jsonl" if metadata.get("source_suffix") == ".jsonl" else ".json"
-    return Capture(directory, key, directory / "captures" / (key + suffix), metadata)
+    return Capture(directory, key, _capture_path(directory, key, metadata), metadata)
+
+
+def _capture_path(directory: Path, key: str, metadata: dict) -> Path:
+    if metadata.get("storage") == "source_prefix":
+        return Path(metadata["source"])
+    return directory / "captures" / (key + (".jsonl" if metadata.get("source_suffix") == ".jsonl" else ".json"))
 
 
 def _claim_free(directory: Path, key: str) -> bool:
@@ -474,7 +517,9 @@ def _collect(directory: Path, state: dict) -> None:
         evicted.append(key)
     if changed or evicted:
         _save_state(directory, state)
-    _discard(directory, captures, evicted)
+    with contextlib.suppress(OSError):
+        # Cleanup is best effort; anything left is retried by a later pass.
+        _discard(directory, captures, evicted)
 
 
 def _discard(directory: Path, captures: dict, forgotten: list[str] | tuple[str, ...] = ()) -> None:
@@ -488,6 +533,16 @@ def _discard(directory: Path, captures: dict, forgotten: list[str] | tuple[str, 
                 and _claim_free(directory, key)):
             with contextlib.suppress(OSError):
                 (directory / "captures" / name).unlink()
+    incoming = directory / "incoming"
+    if incoming.is_dir():
+        # Copies stream outside state.lock; only an hour-old partial is abandoned.
+        cutoff = time.time() - 3600
+        with os.scandir(incoming) as entries:
+            stale = [entry.path for entry in islice(entries, 2 * MAX_CAPTURES)
+                     if entry.name.endswith(".partial") and entry.stat(follow_symlinks=False).st_mtime < cutoff]
+        for path in stale:
+            with contextlib.suppress(OSError):
+                os.unlink(path)
     for key in forgotten:
         for path in (directory / "logs").glob(key + "-*.log"):
             with contextlib.suppress(OSError):
@@ -496,8 +551,20 @@ def _discard(directory: Path, captures: dict, forgotten: list[str] | tuple[str, 
             (directory / (key + ".lock")).unlink()
 
 
-def _replaced(directory: Path, captures: dict, incoming: dict, data: bytes) -> list[str]:
-    """Queued or retrying captures of the same native source that ``data`` begins with."""
+def _prefix_offsets(state: dict, host: str, session_id: str, source: str) -> frozenset[int]:
+    """Byte counts of live captures of this native source that new bytes may supersede."""
+    offsets = set()
+    for entry in state["captures"].values():
+        meta = entry.get("metadata") if type(entry) is dict else None
+        if (type(meta) is dict and entry.get("status") in ("queued", "retry") and entry.get("released") is not True
+                and (meta.get("host"), meta.get("session_id"), meta.get("source")) == (host, session_id, source)
+                and type(meta.get("byte_count")) is int):
+            offsets.add(meta["byte_count"])
+    return frozenset(offsets)
+
+
+def _replaced(directory: Path, captures: dict, incoming: dict, prefixes: dict[int, str]) -> list[str]:
+    """Queued or retrying captures of the same native source that the incoming bytes begin with."""
     keys = []
     for key, entry in captures.items():
         try:
@@ -505,16 +572,34 @@ def _replaced(directory: Path, captures: dict, incoming: dict, data: bytes) -> l
         except CompletionError:
             continue
         if (entry["status"] in ("queued", "retry") and entry.get("released") is not True
-                and meta["byte_count"] <= len(data)
                 and all(meta[name] == incoming[name] for name in ("host", "session_id", "source"))
-                and hashlib.sha256(data[:meta["byte_count"]]).hexdigest() == meta["sha256"]
+                and prefixes.get(meta["byte_count"]) == meta["sha256"]
                 and _claim_free(directory, key)):
             keys.append(key)
     return keys
 
 
+def _source_state(path: Path, fd: int | None = None) -> os.stat_result:
+    if fd is not None:
+        info = os.fstat(fd)
+        _source_owned(info, fd)
+        return info
+    fd = os.open(path, _SOURCE_FLAGS)
+    try:
+        return _source_state(path, fd)
+    finally:
+        os.close(fd)
+
+
 def admit_capture(source: str, session_id: str, user_id: str = "", db_path: str | None = None,
                   host: str = "claude", *, root: Path | None = None) -> Capture:
+    """Admit the observed bytes of ``source``, reading them once in bounded chunks.
+
+    Sources up to MAX_CAPTURE_BYTES are copied into the private store. Larger
+    sources are referenced as a prefix: append-only transcripts keep these
+    bytes while they grow, and the worker parses exactly this many bytes and
+    proves them by the same hash. A rewritten source settles the capture.
+    """
     from truememory.ingest.hooks._shared import is_allowed_transcript, normalize_transcript_host
     host = normalize_transcript_host(host)
     _text(session_id, 256)
@@ -524,95 +609,106 @@ def admit_capture(source: str, session_id: str, user_id: str = "", db_path: str 
     original = Path(source).expanduser()
     if original.is_symlink():
         raise CompletionError("source_link")
-    try:
-        fd = os.open(original, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                     | getattr(os, "O_NONBLOCK", 0))
-        try:
-            before_stat = os.fstat(fd)
-            _source_owned(before_stat, fd)
-            handle = os.fdopen(fd, "rb")
-            fd = None
-            with handle:
-                before = _file_identity(before_stat)
-                if before[2] > MAX_CAPTURE_BYTES:
-                    raise CompletionError("capture_limit")
-                data = handle.read(MAX_CAPTURE_BYTES + 1)
-                after_stat = os.fstat(handle.fileno())
-                _source_owned(after_stat, handle.fileno())
-                after = _file_identity(after_stat)
-        finally:
-            if fd is not None:
-                os.close(fd)
-        fd = os.open(original, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                     | getattr(os, "O_NONBLOCK", 0))
-        try:
-            path_stat = os.fstat(fd)
-            _source_owned(path_stat, fd)
-            handle = os.fdopen(fd, "rb")
-            fd = None
-            with handle:
-                path_after = _file_identity(path_stat)
-        finally:
-            if fd is not None:
-                os.close(fd)
-    except CompletionError:
-        raise
-    except OSError as error:
-        raise CompletionError("source_capture_failed") from error
-    if len(data) > MAX_CAPTURE_BYTES:
-        raise CompletionError("capture_limit")
-    if before != after or after != path_after or len(data) != after[2]:
-        raise CompletionError("source_changed")
-    metadata = {"version": 1, "user_id": user_id, "database": normalized_database(db_path),
-                "host": host, "session_id": session_id, "source": locator,
-                "source_suffix": original.suffix.lower(), "file_identity": before,
-                "byte_count": len(data), "sha256": hashlib.sha256(data).hexdigest()}
-    key = _digest(metadata)
     directory = account_root(user_id, db_path, root)
     _account_directory(directory)
-    for child in ("captures", "receipts", "logs"):
+    for child in ("captures", "receipts", "logs", "incoming"):
         _private_directory(directory / child)
     with _lock(directory / "state.lock"):
-        state = _state(directory)
-        if key in state["captures"]:
-            capture = _capture_from(directory, key, state["captures"][key])
-            if state["captures"][key].get("released") is not True:
+        offsets = _prefix_offsets(_state(directory), host, session_id, locator)
+    incoming = None
+    try:
+        try:
+            fd = os.open(original, _SOURCE_FLAGS)
+            try:
+                before = _file_identity(_source_state(original, fd))
+                if before[2] > MAX_SOURCE_BYTES:
+                    raise CompletionError("capture_limit")
+                copied = before[2] <= MAX_CAPTURE_BYTES
+                sink = None
+                if copied:
+                    incoming = directory / "incoming" / (uuid.uuid4().hex + ".partial")
+                    sink = _open_private(incoming, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                try:
+                    total, digest, prefixes = _stream(fd, before[2], sink=sink, offsets=offsets)
+                    if sink is not None:
+                        os.fsync(sink)
+                finally:
+                    if sink is not None:
+                        os.close(sink)
+                after = _file_identity(_source_state(original, fd))
+            finally:
+                os.close(fd)
+            path_after = _file_identity(_source_state(original))
+        except CompletionError:
+            raise
+        except OSError as error:
+            raise CompletionError("source_capture_failed") from error
+        if copied:
+            stable = before == after == path_after and total == before[2]
+        else:
+            # Appends after the observed size leave the referenced prefix intact.
+            stable = total == before[2] and all(state[:2] == before[:2] and state[2] >= total
+                                                for state in (after, path_after))
+        if not stable:
+            raise CompletionError("source_changed")
+        metadata = {"version": 1, "user_id": user_id, "database": normalized_database(db_path),
+                    "host": host, "session_id": session_id, "source": locator,
+                    "source_suffix": original.suffix.lower(), "file_identity": before,
+                    "byte_count": total, "sha256": digest}
+        if not copied:
+            metadata["storage"] = "source_prefix"
+        key = _digest(metadata)
+        with _lock(directory / "state.lock"):
+            state = _state(directory)
+            if key in state["captures"]:
+                capture = _capture_from(directory, key, state["captures"][key])
+                if copied and state["captures"][key].get("released") is not True:
+                    verify_capture(capture)
+                return capture
+            capture = Capture(directory, key, _capture_path(directory, key, metadata), metadata)
+            if has_receipt(capture):
+                # Forgotten state entry; the retained receipt still certifies these bytes.
+                return capture
+            _collect(directory, state)
+            captures = state["captures"]
+            replaced = _replaced(directory, captures, metadata, prefixes)
+            copies = [name for name in replaced if captures[name]["metadata"].get("storage") != "source_prefix"]
+            freed = sum(captures[name]["metadata"]["byte_count"] for name in copies)
+            retained_count, retained_bytes = _capture_inventory(directory / "captures")
+            added = int(copied and not capture.path.exists())
+            if (retained_count - len(copies) + added > MAX_CAPTURES
+                    or len(captures) - len(replaced) >= MAX_CAPTURES):
+                raise CompletionError("capture_count_limit")
+            if retained_bytes - freed + added * total > MAX_ACCOUNT_BYTES:
+                raise CompletionError("capture_account_quota")
+            forgotten = []
+            for name in replaced:
+                # These exact bytes begin the incoming capture, which covers them.
+                captures[name].update(status="superseded", superseded_by=key, released=True)
+                if len(captures) >= MAX_CAPTURES:
+                    del captures[name]
+                    forgotten.append(name)
+            entry = {"metadata": metadata, "attempts": 0, "status": "queued",
+                     "next_attempt_at": 0, "worker_pid": 0, "outcomes": [], "admitted_at": time.time()}
+            captures[key] = entry
+            if len(_json(state)) > MAX_STATE_BYTES:
+                raise CompletionError("retained_state_limit")
+            if added:
+                os.replace(incoming, capture.path)
+                incoming = None
+                _sync_directory(capture.path.parent)
+            elif copied:
+                # Same key means same bytes; never replace retained evidence.
                 verify_capture(capture)
+            _save_state(directory, state)
+            with contextlib.suppress(OSError):
+                # Admission is durable; an incomplete cleanup is finished by a later pass.
+                _discard(directory, captures, forgotten)
             return capture
-        suffix = ".jsonl" if metadata["source_suffix"] == ".jsonl" else ".json"
-        capture = Capture(directory, key, directory / "captures" / (key + suffix), metadata)
-        if has_receipt(capture):
-            # Forgotten state entry; the retained receipt still certifies these bytes.
-            return capture
-        _collect(directory, state)
-        replaced = _replaced(directory, state["captures"], metadata, data)
-        freed = sum(state["captures"][name]["metadata"]["byte_count"] for name in replaced)
-        retained_count, retained_bytes = _capture_inventory(directory / "captures")
-        already_retained = (directory / "captures" / (key + suffix)).exists()
-        if (retained_count - len(replaced) + int(not already_retained) > MAX_CAPTURES
-                or len(state["captures"]) - len(replaced) >= MAX_CAPTURES):
-            raise CompletionError("capture_count_limit")
-        if retained_bytes - freed + (0 if already_retained else len(data)) > MAX_ACCOUNT_BYTES:
-            raise CompletionError("capture_account_quota")
-        forgotten = []
-        for name in replaced:
-            # These exact bytes begin the incoming capture, which covers them.
-            state["captures"][name].update(status="superseded", superseded_by=key, released=True)
-            if len(state["captures"]) >= MAX_CAPTURES:
-                del state["captures"][name]
-                forgotten.append(name)
-        entry = {"metadata": metadata, "attempts": 0, "status": "queued",
-                 "next_attempt_at": 0, "worker_pid": 0, "outcomes": [], "admitted_at": time.time()}
-        state["captures"][key] = entry
-        if len(_json(state)) > MAX_STATE_BYTES:
-            raise CompletionError("retained_state_limit")
-        capture = _capture_from(directory, key, entry)
-        _immutable(capture.path, data)
-        _save_state(directory, state)
-        with contextlib.suppress(OSError):
-            # Admission is durable; an incomplete cleanup is finished by a later pass.
-            _discard(directory, state["captures"], forgotten)
-        return capture
+    finally:
+        if incoming is not None:
+            with contextlib.suppress(OSError):
+                incoming.unlink()
 
 
 def load_capture(key: str, user_id: str, db_path: str | None, host: str,
@@ -625,15 +721,63 @@ def load_capture(key: str, user_id: str, db_path: str | None, host: str,
     if (capture.metadata["user_id"] != user_id or capture.metadata["database"] != normalized_database(db_path)
             or capture.metadata["host"] != host):
         raise CompletionError("capture_scope_mismatch")
-    verify_capture(capture)
+    try:
+        verify_capture(capture)
+    except CompletionError:
+        if _referenced(capture):
+            # A rewritten, truncated or removed source never regains these bytes.
+            record_failure(capture, "source_prefix_changed", terminal=True)
+        raise
     return capture
 
 
+def _referenced(capture: Capture) -> bool:
+    return capture.metadata.get("storage") == "source_prefix"
+
+
 def verify_capture(capture: Capture) -> None:
-    data = _read_private(capture.path, MAX_CAPTURE_BYTES)
-    if (len(data) != capture.metadata["byte_count"]
-            or hashlib.sha256(data).hexdigest() != capture.metadata["sha256"]):
+    """Stream-verify the retained copy, or the referenced prefix of the source."""
+    meta = capture.metadata
+    try:
+        fd = os.open(capture.path, _SOURCE_FLAGS) if _referenced(capture) else _open_private(capture.path, os.O_RDONLY)
+    except CompletionError:
+        raise
+    except OSError as error:
+        raise CompletionError("capture_version_mismatch") from error
+    try:
+        if _referenced(capture):
+            info = _source_state(capture.path, fd)
+            if [info.st_dev, info.st_ino] != meta["file_identity"][:2] or info.st_size < meta["byte_count"]:
+                raise CompletionError("capture_version_mismatch")
+        total, digest, _ = _stream(fd, meta["byte_count"] if _referenced(capture) else MAX_CAPTURE_BYTES + 1)
+    finally:
+        os.close(fd)
+    if total != meta["byte_count"] or digest != meta["sha256"]:
         raise CompletionError("capture_version_mismatch")
+
+
+def _prefix_present(capture: Capture) -> bool:
+    # Cheap identity check through fstat, the API admission used (Windows stat
+    # and fstat may differ); the worker proves the bytes themselves.
+    try:
+        info = _source_state(capture.path)
+    except OSError:
+        return False
+    return ([info.st_dev, info.st_ino] == capture.metadata["file_identity"][:2]
+            and info.st_size >= capture.metadata["byte_count"])
+
+
+def _save_settled(capture: Capture, state: dict) -> None:
+    """Save state; a settled capture's copied bytes are released right away."""
+    entry = state["captures"][capture.key]
+    settled = entry["status"] in ("complete", "exhausted", "superseded")
+    if settled:
+        entry["released"] = True
+    _save_state(capture.directory, state)
+    if settled and not _referenced(capture):
+        # The receipt or the recorded outcomes are the retained evidence.
+        with contextlib.suppress(OSError):
+            capture.path.unlink()
 
 
 def strict_complete(result: object, capture: Capture | None = None) -> bool:
@@ -713,7 +857,7 @@ def record_failure(capture: Capture, category: str, details: dict | None = None,
         state = _state(capture.directory)
         entry = state["captures"][capture.key]
         _outcome(entry, category, details, terminal=terminal)
-        _save_state(capture.directory, state)
+        _save_settled(capture, state)
 
 
 def _reproducible(coverage: object) -> bool:
@@ -739,7 +883,9 @@ def record_receipt(capture: Capture, result: object) -> bool:
                    "actions": [entry.get("action") for entry in getattr(result, "trace", []) if type(entry) is dict]}
         record_failure(capture, "coverage_unproven", details, terminal=_reproducible(coverage))
         return False
-    verify_capture(capture)
+    if not _referenced(capture):
+        # A referenced prefix was proven by the parse hash strict_complete compared.
+        verify_capture(capture)
     receipt = {"version": 1, "capture_key": capture.key, "scope": capture.metadata,
                "coverage": "observed_bytes", "parser_status": "complete", "extractor_status": "complete",
                "proof": {"coverage": result.coverage,
@@ -758,7 +904,7 @@ def record_receipt(capture: Capture, result: object) -> bool:
         _immutable(capture.directory / "receipts" / (capture.key + ".json"), payload)
         state["captures"][capture.key]["status"] = "complete"
         state["captures"][capture.key]["worker_pid"] = 0
-        _save_state(capture.directory, state)
+        _save_settled(capture, state)
     return True
 
 
@@ -780,7 +926,9 @@ def worker_claim(capture: Capture, attempt: int) -> Iterator[bool]:
             entry["worker_pid"] = os.getpid()
             _save_state(capture.directory, state)
         try:
-            verify_capture(capture)
+            if not _referenced(capture):
+                # load_capture verified a referenced prefix; the parse proves it.
+                verify_capture(capture)
             yield True
         finally:
             with _lock(capture.directory / "state.lock"):
@@ -788,7 +936,7 @@ def worker_claim(capture: Capture, attempt: int) -> Iterator[bool]:
                 entry = state["captures"][capture.key]
                 if entry["attempts"] == attempt and entry["status"] == "running":
                     _outcome(entry, "worker_unproven")
-                    _save_state(capture.directory, state)
+                    _save_settled(capture, state)
 
 
 def _settled(entry: dict) -> bool:
@@ -821,24 +969,31 @@ def dispatch(capture: Capture, threshold: float = 0.30) -> int:
     from truememory.ingest.hooks._shared import check_extraction_budget, refund_extraction_budget
     from truememory.hooks.core import spawn_gate, register_spawned_pid
     from truememory._platform import pid_is_alive, spawn_kwargs
-    from truememory.ingest.hooks.stop import MIN_MESSAGES, _has_enough_messages
+    from truememory.ingest.hooks.stop import MIN_MESSAGES
+    from truememory.ingest.transcript import has_human_messages
     directory = capture.directory
     with _lock(directory / "state.lock"):
         entry = _state(directory)["captures"].get(capture.key)
         if entry is None or _settled(entry) or has_receipt(capture):
             return 0
-    verify_capture(capture)
-    enough = _has_enough_messages(str(capture.path), MIN_MESSAGES)
+    if _referenced(capture):
+        # The hook must not rehash a large source; the worker proves the bytes.
+        present = _prefix_present(capture)
+    else:
+        verify_capture(capture)
+        present = True
+    enough = present and has_human_messages(capture.path, MIN_MESSAGES, byte_limit=capture.metadata["byte_count"])
     with _lock(directory / "state.lock"):
         state = _state(directory)
         entry = state["captures"][capture.key]
         if _settled(entry) or has_receipt(capture) or entry["attempts"] >= MAX_ATTEMPTS:
             return 0
         if not enough:
-            # Retained bytes never gain messages; a longer revision is a new capture.
+            # Observed bytes never gain messages, and a replaced source never
+            # regains them; a longer revision is its own capture.
             if entry["status"] in ("queued", "retry"):
-                _outcome(entry, "below_minimum_messages", terminal=True)
-                _save_state(directory, state)
+                _outcome(entry, "below_minimum_messages" if present else "source_prefix_changed", terminal=True)
+                _save_settled(capture, state)
             return 0
         if entry.get("next_attempt_at", 0) > time.time():
             return 0
@@ -877,7 +1032,7 @@ def dispatch(capture: Capture, threshold: float = 0.30) -> int:
             except OSError as error:
                 refund_extraction_budget()
                 _outcome(entry, "spawn_failed_" + type(error).__name__)
-                _save_state(directory, state)
+                _save_settled(capture, state)
                 log.warning("Completion worker launch failed (%s)", type(error).__name__)
                 return 0
 

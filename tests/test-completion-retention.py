@@ -139,8 +139,8 @@ def test_completed_sessions_release_bytes_so_the_quota_never_fills(env, monkeypa
         key = env.spawned[-1][env.spawned[-1].index("--completion-key") + 1]
         _complete(_capture_for(env, key))
     assert len(list((_account(env) / "receipts").iterdir())) == 8
-    # Only the newest receipted copy waits for the next admission's release.
-    assert len(_captures(env)) == 1
+    # Receipted copies are released as soon as their receipt is recorded.
+    assert _captures(env) == []
     assert not list(env.backlog.glob("*.json"))
 
 
@@ -283,7 +283,7 @@ def test_state_entries_are_bounded_and_receipts_keep_evicted_bytes_settled(env, 
         admitted.append((session, path, capture))
     assert len(_state(env)) <= 3
     assert len(list((_account(env) / "receipts").iterdir())) == 7
-    assert len(_captures(env)) == 1
+    assert _captures(env) == []
     assert len([path for path in _account(env).glob("*.lock") if path.name != "state.lock"]) <= 3
     session, path, first = admitted[0]
     assert first.key not in _state(env)
