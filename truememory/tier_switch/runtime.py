@@ -877,12 +877,67 @@ def _open_serving_connection_at_path(
                 for sql in (f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}", "PRAGMA foreign_keys=ON",
                             "PRAGMA synchronous=NORMAL", "PRAGMA cache_size=-64000", "PRAGMA mmap_size=268435456"):
                     conn.execute(sql)
-                return conn
+                if reconcile_controlled_database(conn, path):
+                    return conn
+                # The journal was retired: open through the ordinary legacy path.
         except BaseException:
             conn.close()
             raise
         conn.close()
         return legacy_factory(path)
+
+
+def reconcile_controlled_database(conn: sqlite3.Connection, path: os.PathLike[str]) -> bool:
+    """Upgrade and validate a controlled database under the caller's maintenance.
+
+    Runs the idempotent create_db migrations (controlled opens skip create_db),
+    retires a journal whose selected pair another binary changed, and mirrors an
+    unacknowledged selection into the default config left by a crash. Returns
+    whether the database is still controlled.
+    """
+    import logging
+    from pathlib import Path
+    from truememory.storage import _apply_schema_migrations
+    from truememory.tier_switch.activation import retire_incoherent_activation
+    _apply_schema_migrations(conn, path)
+    if retire_incoherent_activation(conn):
+        logging.getLogger(__name__).warning(
+            "Tier selection no longer matches its vector pair (changed by another release); "
+            "serving the configured legacy tier")
+        return False
+    _mirror_unacknowledged_selection(conn, Path(path))
+    return True
+
+
+def _mirror_unacknowledged_selection(conn: sqlite3.Connection, path: os.PathLike[str]) -> None:
+    import logging
+    from pathlib import Path
+
+    state = read_activation_state(conn)
+    result = state.selection or state.legacy_policy
+    expected = getattr(state.intent, "expected_config", None)
+    if result is None or result.config_acknowledged or expected is None:
+        return
+    # Only the store the shared config describes (RebuildManager's default) mirrors it.
+    default = Path(os.environ.get("TRUEMEMORY_DB_PATH") or os.environ.get("TRUEMEMORY_DB")
+                   or Path.home() / ".truememory" / "memories.db").expanduser()
+    if Path(path).resolve() != default.resolve():
+        return
+    from truememory.tier_switch.activation import (
+        LegacyTierPolicy, TierActivationError, acknowledge_config, acknowledge_policy_config,
+    )
+    from truememory.tier_switch.job import tier_job_alive
+    from truememory.tier_switch.projection import ConfigProjectionConflict, mirror_activation
+    if tier_job_alive(path):
+        return  # A live job finishes its own projection.
+    try:
+        mirror_activation(result, expected_config=expected)
+        if type(result) is LegacyTierPolicy:
+            acknowledge_policy_config(conn, generation=result.generation)
+        else:
+            acknowledge_config(conn, generation=result.generation)
+    except (ConfigProjectionConflict, TierActivationError, OSError):
+        logging.getLogger(__name__).warning("Committed tier selection still awaits its config mirror", exc_info=True)
 
 
 @contextmanager

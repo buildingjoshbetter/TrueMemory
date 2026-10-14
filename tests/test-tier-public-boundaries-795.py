@@ -537,7 +537,17 @@ class TestPublicBoundaries(unittest.TestCase):
     def test_existing_controlled_open_never_calls_schema_factory_and_closes_on_rejection(self) -> None:
         policy = self.seed_policy()
         factory = Mock(side_effect=AssertionError("Unexpected legacy initialization"))
-        self.modules["storage"] = types.SimpleNamespace(DEFAULT_BUSY_TIMEOUT_MS=10000)
+        migrated = []
+        # Controlled opens run the idempotent create_db upgrades (recorded here);
+        # they never go through the legacy schema factory.
+        self.modules["storage"] = types.SimpleNamespace(
+            DEFAULT_BUSY_TIMEOUT_MS=10000, _apply_schema_migrations=lambda conn, path: migrated.append((conn, path)))
+        # This synthetic store has no native vec0 pair; journal coherence is
+        # covered by the liveness suite on real create_db databases.
+        coherence = []
+        patch.object(self.modules["tier_switch.activation"], "retire_incoherent_activation",
+                     lambda conn: coherence.append(conn) and False, create=True).start()
+        self.addCleanup(patch.stopall)
         path = Path(Path.cwd().anchor) / "synthetic" / "database.db"
         statements = []
         self.conn.set_trace_callback(statements.append)
@@ -549,6 +559,8 @@ class TestPublicBoundaries(unittest.TestCase):
         self.assertFalse(any(sql.lstrip().split(" ", 1)[0].upper() in {"INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER"}
                              for sql in statements))
         factory.assert_not_called()
+        self.assertEqual(migrated, [(self.conn, path)])
+        self.assertEqual(coherence, [self.conn])
         error = self.api.TierRuntimeError("synthetic invalid journal")
         close = Mock()
         with patch.object(Path, "exists", return_value=True), patch.object(self.api.sqlite3, "connect", return_value=self.conn), \

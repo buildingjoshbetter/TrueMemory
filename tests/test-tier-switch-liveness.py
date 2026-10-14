@@ -466,5 +466,143 @@ class ControlledDatabasesWithoutModels(unittest.TestCase):
         self.assert_source_operations(self.run_child("edge"), "edge")
 
 
+
+CHILD_OPEN = """
+from truememory.engine import TrueMemoryEngine
+engine = TrueMemoryEngine(DB)
+added = engine.add("written after reopening", sender="alice")["id"]
+listed = len(engine.get_all(limit=200))
+engine.close(); drain()
+conn = sqlite3.connect(DB)
+tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+emit(added=added, listed=listed, state=state(),
+     maintenance_tables=sorted(t for t in tables if t in {"maintenance_source_state", "maintenance_layers",
+                                                          "dunbar_generated_relationships"}),
+     retired=sorted(row[0] for row in conn.execute("SELECT key FROM metadata WHERE key LIKE '%_retired'")),
+     config=json.loads(CONFIG.read_text()))
+"""
+
+
+
+STRIP = """
+def strip_upgrade_schema(conn):
+    for name in ("maintenance_source_state", "maintenance_layers", "dunbar_generated_relationships"):
+        conn.execute(f"DROP TABLE IF EXISTS {name}")
+    for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND "
+                                "(name LIKE 'messages_maintenance_%' OR name LIKE 'dunbar_relationships_%')").fetchall():
+        conn.execute(f"DROP TRIGGER {name}")
+"""
+
+
+class ControlledDatabasesReconcileAtOpen(unittest.TestCase):
+    def reopen(self, setup: str) -> dict:
+        (result,) = run_scenario(f"""
+            import subprocess
+            {setup}
+            child = subprocess.run([sys.executable, "-c", PRELUDE_SOURCE + "stub_models()\\n" + {CHILD_OPEN!r}],
+                                   capture_output=True, text=True)
+            lines = [json.loads(line[7:]) for line in child.stdout.splitlines() if line.startswith("RESULT ")]
+            emit(child=lines[0] if lines else child.stderr[-3000:])
+        """.replace("\n            ", "\n"))
+        self.assertIsInstance(result["child"], dict, result["child"])
+        return result["child"]
+
+    def test_first_policy_switch_after_upgrade_and_controlled_reopen_migrate(self):
+        child = self.reopen(STRIP + """
+seed(10)
+conn = sqlite3.connect(DB); strip_upgrade_schema(conn); conn.commit(); conn.close()
+stub_models()
+assert switch("pro")["outcome"] == "complete"
+conn = sqlite3.connect(DB)
+migrated = conn.execute("SELECT 1 FROM sqlite_master WHERE name='maintenance_layers'").fetchone()
+assert migrated, "the switch itself migrates before publishing the policy"
+strip_upgrade_schema(conn); conn.commit(); conn.close()
+""")
+        self.assertEqual(child["state"]["selected"], "pro")
+        self.assertEqual(child["maintenance_tables"],
+                         ["dunbar_generated_relationships", "maintenance_layers", "maintenance_source_state"])
+        self.assertEqual((child["added"], child["listed"]), (11, 11))
+
+    def test_older_release_tier_switch_retires_the_journal(self):
+        child = self.reopen("""
+seed(20)
+stub_models()
+assert switch("edge")["outcome"] == "complete"
+conn = connect()
+mid = conn.execute("INSERT INTO messages(content,sender) VALUES ('added by 0.7.6.1 after its switch','alice')").lastrowid
+conn.execute("INSERT INTO vec_messages_basepro(rowid,embedding) VALUES (?,?)", (mid, vec(mid)))
+conn.execute("INSERT INTO vec_messages_sep_basepro(rowid,embedding) VALUES (?,?)", (mid, vec(-mid)))
+conn.execute("INSERT OR REPLACE INTO vector_cache_registry(tier_group,vec_table,sep_table,last_embedded_id,vector_count,"
+             "model_name,embedding_dim,last_updated,created) VALUES ('basepro','vec_messages_basepro',"
+             "'vec_messages_sep_basepro',?,?,'Qwen3-Embedding-0.6B',256,0,0)", (mid, mid))
+conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES ('embed_model','qwen3_256')")
+conn.commit(); conn.close()
+config = json.loads(CONFIG.read_text()); config["tier"] = "base"; CONFIG.write_text(json.dumps(config))
+""")
+        self.assertIsNone(child["state"]["selected"])
+        self.assertEqual(child["retired"], ["tier_activation_v1_retired", "tier_selected_v1_retired"])
+        self.assertEqual((child["added"], child["listed"]), (22, 22))
+
+    def test_policy_on_generic_pair_stranded_by_older_release_is_retired(self):
+        child = self.reopen("""
+seed(10, tables=("vec_messages", "vec_messages_sep"))
+from truememory.embedding_target import EmbeddingTarget
+from truememory.tier_switch.activation import commit_config_only_transition
+from truememory.tier_switch.projection import capture_config_guard
+conn = connect()
+commit_config_only_transition(conn, expected_selection_generation=None, expected_intent_id=None,
+                              target=EmbeddingTarget.capture("pro"), reranker_id="Alibaba-NLP/gte-reranker-modernbert-base",
+                              expected_config=capture_config_guard(config_path=CONFIG),
+                              legacy_pair=("vec_messages", "vec_messages_sep"))
+for name in ("vec_messages_basepro", "vec_messages_sep_basepro"):
+    conn.execute(f"CREATE VIRTUAL TABLE {name} USING vec0(embedding float[256] distance_metric=cosine)")
+conn.execute("INSERT INTO vec_messages_basepro SELECT * FROM vec_messages")
+conn.execute("INSERT INTO vec_messages_sep_basepro SELECT * FROM vec_messages_sep")
+conn.execute("DROP TABLE vec_messages"); conn.execute("DROP TABLE vec_messages_sep")
+conn.execute("INSERT INTO vector_cache_registry(tier_group,vec_table,sep_table,last_embedded_id,vector_count,model_name,"
+             "embedding_dim) VALUES ('basepro','vec_messages_basepro','vec_messages_sep_basepro',10,10,'Qwen3-Embedding-0.6B',256)")
+conn.commit(); conn.close()
+""")
+        self.assertIsNone(child["state"]["selected"])
+        self.assertEqual(child["retired"], ["tier_activation_v1_retired"])
+        self.assertEqual((child["added"], child["listed"]), (11, 11))
+
+    def test_policy_switch_migrates_a_populated_generic_pair_first(self):
+        (result,) = run_scenario("""
+            seed(10, tables=("vec_messages", "vec_messages_sep"))
+            stub_models()
+            outcome = switch("pro")["outcome"]
+            from truememory.tier_switch.activation import read_activation_state
+            conn = connect()
+            emit(outcome=outcome, tables=read_activation_state(conn).legacy_policy.tables,
+                 generic=conn.execute("SELECT count(*) FROM sqlite_master WHERE name='vec_messages'").fetchone()[0],
+                 rows=conn.execute("SELECT count(*) FROM vec_messages_basepro").fetchone()[0])
+        """)
+        self.assertEqual(result["outcome"], "complete")
+        self.assertEqual(result["tables"], ["vec_messages_basepro", "vec_messages_sep_basepro"])
+        self.assertEqual((result["generic"], result["rows"]), (0, 10))
+
+    def test_unacknowledged_selection_is_mirrored_on_open(self):
+        child = self.reopen("""
+seed(10)
+stub_models()
+assert switch("edge")["outcome"] == "complete"
+conn = sqlite3.connect(DB)
+selected = json.loads(conn.execute("SELECT value FROM metadata WHERE key='tier_selected_v1'").fetchone()[0])
+intent = json.loads(conn.execute("SELECT value FROM metadata WHERE key='tier_activation_v1'").fetchone()[0])
+selected["config_acknowledged"] = False; intent["state"] = "db_selected"
+conn.execute("UPDATE metadata SET value=? WHERE key='tier_selected_v1'", (json.dumps(selected, sort_keys=True, separators=(",", ":")),))
+conn.execute("UPDATE metadata SET value=? WHERE key='tier_activation_v1'", (json.dumps(intent, sort_keys=True, separators=(",", ":")),))
+conn.commit(); conn.close()
+config = json.loads(CONFIG.read_text())
+config["tier"] = intent["expected_config"]["tier"]
+config["tier_activation_generation"] = intent["expected_config"]["generation"]
+CONFIG.write_text(json.dumps(config))
+""")
+        self.assertEqual(child["state"]["selected"], "edge")
+        self.assertTrue(child["state"]["acknowledged"])
+        self.assertEqual(child["config"]["tier"], "edge")
+
+
 if __name__ == "__main__":
     unittest.main()

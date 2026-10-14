@@ -1098,16 +1098,27 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
             ) from e
         raise DatabaseOpenError(_integrity_message(db_path, str(e))) from e
 
-    _migrate_messages_schema(conn, db_path)
-    conn.executescript(_SCHEMA_SQL)
     try:
-        _migrate_messages_fts_trigger(conn)
-        _initialize_maintenance_tracking(conn)
-        _initialize_dunbar_ownership(conn)
-        _initialize_style_accumulator_schema(conn)
+        _apply_schema_migrations(conn, db_path)
     except sqlite3.Error:
         conn.close()
         raise
+    return conn
+
+
+def _apply_schema_migrations(conn: sqlite3.Connection, db_path: str | Path) -> None:
+    """Idempotent schema upgrades shared by create_db and controlled opens.
+
+    A database with a committed tier selection is opened without create_db,
+    so its upgrades must not depend on that path. Each step is a no-op once
+    applied; callers own maintenance (schema decisions) for the database.
+    """
+    _migrate_messages_schema(conn, db_path)
+    conn.executescript(_SCHEMA_SQL)
+    _migrate_messages_fts_trigger(conn)
+    _initialize_maintenance_tracking(conn)
+    _initialize_dunbar_ownership(conn)
+    _initialize_style_accumulator_schema(conn)
     # The directive index lives outside _SCHEMA_SQL on purpose: if a legacy
     # DB's migration could not add messages.directive (e.g. a rolled-back
     # ALTER), an unconditional CREATE INDEX inside executescript would turn a
@@ -1140,7 +1151,6 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
         log.debug("fact_timeline status migration skipped", exc_info=True)
 
     conn.commit()
-    return conn
 
 
 # ---------------------------------------------------------------------------

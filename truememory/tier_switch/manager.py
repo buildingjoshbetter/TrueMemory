@@ -6,6 +6,7 @@ create their own SQLite connections for thread safety.
 """
 
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -80,6 +81,14 @@ def _open_db(db_path: Path | None = None, *, initialize: bool = False) -> sqlite
         conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA synchronous=NORMAL")
+        if initialize and objects is not None:
+            # The caller owns maintenance. A switch can be the first action after
+            # an upgrade: migrate before any journal makes the store controlled,
+            # and retire a journal another release has invalidated.
+            from truememory.storage import _apply_schema_migrations
+            from truememory.tier_switch.activation import retire_incoherent_activation
+            _apply_schema_migrations(conn, path)
+            retire_incoherent_activation(conn)
         _load_tier_extension(conn)
         return conn
     except BaseException:
@@ -504,6 +513,15 @@ class RebuildManager:
                 self._last_outcome = "complete"
                 return None
             if old_target.identity == target.identity and {old_target.tier, target.tier} == {"base", "pro"}:
+                if previous is None and old_tables == ("vec_messages", "vec_messages_sep"):
+                    # Older releases rename a populated generic pair on their next
+                    # open, which would strand a policy pinned to these names.
+                    from truememory.vector_search import migrate_legacy_vec_tables
+                    migrate_legacy_vec_tables(conn)
+                    old_target, old_tables = self._serving_identity(conn, state, guard)
+                    if old_tables == ("vec_messages", "vec_messages_sep") and any(
+                            conn.execute(f'SELECT 1 FROM main."{name}" LIMIT 1').fetchone() for name in old_tables):
+                        raise TierSwitchUnsupportedError("Generic vector tables could not be migrated before the switch")
                 self._last_action = "config_only"
                 self._last_outcome = "activation_pending"
                 self._served_tier = None
@@ -1042,8 +1060,11 @@ class RebuildManager:
                 with _transaction(conn, write=True):
                     _guard_storage(conn)
                     state = _state(conn)
-                    if (state.selection != result or type(state.intent) is not ActivationIntent
-                            or state.intent.intent_id != result.intent_id or state.intent.state != "db_selected"):
+                    # An open elsewhere may already have mirrored and acknowledged it.
+                    if (state.selection is None
+                            or dataclasses.replace(state.selection, config_acknowledged=False) != result
+                            or type(state.intent) is not ActivationIntent or state.intent.intent_id != result.intent_id
+                            or state.intent.state not in ("db_selected", "config_acknowledged")):
                         return False
                     # Primary keys are preserved (UPSERT/DELETE), like activation itself.
                     for key, row in snapshot["metadata"].items():
