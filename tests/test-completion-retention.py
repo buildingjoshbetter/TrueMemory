@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import types
 import uuid
 from contextlib import contextmanager
@@ -237,10 +238,9 @@ def test_short_capture_from_another_path_settles_and_is_released(env):
     assert env.spawned == []
 
 
-def test_reproducible_unproven_outcome_is_recorded_once(env):
-    session, path = _transcript(env, _turns(6))
-    capture = completion.admit_capture(str(path), session, "", "", "claude", root=env.root)
+def _heuristic_attempt(capture, now: float) -> None:
     attempt = completion.reserve_inline_attempt(capture)
+    assert attempt
     with completion.worker_claim(capture, attempt) as allowed:
         assert allowed
         coverage = {"parser_status": "complete", "extractor_status": "heuristic", "extractor_calls": 0,
@@ -250,8 +250,28 @@ def test_reproducible_unproven_outcome_is_recorded_once(env):
         result = types.SimpleNamespace(coverage=coverage, facts_extracted=1, facts_stored=1, facts_updated=0,
                                        facts_skipped_gate=0, facts_skipped_dedup=0, trace=[{"action": "stored"}])
         assert completion.record_receipt(capture, result) is False
+
+
+def test_heuristic_outcome_retries_once_after_a_pause_then_settles(env, monkeypatch):
+    # Heuristic extraction reflects the worker's provider detection (Ollama
+    # probe, claude on PATH, keys), which can be transient: never settle it on
+    # one observation, and never retry it more than once.
+    session, path = _transcript(env, _turns(6))
+    capture = completion.admit_capture(str(path), session, "", "", "claude", root=env.root)
+    now = time.time()
+    _heuristic_attempt(capture, now)
     entry = _state(env)[capture.key]
-    assert entry["status"] == "exhausted" and entry["attempts"] == 1
+    assert entry["status"] == "retry"
+    assert entry["next_attempt_at"] >= now + completion.ENVIRONMENT_RETRY_SECONDS - 1
+    assert capture.path.exists(), "the copy stays for the spaced retry"
+    assert completion.reserve_inline_attempt(capture) == 0
+    assert completion.dispatch(capture) == 0
+    later = now + completion.ENVIRONMENT_RETRY_SECONDS + 1
+    monkeypatch.setattr(completion.time, "time", lambda: later)
+    _heuristic_attempt(capture, later)
+    entry = _state(env)[capture.key]
+    assert entry["status"] == "exhausted" and entry["attempts"] == 2
+    assert not capture.path.exists()
     assert completion.reserve_inline_attempt(capture) == 0
     assert completion.dispatch(capture) == 0
     assert env.spawned == []
@@ -260,7 +280,7 @@ def test_reproducible_unproven_outcome_is_recorded_once(env):
 @pytest.mark.parametrize(("coverage", "expected"), [
     ({"parser_status": "partial", "extractor_status": "complete"}, True),
     ({"parser_status": "malformed", "extractor_status": "unobserved"}, True),
-    ({"parser_status": "complete", "extractor_status": "heuristic"}, True),
+    ({"parser_status": "complete", "extractor_status": "heuristic"}, False),
     ({"parser_status": "complete", "extractor_status": "limited", "extractor_errors": ["chunk_limit"]}, True),
     ({"parser_status": "unreadable", "extractor_status": "unobserved"}, False),
     ({"parser_status": "unreadable", "extractor_status": "complete"}, False),
@@ -271,6 +291,8 @@ def test_reproducible_unproven_outcome_is_recorded_once(env):
 ])
 def test_only_outcomes_the_same_bytes_reproduce_are_terminal(coverage, expected):
     assert completion._reproducible(coverage) is expected
+    assert completion._environmental(coverage) is (coverage == {"parser_status": "complete",
+                                                               "extractor_status": "heuristic"})
 
 
 def test_state_entries_are_bounded_and_receipts_keep_evicted_bytes_settled(env, monkeypatch):

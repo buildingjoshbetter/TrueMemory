@@ -32,6 +32,7 @@ MAX_CAPTURES = 1024
 MAX_STATE_BYTES = 8 * 1024 * 1024
 MAX_ATTEMPTS = 5
 MAX_RECEIPT_BYTES = 32768
+ENVIRONMENT_RETRY_SECONDS = 3600
 _KEY = re.compile(r"[0-9a-f]{64}")
 _COUNTS = ("facts_extracted", "facts_stored", "facts_updated", "facts_skipped_gate", "facts_skipped_dedup")
 # Admission refusals that clear once retained captures settle and are released.
@@ -836,13 +837,14 @@ def has_receipt(capture: Capture) -> bool:
     return strict_complete(reconstructed, capture)
 
 
-def _outcome(entry: dict, category: str, details: dict | None = None, *, terminal: bool = False) -> None:
+def _outcome(entry: dict, category: str, details: dict | None = None, *, terminal: bool = False,
+             delay: float | None = None) -> None:
     attempt = entry.get("attempts", 0)
     if type(attempt) is not int or not 0 <= attempt <= MAX_ATTEMPTS:
         raise CompletionError("invalid_attempt_state")
     entry["status"] = "exhausted" if terminal or attempt >= MAX_ATTEMPTS else "retry"
     entry["worker_pid"] = 0
-    entry["next_attempt_at"] = time.time() + min(300, 2 ** min(attempt, 9))
+    entry["next_attempt_at"] = time.time() + (min(300, 2 ** min(attempt, 9)) if delay is None else delay)
     outcome = {"attempt": attempt, "category": category, "observed_at": time.time()}
     if details is not None:
         if len(_json(details)) > 8192:
@@ -870,8 +872,14 @@ def _reproducible(coverage: object) -> bool:
     if coverage.get("parser_status") != "complete":
         return False
     errors = coverage.get("extractor_errors")
-    return coverage.get("extractor_status") in ("heuristic", "unobserved") or (
+    return coverage.get("extractor_status") == "unobserved" or (
         coverage.get("extractor_status") == "limited" and type(errors) is list and "chunk_limit" in errors)
+
+
+def _environmental(coverage: object) -> bool:
+    """Heuristic extraction follows the worker's provider detection, not the bytes."""
+    return (type(coverage) is dict and coverage.get("parser_status") == "complete"
+            and coverage.get("extractor_status") == "heuristic")
 
 
 def record_receipt(capture: Capture, result: object) -> bool:
@@ -881,7 +889,18 @@ def record_receipt(capture: Capture, result: object) -> bool:
                    "counts": {name: getattr(result, name, None) for name in (
                        "facts_extracted", "facts_stored", "facts_updated", "facts_skipped_gate", "facts_skipped_dedup")},
                    "actions": [entry.get("action") for entry in getattr(result, "trace", []) if type(entry) is dict]}
-        record_failure(capture, "coverage_unproven", details, terminal=_reproducible(coverage))
+        with _lock(capture.directory / "state.lock"):
+            state = _state(capture.directory)
+            entry = state["captures"][capture.key]
+            # A provider may have been briefly unreachable from this worker's
+            # environment: retry once after a long pause, and settle only when
+            # a second attempt shows the same environment.
+            repeated = _environmental(coverage) and any(
+                type(item) is dict and _environmental((item.get("details") or {}).get("coverage"))
+                for item in entry["outcomes"])
+            _outcome(entry, "coverage_unproven", details, terminal=_reproducible(coverage) or repeated,
+                     delay=ENVIRONMENT_RETRY_SECONDS if _environmental(coverage) else None)
+            _save_settled(capture, state)
         return False
     if not _referenced(capture):
         # A referenced prefix was proven by the parse hash strict_complete compared.
