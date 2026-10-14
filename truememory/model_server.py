@@ -161,7 +161,12 @@ def _automatic_rss_budget_bytes() -> int:
         raise ValueError("Automatic model-server physical-memory measurement is unavailable") from exc
     if isinstance(physical, bool) or not isinstance(physical, int) or not 0 < physical <= 2**63 - 1:
         raise ValueError("Physical memory must be a positive signed64 integer byte count")
-    budget = min(8 * 1024**3, physical // 4)
+    # Base/Pro keep about 2.3 GB resident on CPU (runtime, Qwen, reranker).
+    # A quarter of an 8 GB host cannot hold that, so small hosts may use up
+    # to half their memory, never more than 3 GiB, before refusing work.
+    budget = physical // 4
+    if budget > 0:
+        budget = min(8 * 1024**3, max(budget, min(physical // 2, 3 * 1024**3)))
     if budget <= 0:
         raise ValueError("Automatic model-server RSS budget must be positive")
     return budget
@@ -656,6 +661,8 @@ class ModelServer:
                     if state is not None and state.model is model:
                         self._publish_embed_state(None)
                     raise
+                # The moved weights' accelerator storage is free only now.
+                flush_mps_cache()
 
     def _check_embed_recovery_deadline_locked(
         self, model: object, deadline: _RequestDeadline,
@@ -765,6 +772,16 @@ class ModelServer:
     # custom models re-read config.json at build time — the fast lane
     # declines all of those and falls through to the main path.
     _FAST_LANE_SAFE_MODEL_IDS = frozenset({"model2vec", "qwen3_256"})
+
+    # Resident bytes charged before a known model is built, so admission refuses
+    # a construction that cannot fit instead of refusing it after weights load.
+    # Qwen3-Embedding-0.6B is bfloat16 on disk but float32 under transformers 4.
+    _MODEL_WEIGHT_BYTES = {
+        "qwen3_256": 2_400_000_000,
+        "model2vec": 32_000_000,
+        "Alibaba-NLP/gte-reranker-modernbert-base": 600_000_000,
+        "cross-encoder/ms-marco-MiniLM-L-6-v2": 92_000_000,
+    }
 
     def _resolve_embed_cache(self, tier: str) -> tuple[str, _EmbedState | None]:
         """Return the requested identity and its compatible cached snapshot."""
@@ -925,6 +942,50 @@ class ModelServer:
         del retired
         self._retire_stale_fast_encoder()
 
+    @staticmethod
+    def _discard_models() -> None:
+        """Free dropped models (reference cycles) and their accelerator cache."""
+        from truememory.mps_utils import flush_mps_cache
+        flush_mps_cache()
+
+    def _construct_model(
+        self, kind: str, stage: str, device: str | None, deadline: _RequestDeadline | None,
+        build: Callable[[str | None], object], *, model_identity: tuple[str, int, str] | None = None,
+        known_bytes: int = 0,
+    ) -> tuple[object, str | None]:
+        """Build within the memory budget on *device*, else on CPU.
+
+        An MPS OOM while building degrades *kind* to CPU for the server
+        lifetime, as an inference OOM does (issue #577), so a model that
+        cannot fit is not rebuilt and refused on every request.
+        """
+        selected = device
+        while True:
+            self._memory_stage(stage, deadline, known_bytes=known_bytes,
+                               model_identity=model_identity, device=selected)
+            failed = False
+            try:
+                model = build(selected)
+            except RuntimeError as exc:
+                from truememory.mps_utils import is_mps_oom
+                if selected == "cpu" or not is_mps_oom(exc):
+                    raise
+                failed = True
+            if failed:
+                # Outside the handler, so the failed build's frames are released.
+                self._mark_sticky_cpu(kind)
+                self._discard_models()
+                selected = "cpu"
+                self._check_process_memory(stage, deadline)
+                continue
+            try:
+                self._check_process_memory(stage + " completion", deadline)
+            except BaseException:
+                model = None
+                self._discard_models()
+                raise
+            return model, selected
+
     def _get_embed_model(self, tier: str, deadline: _RequestDeadline | None = None):
         with self._memory_scope() as _memory:
             model_id, state = self._resolve_embed_cache(tier)
@@ -937,17 +998,21 @@ class ModelServer:
                 return state.model
 
             # Memory-first replacement: failed construction leaves the cache empty.
+            replacing = self._embed_state is not None
             self._publish_embed_state(None)
+            if replacing:
+                self._discard_models()
             self._check_process_memory("embed construction", deadline)
             device = self._embed_device()
             if deadline is not None:
                 deadline.check()
-            self._memory_stage("embed construction", deadline,
-                               model_identity=((model_id, 256, "legacy")
-                                               if model_id in self._FAST_LANE_SAFE_MODEL_IDS else None),
-                               device=device)
-            model = self._build_embed_model(model_id, device)
-            self._check_process_memory("embed construction completion", deadline)
+            model, _ = self._construct_model(
+                "embed", "embed construction", device, deadline,
+                lambda selected: self._build_embed_model(model_id, selected),
+                model_identity=((model_id, 256, "legacy")
+                                if model_id in self._FAST_LANE_SAFE_MODEL_IDS else None),
+                known_bytes=self._MODEL_WEIGHT_BYTES.get(model_id, 0),
+            )
             # ONE atomic reference assignment of an immutable snapshot — the
             # fast lane can never observe a torn (model, tier, model_id) triple.
             self._publish_embed_state(_EmbedState(model=model, tier=tier, model_id=model_id))
@@ -968,15 +1033,19 @@ class ModelServer:
                 return state.model
             # A legacy custom label is not evidence that its constructor did not
             # fall back. Only strict construction can establish that identity.
+            replacing = self._embed_state is not None
             state = None
             self._publish_embed_state(None)
+            if replacing:
+                self._discard_models()
             self._check_process_memory("prepared embed construction", deadline)
             device = self._embed_device()
             deadline.check()
-            self._memory_stage("prepared embed construction", deadline,
-                               model_identity=target.identity, device=device)
-            model = build_target_model(target, device, check=deadline.check)
-            self._check_process_memory("prepared embed construction completion", deadline)
+            model, _ = self._construct_model(
+                "embed", "prepared embed construction", device, deadline,
+                lambda selected: build_target_model(target, selected, check=deadline.check),
+                model_identity=target.identity, known_bytes=self._MODEL_WEIGHT_BYTES.get(target.model_id, 0),
+            )
             self._publish_embed_state(_EmbedState(
                 model=model, tier=target.tier, model_id=target.model_id,
                 prepared_identity=target.identity,
@@ -1027,10 +1096,11 @@ class ModelServer:
             self._fast_model_id = None
             self._fast_generation = None
             self._check_process_memory("fast embed construction", deadline)
-            self._memory_stage("fast embed construction", deadline,
-                               model_identity=(model_id, 256, "legacy"), device="cpu")
-            model = self._build_embed_model(model_id, "cpu")
-            self._check_process_memory("fast embed construction completion", deadline)
+            model, _ = self._construct_model(
+                "embed", "fast embed construction", "cpu", deadline,
+                lambda selected: self._build_embed_model(model_id, selected),
+                model_identity=(model_id, 256, "legacy"), known_bytes=self._MODEL_WEIGHT_BYTES.get(model_id, 0),
+            )
             # A changed generation, including A -> B -> A, must not publish this
             # construction. Its already-captured request may still finish on it.
             if self._residency_lock.acquire(blocking=False):
@@ -1061,8 +1131,11 @@ class ModelServer:
             if self._reranker is not None and self._reranker_name == name:
                 return self._reranker
 
+            replacing = self._reranker is not None
             self._reranker = None
             self._reranker_name = None
+            if replacing:
+                self._discard_models()
             self._check_process_memory("reranker construction", deadline)
             from truememory.mps_utils import auto_detect_device, ensure_mps_memory_budget, resolve_device
             if "rerank" in self._sticky_cpu:
@@ -1070,18 +1143,21 @@ class ModelServer:
             else:
                 device = resolve_device(auto_detect_device())
 
-            ensure_mps_memory_budget(device)
-            from sentence_transformers import CrossEncoder
-            if deadline is not None:
-                deadline.check()
-            if getattr(self, "_memory_owner", None) is not None:
-                self._memory_stage("reranker construction", deadline,
-                                   model_identity=(name, 0, "reranker"), device=device)
-            model = CrossEncoder(name, device=device)
-            if type(getattr(model, "max_seq_length", None)) is int:
-                from truememory._rerank_budget import cap_reranker_length
-                cap_reranker_length(model)
-            self._check_process_memory("reranker construction completion", deadline)
+            def build(selected: str | None) -> object:
+                ensure_mps_memory_budget(selected)
+                from sentence_transformers import CrossEncoder
+                if deadline is not None:
+                    deadline.check()
+                model = CrossEncoder(name, device=selected)
+                if type(getattr(model, "max_seq_length", None)) is int:
+                    from truememory._rerank_budget import cap_reranker_length
+                    cap_reranker_length(model)
+                return model
+
+            model, device = self._construct_model(
+                "rerank", "reranker construction", device, deadline, build,
+                model_identity=(name, 0, "reranker"), known_bytes=self._MODEL_WEIGHT_BYTES.get(name, 0),
+            )
             self._reranker = model
             self._reranker_name = name
             log.info("Loaded reranker model=%s device=%s", name, device)
@@ -1140,7 +1216,11 @@ class ModelServer:
         deadline.check()
         if self._inference_lock.acquire(blocking=False):
             try:
-                if self._lock.acquire(blocking=False):
+                # No inference is running, so the state lock is only held for
+                # bookkeeping. Wait briefly rather than build a second encoder.
+                remaining = deadline.remaining()
+                wait = 0.25 if remaining is None else max(0.0, min(0.25, remaining))
+                if self._lock.acquire(timeout=wait):
                     model = None
                     try:
                         deadline.check()
@@ -1638,10 +1718,10 @@ class ModelServer:
             if not _USE_UNIX:
                 if self._token is None:
                     return None
-                token = self._recv_exact(conn, _HMAC_TOKEN_BYTES, header_deadline)
+                token = self._recv_exact(conn, _HMAC_TOKEN_BYTES, header_deadline, charge=False)
                 if token is None or not hmac.compare_digest(token, self._token):
                     return None
-            header = self._recv_exact(conn, _HEADER_SIZE, header_deadline)
+            header = self._recv_exact(conn, _HEADER_SIZE, header_deadline, charge=False)
             if header is None:
                 return None
             length = struct.unpack(_HEADER_FMT, header)[0]
@@ -1671,6 +1751,10 @@ class ModelServer:
                 self._reject_client(conn, length, "server_busy", "Model server busy: request capacity exhausted")
             return admitted
         except (OSError, TimeoutError):
+            return None
+        except _ProcessMemoryRefused as error:
+            # Memory pressure refuses this connection, never the accept loop.
+            self._reject_client(conn, 0, "server_busy", str(error))
             return None
         finally:
             with self._admission_lock:
@@ -1809,10 +1893,15 @@ class ModelServer:
             if not retained:
                 conn.close()
 
-    def _recv_exact(self, conn: socket.socket, n: int, expires_at: float | None = None) -> bytes | None:
+    def _recv_exact(
+        self, conn: socket.socket, n: int, expires_at: float | None = None, *, charge: bool = True,
+    ) -> bytes | None:
         with self._memory_scope() as _memory:
-            self._memory_stage("frame receive", _RequestDeadline(expires_at),
-                               known_bytes=2 * n + min(n, 65536), shape=(n,))
+            # The accept thread reads fixed-size headers only. Sampled RSS from
+            # concurrent inference must not refuse, or stop, the accept loop.
+            if charge:
+                self._memory_stage("frame receive", _RequestDeadline(expires_at),
+                                   known_bytes=2 * n + min(n, 65536), shape=(n,))
             buf = bytearray(n)
             offset = 0
             while offset < n:
@@ -1844,12 +1933,17 @@ class ModelServer:
         with self._memory_scope() as _memory:
             if "protocol" not in response:
                 response = {**response, "protocol": PROTOCOL_VERSION}
-            self._memory_stage("response metadata")
+            # Error and busy replies are small. Refusing them under memory
+            # pressure would drop the connection, which clients treat as a
+            # dead server and answer by launching another one.
+            charged = response.get("ok") is not False
+            if charged:
+                self._memory_stage("response metadata")
             wire_bytes = _response_wire_size(response)
             if wire_bytes > _MAX_MESSAGE_SIZE:
                 response = {"ok": False, "error": "Response too large", "protocol": PROTOCOL_VERSION}
                 wire_bytes = _response_wire_size(response)
-            if getattr(self, "_memory_owner", None) is not None:
+            if charged and getattr(self, "_memory_owner", None) is not None:
                 payload_bytes = sum(math.prod(value.shape) * 4 for value in response.values()
                                     if isinstance(value, np.ndarray))
                 encoded_bytes = sum(_array_base64_size(value.shape) for value in response.values()

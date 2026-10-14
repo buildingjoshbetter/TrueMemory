@@ -1,0 +1,232 @@
+"""Memory pressure refuses work without stopping the server or stranding models."""
+from __future__ import annotations
+
+import socket
+import struct
+import sys
+import threading
+import time
+import types
+import weakref
+
+import numpy as np
+import pytest
+
+from truememory import model_server as ms
+from truememory import mps_utils
+
+MIB = 1024 ** 2
+
+
+class FakeRSS:
+    """Stands in for psutil; the test sets the sampled resident size."""
+
+    def __init__(self, rss: int) -> None:
+        self.rss = rss
+
+    def Process(self) -> FakeRSS:
+        return self
+
+    def memory_info(self) -> types.SimpleNamespace:
+        return types.SimpleNamespace(rss=self.rss)
+
+
+class Model:
+    """A reference cycle, like sentence-transformers models."""
+
+    def __init__(self, device: str | None) -> None:
+        self.device = device
+        self.cycle = self
+
+    def encode(self, texts, batch_size=32, show_progress_bar=False, **kwargs):
+        return np.ones((len(texts), 2), dtype=np.float32)
+
+
+def _close(server: ms.ModelServer) -> None:
+    server._workers.shutdown(wait=False)
+    if server._memory_owner is not None:
+        server._memory_owner.close()
+
+
+@pytest.fixture
+def budgeted(monkeypatch):
+    rss = FakeRSS(500 * MIB)
+    monkeypatch.setattr(ms, "psutil", rss)
+    monkeypatch.setenv("TRUEMEMORY_MODEL_SERVER_MAX_RSS_MB", "3072")
+    server = ms.ModelServer(automatic_rss_budget=True)
+    server._write_status_file = lambda: None
+    yield server, rss
+    _close(server)
+
+
+@pytest.fixture
+def plain():
+    server = ms.ModelServer()
+    server._write_status_file = lambda: None
+    yield server
+    _close(server)
+
+
+@pytest.mark.skipif(not ms._USE_UNIX, reason="Unix socket transport")
+def test_header_reads_are_not_refused_by_memory_pressure(budgeted):
+    server, rss = budgeted
+    rss.rss = 4096 * MIB
+    client, peer = socket.socketpair()
+    try:
+        body = b'{"op": "ping"}'
+        client.sendall(struct.pack(ms._HEADER_FMT, len(body)) + body)
+        client.shutdown(socket.SHUT_WR)
+        client.settimeout(10)
+        admitted = server._admit_client(peer)
+        assert admitted is not None and admitted.length == len(body)
+        server._serve_client(peer, admitted)
+        header = client.recv(ms._HEADER_SIZE)
+        response = client.recv(struct.unpack(ms._HEADER_FMT, header)[0])
+        assert b'"server_busy"' in response
+        assert not server._stopped.is_set()
+    finally:
+        client.close()
+        peer.close()
+
+
+def test_accept_refusal_rejects_one_connection_and_keeps_serving(plain, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise ms._ProcessMemoryRefused("Model server busy: synthetic pressure")
+
+    monkeypatch.setattr(plain, "_recv_exact", refuse)
+    client, peer = socket.socketpair()
+    try:
+        assert plain._admit_client(peer) is None
+        assert not plain._stopped.is_set()
+        assert plain._staging_lock.acquire(blocking=False)
+        plain._staging_lock.release()
+    finally:
+        client.close()
+        peer.close()
+
+
+def test_construction_is_admitted_with_model_size(budgeted, monkeypatch):
+    server, rss = budgeted
+    builds = []
+    monkeypatch.setattr(server, "_build_embed_model", lambda model_id, device: builds.append(device) or Model(device))
+    # 1,200 MiB resident plus 2.4 GB of Qwen weights exceeds the 3,072 MiB budget.
+    rss.rss = 1200 * MIB
+    with server._lock, pytest.raises(ms._ProcessMemoryRefused):
+        server._get_embed_model("base")
+    assert builds == []
+    rss.rss = 500 * MIB
+    with server._lock:
+        assert server._get_embed_model("base").device in (None, "cpu", "mps")
+    assert len(builds) == 1
+
+
+def test_refused_construction_releases_the_built_model(budgeted, monkeypatch):
+    server, rss = budgeted
+    built = []
+
+    def build(model_id, device):
+        model = Model(device)
+        built.append(weakref.ref(model))
+        rss.rss = 3500 * MIB
+        return model
+
+    monkeypatch.setattr(server, "_build_embed_model", build)
+    with server._lock, pytest.raises(ms._ProcessMemoryRefused):
+        server._get_embed_model("base")
+    assert server._embed_state is None
+    assert built and built[0]() is None
+
+
+@pytest.mark.parametrize("kind", ["embed", "rerank"])
+def test_construction_oom_degrades_to_cpu_once(plain, monkeypatch, kind):
+    builds = []
+
+    def make(device):
+        builds.append(device)
+        if device != "cpu":
+            raise RuntimeError("MPS backend out of memory (MPS allocated: 1.40 GiB, max allowed: 1.50 GiB)")
+        return Model(device)
+
+    monkeypatch.delenv("TRUEMEMORY_DEVICE", raising=False)
+    monkeypatch.setattr(mps_utils, "auto_detect_device", lambda: "mps")
+    monkeypatch.setattr(mps_utils, "ensure_mps_memory_budget", lambda device: None)
+    if kind == "embed":
+        monkeypatch.setattr(plain, "_build_embed_model", lambda model_id, device: make(device))
+
+        def load():
+            return plain._get_embed_model("base")
+
+        def forget():
+            plain._publish_embed_state(None)
+    else:
+        monkeypatch.setitem(sys.modules, "sentence_transformers",
+                            types.SimpleNamespace(CrossEncoder=lambda name, device=None: make(device)))
+
+        def load():
+            return plain._get_reranker("Alibaba-NLP/gte-reranker-modernbert-base")
+
+        def forget():
+            plain._reranker = None
+
+    with plain._lock:
+        assert load().device == "cpu"
+    assert builds[-1] == "cpu" and builds[0] != "cpu"
+    assert kind in plain._sticky_cpu
+    forget()
+    with plain._lock:
+        assert load().device == "cpu"
+    assert builds[2:] == ["cpu"]
+
+
+def test_non_memory_construction_errors_still_raise(plain, monkeypatch):
+    def broken(model_id, device):
+        raise RuntimeError("synthetic missing weights")
+
+    monkeypatch.setattr(plain, "_build_embed_model", broken)
+    with plain._lock, pytest.raises(RuntimeError, match="missing weights"):
+        plain._get_embed_model("base")
+    assert "embed" not in plain._sticky_cpu
+
+
+def test_flush_collects_models_before_emptying_the_cache(monkeypatch):
+    order = []
+    torch = types.SimpleNamespace(
+        mps=types.SimpleNamespace(empty_cache=lambda: order.append("empty_cache")),
+        cuda=types.SimpleNamespace(empty_cache=lambda: None),
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(mps_utils, "get_mps_memory_budget", lambda: object())
+    monkeypatch.setattr(mps_utils, "gc", types.SimpleNamespace(collect=lambda: order.append("collect")))
+    mps_utils.flush_mps_cache()
+    assert order == ["collect", "empty_cache"]
+
+
+def test_single_text_waits_for_bookkeeping_instead_of_cloning(plain, monkeypatch):
+    builds = []
+    monkeypatch.setattr(plain, "_build_embed_model", lambda model_id, device: builds.append(device) or Model(device))
+    main = Model("cpu")
+    plain._publish_embed_state(ms._EmbedState(model=main, tier="", model_id="model2vec"))
+    held = threading.Event()
+
+    def bookkeeping():
+        with plain._lock:
+            held.set()
+            time.sleep(0.05)
+
+    worker = threading.Thread(target=bookkeeping)
+    worker.start()
+    held.wait()
+    response = plain._handle_fast_embed(["synthetic"], "")
+    worker.join()
+    assert response is not None and response["ok"] is True
+    assert builds == [] and plain._fast_encoder is None
+
+
+@pytest.mark.parametrize("physical_gib, expected_gib", [(4, 2), (8, 3), (12, 3), (16, 4), (64, 8)])
+def test_small_hosts_keep_room_for_base_tier_models(monkeypatch, physical_gib, expected_gib):
+    from truememory import memory_budget
+    sensor = types.SimpleNamespace(virtual_memory=lambda: types.SimpleNamespace(total=physical_gib * 1024 ** 3))
+    monkeypatch.setattr(ms, "psutil", sensor)
+    monkeypatch.setitem(sys.modules, "psutil", sensor)
+    assert ms._automatic_rss_budget_bytes() == expected_gib * 1024 ** 3
+    assert memory_budget.automatic_budget_bytes() == expected_gib * 1024 ** 3

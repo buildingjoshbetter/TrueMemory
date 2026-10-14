@@ -106,9 +106,13 @@ class TestRebuildValueExactness(unittest.TestCase):
                 conn, _ = self.database("content " + affinity)
                 self.seed(conn, old)
                 before = self.source.capture_source(conn)
+                stored_before = conn.execute("SELECT content FROM messages").fetchone()[0]
                 conn.execute("UPDATE messages SET content=?", (new,))
                 conn.commit()
-                if expected_change:
+                stored_after = conn.execute("SELECT content FROM messages").fetchone()[0]
+                # SQLite 3.48+ stores REAL-to-TEXT conversions with round-trip
+                # precision, so the TEXT case is a real change on newer builds.
+                if expected_change or repr(stored_before) != repr(stored_after):
                     with self.assertRaises(self.source.RebuildSourceChanged):
                         before.check(conn)
                 else:
