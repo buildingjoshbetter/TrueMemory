@@ -254,8 +254,8 @@ def _probe_server(deadline: float) -> bool:
     policy = _required_capped_policy() if "TRUEMEMORY_REQUIRE_PROCESS_MEMORY_CAP" in os.environ else None
     if not _server_ready():
         return False
-    if policy is not None:
-        _verify_retained_capped_server(policy, deadline)
+    if policy is not None and not _capped_daemon_verified(policy, deadline):
+        return False  # A stale endpoint with no live claimed daemon is relaunched.
     try:
         response = _send_request({"op": "ping"}, timeout=min(0.2, _remaining(deadline)))
     except ModelServerBusyError:
@@ -402,6 +402,7 @@ def _start_server(wait_timeout: float | None = None) -> bool:
                             os.close(bind)
                         # Release bind ownership BEFORE launching the child.
                         if claim is not None:
+                            child = None
                             try:
                                 child = _spawn_server(claim["generation"], deadline)
                                 launched = True
@@ -417,11 +418,15 @@ def _start_server(wait_timeout: float | None = None) -> bool:
                                 if required_cap:
                                     child.release_after_claim(claim, deadline=deadline)
                                     _retain_owned_capped_launch(child)
-                            except (OSError, TimeoutError):
+                            except (OSError, TimeoutError, RuntimeError, ValueError) as error:
+                                if not required_cap and not isinstance(error, (OSError, TimeoutError)):
+                                    raise
                                 # Invalidate this generation; a late child must
-                                # not publish after its launch failed.
-                                if not required_cap:
-                                    START_STATE_PATH.unlink(missing_ok=True)
+                                # not publish after its launch failed, and later
+                                # clients must not wait on a dead launch.
+                                if required_cap:
+                                    _abandon_capped_launch(child)
+                                START_STATE_PATH.unlink(missing_ok=True)
                                 raise
                 finally:
                     os.close(gate)
@@ -455,34 +460,68 @@ def _required_capped_policy() -> object | None:
     return policy
 
 
-def _verify_retained_capped_server(policy: object, deadline: float) -> None:
-    """Current readonly proof; joining never grants launch or stop authority."""
+def _capped_daemon_verified(policy: object, deadline: float) -> bool:
+    """Current readonly proof; joining never grants launch or stop authority.
+
+    False means no live claimed daemon owns the endpoint: the claim is absent,
+    still pending, or names an incarnation that no longer exists, as after the
+    kernel cap kills the daemon. Its endpoint can only be stale, and the launch
+    path replaces it once it holds the bind lock. A live claimed daemon that
+    fails inspection is refused, never joined.
+    """
     from truememory_memory_bootstrap import (
-        EnforcementUnavailable, _validate_claim, inspect_existing_owned_linux,
+        _validate_claim, adopt_exit_cleanup, inspect_existing_owned_linux,
     )
     claim = read_start_claim(START_STATE_PATH)
+    if claim is None or claim.get("child") is None:
+        return False
     _validate_claim(claim)
     child = claim["child"]
     observed_birth = process_birth(child["pid"])
     if type(observed_birth) is not float or observed_birth != child["born"]:
-        raise EnforcementUnavailable("Required daemon current birth differs from its claim")
-    inspect_existing_owned_linux(policy, pid=child["pid"], birth_time=observed_birth,
-                                 generation=claim["generation"], claim=claim, deadline=deadline)
+        return False
+    evidence = inspect_existing_owned_linux(policy, pid=child["pid"], birth_time=observed_birth,
+                                            generation=claim["generation"], claim=claim, deadline=deadline)
+    try:
+        adopt_exit_cleanup(evidence)
+    except (OSError, RuntimeError, ValueError, TypeError) as error:
+        log.debug("Capped daemon exit cleanup not adopted (%s)", type(error).__name__)
     _remaining(deadline)
+    return True
+
+
+def _verify_retained_capped_server(policy: object, deadline: float) -> None:
+    from truememory_memory_bootstrap import EnforcementUnavailable
+    if not _capped_daemon_verified(policy, deadline):
+        raise EnforcementUnavailable("Required capped daemon is not live")
+
+
+def _abandon_capped_launch(handle: object | None) -> None:
+    """Never leave a failed capped launch unowned: terminate it or keep watching it."""
+    if handle is None:
+        return  # The adapter already retired a launch that never returned a handle.
+    from truememory_memory_bootstrap import abandon_owned_launch
+    try:
+        if abandon_owned_launch(handle):
+            return
+    except (OSError, RuntimeError, ValueError, TypeError, TimeoutError) as error:
+        log.warning("Failed capped launch termination unresolved (%s)", type(error).__name__)
+    _retain_owned_capped_launch(handle)
 
 
 def _retain_owned_capped_launch(handle: object) -> None:
     """Retain native resources; an uncertain lifetime never triggers a live stop."""
     import select
     import threading
-    from truememory_memory_bootstrap import stop_owned_exact
+    from truememory_memory_bootstrap import release_exited_launch
     _owned_capped_launches.append(handle)
 
     def observe_exit() -> None:
         try:
             while not select.select([handle.record.pidfd], [], [], 1.0)[0]:
                 pass
-            stop_owned_exact(handle, deadline=time.monotonic() + 30.0)
+            if not release_exited_launch(handle):
+                log.warning("Capped daemon units were left for the next launch sweep")
         except (OSError, RuntimeError, ValueError, TypeError, TimeoutError) as error:
             log.warning("Capped daemon terminal evidence unresolved (%s)", type(error).__name__)
 
@@ -693,9 +732,8 @@ def _request_with_autostart(request: dict, timeout: float | None = None) -> dict
     if required_deadline is not None:
         from truememory_memory_bootstrap import _deadline
         _deadline(required_deadline)
-    required_existing = required_policy is not None and _server_ready()
-    if required_existing:
-        _verify_retained_capped_server(required_policy, required_deadline)
+    required_existing = (required_policy is not None and _server_ready()
+                         and _capped_daemon_verified(required_policy, required_deadline))
 
     try:
         if required_policy is not None and not required_existing:
