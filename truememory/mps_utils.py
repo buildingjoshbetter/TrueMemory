@@ -305,12 +305,15 @@ _MPS_CACHE_TRIM_BYTES = 512 * 1024**2
 
 
 def trim_mps_cache() -> None:
-    """Return cached MPS heaps a long batch left behind."""
+    """Return cached MPS heaps a long batch left behind; never fails a request."""
     if _mps_budget is None:
         return
-    import torch
-    if torch.mps.driver_allocated_memory() - torch.mps.current_allocated_memory() > _MPS_CACHE_TRIM_BYTES:
-        torch.mps.empty_cache()
+    try:
+        import torch
+        if torch.mps.driver_allocated_memory() - torch.mps.current_allocated_memory() > _MPS_CACHE_TRIM_BYTES:
+            torch.mps.empty_cache()
+    except Exception:
+        logger.debug("MPS cache trim skipped", exc_info=True)
 
 
 def prefer_float32_on_cpu(model: object) -> object:
