@@ -23,7 +23,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import NamedTuple
 
-from truememory._platform import try_file_lock
+from truememory._platform import release_file_lock, try_file_lock
 from truememory.storage import (
     DEFAULT_BUSY_TIMEOUT_MS, DatabaseOpenError, _MAINTENANCE_SOURCE_FIELDS,
     _STYLE_OUTPUT_INVALIDATE_SQL, _STYLE_OUTPUT_TRIGGERS,
@@ -233,7 +233,7 @@ def _wanted_by_other_locked(path: Path) -> bool:
         return False  # Fairness is best effort; never block owners on a probe fault.
     if probe is None:
         return True
-    os.close(probe)
+    release_file_lock(probe)
     return False
 
 
@@ -254,7 +254,7 @@ def maintenance_handoff_pending(db_path: str | os.PathLike[str]) -> bool:
             return False
         if probe is None:
             return False
-        os.close(probe)
+        release_file_lock(probe)
         return True
 
 
@@ -284,7 +284,7 @@ def maintenance_wanted(db_path: str | os.PathLike[str]) -> Iterator[bool]:
                     del _wanting[path]
                 if fd in _held_fds:
                     _held_fds.discard(fd)
-                    os.close(fd)
+                    release_file_lock(fd)
 
 
 def _release_owner(fd: int) -> None:
@@ -300,7 +300,7 @@ def _release_owner(fd: int) -> None:
                         if origin is not None and origin.descriptor == fd and origin.process_id == os.getpid():
                             coordinator._admission_owner = None
                             origins.append(origin)
-        os.close(fd)
+        release_file_lock(fd)
         _held_fds.discard(fd)
         for path, claimed_fd in tuple(_held_paths.items()):
             if claimed_fd == fd:
@@ -443,7 +443,9 @@ def _active_initialization_receipt(path: Path, *, expected: tuple | None = None)
 def _after_fork() -> None:
     global _registry_lock, _coordinators, _held_fds, _held_paths, _owner_waiters, _thread_owners, _wanting
     # The child must not prolong its parent's ownership by retaining an
-    # inherited descriptor. Inherited coordinator objects reject child use.
+    # inherited descriptor, and must not unlock it either: the lock lives on
+    # the open file description it shares with the parent. Inherited
+    # coordinator objects reject child use.
     for fd in _held_fds:
         os.close(fd)
     _held_fds = set()

@@ -1017,6 +1017,7 @@ class InMemoryRouting(unittest.TestCase):
         with patch.object(Path, "exists", lambda path: True if path == engine.db_path else exists(path)), \
              patch.object(module.sqlite3, "connect", side_effect=[probe, conn]) as opened, \
              patch.object(MAINTENANCE, "try_file_lock", return_value=719), \
+             patch.object(MAINTENANCE, "release_file_lock", closed_owners.append), \
              patch.object(MAINTENANCE, "os", owner_os), \
              patch.object(engine, "_purge_legacy_entity_profile_summaries"), \
              patch.object(engine, "_maybe_auto_consolidate") as planned, \

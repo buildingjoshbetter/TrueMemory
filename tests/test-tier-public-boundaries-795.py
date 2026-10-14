@@ -38,6 +38,8 @@ def definitions(path: str, names: set[str], namespace: dict, *, methods: bool = 
         names = names | {"_AutomaticAdmission", "_automatic_admission_locked"}
         namespace = {"threading": threading, "weakref": weakref, "_wanted_by_other_locked": lambda path: False,
                      **namespace}
+        # Lock release goes through the fixture's own os.close stub.
+        namespace.setdefault("release_file_lock", lambda fd, stub=namespace: stub["os"].close(fd))
     tree = ast.parse((ROOT / "truememory" / path).read_text(encoding="utf-8"))
     if methods:
         cls = next(node for node in tree.body if isinstance(node, ast.ClassDef))

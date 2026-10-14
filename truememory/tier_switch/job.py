@@ -64,7 +64,8 @@ class TierJobLock:
             if _held_job_locks.get(self._key) is self:
                 del _held_job_locks[self._key]
             if self._pid == os.getpid():
-                os.close(descriptor)
+                from truememory._platform import release_file_lock
+                release_file_lock(descriptor)
 
 
 def acquire_tier_job_lock(db_path: str | os.PathLike[str], *, timeout: float = 0.0,
