@@ -110,6 +110,7 @@ class TestModelResidency(unittest.TestCase):
         mps.resolve_device = lambda device: device
         mps.ensure_mps_memory_budget = lambda device: None
         mps.is_mps_oom = lambda error: False
+        mps.prefer_float32_on_cpu = lambda model: model
         mps.flush_mps_cache = lambda: None
         transformers = types.ModuleType("sentence_transformers")
         transformers.CrossEncoder = lambda identity, device: self.build(identity, device)

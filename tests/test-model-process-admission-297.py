@@ -82,6 +82,7 @@ class TestProcessAdmission(unittest.TestCase):
         self.mps.resolve_device = lambda device: device or "mps"
         self.mps.ensure_mps_memory_budget = lambda device: None
         self.mps.is_mps_oom = lambda error: "MPS backend out of memory" in str(error)
+        self.mps.prefer_float32_on_cpu = lambda model: model
         self.mps.flush_mps_cache = Mock()
         transformers = types.ModuleType("sentence_transformers")
         transformers.CrossEncoder = lambda identity, device: self.build(identity, device)

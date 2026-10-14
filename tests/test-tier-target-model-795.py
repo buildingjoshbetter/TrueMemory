@@ -124,6 +124,7 @@ class TestTierTargetIdentity(unittest.TestCase):
         self.mps = types.ModuleType("truememory.mps_utils")
         self.mps.resolve_device = lambda _device: "cpu"
         self.mps.is_mps_oom = lambda error: "MPS backend out of memory" in str(error)
+        self.mps.prefer_float32_on_cpu = lambda model: model
         self.mps.flush_mps_cache = Mock()
         modules = patch.dict(sys.modules, {
             "truememory": package, "truememory.vector_search": self.vector,

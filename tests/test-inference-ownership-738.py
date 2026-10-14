@@ -85,6 +85,7 @@ class TestIssue738InferenceOwnership(unittest.TestCase):
         self.reset_runtime()
         mps = types.ModuleType("truememory.mps_utils")
         mps.is_mps_oom = lambda error: "MPS backend out of memory" in str(error)
+        mps.prefer_float32_on_cpu = lambda model: model
         mps.flush_mps_cache = lambda: None
         mps.auto_detect_device = lambda: "mps"
         mps.resolve_device = lambda device: device
