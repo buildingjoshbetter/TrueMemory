@@ -1447,10 +1447,10 @@ class ModelServer:
                                 if (getattr(model, "tokenizer", None) is not None
                                         and type(getattr(model, "max_seq_length", None)) is int):
                                     from truememory._embed_budget import embed_token_budget, text_token_lengths
-                                    from truememory._rerank_budget import budgeted_slices
+                                    from truememory._rerank_budget import accelerator_token_budget, budgeted_slices
                                     lengths = text_token_lengths(model, texts)
-                                    slices = (None if lengths is None else
-                                              budgeted_slices(lengths, limit, embed_token_budget()))
+                                    slices = (None if lengths is None else budgeted_slices(
+                                        lengths, limit, accelerator_token_budget(model, embed_token_budget())))
                                     if slices is not None:
                                         # Long texts: smaller longest-first batches bound attention memory.
                                         order = np.array([index for group in slices for index in group], dtype=np.intp)
@@ -1560,11 +1560,12 @@ class ModelServer:
                                         type(getattr(reranker, "max_seq_length", None)) is int
                                         or hasattr(reranker, "max_length")):
                                     from truememory._rerank_budget import (
-                                        budgeted_slices, pair_token_lengths, rerank_token_budget,
+                                        accelerator_token_budget, budgeted_slices, pair_token_lengths,
+                                        rerank_token_budget,
                                     )
                                     lengths = pair_token_lengths(reranker, pairs)
-                                    slices = (None if lengths is None else
-                                              budgeted_slices(lengths, limit, rerank_token_budget()))
+                                    slices = (None if lengths is None else budgeted_slices(
+                                        lengths, limit, accelerator_token_budget(reranker, rerank_token_budget())))
                                 if slices is not None:
                                     # Long pairs: smaller longest-first batches bound attention scratch.
                                     order = np.array([index for group in slices for index in group], dtype=np.intp)

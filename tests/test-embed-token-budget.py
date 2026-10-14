@@ -144,3 +144,46 @@ def test_short_batches_skip_the_memory_read(monkeypatch):
     model = FakeEmbedder(EMBED_MAX_TOKENS)
     budgeted_encode(model, _texts(*([500] * 32)), batch_size=32)
     assert model.calls == [(32, 32)]
+
+
+def _on_mps(monkeypatch, model, allocated_mib, cap_mib=1536, heads=16):
+    import sys
+    import types
+
+    from truememory import mps_utils
+    model.device = types.SimpleNamespace(type="mps")
+    model.config = types.SimpleNamespace(num_attention_heads=heads)
+    monkeypatch.setattr(mps_utils, "get_mps_memory_budget",
+                        lambda: types.SimpleNamespace(effective_bytes=cap_mib * 1024 ** 2))
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(
+        mps=types.SimpleNamespace(current_allocated_memory=lambda: allocated_mib * 1024 ** 2)))
+
+
+def test_mps_batches_fit_the_free_allocation(monkeypatch):
+    monkeypatch.setattr(embed_budget, "embed_token_budget", lambda: EMBED_TOKEN_BUDGET)
+    model = FakeEmbedder(EMBED_MAX_TOKENS)
+    _on_mps(monkeypatch, model, allocated_mib=1190)
+    texts = _texts(*([45] * 31 + [1000]))
+    values = budgeted_encode(model, texts, batch_size=32)
+    # 80% of the free 346 MiB over 16 heads x 48 bytes per score: 377,924 tokens^2.
+    fit = int(346 * 1024 ** 2 * 0.8) // (16 * 48)
+    # Below one long text's 1,004,004 tokens^2, so it is embedded alone.
+    assert fit < 1002 ** 2
+    assert model.calls[0] == (1, 1)
+    assert sum(size for size, _ in model.calls) == 32
+    assert np.array_equal(values, FakeEmbedder().encode(texts))
+
+
+def test_mps_short_batches_keep_one_call(monkeypatch):
+    model = FakeEmbedder(EMBED_MAX_TOKENS)
+    _on_mps(monkeypatch, model, allocated_mib=1190)
+    budgeted_encode(model, _texts(*([45] * 32)), batch_size=32)
+    assert model.calls == [(32, 32)]
+
+
+def test_cpu_models_ignore_the_mps_allocation(monkeypatch):
+    from truememory._rerank_budget import accelerator_token_budget
+    model = FakeEmbedder(EMBED_MAX_TOKENS)
+    _on_mps(monkeypatch, model, allocated_mib=1500)
+    model.device = "cpu"
+    assert accelerator_token_budget(model, EMBED_TOKEN_BUDGET) == EMBED_TOKEN_BUDGET
