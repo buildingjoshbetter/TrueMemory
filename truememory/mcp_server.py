@@ -1631,6 +1631,13 @@ def truememory_status(status_id: int = 0) -> str:
     # Degradation section (issue #592).
     result["degradation"] = _build_health_payload()
 
+    # Memories stored without vectors (models were down); only an open store.
+    try:
+        memory = _memory
+        result["vector_coverage"] = None if memory is None else memory._engine.get_vector_coverage()
+    except Exception as e:
+        result["vector_coverage"] = {"status": "unavailable", "error": type(e).__name__}
+
     return json.dumps(result, indent=2, default=str)
 
 

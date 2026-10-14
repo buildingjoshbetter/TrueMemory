@@ -1421,6 +1421,11 @@ def _foreground_vector_publication(
 # inside the writer that stored a memory without them; consumed by bounded
 # backfill passes, so the work survives restarts.
 _BACKFILL_KEY = "vector_backfill_from"
+# Memories whose embedding came out non-finite (an fp16 NaN, for example) under
+# one model identity. They are skipped and reported instead of stalling every
+# later pass on the same rows; a different model retries them.
+_BACKFILL_SKIPPED_KEY = "vector_backfill_skipped"
+_BACKFILL_SKIPPED_LIMIT = 1000
 
 
 def note_vectorless(conn: sqlite3.Connection, message_id: int) -> None:
@@ -1435,14 +1440,44 @@ def note_vectorless(conn: sqlite3.Connection, message_id: int) -> None:
         logger.debug("Vector backfill cursor was not recorded", exc_info=True)
 
 
+def backfill_pending(conn: sqlite3.Connection) -> bool:
+    return conn.execute("SELECT 1 FROM metadata WHERE key=?", (_BACKFILL_KEY,)).fetchone() is not None
+
+
+def _skipped_vectorless(conn: sqlite3.Connection) -> tuple[str | None, list[int]]:
+    import json
+    row = conn.execute("SELECT value FROM metadata WHERE key=?", (_BACKFILL_SKIPPED_KEY,)).fetchone()
+    try:
+        value = json.loads(row[0])
+        return str(value["model"]), [int(item) for item in value["ids"]]
+    except (TypeError, ValueError, KeyError):
+        return None, []
+
+
+def _first_gap(conn: sqlite3.Connection, table: str, start: int, skipped: list[int]) -> int | None:
+    import json
+    return conn.execute(
+        f'SELECT min(m.id) FROM messages m WHERE m.id >= ? AND m.id NOT IN (SELECT value FROM json_each(?)) '
+        f'AND NOT EXISTS (SELECT 1 FROM main."{table}" v WHERE v.rowid = m.id)',
+        (start, json.dumps(skipped)),
+    ).fetchone()[0]
+
+
 def vector_coverage(conn: sqlite3.Connection, tables: tuple[str, str]) -> dict:
     """Count memories without a vector in the served completion table."""
-    vectorless, first = conn.execute(
-        f'SELECT count(*), min(m.id) FROM messages m WHERE NOT EXISTS '
+    import json
+    _, skipped = _skipped_vectorless(conn)
+    vectorless = conn.execute(
+        f'SELECT count(*) FROM messages m WHERE NOT EXISTS '
         f'(SELECT 1 FROM main."{tables[0]}" v WHERE v.rowid = m.id)'
-    ).fetchone()
+    ).fetchone()[0]
+    unembeddable = conn.execute(
+        f'SELECT count(*) FROM messages m WHERE m.id IN (SELECT value FROM json_each(?)) AND NOT EXISTS '
+        f'(SELECT 1 FROM main."{tables[0]}" v WHERE v.rowid = m.id)', (json.dumps(skipped),)
+    ).fetchone()[0]
     cursor = conn.execute("SELECT value FROM metadata WHERE key=?", (_BACKFILL_KEY,)).fetchone()
-    return {"table": tables[0], "vectorless": vectorless, "first_vectorless_id": first,
+    return {"table": tables[0], "vectorless": vectorless, "skipped_nonfinite": unembeddable,
+            "first_vectorless_id": _first_gap(conn, tables[0], 0, skipped),
             "backfill_from": None if cursor is None else cursor[0]}
 
 
@@ -1454,7 +1489,10 @@ def backfill_missing_vectors(conn: sqlite3.Connection, *, write_lock: object,
     most ``window`` ids from the recorded cursor and publishes at most
     ``budget`` missing pairs, each under the writer and model fences with the
     source row rechecked; encoding happens outside the engine writer lock.
+    Rows whose embedding is not finite are skipped and recorded, so the cursor
+    always moves past the scanned window.
     """
+    import json
     import sys
     from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
 
@@ -1471,46 +1509,74 @@ def backfill_missing_vectors(conn: sqlite3.Connection, *, write_lock: object,
             start = int(cursor[0])
         except (TypeError, ValueError):
             start = 0
+        skipped_model, skipped = _skipped_vectorless(conn)
         rows = conn.execute(
             "SELECT id, content, sender, recipient, timestamp FROM messages WHERE id >= ? ORDER BY id LIMIT ?",
             (start, window),
         ).fetchall()
         missing = [row for row in rows
                    if conn.execute(f'SELECT 1 FROM main."{vec_table}" WHERE rowid=?', (row[0],)).fetchone() is None]
+    with _lock:
+        model_label = f"{EMBEDDING_MODEL}:{_embedding_dim}"
+    if skipped_model != model_label:
+        skipped = []  # Another model may embed them.
+    missing = [row for row in missing if row[0] not in set(skipped)]
     batch = missing[:budget]
-    published = 0
+    published, nonfinite = 0, []
     if batch:
         with write_lock:
             model, identity = _capture_rebuild_model(conn)
+        model_label = f"{identity[1]}:{identity[2]}"
         completion = _encode_with_mps_fallback(model, [row[1] for row in batch])
         separation = _encode_with_mps_fallback(model, [_build_sep_text(row[2], row[3], row[4], row[1]) for row in batch])
         selection = capture_writer_selection(conn)
         for row, left, right in zip(batch, completion, separation):
+            try:
+                blobs = serialize_f32(left), serialize_f32(right)
+            except ValueError:
+                nonfinite.append(row[0])
+                continue
             with write_lock, _foreground_vector_publication(conn, identity, row[0], selection=selection) as tables:
                 current = conn.execute("SELECT id, content, sender, recipient, timestamp FROM messages WHERE id=?",
                                        (row[0],)).fetchone()
                 if (current != tuple(row)
                         or conn.execute(f'SELECT 1 FROM main."{tables[0]}" WHERE rowid=?', (row[0],)).fetchone()):
                     continue  # Changed, deleted or published meanwhile.
-                conn.execute(f'INSERT INTO main."{tables[0]}"(rowid, embedding) VALUES (?, ?)',
-                             (row[0], serialize_f32(left)))
+                conn.execute(f'INSERT INTO main."{tables[0]}"(rowid, embedding) VALUES (?, ?)', (row[0], blobs[0]))
                 conn.execute(f'DELETE FROM main."{tables[1]}" WHERE rowid=?', (row[0],))
-                conn.execute(f'INSERT INTO main."{tables[1]}"(rowid, embedding) VALUES (?, ?)',
-                             (row[0], serialize_f32(right)))
+                conn.execute(f'INSERT INTO main."{tables[1]}"(rowid, embedding) VALUES (?, ?)', (row[0], blobs[1]))
                 _write_foreground_embedder_metadata_no_commit(conn, identity, selection=selection)
                 published += 1
     if len(missing) > len(batch):
-        resume = str(batch[-1][0] + 1)
+        resume = batch[-1][0] + 1
     elif len(rows) == window:
-        resume = str(rows[-1][0] + 1)
+        resume = rows[-1][0] + 1
     else:
         resume = None
-    # Compare-and-set: a smaller cursor noted meanwhile by another add survives.
+    if nonfinite:
+        skipped = sorted(set(skipped) | set(nonfinite))[:_BACKFILL_SKIPPED_LIMIT]
+        logger.warning("Skipped %d memories whose embedding is not finite", len(nonfinite))
     with write_lock, writer_transaction(conn, capture_writer_selection(conn)):
+        if nonfinite:
+            conn.execute("INSERT INTO metadata(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+                         "value=excluded.value",
+                         (_BACKFILL_SKIPPED_KEY, json.dumps({"model": model_label, "ids": skipped})))
         if resume is None:
-            conn.execute("DELETE FROM metadata WHERE key=? AND value=?", (_BACKFILL_KEY, cursor[0]))
+            # Reached the end. Adds commit their row and cursor note together, so
+            # inside this writer every gap noted meanwhile is visible here.
+            resume = _first_gap(conn, vec_table, start, skipped)
+        now = conn.execute("SELECT value FROM metadata WHERE key=?", (_BACKFILL_KEY,)).fetchone()
+        if now is not None and now[0] != cursor[0]:
+            try:
+                lower = int(now[0])  # Noted or seeded meanwhile: never move past it.
+                resume = lower if resume is None else min(resume, lower)
+            except (TypeError, ValueError):
+                pass
+        if resume is None:
+            conn.execute("DELETE FROM metadata WHERE key=?", (_BACKFILL_KEY,))
         else:
-            conn.execute("UPDATE metadata SET value=? WHERE key=? AND value=?", (resume, _BACKFILL_KEY, cursor[0]))
+            conn.execute("INSERT INTO metadata(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+                         "value=excluded.value", (_BACKFILL_KEY, str(resume)))
     return published
 
 

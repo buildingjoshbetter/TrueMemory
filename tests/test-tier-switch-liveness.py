@@ -1145,6 +1145,80 @@ engine.close(); drain()
 emit(**out)
 """
 
+NAN_ENCODER = """
+_finite_encode = FakeEncoder.encode
+def _encode_with_one_nan(self, texts, **kwargs):
+    out = _finite_encode(self, texts, **kwargs)
+    for i, text in enumerate([texts] if isinstance(texts, str) else list(texts)):
+        if "POISON" in text:
+            out[i][0] = float("nan")  # The fp16 NaN class tracked by issues 465/485.
+    return out
+FakeEncoder.encode = _encode_with_one_nan
+"""
+
+ADD_POISON = NAN_ENCODER + """
+stub_models()
+from truememory.engine import TrueMemoryEngine
+engine = TrueMemoryEngine(DB)
+poison = engine.add("POISON input that the model turns into NaN", sender="alice")["id"]
+engine.close(); drain()
+emit(poison=poison)
+"""
+
+ADDS_AFTER_POISON = NAN_ENCODER + """
+stub_models()
+from truememory import vector_search
+from truememory.engine import TrueMemoryEngine
+encoded = [0]
+_encode = vector_search._encode_with_mps_fallback
+def counting(model, texts, **kwargs):
+    encoded[0] += len(texts)
+    return _encode(model, texts, **kwargs)
+vector_search._encode_with_mps_fallback = counting
+engine = TrueMemoryEngine(DB)
+vectorless = []
+for i in range(4):
+    engine.add(f"healthy add {i}", sender="alice")
+    vectorless.append(engine.get_vector_coverage()["vectorless"])
+coverage = engine.get_vector_coverage()
+engine.close(); drain()
+emit(vectorless=vectorless, encoded=encoded[0], coverage=coverage)
+"""
+
+ADD_RACING_THE_BACKFILL = """
+stub_models()
+from truememory import vector_search
+from truememory.engine import TrueMemoryEngine
+raced = []
+_encode = vector_search._encode_with_mps_fallback
+def encode_while_another_process_adds(model, texts, **kwargs):
+    if len(texts) > 1 and not raced:
+        # A process without models commits a vectorless add during this pass.
+        other = sqlite3.connect(DB)
+        raced.append(other.execute("INSERT INTO messages(content,sender,recipient,timestamp) "
+                                   "VALUES ('raced vectorless add','bob','','')").lastrowid)
+        vector_search.note_vectorless(other, raced[0])
+        other.commit(); other.close()
+    return _encode(model, texts, **kwargs)
+vector_search._encode_with_mps_fallback = encode_while_another_process_adds
+engine = TrueMemoryEngine(DB)
+engine.add("healthy add runs a backfill pass", sender="alice")
+after_pass = engine.get_vector_coverage()
+engine.add("second healthy add", sender="alice")
+after_second = engine.get_vector_coverage()
+engine.close(); drain()
+emit(raced=raced, after_pass=after_pass, after_second=after_second)
+"""
+
+SEARCH_ONLY = """
+stub_models()
+from truememory.engine import TrueMemoryEngine
+engine = TrueMemoryEngine(DB)
+hits = engine.search("captured while models were down", limit=3)
+engine.close(); drain()  # Close waits for the bounded background pass.
+emit(hits=len(hits))
+"""
+
 class RetiredSelectionInPinnedProcess(unittest.TestCase):
     def run_retire(self, config_tier):
         (result,) = run_scenario(steps("""
@@ -1187,6 +1261,61 @@ class RetiredSelectionInPinnedProcess(unittest.TestCase):
         self.assertEqual((process["served"], process["add"]), ("TierRuntimeError", "TierRuntimeError"))
         self.assertEqual(result["messages"], 16)
 
+
+class BackfillRobustness(unittest.TestCase):
+    def test_nonfinite_embedding_is_skipped_once_and_reported(self):
+        (result,) = run_scenario(steps("""
+            import subprocess
+            seed(10)
+            stub_models()
+            assert switch("edge")["outcome"] == "complete"
+        """, run_child(ADD_POISON), """
+            poison = child
+        """, run_child(ADD_WITHOUT_MODELS), """
+            offline = child
+        """, run_child(ADDS_AFTER_POISON), """
+            conn = connect()
+            emit(poison=poison, offline=offline, online=child,
+                 cursor=conn.execute("SELECT value FROM metadata WHERE key='vector_backfill_from'").fetchone())
+        """))
+        self.assertEqual(result["poison"], {"poison": 11})
+        self.assertEqual(result["offline"].get("ids"), [12, 13, 14], result["offline"])
+        online = result["online"]
+        self.assertEqual(online.get("vectorless"), [1, 1, 1, 1], online)
+        # 4 adds x 2 texts, plus one pass over 4 rows x 2 texts: no row is re-encoded.
+        self.assertEqual(online["encoded"], 16)
+        self.assertEqual((online["coverage"]["skipped_nonfinite"], online["coverage"]["first_vectorless_id"]), (1, None))
+        self.assertIsNone(result["cursor"])
+
+    def test_vectorless_add_during_a_pass_keeps_its_cursor(self):
+        (result,) = run_scenario(steps("""
+            import subprocess
+            seed(10)
+            stub_models()
+            assert switch("edge")["outcome"] == "complete"
+        """, run_child(ADD_WITHOUT_MODELS), run_child(ADD_RACING_THE_BACKFILL), """
+            emit(child=child)
+        """))
+        child = result["child"]
+        self.assertEqual(child.get("raced"), [15], child)
+        self.assertEqual((child["after_pass"]["vectorless"], child["after_pass"]["backfill_from"]), (1, "15"))
+        self.assertEqual((child["after_second"]["vectorless"], child["after_second"]["backfill_from"]), (0, None))
+
+    def test_search_backfills_an_idle_store(self):
+        (result,) = run_scenario(steps("""
+            import subprocess
+            seed(10)
+            stub_models()
+            assert switch("edge")["outcome"] == "complete"
+        """, run_child(ADD_WITHOUT_MODELS), run_child(SEARCH_ONLY), """
+            conn = connect()
+            emit(child=child, cursor=conn.execute("SELECT value FROM metadata WHERE key='vector_backfill_from'").fetchone(),
+                 vectors=[conn.execute(f"SELECT count(*) FROM {table} WHERE rowid IN (11, 12, 13)").fetchone()[0]
+                          for table in ("vec_messages_edge", "vec_messages_sep_edge")])
+        """))
+        self.assertEqual(result["child"], {"hits": 3})
+        self.assertEqual(result["vectors"], [3, 3])
+        self.assertIsNone(result["cursor"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -387,6 +387,8 @@ class TrueMemoryEngine:
         from truememory.tier_switch.runtime import ConnectionWriteLock
         self._write_lock = ConnectionWriteLock(self)
         self._init_lock = threading.Lock()
+        self._backfill_guard = threading.Lock()
+        self._backfill_thread: threading.Thread | None = None
         self._runtime_initialized = False
         self._runtime_vector_generation = None
         self._runtime_vector_connection = None
@@ -2756,6 +2758,9 @@ class TrueMemoryEngine:
         # "summary_N" / None supplement ids (#630 M-01).
         cleaned.sort(key=lambda d: (-d["score"], str(d.get("id", ""))))
         selected = cleaned[:limit]
+        schedule = getattr(self, "_schedule_backfill", None)  # Absent on synthetic engines.
+        if schedule is not None:
+            schedule()
         return attach_temporal_resolution(selected, temporal_intent) if temporal_intent else selected
 
     # ──────────────────────────────────────────────────────────────────────
@@ -3305,7 +3310,7 @@ class TrueMemoryEngine:
         try:
             with serving_operation(self.conn, connection_lock=self._write_lock, models="none") as operation:
                 coverage = vector_coverage(self.conn, operation.tables)
-                if seed_backfill and coverage["vectorless"] and coverage["backfill_from"] is None:
+                if seed_backfill and coverage["first_vectorless_id"] is not None and coverage["backfill_from"] is None:
                     from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
                     try:
                         with self._write_lock, writer_transaction(self.conn, capture_writer_selection(self.conn)):
@@ -3317,8 +3322,53 @@ class TrueMemoryEngine:
         except Exception as error:
             return {"status": "unavailable", "error_category": type(error).__name__[:64]}
 
+    @engine_fallback_operation
+    def backfill_vectors(self, budget: int = 32) -> int:
+        """Embed one bounded, resumable batch of memories stored without vectors."""
+        self._ensure_connection()
+        if not self._has_vectors:
+            return 0
+        from truememory.vector_search import backfill_missing_vectors
+        return backfill_missing_vectors(self.conn, write_lock=self._write_lock, budget=budget)
+
+    def _schedule_backfill(self) -> None:
+        """Start one background backfill pass when memories still lack vectors.
+
+        Called once a search has its models loaded, so a store that receives no
+        new adds still closes its gaps, without adding latency to the caller.
+        """
+        guard = getattr(self, "_backfill_guard", None)
+        if guard is None or self.conn is None or not self._has_vectors:
+            return
+        from truememory.tier_switch.runtime import current_operation
+        operation = current_operation(self.conn)
+        if operation is not None and not operation.models_ready:
+            return
+        with guard:
+            if self._backfill_thread is not None and self._backfill_thread.is_alive():
+                return
+            from truememory.vector_search import backfill_pending
+            try:
+                with self._write_lock:
+                    if not backfill_pending(self.conn):
+                        return
+            except sqlite3.Error:
+                return
+            self._backfill_thread = threading.Thread(
+                target=self._background_backfill, daemon=True, name="truememory-vector-backfill")
+            self._backfill_thread.start()
+
+    def _background_backfill(self) -> None:
+        try:
+            self.backfill_vectors()
+        except Exception:
+            logger.debug("Background vector backfill pass did not complete", exc_info=True)
+
     def close(self):
         """Detach this engine; a shared worker retains its own connection."""
+        thread = getattr(self, "_backfill_thread", None)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=10)  # One bounded pass; it needs the writer lock below.
         with self._init_lock, self._write_lock:
             self._maintenance_coordinator = None
             self._maintenance_handle = None
