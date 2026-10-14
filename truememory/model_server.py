@@ -161,12 +161,14 @@ def _automatic_rss_budget_bytes() -> int:
         raise ValueError("Automatic model-server physical-memory measurement is unavailable") from exc
     if isinstance(physical, bool) or not isinstance(physical, int) or not 0 < physical <= 2**63 - 1:
         raise ValueError("Physical memory must be a positive signed64 integer byte count")
-    # Base/Pro keep about 2.3 GB resident on CPU (runtime, Qwen, reranker).
-    # A quarter of an 8 GB host cannot hold that, so small hosts may use up
-    # to half their memory, never more than 3 GiB, before refusing work.
+    # Base/Pro on CPU keep the runtime (0.6 GB), Qwen (1.2 GB, or 2.4 GB in
+    # float32 on macOS) and the reranker (0.6 GB) resident. A quarter of an
+    # 8 GB host cannot hold that, so small hosts may use up to half their
+    # memory, never more than 4 GiB on macOS or 3 GiB elsewhere.
     budget = physical // 4
     if budget > 0:
-        budget = min(8 * 1024**3, max(budget, min(physical // 2, 3 * 1024**3)))
+        floor = (4 if sys.platform == "darwin" else 3) * 1024**3
+        budget = min(8 * 1024**3, max(budget, min(physical // 2, floor)))
     if budget <= 0:
         raise ValueError("Automatic model-server RSS budget must be positive")
     return budget
@@ -642,6 +644,10 @@ class ModelServer:
                 self._check_embed_recovery_deadline_locked(model, deadline)
             try:
                 self._check_process_memory("embed CPU transfer", deadline)
+                state = self._embed_state
+                model_id = state.model_id if state is not None and state.model is model else None
+                self._memory_stage("embed CPU transfer", deadline,
+                                   known_bytes=self._MODEL_WEIGHT_BYTES.get(model_id, 0))
             except (_ProcessMemoryRefused, _RequestDeadlineExceeded):
                 # A refused transfer leaves the failed accelerator instance behind.
                 # Invalidate it so a cache hit cannot bypass sticky CPU selection.
@@ -663,6 +669,7 @@ class ModelServer:
                     raise
                 from truememory.mps_utils import prefer_float32_on_cpu
                 prefer_float32_on_cpu(model)
+                self._release_stage("embed CPU transfer")
                 # The moved weights' accelerator storage is free only now.
                 flush_mps_cache()
 
@@ -963,7 +970,12 @@ class ModelServer:
         """
         selected = device
         while True:
-            self._memory_stage(stage, deadline, known_bytes=known_bytes,
+            resident = selected
+            if resident is None:
+                from truememory.mps_utils import auto_detect_device
+                resident = auto_detect_device()
+            # Accelerator weights are not in sampled RSS; only CPU builds are charged.
+            self._memory_stage(stage, deadline, known_bytes=known_bytes if resident == "cpu" else 0,
                                model_identity=model_identity, device=selected)
             failed = False
             try:
@@ -988,7 +1000,18 @@ class ModelServer:
                 model = None
                 self._discard_models()
                 raise
+            self._release_stage(stage)
             return model, selected
+
+    def _release_stage(self, stage: str) -> None:
+        """Return a finished stage's reservation; its bytes are now in sampled RSS."""
+        owner = getattr(self, "_memory_owner", None)
+        if owner is None:
+            return
+        from truememory.memory_budget import current_session
+        session = current_session()
+        if session is not None and session.owner is owner:
+            session.release(stage)
 
     def _get_embed_model(self, tier: str, deadline: _RequestDeadline | None = None):
         with self._memory_scope() as _memory:
@@ -1269,8 +1292,14 @@ class ModelServer:
                     model = None
                     try:
                         deadline.start_inference()
-                        model = (self._get_fast_encoder(tier, deadline=deadline) if expected_target is None else
-                                 self._get_fast_encoder(tier, deadline=deadline, expected_target=expected_target))
+                        try:
+                            model = (self._get_fast_encoder(tier, deadline=deadline) if expected_target is None else
+                                     self._get_fast_encoder(tier, deadline=deadline, expected_target=expected_target))
+                        except _ProcessMemoryRefused:
+                            # Only the second copy does not fit: the main model serves this
+                            # after its slice. A process already over budget stays refused.
+                            self._check_process_memory("fast embed fallback", deadline)
+                            model = None
                         deadline.check()
                         if model is None:
                             if deadline.transport is not None:
@@ -1694,12 +1723,12 @@ class ModelServer:
         try:
             from truememory.mps_utils import get_mps_memory_budget
             import torch
+            gc.collect()
             if get_mps_memory_budget() is not None and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 torch.mps.empty_cache()
                 torch.mps.synchronize()
         except Exception:
-            pass
-        gc.collect()
+            gc.collect()
 
     _CLIENT_TIMEOUT = 30.0
     _REJECT_TIMEOUT = 0.25

@@ -114,9 +114,10 @@ def _positive_bytes(value: object, name: str) -> int:
 
 
 # Base/Pro keep Qwen3-Embedding (1.11 GiB) and the ModernBERT reranker
-# (0.56 GiB) resident. Measured on Apple silicon, one long batch needs about
-# 1.5 GiB more, so smaller caps pushed long memories onto the CPU.
-_MPS_MIN_BUDGET_BYTES = int(3.25 * _GIB)
+# (0.56 GiB) resident. Measured on Apple silicon, one 2,048-token text (the
+# embedding cap) needs a 3.75 GiB cap, so smaller caps pushed long memories
+# onto the CPU. 4 GiB keeps margin above that measurement.
+_MPS_MIN_BUDGET_BYTES = int(4 * _GIB)
 
 
 def _default_mps_budget_bytes(physical_bytes: int) -> int:
