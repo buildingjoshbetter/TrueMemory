@@ -1482,7 +1482,7 @@ def vector_coverage(conn: sqlite3.Connection, tables: tuple[str, str]) -> dict:
 
 
 def backfill_missing_vectors(conn: sqlite3.Connection, *, write_lock: object,
-                             budget: int = 32, window: int = 256) -> int:
+                             budget: int = 32, window: int = 256, stop: threading.Event | None = None) -> int:
     """Embed a bounded, resumable batch of memories stored without vectors.
 
     Runs inside an admitted operation whose models are ready. One pass scans at
@@ -1490,7 +1490,8 @@ def backfill_missing_vectors(conn: sqlite3.Connection, *, write_lock: object,
     ``budget`` missing pairs, each under the writer and model fences with the
     source row rechecked; encoding happens outside the engine writer lock.
     Rows whose embedding is not finite are skipped and recorded, so the cursor
-    always moves past the scanned window.
+    always moves past the scanned window. ``stop`` ends the pass between encode
+    calls and rows; the cursor is then left for the next pass.
     """
     import json
     import sys
@@ -1498,8 +1499,10 @@ def backfill_missing_vectors(conn: sqlite3.Connection, *, write_lock: object,
 
     runtime = sys.modules.get("truememory.tier_switch.runtime")
     operation = runtime.current_operation(conn) if runtime is not None else None
-    if operation is None or not operation.models_ready or conn.in_transaction:
-        return 0  # A caller transaction must not absorb a batch of foreign writes.
+    if operation is None or not operation.models_ready or operation.borrowed:
+        # A caller transaction must not absorb a batch of foreign writes. The
+        # admission recorded it; a live in_transaction may be another thread's read.
+        return 0
     vec_table = operation.tables[0]
     with write_lock:
         cursor = conn.execute("SELECT value FROM metadata WHERE key=?", (_BACKFILL_KEY,)).fetchone()
@@ -1523,14 +1526,23 @@ def backfill_missing_vectors(conn: sqlite3.Connection, *, write_lock: object,
     missing = [row for row in missing if row[0] not in set(skipped)]
     batch = missing[:budget]
     published, nonfinite = 0, []
+    def stopped() -> bool:
+        return stop is not None and stop.is_set()
+
     if batch:
+        if stopped():
+            return 0
         with write_lock:
             model, identity = _capture_rebuild_model(conn)
         model_label = f"{identity[1]}:{identity[2]}"
         completion = _encode_with_mps_fallback(model, [row[1] for row in batch])
+        if stopped():
+            return 0
         separation = _encode_with_mps_fallback(model, [_build_sep_text(row[2], row[3], row[4], row[1]) for row in batch])
         selection = capture_writer_selection(conn)
         for row, left, right in zip(batch, completion, separation):
+            if stopped():
+                return published
             try:
                 blobs = serialize_f32(left), serialize_f32(right)
             except ValueError:
@@ -1553,6 +1565,8 @@ def backfill_missing_vectors(conn: sqlite3.Connection, *, write_lock: object,
         resume = rows[-1][0] + 1
     else:
         resume = None
+    if stopped():
+        return published
     if nonfinite:
         skipped = sorted(set(skipped) | set(nonfinite))[:_BACKFILL_SKIPPED_LIMIT]
         logger.warning("Skipped %d memories whose embedding is not finite", len(nonfinite))

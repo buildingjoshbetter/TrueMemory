@@ -2435,6 +2435,7 @@ def main():
         global _memory
         if _memory is not None:
             try:
+                _memory._engine.stop_background_backfill()
                 _memory._engine.conn.close()
             except Exception:
                 pass

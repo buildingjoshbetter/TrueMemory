@@ -1215,8 +1215,13 @@ stub_models()
 from truememory.engine import TrueMemoryEngine
 engine = TrueMemoryEngine(DB)
 hits = engine.search("captured while models were down", limit=3)
-engine.close(); drain()  # Close waits for the bounded background pass.
-emit(hits=len(hits))
+started = time.monotonic()  # The background pass runs; close() would stop it.
+coverage = {}
+while coverage.get("vectorless") != 0 and time.monotonic() - started < 30:
+    time.sleep(0.05)
+    coverage = engine.get_vector_coverage() or {}
+engine.close(); drain()
+emit(hits=len(hits), coverage=coverage)
 """
 
 TARGET_IDENTITY_CHANGED = """
@@ -1277,6 +1282,27 @@ except Exception as error:
 emit(result=result, seconds=round(time.monotonic() - started, 1))
 """
 
+
+SLOW_BACKGROUND_PASS = """
+stub_models()
+from truememory import vector_search
+from truememory.engine import TrueMemoryEngine
+_encode = vector_search._encode_with_mps_fallback
+def slow_in_background(model, texts, **kwargs):
+    if threading.current_thread().name == "truememory-vector-backfill":
+        time.sleep(3)  # One long encode call, like Qwen3 on CPU.
+    return _encode(model, texts, **kwargs)
+vector_search._encode_with_mps_fallback = slow_in_background
+engine = TrueMemoryEngine(DB)
+engine.search("captured while models were down", limit=3)
+time.sleep(0.5)
+started = time.monotonic()
+engine.close()
+closed = round(time.monotonic() - started, 2)
+time.sleep(4)  # The pass finishes its encode call, then must write nothing.
+drain()
+emit(closed=closed)
+"""
 
 LONG_MAINTENANCE_OWNER = """
 from truememory.maintenance import maintenance_owner
@@ -1397,6 +1423,21 @@ class BackfillRobustness(unittest.TestCase):
         """))
         self.assertEqual(result["child"], {"search": "EmbeddingTargetError", "add": "EmbeddingTargetError"})
         self.assertEqual((result["messages"], result["cursor"]), (10, None))
+
+
+    def test_close_stops_a_background_pass_within_a_second(self):
+        (result,) = run_scenario(steps("""
+            import subprocess
+            seed(10)
+            stub_models()
+            assert switch("edge")["outcome"] == "complete"
+        """, run_child(ADD_WITHOUT_MODELS), run_child(SLOW_BACKGROUND_PASS), """
+            conn = connect()
+            emit(child=child, cursor=conn.execute("SELECT value FROM metadata WHERE key='vector_backfill_from'").fetchone(),
+                 vectors=conn.execute("SELECT count(*) FROM vec_messages_edge WHERE rowid IN (11, 12, 13)").fetchone()[0])
+        """))
+        self.assertLess(result["child"].get("closed", 99), 1.5, result["child"])
+        self.assertEqual((result["vectors"], result["cursor"]), (0, ["11"]))
 
 
 class ActivationFairness(unittest.TestCase):

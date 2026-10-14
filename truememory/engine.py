@@ -389,6 +389,7 @@ class TrueMemoryEngine:
         self._init_lock = threading.Lock()
         self._backfill_guard = threading.Lock()
         self._backfill_thread: threading.Thread | None = None
+        self._backfill_stop = threading.Event()
         self._runtime_initialized = False
         self._runtime_vector_generation = None
         self._runtime_vector_connection = None
@@ -3324,13 +3325,13 @@ class TrueMemoryEngine:
             return {"status": "unavailable", "error_category": type(error).__name__[:64]}
 
     @engine_fallback_operation
-    def backfill_vectors(self, budget: int = 32) -> int:
+    def backfill_vectors(self, budget: int = 32, *, stop: threading.Event | None = None) -> int:
         """Embed one bounded, resumable batch of memories stored without vectors."""
         self._ensure_connection()
         if not self._has_vectors:
             return 0
         from truememory.vector_search import backfill_missing_vectors
-        return backfill_missing_vectors(self.conn, write_lock=self._write_lock, budget=budget)
+        return backfill_missing_vectors(self.conn, write_lock=self._write_lock, budget=budget, stop=stop)
 
     def _schedule_backfill(self) -> None:
         """Start one background backfill pass when memories still lack vectors.
@@ -3348,6 +3349,7 @@ class TrueMemoryEngine:
         with guard:
             if self._backfill_thread is not None and self._backfill_thread.is_alive():
                 return
+            self._backfill_stop.clear()  # A previous close stopped the last pass.
             from truememory.vector_search import backfill_pending
             try:
                 with self._write_lock:
@@ -3360,16 +3362,31 @@ class TrueMemoryEngine:
             self._backfill_thread.start()
 
     def _background_backfill(self) -> None:
+        if self._backfill_stop.is_set():
+            return
         try:
-            self.backfill_vectors()
+            self.backfill_vectors(stop=self._backfill_stop)
         except Exception:
             logger.debug("Background vector backfill pass did not complete", exc_info=True)
 
+    def stop_background_backfill(self, timeout: float = 1.0) -> None:
+        """Stop the background pass between encode calls or rows, waiting briefly.
+
+        A pass inside one encode call finishes that call, then writes nothing.
+        """
+        stop = getattr(self, "_backfill_stop", None)
+        if stop is None:
+            return
+        stop.set()
+        thread = self._backfill_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=timeout)
+
     def close(self):
         """Detach this engine; a shared worker retains its own connection."""
-        thread = getattr(self, "_backfill_thread", None)
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=10)  # One bounded pass; it needs the writer lock below.
+        stop = getattr(self, "stop_background_backfill", None)  # Absent on synthetic engines.
+        if stop is not None:
+            stop()
         with self._init_lock, self._write_lock:
             self._maintenance_coordinator = None
             self._maintenance_handle = None
