@@ -442,6 +442,7 @@ class IngestionPipeline:
         session_id: str = "",
         *,
         require_complete: bool = False,
+        byte_limit: int | None = None,
     ) -> IngestionResult:
         """
         Ingest a full conversation transcript.
@@ -452,6 +453,7 @@ class IngestionPipeline:
         Args:
             transcript_path: Path to the transcript file.
             session_id: Optional session identifier for metadata.
+            byte_limit: Ingest only this prefix of an append-only source.
 
         Returns:
             IngestionResult with full statistics and decision trace.
@@ -466,7 +468,8 @@ class IngestionPipeline:
         log.info("Parsing transcript: %s", transcript_path)
         if require_complete:
             from truememory.ingest.transcript import parse_transcript_outcome
-            parsed = parse_transcript_outcome(transcript_path)
+            # Compact parsing keeps memory bounded by what extraction reads.
+            parsed = parse_transcript_outcome(transcript_path, compact=True, byte_limit=byte_limit)
             messages = parsed.messages
             version = parsed.file_version
             result.coverage = {
@@ -515,6 +518,8 @@ class IngestionPipeline:
                 result.coverage["extractor_status"] = extracted.status
                 result.coverage["extractor_calls"] = 1
                 result.coverage["extractor_errors"] = list(getattr(extracted, "error_categories", ()))
+                result.coverage["extractor_chunks"] = {"attempted": getattr(extracted, "attempted_chunks", None),
+                                                       "total": getattr(extracted, "total_chunks", None)}
             else:
                 facts = extract_facts(conversation, self.llm_config)
         else:

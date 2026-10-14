@@ -248,15 +248,14 @@ def _writable_dirs_ok() -> bool:
 
 
 def _has_enough_messages(transcript_path: str, min_messages: int) -> bool:
-    """Count meaningful canonical human turns, independently of completion coverage."""
-    from truememory.ingest.transcript import parse_transcript_outcome, strip_truememory_blocks
+    """Count meaningful canonical human turns, independently of completion coverage.
 
-    outcome = parse_transcript_outcome(Path(transcript_path))
-    if outcome.status == "unreadable":
-        return False
-    count = sum(message.role == "human" and bool(strip_truememory_blocks(message.content).strip())
-                for message in outcome.messages)
-    return count >= min_messages
+    JSONL is read record by record and only until the threshold is met, so
+    the hook's time and memory do not grow with the transcript.
+    """
+    from truememory.ingest.transcript import has_human_messages
+
+    return has_human_messages(Path(transcript_path), min_messages)
 
 
 def _count_active_ingest_processes() -> int:
