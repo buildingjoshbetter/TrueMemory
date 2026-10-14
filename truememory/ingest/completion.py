@@ -407,7 +407,7 @@ def _capture_from(directory: Path, key: str, entry: dict) -> Capture:
             or type(metadata.get("file_identity")) is not list or len(metadata["file_identity"]) != 5
             or any(type(value) is not int for value in metadata["file_identity"])
             or type(entry.get("attempts")) is not int or not 0 <= entry["attempts"] <= MAX_ATTEMPTS
-            or entry.get("status") not in ("queued", "pending", "running", "retry", "exhausted", "complete")
+            or entry.get("status") not in ("queued", "pending", "running", "retry", "exhausted", "complete", "superseded")
             or type(entry.get("outcomes")) is not list or len(entry["outcomes"]) > MAX_ATTEMPTS):
         raise CompletionError("invalid_capture")
     _text(metadata.get("session_id"), 256)
@@ -417,6 +417,100 @@ def _capture_from(directory: Path, key: str, entry: dict) -> Capture:
         raise CompletionError("invalid_capture")
     suffix = ".jsonl" if metadata.get("source_suffix") == ".jsonl" else ".json"
     return Capture(directory, key, directory / "captures" / (key + suffix), metadata)
+
+
+def _claim_free(directory: Path, key: str) -> bool:
+    # Workers hold the per-capture lock for their whole attempt; an unusable
+    # lock file counts as held, so collection defers instead of failing.
+    path = directory / (key + ".lock")
+    if not path.exists():
+        return True
+    try:
+        with _lock(path, blocking=False) as free:
+            return free
+    except OSError:
+        return False
+
+
+def _activity(entry: dict) -> float:
+    times = [0, entry.get("admitted_at", 0)] + [item.get("observed_at", 0) for item in entry.get("outcomes", ()) if type(item) is dict]
+    return max(value for value in times if type(value) in (int, float))
+
+
+def _collect(directory: Path, state: dict) -> None:
+    """Release bytes no attempt can still use; receipts and outcomes stay retained.
+
+    Runs under state.lock before admission. State is saved before any unlink,
+    so a crash leaves orphan bytes for a later pass, never a live entry without
+    its bytes. The oldest released entries are forgotten first, which keeps room
+    for one more capture and bounds the retained state.
+    """
+    from truememory._platform import pid_is_alive
+    captures = state["captures"]
+    changed = False
+    for key, entry in captures.items():
+        try:
+            capture = _capture_from(directory, key, entry)
+        except CompletionError:
+            continue
+        if entry.get("released") is True or not _claim_free(directory, key):
+            continue
+        pid = entry.get("worker_pid", 0)
+        if (entry["status"] in ("pending", "running") and entry["attempts"] >= MAX_ATTEMPTS
+                and not (type(pid) is int and pid > 0 and pid_is_alive(pid))):
+            # The final attempt's worker exited without recording an outcome.
+            _outcome(entry, "worker_lost")
+            changed = True
+        if entry["status"] in ("exhausted", "superseded") or has_receipt(capture):
+            entry["released"] = changed = True
+    released = sorted((key for key, entry in captures.items() if type(entry) is dict and entry.get("released") is True),
+                      key=lambda key: _activity(captures[key]))
+    size = len(_json(state))
+    evicted = []
+    for key in released:
+        if len(captures) < MAX_CAPTURES and size <= MAX_STATE_BYTES // 2:
+            break
+        size -= len(_json({key: captures.pop(key)}))
+        evicted.append(key)
+    if changed or evicted:
+        _save_state(directory, state)
+    _discard(directory, captures, evicted)
+
+
+def _discard(directory: Path, captures: dict, forgotten: list[str] | tuple[str, ...] = ()) -> None:
+    # Only bytes of released or unknown keys go; a held claim defers to a later pass.
+    live = {key for key, entry in captures.items() if not (type(entry) is dict and entry.get("released") is True)}
+    with os.scandir(directory / "captures") as entries:
+        names = [entry.name for entry in islice(entries, 2 * MAX_CAPTURES)]
+    for name in names:
+        key = name.split(".", 1)[0]
+        if (_KEY.fullmatch(key) and name[len(key):] in (".json", ".jsonl") and key not in live
+                and _claim_free(directory, key)):
+            with contextlib.suppress(OSError):
+                (directory / "captures" / name).unlink()
+    for key in forgotten:
+        for path in (directory / "logs").glob(key + "-*.log"):
+            with contextlib.suppress(OSError):
+                path.unlink()
+        with contextlib.suppress(OSError):
+            (directory / (key + ".lock")).unlink()
+
+
+def _replaced(directory: Path, captures: dict, incoming: dict, data: bytes) -> list[str]:
+    """Queued or retrying captures of the same native source that ``data`` begins with."""
+    keys = []
+    for key, entry in captures.items():
+        try:
+            meta = _capture_from(directory, key, entry).metadata
+        except CompletionError:
+            continue
+        if (entry["status"] in ("queued", "retry") and entry.get("released") is not True
+                and meta["byte_count"] <= len(data)
+                and all(meta[name] == incoming[name] for name in ("host", "session_id", "source"))
+                and hashlib.sha256(data[:meta["byte_count"]]).hexdigest() == meta["sha256"]
+                and _claim_free(directory, key)):
+            keys.append(key)
+    return keys
 
 
 def admit_capture(source: str, session_id: str, user_id: str = "", db_path: str | None = None,
@@ -482,23 +576,42 @@ def admit_capture(source: str, session_id: str, user_id: str = "", db_path: str 
         state = _state(directory)
         if key in state["captures"]:
             capture = _capture_from(directory, key, state["captures"][key])
-            verify_capture(capture)
+            if state["captures"][key].get("released") is not True:
+                verify_capture(capture)
             return capture
-        retained_count, retained_bytes = _capture_inventory(directory / "captures")
         suffix = ".jsonl" if metadata["source_suffix"] == ".jsonl" else ".json"
+        capture = Capture(directory, key, directory / "captures" / (key + suffix), metadata)
+        if has_receipt(capture):
+            # Forgotten state entry; the retained receipt still certifies these bytes.
+            return capture
+        _collect(directory, state)
+        replaced = _replaced(directory, state["captures"], metadata, data)
+        freed = sum(state["captures"][name]["metadata"]["byte_count"] for name in replaced)
+        retained_count, retained_bytes = _capture_inventory(directory / "captures")
         already_retained = (directory / "captures" / (key + suffix)).exists()
-        if retained_count + int(not already_retained) > MAX_CAPTURES or len(state["captures"]) >= MAX_CAPTURES:
+        if (retained_count - len(replaced) + int(not already_retained) > MAX_CAPTURES
+                or len(state["captures"]) - len(replaced) >= MAX_CAPTURES):
             raise CompletionError("capture_count_limit")
-        if retained_bytes + (0 if already_retained else len(data)) > MAX_ACCOUNT_BYTES:
+        if retained_bytes - freed + (0 if already_retained else len(data)) > MAX_ACCOUNT_BYTES:
             raise CompletionError("capture_account_quota")
+        forgotten = []
+        for name in replaced:
+            # These exact bytes begin the incoming capture, which covers them.
+            state["captures"][name].update(status="superseded", superseded_by=key, released=True)
+            if len(state["captures"]) >= MAX_CAPTURES:
+                del state["captures"][name]
+                forgotten.append(name)
         entry = {"metadata": metadata, "attempts": 0, "status": "queued",
-                 "next_attempt_at": 0, "worker_pid": 0, "outcomes": []}
+                 "next_attempt_at": 0, "worker_pid": 0, "outcomes": [], "admitted_at": time.time()}
         state["captures"][key] = entry
         if len(_json(state)) > MAX_STATE_BYTES:
             raise CompletionError("retained_state_limit")
         capture = _capture_from(directory, key, entry)
         _immutable(capture.path, data)
         _save_state(directory, state)
+        with contextlib.suppress(OSError):
+            # Admission is durable; an incomplete cleanup is finished by a later pass.
+            _discard(directory, state["captures"], forgotten)
         return capture
 
 
@@ -579,11 +692,11 @@ def has_receipt(capture: Capture) -> bool:
     return strict_complete(reconstructed, capture)
 
 
-def _outcome(entry: dict, category: str, details: dict | None = None) -> None:
+def _outcome(entry: dict, category: str, details: dict | None = None, *, terminal: bool = False) -> None:
     attempt = entry.get("attempts", 0)
     if type(attempt) is not int or not 0 <= attempt <= MAX_ATTEMPTS:
         raise CompletionError("invalid_attempt_state")
-    entry["status"] = "exhausted" if attempt >= MAX_ATTEMPTS else "retry"
+    entry["status"] = "exhausted" if terminal or attempt >= MAX_ATTEMPTS else "retry"
     entry["worker_pid"] = 0
     entry["next_attempt_at"] = time.time() + min(300, 2 ** min(attempt, 9))
     outcome = {"attempt": attempt, "category": category, "observed_at": time.time()}
@@ -594,11 +707,12 @@ def _outcome(entry: dict, category: str, details: dict | None = None) -> None:
     entry["outcomes"].append(outcome)
 
 
-def record_failure(capture: Capture, category: str, details: dict | None = None) -> None:
+def record_failure(capture: Capture, category: str, details: dict | None = None, *,
+                   terminal: bool = False) -> None:
     with _lock(capture.directory / "state.lock"):
         state = _state(capture.directory)
         entry = state["captures"][capture.key]
-        _outcome(entry, category, details)
+        _outcome(entry, category, details, terminal=terminal)
         _save_state(capture.directory, state)
 
 
@@ -663,6 +777,10 @@ def worker_claim(capture: Capture, attempt: int) -> Iterator[bool]:
                     _save_state(capture.directory, state)
 
 
+def _settled(entry: dict) -> bool:
+    return entry["status"] in ("exhausted", "superseded") or entry.get("released") is True
+
+
 def reserve_inline_attempt(capture: Capture) -> int:
     from truememory._platform import pid_is_alive
     with _lock(capture.directory / (capture.key + ".lock"), blocking=False) as allowed:
@@ -671,7 +789,8 @@ def reserve_inline_attempt(capture: Capture) -> int:
         with _lock(capture.directory / "state.lock"):
             state = _state(capture.directory)
             entry = state["captures"][capture.key]
-            if entry["attempts"] >= MAX_ATTEMPTS or entry.get("next_attempt_at", 0) > time.time():
+            if (_settled(entry) or entry["attempts"] >= MAX_ATTEMPTS
+                    or entry.get("next_attempt_at", 0) > time.time()):
                 return 0
             pid = entry.get("worker_pid", 0)
             if entry["status"] == "pending" and type(pid) is int and pid > 0 and pid_is_alive(pid):
@@ -689,14 +808,23 @@ def dispatch(capture: Capture, threshold: float = 0.30) -> int:
     from truememory.hooks.core import spawn_gate, register_spawned_pid
     from truememory._platform import pid_is_alive, spawn_kwargs
     from truememory.ingest.hooks.stop import MIN_MESSAGES, _has_enough_messages
-    verify_capture(capture)
-    if not _has_enough_messages(str(capture.path), MIN_MESSAGES):
-        return 0
     directory = capture.directory
+    with _lock(directory / "state.lock"):
+        entry = _state(directory)["captures"].get(capture.key)
+        if entry is None or _settled(entry) or has_receipt(capture):
+            return 0
+    verify_capture(capture)
+    enough = _has_enough_messages(str(capture.path), MIN_MESSAGES)
     with _lock(directory / "state.lock"):
         state = _state(directory)
         entry = state["captures"][capture.key]
-        if has_receipt(capture) or entry["attempts"] >= MAX_ATTEMPTS:
+        if _settled(entry) or has_receipt(capture) or entry["attempts"] >= MAX_ATTEMPTS:
+            return 0
+        if not enough:
+            # Retained bytes never gain messages; a longer revision is a new capture.
+            if entry["status"] in ("queued", "retry"):
+                _outcome(entry, "below_minimum_messages", terminal=True)
+                _save_state(directory, state)
             return 0
         if entry.get("next_attempt_at", 0) > time.time():
             return 0

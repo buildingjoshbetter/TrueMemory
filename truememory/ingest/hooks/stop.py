@@ -147,27 +147,33 @@ def main() -> None:
     if not Path(transcript_path).is_file():
         return
 
+    # Proper transcript validation: parse and count actual message objects
+    # instead of substring-matching (which false-positives on content that
+    # contains the literal strings "human" or "user"). Declining here keeps
+    # short sessions out of the bounded completion store.
+    if not _has_enough_messages(transcript_path, MIN_MESSAGES):
+        return
+
     capture = None
     if args.host == "claude":
-        from truememory.ingest.completion import admit_capture, has_receipt
+        from truememory.ingest.completion import BACKPRESSURE, CompletionError, admit_capture, has_receipt
         try:
             capture = admit_capture(transcript_path, session_id, args.user, args.db, args.host,
                                     root=BACKLOG_DIR.parent / "ingest-completion-v1")
             if has_receipt(capture):
                 return
         except OSError as error:
-            log.warning("stop hook: capture retained nonterminal source (%s)", type(error).__name__)
+            reason = error.args[0] if isinstance(error, CompletionError) and error.args else type(error).__name__
+            log.warning("stop hook: completion admission refused (%s)", reason)
+            if reason in BACKPRESSURE:
+                # The pointer is adopted once completion has room again.
+                _queue_to_backlog(transcript_path, session_id, args.user, args.db,
+                                  reason="completion_backpressure:" + reason, transcript_host=args.host)
             return
 
     # Pre-flight check: ensure our write directories exist and are writable
     # so we fail early with a clear message instead of silently losing work
     if not _writable_dirs_ok():
-        return
-
-    # Proper transcript validation: parse and count actual message objects
-    # instead of substring-matching (which false-positives on content that
-    # contains the literal strings "human" or "user").
-    if not _has_enough_messages(str(capture.path) if capture else transcript_path, MIN_MESSAGES):
         return
 
     from truememory.ingest.hooks._shared import should_extract_session, mark_session_extracted

@@ -507,8 +507,10 @@ class FilesystemCompletionControls(unittest.TestCase):
         second = self.capture()
         self.assertNotEqual(first.key, second.key)
         self.assertFalse(COMPLETION.has_receipt(second))
+        # Receipted bytes are released at the next admission; the receipt stays.
         self.assertTrue(COMPLETION.has_receipt(first))
-        self.assertEqual(first.path.read_bytes(), self.data)
+        self.assertFalse(first.path.exists())
+        self.assertEqual(second.path.read_bytes(), replacement)
 
     def test_limits_backpressure_preserve_original_and_prior_capture(self) -> None:
         first = self.capture()
