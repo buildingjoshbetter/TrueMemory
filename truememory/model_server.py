@@ -1078,6 +1078,9 @@ class ModelServer:
                 self._memory_stage("reranker construction", deadline,
                                    model_identity=(name, 0, "reranker"), device=device)
             model = CrossEncoder(name, device=device)
+            if type(getattr(model, "max_seq_length", None)) is int:
+                from truememory._rerank_budget import cap_reranker_length
+                cap_reranker_length(model)
             self._check_process_memory("reranker construction completion", deadline)
             self._reranker = model
             self._reranker_name = name
@@ -1428,6 +1431,7 @@ class ModelServer:
                     scores = None
                     offset = 0
                     order = None
+                    steps = None
                     recovery_name = model_name
                     while offset < len(pairs) or scores is None:
                         retry = None
@@ -1441,18 +1445,39 @@ class ModelServer:
                                 order = self._rerank_global_order(reranker, pairs, limit, deadline)
                                 if order is not None:
                                     recovery_name = self._reranker_name
+                                slices = None
+                                if (getattr(reranker, "tokenizer", None) is not None
+                                        and type(getattr(reranker, "max_seq_length", None)) is int):
+                                    from truememory._rerank_budget import (
+                                        budgeted_slices, pair_token_lengths, rerank_token_budget,
+                                    )
+                                    lengths = pair_token_lengths(reranker, pairs)
+                                    slices = (None if lengths is None else
+                                              budgeted_slices(lengths, limit, rerank_token_budget()))
+                                if slices is not None:
+                                    # Long pairs: smaller longest-first batches bound attention scratch.
+                                    order = np.array([index for group in slices for index in group], dtype=np.intp)
+                                    steps, start = {}, 0
+                                    for group in slices:
+                                        steps[start] = len(group)
+                                        start += len(group)
+                                    recovery_name = self._reranker_name
                             while offset < len(pairs) or scores is None:
                                 deadline.check()
-                                indices = None if order is None else self._rerank_slice_indices(
-                                    reranker, pairs, order, offset, limit, deadline,
-                                )
-                                batch = (pairs[offset:offset + limit] if indices is None else
+                                step = limit if steps is None else steps[offset]
+                                if steps is not None:
+                                    indices = order[offset:offset + step]
+                                else:
+                                    indices = None if order is None else self._rerank_slice_indices(
+                                        reranker, pairs, order, offset, step, deadline,
+                                    )
+                                batch = (pairs[offset:offset + step] if indices is None else
                                          [pairs[index] for index in indices])
                                 self._check_process_memory("reranker slice", deadline)
                                 deadline.check()
                                 recover = False
                                 try:
-                                    values = reranker.predict(batch, batch_size=limit, show_progress_bar=False)
+                                    values = reranker.predict(batch, batch_size=step, show_progress_bar=False)
                                 except RuntimeError as exc:
                                     from truememory.mps_utils import is_mps_oom, flush_mps_cache
                                     if not is_mps_oom(exc):
@@ -1485,7 +1510,7 @@ class ModelServer:
                         if retry is not None:
                             self._check_process_memory("reranker CPU retry", deadline)
                             deadline.check()
-                            values = reranker.predict(retry, batch_size=limit, show_progress_bar=False)
+                            values = reranker.predict(retry, batch_size=len(retry) or limit, show_progress_bar=False)
                             if indices is None:
                                 scores = _store_batch_result(scores, values, offset, len(retry), len(pairs),
                                                              "scores", **result_options)
