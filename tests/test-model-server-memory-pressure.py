@@ -451,16 +451,65 @@ def test_fallback_waits_at_most_a_second_for_a_long_batch(budgeted, monkeypatch)
         worker.join()
 
 
-def test_small_hosts_never_build_a_fast_lane_copy(budgeted, monkeypatch):
+@pytest.mark.parametrize("physical_gib, small", [(8, True), (16, False)])
+def test_small_hosts_never_build_a_fast_lane_copy(monkeypatch, physical_gib, small):
+    rss = FakeRSS(500 * MIB, physical=physical_gib * 1024 ** 3)
+    monkeypatch.setattr(ms, "psutil", rss)
+    monkeypatch.delenv("TRUEMEMORY_MODEL_SERVER_MAX_RSS_MB", raising=False)
+    server = ms.ModelServer(automatic_rss_budget=True)
+    try:
+        assert server._small_host is small
+        builds = []
+        monkeypatch.setattr(server, "_build_embed_model", lambda model_id, device: builds.append(device) or Model(device))
+        server._publish_embed_state(ms._EmbedState(model=Model("mps"), tier="", model_id="qwen3_256"))
+        with server._fast_lock, server._memory_scope():
+            if small:
+                with pytest.raises(ms._ProcessMemoryRefused):
+                    server._get_fast_encoder("")
+            else:
+                server._get_fast_encoder("")
+        assert builds == ([] if small else ["cpu"])
+    finally:
+        _close(server)
+
+
+def test_test_servers_never_read_the_host_size(plain):
+    assert plain._small_host is False
+
+
+def test_concurrent_fallback_waits_do_not_queue_behind_each_other(budgeted, monkeypatch):
     server, rss = budgeted
-    sizes = {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 8 * 1024 ** 3 // 4096}
-    monkeypatch.setattr(ms.os, "sysconf", lambda name: sizes[name])
-    builds = []
-    monkeypatch.setattr(server, "_build_embed_model", lambda model_id, device: builds.append(device) or Model(device))
-    server._publish_embed_state(ms._EmbedState(model=Model("mps"), tier="", model_id="qwen3_256"))
-    with server._fast_lock, server._memory_scope(), pytest.raises(ms._ProcessMemoryRefused):
-        server._get_fast_encoder("")
-    assert builds == []
+    monkeypatch.setattr(server, "_build_embed_model", lambda model_id, device: Model(device))
+    server._publish_embed_state(ms._EmbedState(model=Model("cpu"), tier="", model_id="qwen3_256"))
+    rss.rss = 1200 * MIB
+    release = threading.Event()
+
+    def long_batch():
+        with server._inference_lock:
+            release.wait(5)
+
+    holder = threading.Thread(target=long_batch)
+    holder.start()
+    finished = []
+
+    def query():
+        started = time.monotonic()
+        with server._memory_scope():
+            try:
+                server._handle_fast_embed(["synthetic"], "", ms._RequestDeadline(time.monotonic() + 5))
+            except ms._ProcessMemoryRefused:
+                finished.append(time.monotonic() - started)
+
+    waiters = [threading.Thread(target=query) for _ in range(3)]
+    try:
+        for waiter in waiters:
+            waiter.start()
+        for waiter in waiters:
+            waiter.join()
+    finally:
+        release.set()
+        holder.join()
+    assert len(finished) == 3 and max(finished) < 1.6
 
 
 @pytest.mark.parametrize("cached_mib, emptied", [(600, True), (100, False)])

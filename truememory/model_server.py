@@ -151,8 +151,7 @@ def _admission_setting(name: str, default: int, minimum: int, maximum: int) -> i
     return int(raw)
 
 
-def _automatic_rss_budget_bytes() -> int:
-    """Finite sampled admission threshold, without a native peak guarantee."""
+def _physical_memory_bytes() -> int:
     if psutil is None:
         raise ValueError("Automatic model-server RSS budget requires a physical-memory sensor")
     try:
@@ -161,6 +160,13 @@ def _automatic_rss_budget_bytes() -> int:
         raise ValueError("Automatic model-server physical-memory measurement is unavailable") from exc
     if isinstance(physical, bool) or not isinstance(physical, int) or not 0 < physical <= 2**63 - 1:
         raise ValueError("Physical memory must be a positive signed64 integer byte count")
+    return physical
+
+
+def _automatic_rss_budget_bytes(physical: int | None = None) -> int:
+    """Finite sampled admission threshold, without a native peak guarantee."""
+    if physical is None:
+        physical = _physical_memory_bytes()
     # Base/Pro on CPU keep the runtime (0.6 GB), Qwen (1.2 GB, or 2.4 GB in
     # float32 on macOS) and the reranker (0.6 GB) resident. A quarter of an
     # 8 GB host cannot hold that, so small hosts may use up to half their
@@ -389,8 +395,13 @@ class ModelServer:
         if not isinstance(automatic_rss_budget, bool):
             raise ValueError("automatic_rss_budget must be a bool")
         # Installed main opts in; explicit settings and direct construction retain their contract.
+        # The installed server skips the fast-lane CPU copy on hosts with 8 GiB or
+        # less: beside the MPS cap it does not fit.
+        self._small_host = False
         if automatic_rss_budget and os.environ.get("TRUEMEMORY_MODEL_SERVER_MAX_RSS_MB") is None:
-            self._max_rss_bytes = _automatic_rss_budget_bytes()
+            physical = _physical_memory_bytes()
+            self._max_rss_bytes = _automatic_rss_budget_bytes(physical)
+            self._small_host = physical <= 8 * 1024**3
         else:
             self._max_rss_bytes = _admission_setting(
                 "TRUEMEMORY_MODEL_SERVER_MAX_RSS_MB", 0, 0, 2**31 - 1,
@@ -1125,11 +1136,7 @@ class ModelServer:
                 return None
 
             model_id, generation = state.model_id, state.generation
-            try:
-                physical = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-            except (AttributeError, OSError, ValueError):
-                physical = None
-            if physical is not None and physical <= 8 * 1024**3:
+            if getattr(self, "_small_host", False):
                 # A second CPU copy (2.4 GB in float32 on macOS) does not fit beside
                 # the MPS cap on an 8 GiB host; wait for the main model instead.
                 raise _ProcessMemoryRefused("Model server busy: no room for a fast-lane copy on this host")
@@ -1307,6 +1314,7 @@ class ModelServer:
 
         was_started = deadline.transport.started if deadline.transport is not None else False
         fast_owned = False
+        wait_for_main = False
         try:
             try:
                 with deadline.locked(self._fast_lock):
@@ -1318,35 +1326,40 @@ class ModelServer:
                             model = (self._get_fast_encoder(tier, deadline=deadline) if expected_target is None else
                                      self._get_fast_encoder(tier, deadline=deadline, expected_target=expected_target))
                         except _ProcessMemoryRefused:
-                            # Only the second copy does not fit. Wait briefly for the main
-                            # model; a long batch, or a process over budget, stays refused
-                            # so hook recall falls back to keyword search promptly.
+                            # Only the second copy does not fit; a process over budget stays refused.
                             self._check_process_memory("fast embed fallback", deadline)
-                            remaining = deadline.remaining()
-                            wait = 1.0 if remaining is None else max(0.0, min(1.0, remaining))
-                            if not self._inference_lock.acquire(timeout=wait):
-                                raise
-                            self._inference_lock.release()
-                            model = None
+                            wait_for_main = True
                         deadline.check()
                         if model is None:
                             if deadline.transport is not None:
                                 deadline.transport.started = was_started
-                            # Custom identities decline rather than drift.
-                            return None
-                        self._check_process_memory("fast embed slice", deadline)
-                        deadline.check()
-                        vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
-                        if expected_target is not None:
-                            response = self._serving_embed_response(
-                                _checked_batch(vectors, len(texts), len(texts), "vectors", **result_options),
-                                len(texts), expected_target,
-                            )
+                            if not wait_for_main:
+                                # Custom identities decline rather than drift.
+                                return None
+                        else:
+                            self._check_process_memory("fast embed slice", deadline)
+                            deadline.check()
+                            vectors = model.encode(texts, batch_size=1, show_progress_bar=False)
+                            if expected_target is not None:
+                                response = self._serving_embed_response(
+                                    _checked_batch(vectors, len(texts), len(texts), "vectors", **result_options),
+                                    len(texts), expected_target,
+                                )
                     finally:
                         model = None
             finally:
                 if fast_owned:
                     self._retire_stale_fast_encoder()
+            if wait_for_main:
+                # Wait briefly for the main model outside the fast-lane lock, so
+                # concurrent queries do not queue behind each other. A long batch
+                # stays refused so hook recall falls back to keyword search promptly.
+                remaining = deadline.remaining()
+                wait = 1.0 if remaining is None else max(0.0, min(1.0, remaining))
+                if not self._inference_lock.acquire(timeout=wait):
+                    raise _ProcessMemoryRefused("Model server busy: the main model is serving a long batch")
+                self._inference_lock.release()
+                return None
             return (response if expected_target is not None else
                     {"ok": True, "vectors": _checked_batch(vectors, len(texts), len(texts), "vectors",
                                                           **result_options)})
