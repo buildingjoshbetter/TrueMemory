@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import copy
 from contextlib import ExitStack
+from dataclasses import asdict, replace
 import os
 from pathlib import Path
 import sys
@@ -66,6 +67,55 @@ def write_private(path: Path, raw: bytes) -> None:
         os.close(descriptor)
 
 
+# Properties that exist only on org.freedesktop.systemd1.Service objects.
+SERVICE_ONLY = frozenset(("MainPID", "ExecMainPID", "ExecMainCode", "ExecMainStatus", "Result"))
+
+
+class FakeUserManager:
+    """systemctl --user as observed on systemd 249.
+
+    `show -p` prints only properties the unit object has, so a slice never
+    prints MainPID, and an unknown unit prints a not-found stub with rc 0.
+    Stopping a transient unit unloads it once inactive; stop or reset-failed
+    on an unloaded unit fails with status 5. The real _properties parser runs
+    on this output.
+    """
+
+    def __init__(self, units: dict[str, dict[str, str]], *, sticky: frozenset[str] = frozenset()) -> None:
+        self.units = units
+        self.sticky = sticky  # units whose stop job leaves them active
+        self.commands: list[tuple[str, str]] = []
+
+    def state(self, unit: str) -> dict[str, str]:
+        if unit in self.units:
+            state = dict(self.units[unit])
+        else:
+            state = {"LoadState": "not-found", "ActiveState": "inactive", "SubState": "dead", "ControlGroup": "",
+                     "InvocationID": "", "MemoryMax": "infinity", "MemorySwapMax": "infinity"}
+            if unit.endswith(".service"):
+                state.update(MainPID="0", ExecMainPID="0", ExecMainCode="0", ExecMainStatus="0", Result="success")
+        if unit.endswith(".slice"):
+            state = {name: value for name, value in state.items() if name not in SERVICE_ONLY}
+        return state
+
+    def run(self, arguments: list[str], deadline: float, **kwargs: object) -> tuple[object, bytes]:
+        if arguments[:2] != ["/usr/bin/systemctl", "--user"]:
+            raise AssertionError(f"Unexpected manager command {arguments}")
+        command, unit = arguments[2], arguments[3]
+        if command == "show":
+            names = arguments[5].split("=", 1)[1].split(",")
+            state = self.state(unit)
+            return SimpleNamespace(), "".join(f"{name}={state[name]}\n" for name in names if name in state).encode()
+        self.commands.append((command, unit))
+        if unit not in self.units:
+            raise BOOT.EnforcementUnavailable("Owned manager command failed with status 5")
+        if command not in ("stop", "reset-failed"):
+            raise AssertionError(f"Unexpected manager command {arguments}")
+        if unit not in self.sticky:
+            del self.units[unit]
+        return SimpleNamespace(), b""
+
+
 @unittest.skipIf(sys.platform == "win32", "Linux-only launcher; POSIX synthetic fixtures")
 class StaleEndpointRecovery(unittest.TestCase):
     """F1: a dead claimed daemon leaves a stale endpoint that must not wedge capped mode."""
@@ -74,11 +124,14 @@ class StaleEndpointRecovery(unittest.TestCase):
         return {"generation": GENERATION, "launcher": {"pid": 101, "born": 2000.5},
                 "child": {"pid": 43, "born": 1000.5} if child is None else child}
 
-    def verify(self, claim: object, birth: object, **patches: object) -> tuple[bool, MagicMock, MagicMock]:
-        inspect = patches.get("inspect", MagicMock(return_value="synthetic-evidence"))
+    def verify(self, claim: object, birth: object, *, ready: bool = True, live: bool = False,
+               inspect: MagicMock | None = None) -> tuple[bool, MagicMock, MagicMock]:
+        inspect = inspect if inspect is not None else MagicMock(return_value="synthetic-evidence")
         adopt = MagicMock(return_value=True)
         with patch.object(client, "read_start_claim", return_value=claim), \
              patch.object(client, "process_birth", return_value=birth), \
+             patch.object(BOOT, "generation_ready", return_value=ready), \
+             patch.object(BOOT, "claimed_daemon_live", return_value=live), \
              patch.object(BOOT, "inspect_existing_owned_linux", inspect), \
              patch.object(BOOT, "adopt_exit_cleanup", adopt):
             result = client._capped_daemon_verified(object(), time.monotonic() + 10.0)
@@ -106,6 +159,28 @@ class StaleEndpointRecovery(unittest.TestCase):
         inspect = MagicMock(side_effect=BOOT.EnforcementUnavailable("synthetic foreign member"))
         with self.assertRaises(BOOT.EnforcementUnavailable):
             self.verify(self.claim(), 1000.5, inspect=inspect)
+
+    def test_live_daemon_still_starting_is_pending_not_an_error(self) -> None:
+        result, inspect, _ = self.verify(self.claim(), 1000.5, ready=False)
+        self.assertIs(result, False)
+        inspect.assert_not_called()
+
+    def test_clock_step_on_a_live_daemon_is_refused_fast(self) -> None:
+        with self.assertRaises(BOOT.EnforcementUnavailable):
+            self.verify(self.claim(), 2000.0, live=True)
+
+    def test_request_waits_for_a_starting_daemon_instead_of_raising(self) -> None:
+        starter = MagicMock(return_value=False)
+        with patch.dict(os.environ, {FLAG: "1"}), \
+             patch.object(client, "_required_capped_policy", return_value=object()), \
+             patch.object(client, "_server_ready", return_value=True), \
+             patch.object(client, "read_start_claim", return_value=self.claim()), \
+             patch.object(client, "process_birth", return_value=1000.5), \
+             patch.object(BOOT, "generation_ready", return_value=False), \
+             patch.object(BOOT, "inspect_existing_owned_linux", side_effect=FileNotFoundError("ready-v1.json")), \
+             patch.object(client, "_start_server", starter), self.assertRaises(ConnectionError):
+            client._request_with_autostart({"op": "ping"}, timeout=5.0)
+        starter.assert_called_once()
 
     def test_live_verified_daemon_is_joined_and_adopted(self) -> None:
         result, inspect, adopt = self.verify(self.claim(), 1000.5)
@@ -167,6 +242,7 @@ class StaleEndpointRecovery(unittest.TestCase):
                     (client, "_send_request", lambda request, timeout=None: {"ok": True}),
                     (BOOT, "_physical_total", lambda: 4 * CAP), (BOOT, "_required_linux_support", lambda *args: None),
                     (BOOT, "inspect_existing_owned_linux", MagicMock(return_value="synthetic-evidence")),
+                    (BOOT, "generation_ready", lambda generation: True),
                     (BOOT, "adopt_exit_cleanup", MagicMock(return_value=True))):
                 stack.enter_context(patch.object(target, name, value))
             self.assertIs(client._start_server(wait_timeout=5.0), True)
@@ -178,12 +254,43 @@ class StaleEndpointRecovery(unittest.TestCase):
             with self.assertRaises(OSError):
                 os.fstat(descriptor)
 
+    def test_held_bind_lock_blocks_relaunch_over_a_stale_endpoint(self) -> None:
+        directory = private_directory()
+        spawn = MagicMock()
+        locks: list[int] = []
+
+        def lock(path: object) -> int | None:
+            if path == client.LOCK_PATH:
+                return None  # A live bind owner whose claim is not current.
+            descriptor = os.open(os.devnull, os.O_RDONLY)
+            locks.append(descriptor)
+            return descriptor
+
+        environment = {key: value for key, value in os.environ.items() if key != "TRUEMEMORY_MODEL_SERVER_MAX_RSS_MB"}
+        environment[FLAG] = "1"
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, environment, clear=True))
+            for target, name, value in (
+                    (client.sys, "platform", "linux"), (client, "use_model_server", lambda: True),
+                    (client, "_TRUEMEMORY_DIR", directory), (client, "_server_ready", lambda: True),
+                    (client, "read_start_claim", lambda path: self.claim()), (client, "process_birth", lambda pid: None),
+                    (client, "try_file_lock", lock), (client, "_spawn_server", spawn),
+                    (BOOT, "_physical_total", lambda: 4 * CAP), (BOOT, "_required_linux_support", lambda *args: None)):
+                stack.enter_context(patch.object(target, name, value))
+            self.assertIs(client._start_server(wait_timeout=0.3), False)
+        spawn.assert_not_called()
+        self.assertTrue(locks)
+        for descriptor in locks:
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
+
 
 @unittest.skipIf(sys.platform == "win32", "Linux-only launcher; POSIX synthetic fixtures")
 class FailedLaunchClaimRetirement(unittest.TestCase):
     """F3: a failed launch retires its claim; F2: it never leaves its workload unowned."""
 
-    def run_start(self, spawn: object, *, abandon: object = None) -> tuple[Path, MagicMock, object]:
+    def run_start(self, spawn: object, *, abandon: object = None,
+                  handed_off: bool = False) -> tuple[Path, MagicMock, object]:
         directory = private_directory()
         claim_path = directory / "model_server.start.json"
         retain = MagicMock()
@@ -201,7 +308,8 @@ class FailedLaunchClaimRetirement(unittest.TestCase):
                     (client, "try_file_lock", lambda path: os.open(os.devnull, os.O_RDONLY)),
                     (client, "_spawn_server", spawn), (client, "_retain_owned_capped_launch", retain),
                     (BOOT, "_physical_total", lambda: 4 * CAP), (BOOT, "_required_linux_support", lambda *args: None),
-                    (BOOT, "abandon_owned_launch", abandon)):
+                    (BOOT, "abandon_owned_launch", abandon),
+                    (BOOT, "launch_handed_off", lambda handle: handed_off)):
                 stack.enter_context(patch.object(target, name, value))
             try:
                 outcome = client._start_server(wait_timeout=0.5)
@@ -225,24 +333,47 @@ class FailedLaunchClaimRetirement(unittest.TestCase):
         self.assertFalse(claim_path.exists())
         self.assertEqual(spawn.call_count, 1)
 
-    def handle(self) -> object:
+    def handle(self, error: BaseException | None = None) -> object:
+        error = error if error is not None else BOOT.EnforcementUnavailable("synthetic census")
         return SimpleNamespace(pid=77, record=SimpleNamespace(identity=SimpleNamespace(birth_time=1234.5, cap_bytes=CAP)),
-                               release_after_claim=MagicMock(side_effect=BOOT.EnforcementUnavailable("synthetic census")))
+                               release_after_claim=MagicMock(side_effect=error))
 
-    def test_failed_release_terminates_owned_workload(self) -> None:
+    def test_failed_release_terminates_owned_workload_within_the_caller_budget(self) -> None:
         handle = self.handle()
         abandon = MagicMock(return_value=True)
+        started = time.monotonic()
         claim_path, retain, outcome = self.run_start(MagicMock(return_value=handle), abandon=abandon)
         self.assertIsInstance(outcome, BOOT.EnforcementUnavailable)
-        abandon.assert_called_once_with(handle)
+        self.assertEqual(abandon.call_args.args, (handle,))
+        # The 0.5 s caller budget plus the cleanup grace bounds work under the start lock.
+        self.assertLessEqual(abandon.call_args.kwargs["deadline"], started + 0.5 + BOOT._CLEANUP_GRACE + 0.5)
         retain.assert_not_called()
         self.assertFalse(claim_path.exists())
 
-    def test_unresolved_termination_keeps_owning_the_workload(self) -> None:
+    def test_unresolved_termination_continues_off_the_start_lock(self) -> None:
         handle = self.handle()
         claim_path, retain, outcome = self.run_start(MagicMock(return_value=handle), abandon=MagicMock(return_value=False))
         self.assertIsInstance(outcome, BOOT.EnforcementUnavailable)
+        retain.assert_called_once_with(handle, terminate=True)
+        self.assertFalse(claim_path.exists())
+
+    def test_budget_expiry_after_handoff_keeps_the_starting_workload(self) -> None:
+        handle = self.handle(TimeoutError("synthetic hook budget"))
+        abandon = MagicMock(return_value=True)
+        claim_path, retain, outcome = self.run_start(MagicMock(return_value=handle), abandon=abandon, handed_off=True)
+        self.assertIs(outcome, False)
+        abandon.assert_not_called()
         retain.assert_called_once_with(handle)
+        claim = BOOT._strict_json(claim_path.read_bytes())
+        self.assertEqual(claim["child"], {"pid": 77, "born": 1234.5})
+
+    def test_budget_expiry_before_handoff_is_abandoned(self) -> None:
+        handle = self.handle(TimeoutError("synthetic hook budget"))
+        abandon = MagicMock(return_value=True)
+        claim_path, retain, outcome = self.run_start(MagicMock(return_value=handle), abandon=abandon, handed_off=False)
+        self.assertIs(outcome, False)
+        abandon.assert_called_once()
+        retain.assert_not_called()
         self.assertFalse(claim_path.exists())
 
 
@@ -276,6 +407,11 @@ class McpStartupCapFailure(unittest.TestCase):
 
     def test_unavailable_enforcement_is_logged_and_not_fatal(self) -> None:
         result, log = self.start(BOOT.EnforcementUnavailable("A required Linux charged-domain cap is unsupported"), {FLAG: "1"})
+        self.assertIs(result, False)
+        log.error.assert_called_once()
+
+    def test_identity_schema_drift_is_not_fatal(self) -> None:
+        result, log = self.start(TypeError("LinuxInvocationIdentity got an unexpected keyword"), {FLAG: "1"})
         self.assertIs(result, False)
         log.error.assert_called_once()
 
@@ -406,7 +542,41 @@ class OwnedAbandonAndRelease(unittest.TestCase):
              patch.object(BOOT, "release_exited_launch", return_value=True) as release:
             self.assertIs(BOOT.abandon_owned_launch(handle), True)
         terminate.assert_not_called()
-        release.assert_called_once_with(handle)
+        self.assertEqual(release.call_args.args, (handle,))
+
+    def test_abandon_stops_at_its_deadline(self) -> None:
+        handle = owned_handle()
+        clock = [1000.0]
+        deadlines: list[float] = []
+
+        def refuse(target: object, *, deadline: float) -> None:
+            deadlines.append(deadline)
+            clock[0] += 0.6
+            raise BOOT.EnforcementUnavailable("refused")
+
+        with patch.object(BOOT.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(BOOT.time, "sleep", side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay)), \
+             patch.object(BOOT, "terminate_owned_exact", refuse), patch.object(BOOT, "_owned_exited", return_value=False):
+            self.assertIs(BOOT.abandon_owned_launch(handle, deadline=1001.0), False)
+        self.assertTrue(deadlines)
+        self.assertTrue(all(value <= 1001.0 for value in deadlines))
+        self.assertLessEqual(clock[0], 1001.0 + 0.6)
+
+    def test_release_stops_at_its_deadline(self) -> None:
+        handle = owned_handle()
+        clock = [1000.0]
+        retire = MagicMock(return_value=True)
+
+        def slow_stop(target: object, *, deadline: float) -> None:
+            self.assertLessEqual(deadline, 1000.5)
+            clock[0] += 1.0
+            raise TimeoutError("synthetic manager stall")
+
+        with patch.object(BOOT.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(BOOT, "stop_owned_exact", slow_stop), patch.object(BOOT, "_owned_exited", return_value=True), \
+             patch.object(BOOT, "_retire_generation_units", retire):
+            self.assertIs(BOOT.release_exited_launch(handle, deadline=1000.5), False)
+        retire.assert_not_called()
 
     def test_release_prefers_terminal_evidence(self) -> None:
         handle = owned_handle()
@@ -465,7 +635,8 @@ class PartialStartCleanup(unittest.TestCase):
         with patch.object(BOOT, "_retire_generation_units", retire), \
              patch.object(BOOT, "_mark_generation_retired", MagicMock(return_value=True)) as marked:
             retired = BOOT.LinuxAdapter()._abandon_partial(store, listener, connection, None,
-                      BOOT.LinuxDaemonLaunchPolicy(1, CAP, 0), GENERATION, "/synthetic", "/user.slice/app.slice", descriptors)
+                      BOOT.LinuxDaemonLaunchPolicy(1, CAP, 0), GENERATION, "/synthetic", "/user.slice/app.slice", descriptors,
+                      time.monotonic() + 10.0)
         self.assertIs(retired, True)
         self.assertEqual(trace, ["connection", "listener", "retire", "startup-retired"])
         marked.assert_called_once_with(GENERATION)
@@ -480,10 +651,21 @@ class PartialStartCleanup(unittest.TestCase):
         with patch.object(BOOT, "_retire_generation_units", return_value=False), \
              patch.object(BOOT, "_mark_generation_retired") as marked:
             retired = BOOT.LinuxAdapter()._abandon_partial(store, SimpleNamespace(close=lambda: None), None, None,
-                      BOOT.LinuxDaemonLaunchPolicy(1, CAP, 0), GENERATION, "/synthetic", "/user.slice/app.slice", [])
+                      BOOT.LinuxDaemonLaunchPolicy(1, CAP, 0), GENERATION, "/synthetic", "/user.slice/app.slice", [],
+                      time.monotonic() + 10.0)
         self.assertIs(retired, False)
         self.assertEqual(trace, ["startup-cleanup-deferred"])
         marked.assert_not_called()
+
+    def test_expired_cleanup_budget_defers_without_manager_calls(self) -> None:
+        store = SimpleNamespace(directory=os.open(os.devnull, os.O_RDONLY), append=MagicMock())
+        retire = MagicMock(return_value=True)
+        with patch.object(BOOT, "_retire_generation_units", retire):
+            retired = BOOT.LinuxAdapter()._abandon_partial(store, SimpleNamespace(close=lambda: None), None, None,
+                      BOOT.LinuxDaemonLaunchPolicy(1, CAP, 0), GENERATION, "/synthetic", "/user.slice/app.slice", [],
+                      time.monotonic() - 1.0)
+        self.assertIs(retired, False)
+        retire.assert_not_called()
 
     def test_terminated_record_is_not_closed_twice(self) -> None:
         handle = owned_handle()
@@ -491,124 +673,179 @@ class PartialStartCleanup(unittest.TestCase):
         closer = MagicMock()
         with patch.object(BOOT, "abandon_owned_launch", return_value=True), patch.object(BOOT.os, "close", closer):
             retired = BOOT.LinuxAdapter()._abandon_partial(store, SimpleNamespace(close=MagicMock()), None, handle.record,
-                      handle.policy, GENERATION, "/synthetic", "/user.slice/app.slice", [72])
+                      handle.policy, GENERATION, "/synthetic", "/user.slice/app.slice", [72], time.monotonic() + 10.0)
         self.assertIs(retired, True)
         closer.assert_not_called()
         store.append.assert_not_called()
 
 
 class UnitRetirement(unittest.TestCase):
-    """F5: only provably empty generation units are stopped and failed state is cleared."""
+    """F5/R1: only provably empty generation units are stopped, through the real readback parser."""
 
     SLICE = "/user.slice/app.slice/app-truememory" + GENERATION + ".slice"
 
-    def manager(self, units: dict[str, dict[str, str]], *, empty: list[bool] | None = None,
-                collect_on_stop: bool = False, stop_error: bool = False) -> tuple[list[tuple[str, str]], ExitStack]:
-        commands: list[tuple[str, str]] = []
-        census = list(empty if empty is not None else [True] * 8)
-
-        def properties(unit: str, names: tuple[str, ...], deadline: float) -> dict[str, str]:
-            state = units.get(unit, {"LoadState": "not-found", "ActiveState": "inactive", "SubState": "dead",
-                                     "MainPID": "0", "ControlGroup": ""})
-            return {name: state[name] for name in names}
-
-        def run(arguments: list[str], deadline: float, **kwargs: object) -> tuple[object, bytes]:
-            self.assertEqual(arguments[:2], ["/usr/bin/systemctl", "--user"])
-            command, unit = arguments[2], arguments[3]
-            commands.append((command, unit))
-            if stop_error:
-                units.pop(unit, None)
-                raise BOOT.EnforcementUnavailable("Owned manager command failed with status 5")
-            if command == "reset-failed" or collect_on_stop:
-                units.pop(unit, None)
-            else:
-                units[unit].update(ActiveState="inactive", SubState="dead", MainPID="0", ControlGroup="")
-            return SimpleNamespace(), b""
-
-        stack = ExitStack()
-        stack.enter_context(patch.object(BOOT, "_properties", properties))
-        stack.enter_context(patch.object(BOOT, "_run_command", run))
-        stack.enter_context(patch.object(BOOT, "_generation_domain_empty", lambda *args: census.pop(0)))
-        stack.enter_context(patch.object(BOOT.time, "sleep", lambda delay: None))
-        return commands, stack
-
-    def units(self, *, service: dict[str, str] | None = None, slice_state: dict[str, str] | None = None) -> dict[str, dict[str, str]]:
+    def units(self, *, service: dict[str, str] | None = None,
+              slice_state: dict[str, str] | None = None) -> dict[str, dict[str, str]]:
         slice_unit, service_unit = BOOT._generation_units(GENERATION)
         result = {}
         if service is not None:
-            result[service_unit] = {"LoadState": "loaded", "SubState": "exited", "MainPID": "0",
-                                    "ControlGroup": self.SLICE + "/" + service_unit, "ActiveState": "active", **service}
+            result[service_unit] = {"LoadState": "loaded", "ActiveState": "active", "SubState": "exited",
+                                    "MainPID": "0", "ControlGroup": self.SLICE + "/" + service_unit,
+                                    "InvocationID": "c" * 32, **service}
         if slice_state is not None:
-            result[slice_unit] = {"LoadState": "loaded", "SubState": "active", "MainPID": "0",
-                                  "ControlGroup": self.SLICE, "ActiveState": "active", **slice_state}
+            result[slice_unit] = {"LoadState": "loaded", "ActiveState": "active", "SubState": "active",
+                                  "ControlGroup": self.SLICE, "InvocationID": "b" * 32, "MemoryMax": str(CAP),
+                                  "MemorySwapMax": "0", **slice_state}
         return result
+
+    def manager(self, units: dict[str, dict[str, str]], *, empty: list[bool] | None = None) -> tuple[FakeUserManager, ExitStack]:
+        manager = FakeUserManager(units)
+        census = list(empty if empty is not None else [True] * 8)
+        stack = ExitStack()
+        stack.enter_context(patch.object(BOOT, "_run_command", manager.run))
+        stack.enter_context(patch.object(BOOT, "_generation_domain_empty", lambda *args: census.pop(0)))
+        stack.enter_context(patch.object(BOOT.time, "sleep", lambda delay: None))
+        return manager, stack
 
     def retire(self, **kwargs: object) -> bool:
         return BOOT._retire_generation_units(GENERATION, mount_point="/synthetic", parent_relative="/user.slice/app.slice",
                                              deadline=time.monotonic() + 10.0, **kwargs)
 
+    def test_fake_matches_observed_slice_readback(self) -> None:
+        manager = FakeUserManager(self.units(slice_state={}))
+        slice_unit, service_unit = BOOT._generation_units(GENERATION)
+        with patch.object(BOOT, "_run_command", manager.run):
+            with self.assertRaises(BOOT.EnforcementUnavailable):
+                BOOT._properties(slice_unit, BOOT._SERVICE_STATE, time.monotonic() + 10.0)
+            self.assertEqual(BOOT._properties(slice_unit, BOOT._SLICE_STATE, time.monotonic() + 10.0)["LoadState"], "loaded")
+            missing = BOOT._properties(service_unit, BOOT._SERVICE_STATE, time.monotonic() + 10.0)
+        self.assertEqual((missing["LoadState"], missing["MainPID"]), ("not-found", "0"))
+
     def test_unloaded_generation_needs_no_commands(self) -> None:
-        commands, stack = self.manager({})
+        manager, stack = self.manager({})
         with stack:
             self.assertIs(self.retire(), True)
-        self.assertEqual(commands, [])
+        self.assertEqual(manager.commands, [])
 
     def test_failed_service_is_reset_and_empty_slice_stopped(self) -> None:
         slice_unit, service_unit = BOOT._generation_units(GENERATION)
-        commands, stack = self.manager(self.units(service={"ActiveState": "failed", "SubState": "failed"}, slice_state={}))
+        manager, stack = self.manager(self.units(service={"ActiveState": "failed", "SubState": "failed"}, slice_state={}))
         with stack:
             self.assertIs(self.retire(), True)
-        self.assertEqual(commands, [("reset-failed", service_unit), ("stop", slice_unit)])
+        self.assertEqual(manager.commands, [("reset-failed", service_unit), ("stop", slice_unit)])
+        self.assertEqual(manager.units, {})
+
+    def test_collected_service_leaves_only_the_slice_to_stop(self) -> None:
+        slice_unit, _ = BOOT._generation_units(GENERATION)
+        manager, stack = self.manager(self.units(slice_state={}))
+        with stack:
+            self.assertIs(self.retire(), True)
+        self.assertEqual(manager.commands, [("stop", slice_unit)])
 
     def test_exited_service_then_slice_are_stopped(self) -> None:
         slice_unit, service_unit = BOOT._generation_units(GENERATION)
-        commands, stack = self.manager(self.units(service={}, slice_state={}))
+        manager, stack = self.manager(self.units(service={}, slice_state={}))
         with stack:
             self.assertIs(self.retire(), True)
-        self.assertEqual(commands, [("stop", service_unit), ("stop", slice_unit)])
+        self.assertEqual(manager.commands, [("stop", service_unit), ("stop", slice_unit)])
 
     def test_live_main_process_is_never_stopped(self) -> None:
-        commands, stack = self.manager(self.units(service={"MainPID": "43", "SubState": "running"}, slice_state={}))
+        manager, stack = self.manager(self.units(service={"MainPID": "43", "SubState": "running"}, slice_state={}))
         with stack:
             self.assertIs(self.retire(settle=1.0), False)
-        self.assertEqual(commands, [])
+        self.assertEqual(manager.commands, [])
 
     def test_populated_or_foreign_domain_is_never_stopped(self) -> None:
         for units, empty in ((self.units(service={}, slice_state={}), [False] * 8),
                              (self.units(service={"ControlGroup": "/foreign.service"}, slice_state={}), None),
                              (self.units(slice_state={"ControlGroup": "/user.slice/foreign.slice"}), None)):
-            commands, stack = self.manager(units, empty=empty)
+            manager, stack = self.manager(units, empty=empty)
             with self.subTest(units=units, empty=empty), stack:
                 self.assertIs(self.retire(), False)
-            self.assertEqual(commands, [])
+            self.assertEqual(manager.commands, [])
 
     def test_slice_is_kept_when_a_member_appears_after_service_stop(self) -> None:
         _, service_unit = BOOT._generation_units(GENERATION)
-        commands, stack = self.manager(self.units(service={}, slice_state={}), empty=[True, False])
+        manager, stack = self.manager(self.units(service={}, slice_state={}), empty=[True, False])
         with stack:
             self.assertIs(self.retire(), False)
-        self.assertEqual(commands, [("stop", service_unit)])
+        self.assertEqual(manager.commands, [("stop", service_unit)])
 
     def test_unit_collected_between_readback_and_command(self) -> None:
         _, service_unit = BOOT._generation_units(GENERATION)
-        commands, stack = self.manager(self.units(service={}), stop_error=True)
-        with stack:
-            self.assertIs(BOOT._stop_unit(service_unit, time.monotonic() + 10.0), True)
-        self.assertEqual(commands, [("stop", service_unit)])
+        units = self.units(service={})
+        manager = FakeUserManager(units)
 
-    def test_launch_collects_failed_services_and_stop_clears_failures(self) -> None:
+        def run(arguments: list[str], deadline: float, **kwargs: object) -> tuple[object, bytes]:
+            if arguments[2] == "stop":
+                units.pop(service_unit, None)  # collected by the manager first
+            return manager.run(arguments, deadline, **kwargs)
+
+        with patch.object(BOOT, "_run_command", run):
+            self.assertIs(BOOT._stop_unit(service_unit, time.monotonic() + 10.0), True)
+        self.assertEqual(manager.commands, [("stop", service_unit)])
+
+    def owned_stop(self, units: dict[str, dict[str, str]], *,
+                   sticky: frozenset[str] = frozenset()) -> tuple[FakeUserManager, object, MagicMock]:
+        slice_dir = private_directory()
+        descriptor = os.open(slice_dir, os.O_RDONLY)
+        try:
+            metadata = os.fstat(descriptor)
+            value = identity()
+            value = BOOT.LinuxInvocationIdentity(**{**asdict(value), "slice_device": metadata.st_dev,
+                                                    "slice_inode": metadata.st_ino, "slice_invocation_id": "b" * 32})
+            store = SimpleNamespace(verify=MagicMock(), append=MagicMock(return_value=(1, "f" * 64)))
+            runner = SimpleNamespace(stop_complete=False, store=store)
+            record = BOOT.LinuxProvisionalLaunch(value, runner, 72, SimpleNamespace(slice_fd=descriptor), object())
+            adapter = BOOT.LinuxAdapter()
+            manager = FakeUserManager(units, sticky=sticky)
+            closer = MagicMock()
+            with patch.object(BOOT, "_run_command", manager.run), \
+                 patch.object(adapter, "inspect", return_value=replace(evidence(value), members=())), \
+                 patch.object(BOOT, "_recursive_members", return_value=((value.slice_relative_path, ()),)), \
+                 patch.object(adapter, "_close_resolved", closer):
+                adapter.stop(record, value, time.monotonic() + 10.0)
+        finally:
+            os.close(descriptor)
+        return manager, record, closer
+
+    def test_owned_stop_stops_service_and_slice_on_a_clean_exit(self) -> None:
+        slice_unit, service_unit = BOOT._generation_units(GENERATION)
+        manager, record, closer = self.owned_stop(self.units(service={}, slice_state={}))
+        self.assertEqual(manager.commands, [("stop", service_unit), ("stop", slice_unit)])
+        self.assertEqual(manager.units, {})
+        closer.assert_called_once()
+        self.assertIs(record.runner.stop_complete, True)
+        phases = [call.args[0] for call in record.runner.store.append.call_args_list]
+        self.assertEqual(phases[-1], "owned-stop-complete")
+
+    def test_owned_stop_does_not_claim_completion_for_a_unit_left_active(self) -> None:
+        slice_unit, _ = BOOT._generation_units(GENERATION)
+        with self.assertRaises(BOOT.EnforcementUnavailable):
+            self.owned_stop(self.units(service={}, slice_state={}), sticky=frozenset((slice_unit,)))
+
+    def test_release_fallback_retires_and_marks_under_real_readback(self) -> None:
+        slice_unit, _ = BOOT._generation_units(GENERATION)
+        handle = owned_handle()
+        manager, stack = self.manager(self.units(slice_state={}))
+        with stack, patch.object(BOOT, "stop_owned_exact", side_effect=BOOT.EnforcementUnavailable("collected")), \
+             patch.object(BOOT, "_owned_exited", return_value=True), \
+             patch.object(BOOT, "_mark_generation_retired", return_value=True) as marked:
+            self.assertIs(BOOT.release_exited_launch(handle, deadline=time.monotonic() + 10.0), True)
+        self.assertEqual(manager.commands, [("stop", slice_unit)])
+        marked.assert_called_once_with(GENERATION)
+        handle._adapter._close_resolved.assert_called_once()
+        self.assertIs(handle.record.runner.stop_complete, True)
+
+    def test_launch_collects_failed_services(self) -> None:
         tree = ast.parse((ROOT / "truememory_memory_bootstrap.py").read_text())
         adapter = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "LinuxAdapter")
-        methods = {node.name: node for node in adapter.body if isinstance(node, ast.FunctionDef)}
-        launch = next(node for node in ast.walk(methods["start"]) if isinstance(node, ast.List)
+        start = next(node for node in adapter.body if isinstance(node, ast.FunctionDef) and node.name == "start")
+        launch = next(node for node in ast.walk(start) if isinstance(node, ast.List)
                       and any(isinstance(item, ast.Constant) and item.value == "/usr/bin/systemd-run" for item in node.elts))
         values = [item.value for item in launch.elts if isinstance(item, ast.Constant)]
         self.assertIn("--collect", values)
         self.assertIn("--property=RemainAfterExit=yes", values)
-        stops = [node for node in ast.walk(methods["stop"]) if isinstance(node, ast.Call)
-                 and getattr(node.func, "id", None) == "_stop_unit"]
-        self.assertEqual(len(stops), 2)
-        self.assertFalse(any(isinstance(node, ast.Constant) and node.value == "stop" for node in ast.walk(methods["stop"])))
 
 
 @unittest.skipIf(sys.platform == "win32", "Linux-only launcher; POSIX synthetic fixtures")
@@ -680,6 +917,23 @@ class OrphanSweep(unittest.TestCase):
         retire = self.sweep()
         self.assertEqual(retire.call_count, BOOT._SWEEP_LIMIT)
 
+    def test_live_launcher_detected_from_process_ticks(self) -> None:
+        live = self.generation(1, launcher=4242)
+        orphan = self.generation(2, launcher=4343)
+        retire = MagicMock(return_value=True)
+
+        def process_identity(pid: int) -> tuple[int, float]:
+            if pid == 4242:
+                return 11, 3000.5
+            raise FileNotFoundError(pid)
+
+        with patch.object(BOOT.Path, "home", return_value=self.home), patch.object(BOOT, "_boot_id", return_value="boot"), \
+             patch.object(BOOT, "_process_identity", process_identity), patch.object(BOOT, "_retire_generation_units", retire):
+            BOOT._sweep_retired_generations(mount_point="/synthetic", parent_relative="/user.slice/app.slice",
+                                            deadline=time.monotonic() + 10.0)
+        self.assertEqual([item.args[0] for item in retire.call_args_list], [orphan])
+        self.assertFalse((self.root / live / "retired-v1.json").exists())
+
     def test_unrelated_names_are_ignored(self) -> None:
         (self.root / "not-a-generation").mkdir(mode=0o700)
         retire = self.sweep()
@@ -750,15 +1004,18 @@ class JoinedExitAdoption(unittest.TestCase):
 
 @unittest.skipIf(sys.platform == "win32", "Linux-only launcher; POSIX synthetic fixtures")
 class ConsoleLauncherFailure(unittest.TestCase):
-    """F2/F3: the console retires its claim and keeps owning an unterminated workload."""
+    """F2/F3/R2: the console retires a failed claim, owns what it cannot terminate, keeps a starting workload."""
 
-    def run_main(self, abandon: bool) -> tuple[Path, MagicMock, MagicMock]:
+    def run_main(self, abandon: list[bool], *, error: BaseException | None = None,
+                 handed_off: bool = False) -> tuple[Path, MagicMock, MagicMock, BaseException | None]:
         home = private_directory()
+        error = error if error is not None else BOOT.EnforcementUnavailable("synthetic census")
         handle = SimpleNamespace(pid=77, record=SimpleNamespace(pidfd=72, identity=SimpleNamespace(birth_time=1234.5)),
-                                 release_after_claim=MagicMock(side_effect=BOOT.EnforcementUnavailable("synthetic census")))
-        abandon_mock = MagicMock(return_value=abandon)
+                                 release_after_claim=MagicMock(side_effect=error))
+        abandon_mock = MagicMock(side_effect=list(abandon))
         release = MagicMock(return_value=True)
         environment = {key: value for key, value in os.environ.items() if key != "TRUEMEMORY_MODEL_SERVER_MAX_RSS_MB"}
+        raised = None
         with ExitStack() as stack:
             stack.enter_context(patch.dict(os.environ, environment, clear=True))
             for target, name, value in (
@@ -768,22 +1025,210 @@ class ConsoleLauncherFailure(unittest.TestCase):
                     (BOOT, "_verified_psutil_birth", lambda pid, candidate: candidate),
                     (BOOT, "launch_owned_linux", MagicMock(return_value=handle)),
                     (BOOT, "abandon_owned_launch", abandon_mock), (BOOT, "release_exited_launch", release),
+                    (BOOT, "launch_handed_off", lambda target: handed_off),
                     (BOOT.select, "select", lambda read, write, error, timeout: (read, [], []))):
                 stack.enter_context(patch.object(target, name, value))
-            with self.assertRaises(BOOT.EnforcementUnavailable):
+            try:
                 BOOT.main()
-        return home / ".truememory" / "model_server.start.json", abandon_mock, release
+            except (RuntimeError, OSError) as failure:
+                raised = failure
+        return home / ".truememory" / "model_server.start.json", abandon_mock, release, raised
 
     def test_terminated_failure_retires_claim(self) -> None:
-        claim, abandon, release = self.run_main(True)
+        claim, abandon, release, raised = self.run_main([True])
+        self.assertIsInstance(raised, BOOT.EnforcementUnavailable)
         self.assertFalse(claim.exists())
-        abandon.assert_called_once()
+        self.assertIn("deadline", abandon.call_args.kwargs)
         release.assert_not_called()
 
-    def test_unterminated_failure_is_watched_until_exit(self) -> None:
-        claim, abandon, release = self.run_main(False)
+    def test_unterminated_failure_is_retried_off_the_lock_then_watched(self) -> None:
+        claim, abandon, release, raised = self.run_main([False, False])
+        self.assertIsInstance(raised, BOOT.EnforcementUnavailable)
         self.assertFalse(claim.exists())
+        self.assertEqual(abandon.call_count, 2)
+        self.assertNotIn("deadline", abandon.call_args.kwargs)
         release.assert_called_once()
+
+    def test_budget_expiry_after_handoff_keeps_owning_the_starting_workload(self) -> None:
+        claim, abandon, release, raised = self.run_main([], error=TimeoutError("synthetic"), handed_off=True)
+        self.assertIsNone(raised)
+        abandon.assert_not_called()
+        self.assertTrue(claim.exists())
+        release.assert_called_once()
+
+
+@unittest.skipIf(sys.platform == "win32", "Linux-only launcher; POSIX synthetic fixtures")
+class RetainedOwnerWatcher(unittest.TestCase):
+    """R4: termination left unfinished under the start lock continues on the watcher thread."""
+
+    def watch(self, *, terminate: bool, abandoned: bool) -> tuple[MagicMock, MagicMock, MagicMock]:
+        handle = SimpleNamespace(record=SimpleNamespace(pidfd=72))
+        abandon = MagicMock(return_value=abandoned)
+        release = MagicMock(return_value=True)
+        waits = MagicMock(return_value=([72], [], []))
+
+        class Inline:
+            def __init__(self, target: object, name: str, daemon: bool) -> None:
+                self.target = target
+
+            def start(self) -> None:
+                self.target()
+
+        import select as select_module
+        import threading as threading_module
+        with patch.object(threading_module, "Thread", Inline), patch.object(select_module, "select", waits), \
+             patch.object(BOOT, "abandon_owned_launch", abandon), patch.object(BOOT, "release_exited_launch", release), \
+             patch.object(client, "_owned_capped_launches", []):
+            client._retain_owned_capped_launch(handle, terminate=terminate)
+        return abandon, release, waits
+
+    def test_failed_launch_is_terminated_by_the_watcher(self) -> None:
+        abandon, release, waits = self.watch(terminate=True, abandoned=True)
+        abandon.assert_called_once()
+        self.assertNotIn("deadline", abandon.call_args.kwargs)
+        release.assert_not_called()
+        waits.assert_not_called()
+
+    def test_unterminated_failed_launch_is_still_released_after_exit(self) -> None:
+        abandon, release, waits = self.watch(terminate=True, abandoned=False)
+        waits.assert_called()
+        release.assert_called_once()
+
+    def test_healthy_launch_is_only_watched(self) -> None:
+        abandon, release, _ = self.watch(terminate=False, abandoned=True)
+        abandon.assert_not_called()
+        release.assert_called_once()
+
+
+@unittest.skipIf(sys.platform == "win32", "Linux-only launcher; POSIX synthetic fixtures")
+class GenerationClassification(unittest.TestCase):
+    """T2: the sweep acts only on generations whose launcher is provably gone."""
+
+    def setUp(self) -> None:
+        self.root = private_directory()
+        self.descriptor = os.open(self.root, os.O_RDONLY)
+
+    def tearDown(self) -> None:
+        os.close(self.descriptor)
+
+    def generation(self, manifest: dict | None, *, age: float = 0.0) -> str:
+        name = "b" * 32
+        path = self.root / name
+        path.mkdir(mode=0o700)
+        if manifest is not None:
+            write_private(path / "manifest-v1.json", BOOT._canonical(manifest))
+        stamp = time.time() - age
+        os.utime(path, (stamp, stamp))
+        return name
+
+    def state(self, name: str, *, stat_result: object = (11, 3000.5)) -> str:
+        def process_identity(pid: int) -> tuple[int, float]:
+            if isinstance(stat_result, BaseException):
+                raise stat_result
+            return stat_result
+        with patch.object(BOOT, "_boot_id", return_value="boot"), patch.object(BOOT, "_process_identity", process_identity):
+            return BOOT._generation_state(self.descriptor, name)
+
+    def manifest(self, **changes: object) -> dict:
+        return {"boot_id": "boot", "parent_pid": 4242, "parent_start_ticks": 11, **changes}
+
+    def test_live_launcher_incarnation_is_live(self) -> None:
+        self.assertEqual(self.state(self.generation(self.manifest())), "live")
+
+    def test_exited_launcher_is_orphaned(self) -> None:
+        self.assertEqual(self.state(self.generation(self.manifest()), stat_result=FileNotFoundError()), "orphaned")
+
+    def test_reused_launcher_pid_is_orphaned(self) -> None:
+        self.assertEqual(self.state(self.generation(self.manifest()), stat_result=(12, 3000.5)), "orphaned")
+
+    def test_unreadable_launcher_is_conservatively_live(self) -> None:
+        self.assertEqual(self.state(self.generation(self.manifest()), stat_result=BOOT.EnforcementUnavailable("zombie")), "live")
+
+    def test_previous_boot_is_orphaned_even_with_a_matching_process(self) -> None:
+        self.assertEqual(self.state(self.generation(self.manifest(boot_id="other"))), "orphaned")
+
+    def test_malformed_launcher_fields_are_live(self) -> None:
+        for changes in ({"parent_pid": "4242"}, {"parent_start_ticks": 11.0}, {"parent_pid": 0}):
+            with self.subTest(changes=changes):
+                path = self.root / ("b" * 32)
+                if path.exists():
+                    for item in path.iterdir():
+                        item.unlink()
+                    path.rmdir()
+                self.assertEqual(self.state(self.generation(self.manifest(**changes)), stat_result=FileNotFoundError()), "live")
+
+    def test_missing_manifest_waits_out_the_creation_grace(self) -> None:
+        self.assertEqual(self.state(self.generation(None)), "live")
+
+    def test_missing_manifest_past_the_grace_is_orphaned(self) -> None:
+        self.assertEqual(self.state(self.generation(None, age=7200.0)), "orphaned")
+
+    def test_retired_marker_wins(self) -> None:
+        name = self.generation(self.manifest())
+        write_private(self.root / name / "retired-v1.json", b"{}")
+        self.assertEqual(self.state(name), "retired")
+
+    def test_foreign_owner_is_live(self) -> None:
+        name = self.generation(self.manifest())
+        with patch.object(BOOT.os, "getuid", return_value=os.getuid() + 1):
+            self.assertEqual(self.state(name, stat_result=FileNotFoundError()), "live")
+
+
+@unittest.skipIf(sys.platform == "win32", "Linux-only launcher; POSIX synthetic fixtures")
+class LauncherHandoff(unittest.TestCase):
+    """R2/R3/R5: the workload outlives its launcher after handoff and liveness uses start ticks."""
+
+    def test_child_tolerates_an_exited_launcher_only_when_allowed(self) -> None:
+        manifest = {"parent_pid": 4242, "parent_start_ticks": 11, "parent_birth": 3000.5}
+        for result, allowed, expected in ((FileNotFoundError(), True, True), (FileNotFoundError(), False, False),
+                                          ((11, 3000.5), False, True), ((12, 3000.5), True, False)):
+            def process_identity(pid: int) -> tuple[int, float]:
+                if isinstance(result, BaseException):
+                    raise result
+                return result
+            with self.subTest(result=result, allowed=allowed), patch.object(BOOT, "_process_identity", process_identity):
+                self.assertIs(BOOT._launcher_unchanged(manifest, launcher_may_exit=allowed), expected)
+
+    def native_handle(self, *, handoff: bool) -> object:
+        value = identity()
+        runner = BOOT._NativeRunner(object(), SimpleNamespace(), {}, handoff_complete=handoff)
+        record = BOOT.LinuxProvisionalLaunch(value, runner, 72, SimpleNamespace(pidfd_device=101, pidfd_inode=103), object())
+        return BOOT.OwnedLinuxLaunch(record, BOOT.LinuxDaemonLaunchPolicy(1, CAP, 0), object())
+
+    def test_handoff_requires_a_live_workload_that_received_its_environment(self) -> None:
+        for handoff, exited, expected in ((True, False, True), (True, True, False), (False, False, False)):
+            with self.subTest(handoff=handoff, exited=exited), patch.object(BOOT, "_owned_exited", return_value=exited):
+                self.assertIs(BOOT.launch_handed_off(self.native_handle(handoff=handoff)), expected)
+
+    def evidence_home(self, *, ready: bool, identity_payload: dict | None) -> Path:
+        home = private_directory()
+        directory = home / ".truememory" / "memory-cap-launches" / GENERATION
+        directory.mkdir(parents=True, mode=0o700)
+        if ready:
+            write_private(directory / "ready-v1.json", b"{}")
+        if identity_payload is not None:
+            write_private(directory / "identity-v1.json", BOOT._canonical(identity_payload))
+        return home
+
+    def test_generation_ready_reads_the_receipt(self) -> None:
+        for ready in (True, False):
+            home = self.evidence_home(ready=ready, identity_payload=None)
+            with self.subTest(ready=ready), patch.object(BOOT.Path, "home", return_value=home):
+                self.assertIs(BOOT.generation_ready(GENERATION), ready)
+        with patch.object(BOOT.Path, "home", return_value=private_directory()):
+            self.assertIs(BOOT.generation_ready(GENERATION), False)
+
+    def test_claimed_daemon_liveness_uses_start_ticks(self) -> None:
+        home = self.evidence_home(ready=True, identity_payload={"main_pid": 43, "start_ticks": 47})
+        for result, pid, expected in (((47, 9999.0), 43, True), ((48, 1000.5), 43, False),
+                                      (FileNotFoundError(), 43, False), ((47, 1000.5), 44, False)):
+            def process_identity(target: int) -> tuple[int, float]:
+                if isinstance(result, BaseException):
+                    raise result
+                return result
+            with self.subTest(result=result, pid=pid), patch.object(BOOT.Path, "home", return_value=home), \
+                 patch.object(BOOT, "_process_identity", process_identity):
+                self.assertIs(BOOT.claimed_daemon_live(GENERATION, pid), expected)
 
 
 if __name__ == "__main__":

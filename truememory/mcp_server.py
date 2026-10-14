@@ -2392,7 +2392,7 @@ def main():
         except (ConnectionError, OSError) as error:
             shared_ready = False
             log.warning("Shared model-server readiness failed: %s", error)
-        except (RuntimeError, ValueError) as error:
+        except (RuntimeError, ValueError, TypeError) as error:
             # A required process memory cap fails closed per request; it must
             # not take down the tools that need no model server.
             if "TRUEMEMORY_REQUIRE_PROCESS_MEMORY_CAP" not in os.environ:
