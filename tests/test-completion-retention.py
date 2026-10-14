@@ -442,3 +442,75 @@ def test_unprocessed_pointers_survive_backlog_pruning(env):
         os.utime(item, (old, old))
     assert stop._writable_dirs_ok()
     assert pointer.exists() and not corrupt.exists()
+
+
+def test_a_permanently_unreadable_reference_settles_after_bounded_observations(env, monkeypatch):
+    monkeypatch.setattr(completion, "MAX_CAPTURE_BYTES", 256)
+    session, path = _transcript(env, _turns(6))
+    capture = completion.admit_capture(str(path), session, "", "", "claude", root=env.root)
+    real = completion._source_state
+
+    def denied(target, fd=None):
+        if fd is None and Path(target) == capture.path:
+            raise PermissionError("synthetic persistent denial")
+        return real(target, fd)
+
+    monkeypatch.setattr(completion, "_source_state", denied)
+    now = time.time()
+    for index in range(completion.MAX_ATTEMPTS):
+        monkeypatch.setattr(completion.time, "time", lambda: now + index * 900)
+        assert completion.dispatch(capture) == 0
+        entry = _state(env)[capture.key]
+        assert entry["status"] == ("queued" if index < completion.MAX_ATTEMPTS - 1 else "exhausted")
+    assert entry["outcomes"][-1]["category"] == "source_unavailable"
+
+    # A symlink at the path is a changed source at once.
+    other, other_path = _transcript(env, _turns(6))
+    referenced = completion.admit_capture(str(other_path), other, "", "", "claude", root=env.root)
+    moved = other_path.with_name("moved.jsonl")
+    os.replace(other_path, moved)
+    other_path.symlink_to(moved)
+    monkeypatch.setattr(completion, "_source_state", real)
+    assert completion.dispatch(referenced) == 0
+    entry = _state(env)[referenced.key]
+    assert (entry["status"], entry["outcomes"][-1]["category"]) == ("exhausted", "source_prefix_changed")
+
+
+def test_an_unreadable_entry_never_stops_the_drain(env):
+    session, path = _transcript(env, _turns(6))
+    good = completion.admit_capture(str(path), session, "", "", "claude", root=env.root)
+    with completion._lock(good.directory / "state.lock"):
+        state = completion._state(good.directory)
+        # A referenced entry written by an earlier build still carried a hash.
+        stale = dict(state["captures"][good.key]["metadata"], storage="source_prefix")
+        state["captures"][completion._digest(stale)] = {"metadata": stale, "attempts": 0, "status": "queued",
+                                                      "next_attempt_at": 0, "worker_pid": 0, "outcomes": []}
+        completion._save_state(good.directory, state)
+    completion.drain("", "", "claude")
+    assert len(env.spawned) == 1
+    other, other_path = _transcript(env, _turns(6))
+    completion.admit_capture(str(other_path), other, "", "", "claude", root=env.root)
+    assert completion._digest(stale) not in _state(env)
+    assert (good.directory / "quarantine" / (completion._digest(stale) + ".entry.json")).exists()
+
+
+def test_receipts_are_bounded_keeping_the_newest_per_source(env, monkeypatch):
+    monkeypatch.setattr(completion, "MAX_RECEIPTS", 8)
+    paths = []
+    for _ in range(4):
+        session, path = _transcript(env, _turns(6))
+        paths.append((session, path))
+    for revision in range(3):
+        for session, path in paths:
+            path.write_text("\n".join(_turns(6 + revision)) + "\n", encoding="utf-8")
+            capture = completion.admit_capture(str(path), session, "", "", "claude", root=env.root)
+            _complete(capture, completion.reserve_inline_attempt(capture))
+            time.sleep(0.01)
+    session, path = _transcript(env, _turns(6))
+    completion.admit_capture(str(path), session, "", "", "claude", root=env.root)
+    receipts = list((_account(env) / "receipts").iterdir())
+    assert len(receipts) <= completion.MAX_RECEIPTS
+    for session, path in paths:
+        # The latest revision of every source still deduplicates a re-fired hook.
+        again = completion.admit_capture(str(path), session, "", "", "claude", root=env.root)
+        assert completion.has_receipt(again)

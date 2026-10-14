@@ -6,6 +6,7 @@ Legacy size/PID markers are advisory and do not participate in this protocol.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import logging
@@ -33,6 +34,9 @@ MAX_STATE_BYTES = 8 * 1024 * 1024
 MAX_ATTEMPTS = 5
 MAX_RECEIPT_BYTES = 32768
 ENVIRONMENT_RETRY_SECONDS = 3600
+# A source still unreadable after this many dispatches spanning this long settles.
+UNAVAILABLE_SECONDS = 3600
+MAX_RECEIPTS = 4 * MAX_CAPTURES
 _KEY = re.compile(r"[0-9a-f]{64}")
 _COUNTS = ("facts_extracted", "facts_stored", "facts_updated", "facts_skipped_gate", "facts_skipped_dedup")
 # Admission refusals that clear once retained captures settle and are released.
@@ -449,7 +453,8 @@ def _capture_from(directory: Path, key: str, entry: dict) -> Capture:
     if (type(metadata.get("version")) is not int or metadata["version"] != 1
             or metadata.get("host") not in ("claude", "codex", "gemini", "cursor")
             or metadata.get("storage") not in (None, "source_prefix") or type(metadata.get("byte_count")) is not int
-            or not 0 <= metadata["byte_count"] <= (MAX_SOURCE_BYTES if metadata.get("storage") else MAX_CAPTURE_BYTES)
+            # Size policy applies at admission; a later limit never invalidates retained evidence.
+            or not 0 <= metadata["byte_count"] <= MAX_SOURCE_BYTES
             or ("sha256" in metadata if metadata.get("storage") else
                 type(metadata.get("sha256")) is not str or _KEY.fullmatch(metadata["sha256"]) is None)
             or type(metadata.get("file_identity")) is not list or len(metadata["file_identity"]) != 5
@@ -502,10 +507,12 @@ def _collect(directory: Path, state: dict) -> None:
     from truememory._platform import pid_is_alive
     captures = state["captures"]
     changed = False
+    invalid = []
     for key, entry in captures.items():
         try:
             capture = _capture_from(directory, key, entry)
         except CompletionError:
+            invalid.append(key)
             continue
         if entry.get("released") is True or not _claim_free(directory, key):
             continue
@@ -518,6 +525,20 @@ def _collect(directory: Path, state: dict) -> None:
         if entry["status"] in ("exhausted", "superseded") or has_receipt(capture):
             entry["released"] = changed = True
             entry.setdefault("settled_at", time.time())
+    for key in invalid:
+        # An entry this version cannot read (corrupt, or written by an older
+        # schema) is set aside with any bytes, instead of holding a slot.
+        quarantine = directory / "quarantine"
+        try:
+            _private_directory(quarantine)
+            _immutable(quarantine / (key + ".entry.json"), _json(captures[key]))
+            for suffix in (".json", ".jsonl"):
+                with contextlib.suppress(FileNotFoundError):
+                    os.replace(directory / "captures" / (key + suffix), quarantine / (key + suffix))
+        except (OSError, TypeError, ValueError):
+            continue
+        del captures[key]
+        changed = True
     released = sorted((key for key, entry in captures.items() if type(entry) is dict and entry.get("released") is True),
                       key=lambda key: _activity(captures[key]))
     size = len(_json(state))
@@ -535,6 +556,42 @@ def _collect(directory: Path, state: dict) -> None:
     with contextlib.suppress(OSError):
         # Cleanup is best effort; anything left is retried by a later pass.
         _discard(directory, captures, evicted)
+        _prune_receipts(directory, captures)
+
+
+def _prune_receipts(directory: Path, captures: dict) -> None:
+    """Bound receipts once past MAX_RECEIPTS, oldest first.
+
+    Receipts only answer whether these exact bytes were ingested. The newest
+    receipt of each native source still covers a re-fired hook on an unchanged
+    transcript, and entries still in state keep theirs; older byte versions of
+    an append-only source never recur.
+    """
+    receipts = directory / "receipts"
+    with os.scandir(receipts) as entries:
+        found = [(entry.stat(follow_symlinks=False).st_mtime, entry.name[:-5], entry.path)
+                 for entry in islice(entries, 4 * MAX_RECEIPTS)
+                 if entry.name.endswith(".json") and _KEY.fullmatch(entry.name[:-5])]
+    if len(found) <= MAX_RECEIPTS:
+        return
+    newest: dict[tuple, tuple[float, str]] = {}
+    for mtime, key, path in found:
+        try:
+            scope = json.loads(_read_private(Path(path), MAX_RECEIPT_BYTES)).get("scope")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if type(scope) is dict:
+            source = (scope.get("host"), scope.get("session_id"), scope.get("source"))
+            if source not in newest or newest[source][0] < mtime:
+                newest[source] = (mtime, key)
+    kept = {key for _, key in newest.values()}
+    # Older revisions go first; the newest per source go only if still too many.
+    order = sorted(found, key=lambda item: (item[1] in kept, item[0]))
+    for _, key, path in order[:len(found) - MAX_RECEIPTS // 2]:
+        # A released entry is settled by state; only a live one still needs its receipt.
+        if type(captures.get(key)) is not dict or captures[key].get("released") is True:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(path)
 
 
 def _discard(directory: Path, captures: dict, forgotten: list[str] | tuple[str, ...] = ()) -> None:
@@ -787,10 +844,14 @@ def _prefix_state(capture: Capture) -> str:
     """present, changed (removed, replaced or truncated) or unavailable (retry later)."""
     try:
         info = _source_state(capture.path)
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError):
         return "changed"
-    except OSError:
-        return "unavailable"
+    except CompletionError:
+        # No longer a regular file owned by this account.
+        return "changed"
+    except OSError as error:
+        # O_NOFOLLOW reports a symlink now at the path as ELOOP.
+        return "changed" if error.errno == errno.ELOOP else "unavailable"
     # The inode names the file; a remount may change st_dev without changing it.
     if info.st_ino != capture.metadata["file_identity"][1] or info.st_size < capture.metadata["byte_count"]:
         return "changed"
@@ -812,7 +873,7 @@ def verify_capture(capture: Capture) -> None:
     except OSError as error:
         raise CompletionError("capture_version_mismatch") from error
     try:
-        total, digest, _ = _stream(fd, MAX_CAPTURE_BYTES + 1)
+        total, digest, _ = _stream(fd, meta["byte_count"] + 1)
     finally:
         os.close(fd)
     if total != meta["byte_count"] or digest != meta["sha256"]:
@@ -1055,15 +1116,34 @@ def dispatch(capture: Capture, threshold: float = 0.30) -> int:
         # Identity only: the hook never reads a large source; the worker parses it.
         source = _prefix_state(capture)
     else:
-        verify_capture(capture)
-        source = "present"
+        try:
+            verify_capture(capture)
+            source = "present"
+        except CompletionError as error:
+            if str(error) != "capture_version_mismatch":
+                raise
+            # A missing or altered private copy can never be ingested.
+            source = "changed"
     enough = None
     if source == "present":
         # A reference is larger than the copy limit and counts as substantive.
         enough = has_human_messages(capture.path, MIN_MESSAGES, byte_limit=capture.metadata["byte_count"],
                                     substantive=MAX_CAPTURE_BYTES)
     if source == "unavailable" or (source == "present" and enough is None):
-        # Unreadable right now is not a changed source; a later dispatch retries.
+        # Unreadable right now is not a changed source: later dispatches retry,
+        # and only a source that stays unreadable across them settles.
+        with _lock(directory / "state.lock"):
+            state = _state(directory)
+            entry = state["captures"].get(capture.key)
+            if entry is not None and entry["status"] in ("queued", "retry") and not _settled(entry):
+                now = time.time()
+                seen = [value for value in entry.get("unavailable", ()) if type(value) in (int, float)]
+                entry["unavailable"] = seen = (seen + [now])[-MAX_ATTEMPTS:]
+                if len(seen) >= MAX_ATTEMPTS and now - seen[0] >= UNAVAILABLE_SECONDS:
+                    _outcome(entry, "source_unavailable", terminal=True)
+                    _save_settled(capture, state)
+                else:
+                    _save_state(directory, state)
         return 0
     with _lock(directory / "state.lock"):
         state = _state(directory)
@@ -1074,8 +1154,9 @@ def dispatch(capture: Capture, threshold: float = 0.30) -> int:
             # Observed bytes never gain messages, and a removed, replaced or
             # truncated source never regains them; a longer revision is its own capture.
             if entry["status"] in ("queued", "retry"):
-                _outcome(entry, "source_prefix_changed" if source == "changed" else "below_minimum_messages",
-                         terminal=True)
+                category = "below_minimum_messages" if source == "present" else (
+                    "source_prefix_changed" if _referenced(capture) else "capture_version_mismatch")
+                _outcome(entry, category, terminal=True)
                 _save_settled(capture, state)
             return 0
         if entry.get("next_attempt_at", 0) > time.time():
@@ -1095,6 +1176,7 @@ def dispatch(capture: Capture, threshold: float = 0.30) -> int:
             entry["attempts"] += 1
             entry["status"] = "pending"
             entry["worker_pid"] = 0
+            entry.pop("unavailable", None)
             _save_state(directory, state)
             attempt = entry["attempts"]
             meta = capture.metadata
@@ -1127,8 +1209,15 @@ def drain(user_id: str = "", db_path: str | None = None, host: str = "claude") -
     _account_directory(directory)
     with _lock(directory / "state.lock"):
         state = _state(directory)
-        captures = [_capture_from(directory, key, entry) for key, entry in state["captures"].items()
-                    if entry.get("metadata", {}).get("host") == host]
+        captures = []
+        for key, entry in state["captures"].items():
+            if type(entry) is not dict or type(entry.get("metadata")) is not dict or entry["metadata"].get("host") != host:
+                continue
+            try:
+                captures.append(_capture_from(directory, key, entry))
+            except CompletionError:
+                # Collection sets it aside at the next admission.
+                continue
     for capture in captures:
         try:
             if dispatch(capture):
@@ -1200,7 +1289,14 @@ def adopt_legacy_pointer(pointer: Path, scope: tuple[str, str | None, str] | Non
             return None
         transcript, session = source
         # A removed transcript can never be admitted; retire its pointer too.
-        capture = admit_capture(transcript, session, user_id, db_path, host) if Path(transcript).is_file() else None
+        try:
+            capture = admit_capture(transcript, session, user_id, db_path, host) if Path(transcript).is_file() else None
+        except CompletionError as error:
+            if str(error) != "capture_limit":
+                raise
+            # Larger than any capture can be: retire it rather than retry forever.
+            log.warning("Legacy pointer source exceeds MAX_SOURCE_BYTES; not ingested")
+            capture = None
         # The stale-session scanner skips handled sessions; without this mark
         # it re-queues them and holds its watermark, starving later sessions.
         mark_session_extracted(session, transcript, running=False)

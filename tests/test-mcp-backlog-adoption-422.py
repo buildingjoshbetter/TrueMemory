@@ -310,3 +310,12 @@ def test_mcp_drainer_reads_the_configured_backlog_directory(tmp_path):
     output = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True,
                             env={**os.environ, "TRUEMEMORY_BACKLOG_DIR": str(custom), "HOME": str(tmp_path)})
     assert output.stdout.split() == [str(custom), str(custom)]
+
+
+def test_an_oversize_source_pointer_is_retired_with_a_mark(env, monkeypatch):
+    monkeypatch.setattr(completion, "MAX_SOURCE_BYTES", 100)
+    monkeypatch.setattr(_shared, "EXTRACTED_DIR", env.home / ".truememory" / "extracted")
+    session, _, marker = _marker(env)
+    assert completion.adopt_legacy_pointer(marker) is None
+    assert not marker.exists()
+    assert (env.home / ".truememory" / "extracted" / session).exists()
