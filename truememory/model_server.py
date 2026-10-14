@@ -1149,9 +1149,8 @@ class ModelServer:
                 if deadline is not None:
                     deadline.check()
                 model = CrossEncoder(name, device=selected)
-                if type(getattr(model, "max_seq_length", None)) is int:
-                    from truememory._rerank_budget import cap_reranker_length
-                    cap_reranker_length(model)
+                from truememory._rerank_budget import cap_reranker_length
+                cap_reranker_length(model)
                 return model
 
             model, device = self._construct_model(
@@ -1526,8 +1525,9 @@ class ModelServer:
                                 if order is not None:
                                     recovery_name = self._reranker_name
                                 slices = None
-                                if (getattr(reranker, "tokenizer", None) is not None
-                                        and type(getattr(reranker, "max_seq_length", None)) is int):
+                                if getattr(reranker, "tokenizer", None) is not None and (
+                                        type(getattr(reranker, "max_seq_length", None)) is int
+                                        or hasattr(reranker, "max_length")):
                                     from truememory._rerank_budget import (
                                         budgeted_slices, pair_token_lengths, rerank_token_budget,
                                     )

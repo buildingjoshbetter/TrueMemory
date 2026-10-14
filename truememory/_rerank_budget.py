@@ -10,11 +10,31 @@ RERANK_MAX_TOKENS = 1024
 RERANK_TOKEN_BUDGET = 64 * 512 * 512
 
 
+def _length_attribute(model: object) -> str | None:
+    # sentence-transformers 5.5+ exposes max_seq_length. Older CrossEncoders
+    # expose max_length; 3.x leaves it None, meaning the tokenizer's limit.
+    if type(getattr(model, "max_seq_length", None)) is int:
+        return "max_seq_length"
+    if hasattr(model, "max_length"):
+        return "max_length"
+    return None
+
+
+def token_limit(model: object) -> int | None:
+    """The cross-encoder's effective input token limit, if it can be read."""
+    name = _length_attribute(model)
+    value = None if name is None else getattr(model, name, None)
+    if value is None and name == "max_length":
+        value = getattr(getattr(model, "tokenizer", None), "model_max_length", None)
+    return value if type(value) is int and value > 0 else None
+
+
 def cap_reranker_length(model: object) -> None:
     """Bound a cross-encoder's input length without raising a smaller limit."""
-    current = getattr(model, "max_seq_length", None)
-    if type(current) is int and current > RERANK_MAX_TOKENS:
-        model.max_seq_length = RERANK_MAX_TOKENS
+    name = _length_attribute(model)
+    current = token_limit(model)
+    if name is not None and (current is None or current > RERANK_MAX_TOKENS):
+        setattr(model, name, RERANK_MAX_TOKENS)
 
 
 def rerank_token_budget(available: int | None = None) -> int:
@@ -35,8 +55,8 @@ def rerank_token_budget(available: int | None = None) -> int:
 def pair_token_lengths(model: object, pairs: list) -> list[int] | None:
     """Truncated token length of each pair, or None when it cannot be measured."""
     tokenizer = getattr(model, "tokenizer", None)
-    limit = getattr(model, "max_seq_length", None)
-    if (tokenizer is None or type(limit) is not int or limit <= 0
+    limit = token_limit(model)
+    if (tokenizer is None or limit is None
             or not all(isinstance(pair, (list, tuple)) and len(pair) == 2
                        and all(isinstance(text, str) for text in pair) for pair in pairs)):
         return None
