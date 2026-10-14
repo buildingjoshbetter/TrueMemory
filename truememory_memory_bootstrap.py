@@ -1856,18 +1856,27 @@ def launch_owned_linux(policy: LinuxDaemonLaunchPolicy, *, generation: str, pyth
     adapter = get_linux_adapter()
     _deadline(deadline)
     record = _validate_record(adapter.start(policy, generation, python_executable, deadline))
-    _literal(record.identity.generation, generation, "returned generation")
-    _literal(record.identity.cap_bytes, policy.cap_bytes, "returned cap")
-    _literal(record.identity.swap_bytes, policy.swap_bytes, "returned swap")
-    identity = _identity_snapshot(record.identity)
-    resources = _resource_snapshot(record)
-    _same_snapshot(record, policy, identity, expected_policy, resources)
-    _validate_policy(policy)
-    _deadline(deadline)
-    _validate_evidence(adapter.inspect(record, deadline), identity)
-    _same_snapshot(record, policy, identity, expected_policy, resources)
-    _deadline(deadline)
-    return OwnedLinuxLaunch(record, policy, adapter)
+    try:
+        _literal(record.identity.generation, generation, "returned generation")
+        _literal(record.identity.cap_bytes, policy.cap_bytes, "returned cap")
+        _literal(record.identity.swap_bytes, policy.swap_bytes, "returned swap")
+        identity = _identity_snapshot(record.identity)
+        resources = _resource_snapshot(record)
+        _same_snapshot(record, policy, identity, expected_policy, resources)
+        _validate_policy(policy)
+        _deadline(deadline)
+        _validate_evidence(adapter.inspect(record, deadline), identity)
+        _same_snapshot(record, policy, identity, expected_policy, resources)
+        _deadline(deadline)
+        return OwnedLinuxLaunch(record, policy, adapter)
+    except (OSError, RuntimeError, ValueError, TypeError, TimeoutError):
+        # The started child is ours even though it will not be returned.
+        if type(adapter) is LinuxAdapter:
+            try:
+                adapter.abandon(record, expected_policy, deadline=cleanup_deadline(deadline))
+            except (OSError, RuntimeError, ValueError, TypeError, TimeoutError, AttributeError):
+                pass
+        raise
 
 
 def child_gate(identity: LinuxInvocationIdentity, *, deadline: float) -> None:
@@ -1921,6 +1930,206 @@ def stop_owned_exact(handle: OwnedLinuxLaunch, *, deadline: float) -> LinuxExitR
     _deadline(deadline)
     adapter.stop(record, identity, deadline)
     return receipt
+
+
+def _owned_exited(record: LinuxProvisionalLaunch) -> bool:
+    scope = record.scope_fd
+    return _pidfd_exited(record.pidfd, scope.pidfd_device, scope.pidfd_inode)
+
+
+def cleanup_deadline(deadline: float) -> float:
+    """Synchronous cleanup budget: the caller's remaining budget plus a short grace."""
+    return max(deadline, time.monotonic()) + _CLEANUP_GRACE
+
+
+def release_exited_launch(handle: OwnedLinuxLaunch, *, deadline: float | None = None) -> bool:
+    """Retire an owned launch whose workload has exited.
+
+    Terminal evidence is captured when the manager still holds it. A failed
+    service is collected by the manager at exit, so its units are then retired
+    from the empty-domain proof alone. Nothing is signaled. Without a deadline
+    this runs on a watcher thread's own budget.
+    """
+    record, _ = _validate_handle(handle)
+    identity = record.identity
+    end = time.monotonic() + 60.0 if deadline is None else deadline
+    if record.runner.stop_complete:
+        return True
+    for attempt in range(2):
+        if time.monotonic() >= end:
+            break
+        try:
+            stop_owned_exact(handle, deadline=min(end, time.monotonic() + 30.0))
+        except (OSError, RuntimeError, ValueError, TypeError, TimeoutError):
+            if record.runner.stop_complete:
+                return True
+            if attempt == 0:
+                # The manager may not have reaped the workload yet.
+                time.sleep(max(0.0, min(0.5, end - time.monotonic())))
+            continue
+        _mark_generation_retired(identity.generation)
+        return True
+    try:
+        remaining = end - time.monotonic()
+        if remaining <= 0 or not _owned_exited(record):
+            return False
+        retired = _retire_generation_units(identity.generation, mount_point=record.scope_fd.mount_point,
+                                           parent_relative=identity.slice_relative_path.rsplit("/", 1)[0],
+                                           deadline=end, settle=min(10.0, remaining))
+    except (OSError, RuntimeError, ValueError, TypeError, TimeoutError):
+        return False
+    if retired:
+        _mark_generation_retired(identity.generation)
+        try:
+            handle._adapter._close_resolved(record, identity)
+        except (OSError, RuntimeError, ValueError, TypeError, AttributeError):
+            pass
+        record.runner.stop_complete = True
+    return retired
+
+
+def abandon_owned_launch(handle: OwnedLinuxLaunch, *, deadline: float | None = None) -> bool:
+    """Terminate and retire an owned launch that will not be published.
+
+    Only the retained pidfd is signaled. False means the work did not finish
+    within the deadline: the workload may still be live and remains owned by
+    this handle, so the caller must keep watching it.
+    """
+    record, _ = _validate_handle(handle)
+    end = time.monotonic() + 15.0 if deadline is None else deadline
+    for attempt in range(3):
+        if record.runner.stop_complete:
+            return True
+        now = time.monotonic()
+        if now >= end:
+            break
+        try:
+            if _owned_exited(record):
+                return release_exited_launch(handle, deadline=end)
+            terminate_owned_exact(handle, deadline=min(end, now + 5.0))
+        except (OSError, RuntimeError, ValueError, TypeError, TimeoutError):
+            # The workload's own short-lived manager helpers can make a single
+            # census transiently non-exact; they exit within milliseconds.
+            if attempt < 2:
+                time.sleep(max(0.0, min(0.2, end - time.monotonic())))
+            continue
+        _mark_generation_retired(record.identity.generation)
+        return True
+    try:
+        return _owned_exited(record) and release_exited_launch(handle, deadline=end)
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return False
+
+
+def launch_handed_off(handle: OwnedLinuxLaunch) -> bool:
+    """The live workload holds everything it needs to finish starting without its launcher.
+
+    Anything unproven reads as False, so the launch is treated as failed.
+    """
+    try:
+        record, _ = _validate_handle(handle)
+        return type(record.runner) is _NativeRunner and record.runner.handoff_complete and not _owned_exited(record)
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return False
+
+
+def generation_ready(generation: str) -> bool:
+    """Whether a generation's workload has published its ready receipt."""
+    _hex(generation, 32, "generation")
+    try:
+        directory = _open_directory(_evidence_root() / generation, uid=os.getuid())
+    except FileNotFoundError:
+        return False
+    try:
+        os.stat("ready-v1.json", dir_fd=directory, follow_symlinks=False)
+        return True
+    except FileNotFoundError:
+        return False
+    finally:
+        os.close(directory)
+
+
+def claimed_daemon_live(generation: str, pid: int) -> bool:
+    """Whether pid is still the generation's admitted workload, judged by start ticks.
+
+    Start ticks count from boot, so unlike a wall-clock birth they survive a
+    realtime clock step; a reused PID has different ticks.
+    """
+    _hex(generation, 32, "generation")
+    _integer(pid, "claimed pid", positive=True)
+    try:
+        directory = _open_directory(_evidence_root() / generation, uid=os.getuid())
+        try:
+            raw, _ = _private_artifact(directory, "identity-v1.json")
+        finally:
+            os.close(directory)
+        recorded = _strict_json(raw)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    if type(recorded) is not dict or recorded.get("main_pid") != pid or type(recorded.get("start_ticks")) is not int:
+        return False
+    try:
+        # Start ticks restart at every boot.
+        if recorded.get("boot_id") != _boot_id():
+            return False
+        ticks, _ = _process_identity(pid)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return ticks == recorded["start_ticks"]
+
+
+def generation_startup_expired(generation: str) -> bool:
+    """A generation that has not published its ready receipt by its startup deadline.
+
+    Its workload refuses to publish after that deadline, so its claim no longer
+    stands for a launch in progress.
+    """
+    _hex(generation, 32, "generation")
+    try:
+        directory = _open_directory(_evidence_root() / generation, uid=os.getuid())
+        try:
+            try:
+                os.stat("ready-v1.json", dir_fd=directory, follow_symlinks=False)
+                return False
+            except FileNotFoundError:
+                pass
+            raw, _ = _private_artifact(directory, "manifest-v1.json")
+        finally:
+            os.close(directory)
+        manifest = _strict_json(raw)
+        if type(manifest) is not dict or manifest.get("boot_id") != _boot_id():
+            return False
+        deadline = manifest.get("deadline")
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return type(deadline) is float and math.isfinite(deadline) and time.monotonic() > deadline + _CLEANUP_GRACE
+
+
+def enforce_startup_deadline(handle: OwnedLinuxLaunch) -> None:
+    """Hold a handed-off launch to its own startup deadline.
+
+    Returns once the workload published its ready receipt or exited. A workload
+    still starting after its deadline can no longer publish, so it is
+    terminated through its pinned pidfd instead of holding its claim pending.
+    """
+    record, _ = _validate_handle(handle)
+    expiry = record.runner.manifest["deadline"] + _CLEANUP_GRACE
+    while True:
+        if _owned_exited(record) or _ready_published(record):
+            return
+        remaining = expiry - time.monotonic()
+        if remaining <= 0:
+            abandon_owned_launch(handle)
+            return
+        select.select([record.pidfd], [], [], min(1.0, remaining))
+
+
+def _ready_published(record: LinuxProvisionalLaunch) -> bool:
+    try:
+        os.stat("ready-v1.json", dir_fd=record.runner.store.directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
 
 
 _termination_context = threading.local()
@@ -2751,6 +2960,7 @@ class _NativeRunner:
     manifest: dict[str, object]
     stop_complete: bool = False
     forwarded: Mapping[str, str] | None = None
+    handoff_complete: bool = False
 
 
 @dataclass
@@ -2868,6 +3078,276 @@ def _required_linux_support(policy: LinuxDaemonLaunchPolicy, deadline: float) ->
     ancestors = _ancestor_limits(mount_point, parent_relative, policy.cap_bytes)
     _deadline(deadline)
     return mount_id, mount_point, parent_relative, ancestors
+
+
+# MainPID exists only on service objects; systemctl show omits it for a slice,
+# and _properties refuses a readback that omits a requested property.
+_SERVICE_STATE = ("LoadState", "ActiveState", "SubState", "MainPID", "ControlGroup")
+# A caller's request budget (5 s for hooks) bounds only the caller. Once the
+# workload holds its environment it may finish starting on its own budget.
+_CHILD_STARTUP_SECONDS = 60.0
+_CLEANUP_GRACE = 2.0
+_SLICE_STATE = ("LoadState", "ActiveState", "SubState", "ControlGroup")
+_EVIDENCE_KEEP = 8
+_SWEEP_LIMIT = 4
+
+
+def _evidence_root() -> Path:
+    return Path.home() / ".truememory" / "memory-cap-launches"
+
+
+def _generation_units(generation: str) -> tuple[str, str]:
+    _hex(generation, 32, "generation")
+    return f"app-truememory{generation}.slice", f"truememory-memory{generation}.service"
+
+
+def _unit_state(unit: str, deadline: float) -> dict[str, str]:
+    return _properties(unit, _SLICE_STATE if unit.endswith(".slice") else _SERVICE_STATE, deadline)
+
+
+def _stop_unit(unit: str, deadline: float) -> bool:
+    """Stop one generation-scoped unit and clear a failed state so it unloads."""
+    state = _unit_state(unit, deadline)
+    for command in ("stop", "reset-failed"):
+        if state["LoadState"] != "loaded":
+            return True
+        if command == "stop" and state["ActiveState"] in ("inactive", "failed"):
+            continue
+        if command == "reset-failed" and state["ActiveState"] != "failed":
+            continue
+        try:
+            _run_command(["/usr/bin/systemctl", "--user", command, unit], deadline)
+        except EnforcementUnavailable:
+            # The manager may collect the unit between readback and command.
+            if _unit_state(unit, deadline)["LoadState"] == "loaded":
+                raise
+        state = _unit_state(unit, deadline)
+    return state["LoadState"] != "loaded" or state["ActiveState"] == "inactive"
+
+
+def _generation_domain_empty(mount_point: str, slice_relative: str) -> bool:
+    try:
+        descriptor = _open_directory(Path(mount_point + slice_relative), uid=os.getuid())
+    except FileNotFoundError:
+        return True
+    try:
+        _filesystem_magic(descriptor)
+        return not any(members for _, members in _recursive_members(descriptor, slice_relative))
+    finally:
+        os.close(descriptor)
+
+
+def _retire_generation_units(generation: str, *, mount_point: str, parent_relative: str,
+                             deadline: float, settle: float = 0.0) -> bool:
+    """Stop this generation's service and slice once its domain is provably empty.
+
+    Unit names are unique to the generation. A unit is stopped only when the
+    manager reports no main process, its cgroup is this generation's path and
+    the recursive census is empty, so no live or foreign process is affected.
+    """
+    slice_unit, service_unit = _generation_units(generation)
+    slice_relative = _relative(parent_relative + "/" + slice_unit, "retired slice path")
+    service_relative = slice_relative + "/" + service_unit
+    settle_until = min(deadline, time.monotonic() + settle)
+    while True:
+        service = _unit_state(service_unit, deadline)
+        slice_state = _unit_state(slice_unit, deadline)
+        if service["LoadState"] != "loaded" and slice_state["LoadState"] != "loaded":
+            return True
+        if service["ControlGroup"] not in ("", service_relative) or slice_state["ControlGroup"] not in ("", slice_relative):
+            return False
+        if service["MainPID"] == "0" and _generation_domain_empty(mount_point, slice_relative):
+            break
+        if time.monotonic() >= settle_until:
+            return False
+        time.sleep(min(0.25, _left(deadline)))
+    service_stopped = _stop_unit(service_unit, deadline)
+    if not _generation_domain_empty(mount_point, slice_relative):
+        return False
+    return _stop_unit(slice_unit, deadline) and service_stopped
+
+
+def _mark_generation_retired(generation: str) -> bool:
+    try:
+        _hex(generation, 32, "generation")
+        directory = _open_directory(_evidence_root() / generation, uid=os.getuid())
+    except (OSError, ValueError, RuntimeError):
+        return False
+    try:
+        _exclusive_file(directory, "retired-v1.json", _canonical({"version": 1, "generation": generation}))
+    except FileExistsError:
+        pass
+    except OSError:
+        return False
+    finally:
+        os.close(directory)
+    return True
+
+
+def _incarnation_alive(pid: object, start_ticks: object) -> bool:
+    """True unless the recorded incarnation provably no longer exists."""
+    if type(pid) is not int or type(start_ticks) is not int or pid <= 0:
+        return True
+    try:
+        ticks, _ = _process_identity(pid)
+    except FileNotFoundError:
+        return False
+    except (OSError, RuntimeError, ValueError):
+        return True
+    return ticks == start_ticks
+
+
+def _generation_state(root: int, generation: str) -> str:
+    """Classify retained evidence as retired, live (an owner may still act) or orphaned."""
+    directory = os.open(generation, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root)
+    try:
+        metadata = os.fstat(directory)
+        if metadata.st_uid != os.getuid():
+            return "live"
+        try:
+            os.stat("retired-v1.json", dir_fd=directory, follow_symlinks=False)
+            return "retired"
+        except FileNotFoundError:
+            pass
+        try:
+            raw, _ = _private_artifact(directory, "manifest-v1.json")
+        except FileNotFoundError:
+            # A launcher writes its manifest immediately after creating the directory.
+            return "orphaned" if time.time() - metadata.st_mtime > 3600 else "live"
+        manifest = _strict_json(raw)
+        if type(manifest) is not dict:
+            return "live"
+        if manifest.get("boot_id") != _boot_id():
+            return "orphaned"
+        return "live" if _incarnation_alive(manifest.get("parent_pid"), manifest.get("parent_start_ticks")) else "orphaned"
+    finally:
+        os.close(directory)
+
+
+def _remove_generation_dir(root: int, generation: str) -> bool:
+    _hex(generation, 32, "retired generation")
+    directory = os.open(generation, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root)
+    try:
+        metadata = os.fstat(directory)
+        if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+            return False
+        names = []
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if len(names) >= 4200 or re.fullmatch(r"[A-Za-z0-9_.-]+", entry.name) is None:
+                    return False
+                item = entry.stat(follow_symlinks=False)
+                if item.st_uid != os.getuid() or not (stat.S_ISREG(item.st_mode) or stat.S_ISSOCK(item.st_mode)):
+                    return False
+                names.append(entry.name)
+        for name in names:
+            os.unlink(name, dir_fd=directory)
+    finally:
+        os.close(directory)
+    os.rmdir(generation, dir_fd=root)
+    return True
+
+
+def _sweep_retired_generations(*, mount_point: str, parent_relative: str, deadline: float) -> int:
+    """Retire units whose launcher is gone and prune old retired evidence.
+
+    Best effort and bounded per call: every capped launch sweeps, so units left
+    by a launcher that exited before its server cannot accumulate.
+    """
+    try:
+        root = _open_directory(_evidence_root(), uid=os.getuid())
+    except FileNotFoundError:
+        return 0
+    retired = checks = removals = kept = 0
+    try:
+        if stat.S_IMODE(os.fstat(root).st_mode) != 0o700:
+            return 0
+        candidates = []
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if len(candidates) >= 4096:
+                    break
+                if len(entry.name) == 32 and _HEX.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False):
+                    candidates.append((entry.stat(follow_symlinks=False).st_mtime_ns, entry.name))
+        for _, generation in sorted(candidates, reverse=True):
+            if time.monotonic() >= deadline:
+                break
+            try:
+                state = _generation_state(root, generation)
+                if state == "live":
+                    continue
+                if state == "orphaned":
+                    if checks >= _SWEEP_LIMIT:
+                        continue
+                    checks += 1
+                    if not _retire_generation_units(generation, mount_point=mount_point,
+                                                    parent_relative=parent_relative, deadline=deadline):
+                        continue
+                    _mark_generation_retired(generation)
+                    retired += 1
+                kept += 1
+                if kept > _EVIDENCE_KEEP and removals < 2 * _SWEEP_LIMIT:
+                    removals += 1
+                    _remove_generation_dir(root, generation)
+            except TimeoutError:
+                break
+            except (OSError, RuntimeError, ValueError):
+                continue
+    finally:
+        os.close(root)
+    return retired
+
+
+_adopted_generations: set[str] = set()
+_adoption_lock = threading.Lock()
+
+
+def _retire_after_exit(pidfd: int, identity: LinuxInvocationIdentity) -> None:
+    try:
+        while not select.select([pidfd], [], [], 1.0)[0]:
+            pass
+    finally:
+        os.close(pidfd)
+    try:
+        root = _open_directory(_evidence_root(), uid=identity.uid)
+        try:
+            # A live launcher still owns terminal evidence for this generation.
+            if _generation_state(root, identity.generation) != "orphaned":
+                return
+        finally:
+            os.close(root)
+        _, mount_point = _mount()
+        if _retire_generation_units(identity.generation, mount_point=mount_point,
+                                    parent_relative=identity.slice_relative_path.rsplit("/", 1)[0],
+                                    deadline=time.monotonic() + 30.0, settle=10.0):
+            _mark_generation_retired(identity.generation)
+    except (OSError, RuntimeError, ValueError, TimeoutError):
+        pass
+
+
+def adopt_exit_cleanup(evidence: LinuxScopeEvidence) -> bool:
+    """Watch a verified joined daemon and retire its units if its launcher is gone at exit."""
+    identity = _validate_evidence(evidence, evidence.identity).identity
+    with _adoption_lock:
+        if identity.generation in _adopted_generations:
+            return False
+        _adopted_generations.add(identity.generation)
+    try:
+        pidfd = os.pidfd_open(identity.main_pid)
+    except OSError:
+        _adopted_generations.discard(identity.generation)
+        return False
+    try:
+        # The pidfd pins one incarnation; prove it is the verified workload.
+        if _process_identity(identity.main_pid)[0] != identity.start_ticks or _membership(identity.main_pid) != identity.service_relative_path:
+            raise EnforcementUnavailable("Joined workload changed before exit adoption")
+    except (OSError, RuntimeError, ValueError):
+        os.close(pidfd)
+        _adopted_generations.discard(identity.generation)
+        return False
+    threading.Thread(target=_retire_after_exit, args=(pidfd, identity),
+                     name="truememory-capped-exit", daemon=True).start()
+    return True
 
 
 class LinuxAdapter:
@@ -3023,7 +3503,12 @@ class LinuxAdapter:
         _original_environment_packet(forwarded, generation=generation, manifest_sha256="0" * 64)
         slice_unit = f"app-truememory{generation}.slice"
         service_unit = f"truememory-memory{generation}.service"
-        evidence_root = Path.home() / ".truememory" / "memory-cap-launches"
+        try:
+            _sweep_retired_generations(mount_point=mount_point, parent_relative=parent_relative,
+                                       deadline=min(deadline, time.monotonic() + 1.5))
+        except (OSError, RuntimeError, ValueError, TimeoutError):
+            pass
+        evidence_root = _evidence_root()
         evidence_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         root_fd = _open_directory(evidence_root, uid=os.getuid())
         try:
@@ -3040,7 +3525,8 @@ class LinuxAdapter:
         parent_ticks, parent_birth = _process_identity(os.getpid())
         manifest = {"version": 1, "generation": generation, "uid": os.getuid(), "boot_id": _boot_id(),
                     "slice_unit": slice_unit, "service_unit": service_unit, "cap_bytes": policy.cap_bytes,
-                    "swap_bytes": 0, "bootstrap_sha256": bootstrap_sha, "deadline": deadline,
+                    "swap_bytes": 0, "bootstrap_sha256": bootstrap_sha,
+                    "deadline": max(deadline, time.monotonic() + _CHILD_STARTUP_SECONDS),
                     "parent_pid": os.getpid(), "parent_start_ticks": parent_ticks, "parent_birth": parent_birth,
                     "claim_path": str(Path.home() / ".truememory" / "model_server.start.json"),
                     "forwarded_names": sorted(forwarded), "interpreter": interpreter,
@@ -3054,6 +3540,8 @@ class LinuxAdapter:
         listener.listen(1)
         store.append("prepared", {"generation": generation, "kernel_cap_bytes": policy.cap_bytes, "swap_bytes": 0,
                                   "metric": _METRIC, "physical_hard_cap": False, "dynamic_registry_cap": False})
+        connection = record = None
+        descriptors: list[int] = []
         try:
             _run_command(["/usr/bin/busctl", "--user", "call", "org.freedesktop.systemd1",
                           "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "StartTransientUnit",
@@ -3067,6 +3555,7 @@ class LinuxAdapter:
                 raise EnforcementUnavailable("Owned slice is not a direct child of admitted app.slice")
             slice_fd = _open_directory(Path(mount_point + slice_relative), uid=os.getuid())
             _unresolved_launches.append(slice_fd)
+            descriptors.append(slice_fd)
             _filesystem_magic(slice_fd)
             if _number(_read_at(slice_fd, "memory.max"), "memory.max", positive=True) != policy.cap_bytes or _number(_read_at(slice_fd, "memory.swap.max"), "memory.swap.max") != 0:
                 raise EnforcementUnavailable("Slice kernel ceiling is not installed before exec")
@@ -3081,7 +3570,9 @@ class LinuxAdapter:
             os.fsync(stderr_fd)
             os.close(stderr_fd)
             os.fsync(store.directory)
-            arguments = ["/usr/bin/systemd-run", "--user", "--unit=" + service_unit, "--slice=" + slice_unit,
+            # --collect unloads a failed service at exit so no stale failure
+            # degrades the user manager; a successful exit remains for capture.
+            arguments = ["/usr/bin/systemd-run", "--user", "--collect", "--unit=" + service_unit, "--slice=" + slice_unit,
                          "--service-type=exec", "--property=MemoryMax=infinity", "--property=MemorySwapMax=infinity",
                          "--property=RemainAfterExit=yes", "--property=StandardOutput=null",
                          "--property=StandardError=append:" + str(path / "stderr-v1.log"),
@@ -3106,6 +3597,7 @@ class LinuxAdapter:
             service_relative = _relative(service["ControlGroup"], "service path")
             service_fd = _open_directory(Path(mount_point + service_relative), uid=os.getuid())
             _unresolved_launches.append(service_fd)
+            descriptors.append(service_fd)
             _filesystem_magic(service_fd)
             slice_meta, service_meta = os.fstat(slice_fd), os.fstat(service_fd)
             identity = LinuxInvocationIdentity(1, generation, manifest["boot_id"], os.getuid(), slice_unit,
@@ -3118,6 +3610,7 @@ class LinuxAdapter:
                                        connection_meta.st_dev, connection_meta.st_ino)
             pidfd = os.pidfd_open(main_pid)
             _unresolved_launches.append(pidfd)
+            descriptors.append(pidfd)
             pidfd_meta = os.fstat(pidfd)
             scope = _NativeScope(mount_id, mount_point, slice_fd, service_fd, baseline, baseline_local,
                                  _controller_events(service_fd), _controller_events(service_fd, "memory.events.local"),
@@ -3129,8 +3622,62 @@ class LinuxAdapter:
             self.inspect(record, deadline)
             return record
         except (OSError, RuntimeError, ValueError, TypeError, TimeoutError) as error:
-            store.append("startup-unresolved", {"error_type": type(error).__name__, "generation": generation})
+            try:
+                store.append("startup-unresolved", {"error_type": type(error).__name__, "generation": generation})
+            except (OSError, RuntimeError, ValueError, TypeError):
+                pass
+            self._abandon_partial(store, listener, connection, record, policy, generation, mount_point,
+                                  parent_relative, descriptors, cleanup_deadline(deadline))
             raise
+
+    def abandon(self, record: LinuxProvisionalLaunch, policy: LinuxDaemonLaunchPolicy, *, deadline: float) -> bool:
+        """Retire a started launch that will not be returned to an owner."""
+        _validate_record(record)
+        scope, endpoint = record.scope_fd, record.endpoint
+        return self._abandon_partial(record.runner.store, endpoint.listener, endpoint.connection, record, policy,
+                                     record.identity.generation, scope.mount_point,
+                                     record.identity.slice_relative_path.rsplit("/", 1)[0],
+                                     [record.pidfd, scope.slice_fd, scope.service_fd], deadline)
+
+    def _abandon_partial(self, store: _EvidenceStore, listener: socket.socket, connection: socket.socket | None,
+                         record: LinuxProvisionalLaunch | None, policy: LinuxDaemonLaunchPolicy, generation: str,
+                         mount_point: str, parent_relative: str, descriptors: list[int], deadline: float) -> bool:
+        """Terminate or release a failed launch, then retire its units.
+
+        A child still waiting at the barrier exits on its own once the barrier
+        closes; the units are stopped only after the manager and census prove
+        the domain empty. Anything unproven is left for the next launch sweep.
+        """
+        retired = False
+        try:
+            if record is not None and abandon_owned_launch(OwnedLinuxLaunch(record, policy, self), deadline=deadline):
+                return True
+        except (OSError, RuntimeError, ValueError, TypeError, TimeoutError):
+            pass
+        try:
+            for endpoint in (connection, listener):
+                if endpoint is not None:
+                    endpoint.close()
+            remaining = deadline - time.monotonic()
+            retired = remaining > 0 and _retire_generation_units(
+                generation, mount_point=mount_point, parent_relative=parent_relative,
+                deadline=deadline, settle=min(5.0, remaining))
+        except (OSError, RuntimeError, ValueError, TypeError, TimeoutError):
+            retired = False
+        try:
+            store.append("startup-retired" if retired else "startup-cleanup-deferred", {"generation": generation})
+        except (OSError, RuntimeError, ValueError, TypeError):
+            pass
+        if retired:
+            _mark_generation_retired(generation)
+        if record is None or not record.runner.stop_complete:
+            # The record is discarded, so nothing else will use or close these.
+            for descriptor in [*descriptors, store.directory]:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+        return retired
 
     def inspect(self, record: LinuxProvisionalLaunch | LinuxInvocationIdentity, deadline: float) -> LinuxScopeEvidence:
         _deadline(deadline)
@@ -3312,22 +3859,44 @@ class LinuxAdapter:
         environment_packet = _original_environment_packet(runner.forwarded, generation=identity.generation,
                               manifest_sha256=identity.manifest_sha256, names=runner.manifest["forwarded_names"])
         _packet_send(record.endpoint.connection, environment_packet, deadline)
+        # The workload now needs nothing more from this launcher to finish starting.
+        runner.handoff_complete = True
         acknowledgement = _packet_receive(record.endpoint.connection, deadline)
         _literal_packet(acknowledgement, {"generation": identity.generation, "manifest_sha256": identity.manifest_sha256,
                         "gate_passed": True}, "restored pre-import gate")
         runner.store.observe("first-import-v1.json")
         runner.store.append("first-import", {"generation": identity.generation, "source_sha256": identity.bootstrap_sha256})
+        self._await_ready(record, identity, deadline)
+
+    def _await_ready(self, record: LinuxProvisionalLaunch, identity: LinuxInvocationIdentity, deadline: float) -> None:
+        """Wait for the workload's ready receipt, then prove its domain once.
+
+        Until it is ready the workload gates itself with short-lived systemctl
+        helpers inside its own cgroup, so an exact-membership census taken while
+        waiting would count them as foreign. Liveness is watched via the pidfd
+        instead, and the census runs after the receipt exists and the helpers
+        have been reaped.
+        """
+        runner = record.runner
+        expected = {"version": 1, "generation": identity.generation, "manifest_sha256": identity.manifest_sha256,
+                    "pid": identity.main_pid, "kernel_cap_bytes": identity.cap_bytes, "metric": _METRIC,
+                    "physical_hard_cap": False, "dynamic_registry_cap": False}
         while True:
-            _validate_evidence(self.inspect(record, deadline), identity)
+            if _owned_exited(record):
+                raise EnforcementUnavailable("Admitted workload exited before application readiness")
             try:
                 raw, _ = _private_artifact(runner.store.directory, "ready-v1.json")
+                observed = _strict_json(raw)
             except FileNotFoundError:
+                observed = None
+            except (ValueError, EnforcementUnavailable):
+                # The receipt is created exclusively and then written, so a
+                # read can briefly see it empty or still growing.
+                observed = None
+            if observed is None:
                 time.sleep(min(0.01, _left(deadline)))
                 continue
-            expected = {"version": 1, "generation": identity.generation, "manifest_sha256": identity.manifest_sha256,
-                        "pid": identity.main_pid, "kernel_cap_bytes": identity.cap_bytes, "metric": _METRIC,
-                        "physical_hard_cap": False, "dynamic_registry_cap": False}
-            _literal_packet(_strict_json(raw), expected, "application ready receipt")
+            _literal_packet(observed, expected, "application ready receipt")
             runner.store.observe("ready-v1.json")
             runner.store.append("application-ready", expected)
             _validate_evidence(self.inspect(record, deadline), identity)
@@ -3464,7 +4033,8 @@ class LinuxAdapter:
         store.append("owned-stop-request", {"generation": identity.generation, "service_invocation_id": identity.service_invocation_id,
                                            "slice_invocation_id": identity.slice_invocation_id})
         self.inspect(record, deadline)
-        _run_command(["/usr/bin/systemctl", "--user", "stop", identity.service_unit], deadline)
+        if not _stop_unit(identity.service_unit, deadline):
+            raise EnforcementUnavailable("Owned service did not stop")
         slice_props = _properties(identity.slice_unit, ("InvocationID", "ControlGroup", "MemoryMax", "MemorySwapMax", "ActiveState"), deadline)
         metadata = os.fstat(record.scope_fd.slice_fd)
         if slice_props["InvocationID"] != identity.slice_invocation_id or slice_props["ControlGroup"] != identity.slice_relative_path or (metadata.st_dev, metadata.st_ino) != (identity.slice_device, identity.slice_inode):
@@ -3473,7 +4043,8 @@ class LinuxAdapter:
             raise EnforcementUnavailable("Slice cap changed before owned final stop")
         if any(members for _, members in _recursive_members(record.scope_fd.slice_fd, identity.slice_relative_path)):
             raise EnforcementUnavailable("Slice acquired a member before owned final stop")
-        _run_command(["/usr/bin/systemctl", "--user", "stop", identity.slice_unit], deadline)
+        if not _stop_unit(identity.slice_unit, deadline):
+            raise EnforcementUnavailable("Owned slice did not stop")
         store.append("owned-stop-complete", {"generation": identity.generation})
         self._close_resolved(record, identity)
         record.runner.stop_complete = True
@@ -3508,7 +4079,7 @@ def _physical_total() -> int:
     return _integer(pages * page_size, "physical_total", positive=True)
 
 
-def _child_bundle(manifest_path: str) -> tuple[int, Path, dict[str, object], str]:
+def _child_bundle(manifest_path: str, *, launcher_may_exit: bool = False) -> tuple[int, Path, dict[str, object], str]:
     path = Path(manifest_path)
     if not path.is_absolute() or path.name != "manifest-v1.json":
         raise EnforcementUnavailable("Child requires an absolute generation manifest")
@@ -3536,7 +4107,7 @@ def _child_bundle(manifest_path: str) -> tuple[int, Path, dict[str, object], str
         _integer(manifest.get("parent_start_ticks"), "parent start ticks", positive=True)
         if type(manifest["parent_birth"]) is not float or not math.isfinite(manifest["parent_birth"]) or manifest["parent_birth"] <= 0:
             raise EnforcementUnavailable("Manifest parent birth is invalid")
-        if _process_identity(manifest["parent_pid"]) != (manifest["parent_start_ticks"], manifest["parent_birth"]):
+        if not _launcher_unchanged(manifest, launcher_may_exit=launcher_may_exit):
             raise EnforcementUnavailable("Parent process incarnation changed")
         names = manifest["forwarded_names"]
         if type(names) is not list or not names or len(names) > 4096 or any(type(name) is not str or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None for name in names) or names != sorted(set(names)):
@@ -3553,6 +4124,31 @@ def _child_bundle(manifest_path: str) -> tuple[int, Path, dict[str, object], str
     except (OSError, RuntimeError, ValueError, TypeError, TimeoutError):
         os.close(directory)
         raise
+
+
+def _launcher_unchanged(manifest: dict[str, object], *, launcher_may_exit: bool) -> bool:
+    """The launcher is still its recorded incarnation, or has exited when allowed.
+
+    A zombie has exited even though its parent has not reaped it yet.
+    """
+    try:
+        current = _process_identity(manifest["parent_pid"])
+    except FileNotFoundError:
+        return launcher_may_exit
+    except EnforcementUnavailable:
+        if _process_unreaped(manifest["parent_pid"]):
+            return launcher_may_exit
+        raise
+    return current == (manifest["parent_start_ticks"], manifest["parent_birth"])
+
+
+def _process_unreaped(pid: int) -> bool:
+    try:
+        raw = _read_path(Path(f"/proc/{pid}/stat"), bound=8192).decode("ascii")
+    except FileNotFoundError:
+        return True
+    fields = raw[raw.rfind(")") + 2:].split()
+    return bool(fields) and fields[0] == "Z"
 
 
 def _child_main(manifest_path: str) -> None:
@@ -3641,7 +4237,7 @@ def _restore_child_context() -> None:
     descriptor = _integer(int(raw_descriptor), "inherited barrier descriptor")
     if descriptor < 3:
         raise EnforcementUnavailable("Barrier cannot replace a standard stream")
-    directory, path, manifest, manifest_sha = _child_bundle(manifest_path)
+    directory, path, manifest, manifest_sha = _child_bundle(manifest_path, launcher_may_exit=True)
     endpoint = None
     try:
         identity_raw, identity_sha = _private_artifact(directory, "identity-v1.json")
@@ -3666,8 +4262,10 @@ def _restore_child_context() -> None:
         endpoint = socket.socket(fileno=descriptor)
         if endpoint.family != socket.AF_UNIX or endpoint.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM:
             raise EnforcementUnavailable("Inherited barrier is not the original local stream")
+        # Peer credentials are fixed at connect time, so they still name the
+        # launcher after it gives up and exits post-handoff.
         parent_pid, parent_uid = _peer(endpoint)
-        if (parent_pid, parent_uid) != (manifest["parent_pid"], identity.uid) or _process_identity(parent_pid) != (manifest["parent_start_ticks"], manifest["parent_birth"]):
+        if (parent_pid, parent_uid) != (manifest["parent_pid"], identity.uid) or not _launcher_unchanged(manifest, launcher_may_exit=True):
             raise EnforcementUnavailable("Inherited barrier no longer names the original parent")
         claim_path = Path(manifest["claim_path"])
         claim_directory = _open_directory(claim_path.parent, uid=identity.uid)
@@ -3685,8 +4283,14 @@ def _restore_child_context() -> None:
         _child_context = (path.parent, identity, endpoint, parent_pid, parent_uid)
         child_gate(identity, deadline=manifest["deadline"])
         _exclusive_file(directory, "first-import-v1.json", _canonical(preexec_data))
-        _packet_send(endpoint, {"generation": identity.generation, "manifest_sha256": manifest_sha,
-                                "gate_passed": True}, manifest["deadline"])
+        try:
+            _packet_send(endpoint, {"generation": identity.generation, "manifest_sha256": manifest_sha,
+                                    "gate_passed": True}, manifest["deadline"])
+        except (BrokenPipeError, ConnectionResetError):
+            # An exited launcher cannot read the acknowledgement; one that is
+            # still alive closed the barrier to abandon this launch.
+            if _launcher_unchanged(manifest, launcher_may_exit=False):
+                raise
     except (OSError, RuntimeError, ValueError, TypeError, TimeoutError):
         if endpoint is not None:
             endpoint.close()
@@ -3737,6 +4341,21 @@ def _write_console_claim(path: Path, claim: dict[str, object]) -> None:
         os.fsync(directory)
     finally:
         os.close(directory)
+
+
+def _retire_console_claim(directory: int, name: str, generation: str) -> None:
+    """Remove this generation's claim so a failed launch blocks no later launcher."""
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory)
+    except FileNotFoundError:
+        return
+    try:
+        claim = _strict_json(_read_fd(descriptor, bound=4096))
+    finally:
+        os.close(descriptor)
+    if type(claim) is dict and claim.get("generation") == generation:
+        os.unlink(name, dir_fd=directory)
+        os.fsync(directory)
 
 
 def _verified_psutil_birth(pid: int, candidate: float) -> float:
@@ -3800,19 +4419,44 @@ def main() -> None:
         parent_born = _verified_psutil_birth(os.getpid(), candidate)
         claim = {"generation": generation, "launcher": {"pid": os.getpid(), "born": parent_born}, "child": None}
         _write_console_claim(claim_path, claim)
-        handle = launch_owned_linux(policy, generation=generation, python_executable=os.path.abspath(sys.executable), deadline=deadline)
-        child_born = _verified_psutil_birth(handle.pid, handle.record.identity.birth_time)
-        claim["child"] = {"pid": handle.pid, "born": child_born}
-        _write_console_claim(claim_path, claim)
-        handle.release_after_claim(claim, deadline=deadline)
+        handle = None
+        unresolved = None
+        handed_off = False
+        try:
+            handle = launch_owned_linux(policy, generation=generation, python_executable=os.path.abspath(sys.executable), deadline=deadline)
+            child_born = _verified_psutil_birth(handle.pid, handle.record.identity.birth_time)
+            claim["child"] = {"pid": handle.pid, "born": child_born}
+            _write_console_claim(claim_path, claim)
+            handle.release_after_claim(claim, deadline=deadline)
+        except (OSError, RuntimeError, ValueError, TypeError, TimeoutError) as error:
+            handed_off = isinstance(error, TimeoutError) and handle is not None and launch_handed_off(handle)
+            if not handed_off:
+                # A failed generation must neither block later launches nor run unowned.
+                try:
+                    _retire_console_claim(directory, claim_path.name, generation)
+                except (OSError, RuntimeError, ValueError):
+                    pass
+                if handle is None or abandon_owned_launch(handle, deadline=cleanup_deadline(deadline)):
+                    raise
+                unresolved = error
+            # Otherwise the workload is still starting on its own budget and
+            # stays owned by this console under its claim.
     finally:
         os.close(lock)
         os.close(directory)
-    # The foreground console retains ownership through exit; no live stop or
-    # finalizer cleanup is substituted for terminal evidence.
+    if unresolved is not None and abandon_owned_launch(handle):
+        raise unresolved
+    if handed_off:
+        enforce_startup_deadline(handle)
+    # The foreground console retains ownership through exit, including a
+    # failed launch whose workload could not be terminated.
     while not select.select([handle.record.pidfd], [], [], 1.0)[0]:
         pass
-    stop_owned_exact(handle, deadline=time.monotonic() + 30.0)
+    released = release_exited_launch(handle)
+    if unresolved is not None:
+        raise unresolved
+    if not released:
+        raise EnforcementUnavailable("Exited workload units were left for the next capped launch sweep")
 
 
 _NATIVE_STARTUP_U64 = (1 << 64) - 1
