@@ -571,6 +571,50 @@ def test_a_dead_worker_never_leaves_its_entry_pending_after_the_source_changes(e
     assert _state(env)[running.key]["status"] == "pending"
 
 
+def test_unchanged_bytes_are_not_reingested_after_their_receipt_is_pruned(env, monkeypatch):
+    # Pre-fix: once the state entry was evicted and the receipt pruned, the
+    # same bytes were admitted again as new work and extracted a second time.
+    monkeypatch.setattr(completion, "MAX_CAPTURES", 3)
+    monkeypatch.setattr(completion, "MAX_RECEIPTS", 8)
+    receipts = _account(env) / "receipts"
+    done = []
+    for index in range(12):
+        session, path = _transcript(env, _turns(6))
+        capture = completion.admit_capture(str(path), session, "", "", "claude", root=env.root)
+        _complete(capture, completion.reserve_inline_attempt(capture))
+        if index == 1:
+            # A receipt that no longer certifies its bytes is never remembered.
+            receipt = receipts / (capture.key + ".json")
+            value = json.loads(receipt.read_text(encoding="utf-8"))
+            value["parser_status"] = "partial"
+            mode = receipt.stat().st_mode
+            receipt.chmod(0o600)
+            receipt.write_text(json.dumps(value), encoding="utf-8")
+            receipt.chmod(mode & 0o777)
+        done.append((session, path, capture))
+        time.sleep(0.01)
+    assert len(list(receipts.iterdir())) <= completion.MAX_RECEIPTS
+    session, path, first = done[0]
+    assert not (receipts / (first.key + ".json")).exists()
+    again = completion.admit_capture(str(path), session, "", "", "claude", root=env.root)
+    assert again.key == first.key
+    assert completion.has_receipt(again)
+    assert again.key not in _state(env)
+    assert completion.dispatch(again) == 0
+    assert completion.reserve_inline_attempt(again) == 0
+    assert env.spawned == []
+    session, path, tampered = done[1]
+    assert not (receipts / (tampered.key + ".json")).exists()
+    assert not completion.has_receipt(completion.admit_capture(str(path), session, "", "", "claude", root=env.root))
+
+    # Each shard keeps only its newest keys.
+    monkeypatch.setattr(completion, "INGESTED_SHARD_KEYS", 2)
+    keys = ["ab" + format(index, "062x") for index in range(3)]
+    with completion._lock(first.directory / "state.lock"):
+        completion._fingerprint(first.directory, keys)
+    assert (first.directory / "ingested" / "ab").read_text(encoding="utf-8").split() == keys[1:]
+
+
 def test_a_failed_windows_ownership_query_is_retried_not_settled(env, monkeypatch):
     # Pre-fix: _windows_security failing for any transient reason made the
     # source look foreign-owned and settled the capture at once.

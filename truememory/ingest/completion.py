@@ -37,6 +37,9 @@ ENVIRONMENT_RETRY_SECONDS = 3600
 # A source still unreadable after this many dispatches spanning this long settles.
 UNAVAILABLE_SECONDS = 3600
 MAX_RECEIPTS = 4 * MAX_CAPTURES
+# Keys of pruned receipts: 256 shards of this many keys, at most 32,768 keys
+# in about 2.1 MB; a shard drops its oldest key first.
+INGESTED_SHARD_KEYS = 128
 _KEY = re.compile(r"[0-9a-f]{64}")
 _COUNTS = ("facts_extracted", "facts_stored", "facts_updated", "facts_skipped_gate", "facts_skipped_dedup")
 # Admission refusals that clear once retained captures settle and are released.
@@ -559,13 +562,66 @@ def _collect(directory: Path, state: dict) -> None:
         _prune_receipts(directory, captures)
 
 
+def _fingerprinted(capture: Capture) -> bool:
+    """Whether a pruned receipt certified this exact capture key."""
+    path = capture.directory / "ingested" / capture.key[:2]
+    if not path.exists():
+        return False
+    try:
+        return capture.key.encode() in _read_private(path, 65 * INGESTED_SHARD_KEYS).split(b"\n")
+    except OSError:
+        return False
+
+
+def _fingerprint(directory: Path, keys: list[str]) -> None:
+    """Remember the keys of pruned receipts; the caller holds state.lock.
+
+    A key digests the full capture scope (file identity, size, and hash or
+    referenced prefix), so it matches exactly what a re-fired hook would admit
+    for unchanged bytes. Keys spread evenly over 256 shards by their first
+    byte, and each shard keeps its newest INGESTED_SHARD_KEYS keys.
+    """
+    if not keys:
+        return
+    index = directory / "ingested"
+    _private_directory(index)
+    for leaked in index.glob("*.tmp"):
+        # Shards are written under state.lock, so a temporary here was interrupted.
+        with contextlib.suppress(FileNotFoundError):
+            leaked.unlink()
+    shards: dict[str, list[str]] = {}
+    for key in keys:
+        shards.setdefault(key[:2], []).append(key)
+    for prefix, new in shards.items():
+        path = index / prefix
+        try:
+            current = _read_private(path, 65 * INGESTED_SHARD_KEYS).decode().split() if path.exists() else []
+        except (OSError, UnicodeDecodeError):
+            # An unreadable shard is rebuilt; losing it never blocks pruning.
+            current = []
+        merged = ([key for key in current if _KEY.fullmatch(key) and key not in new] + new)[-INGESTED_SHARD_KEYS:]
+        temporary = index / (prefix + "." + uuid.uuid4().hex + ".tmp")
+        fd = _open_private(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(("\n".join(merged) + "\n").encode())
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
+            raise
+    _sync_directory(index)
+
+
 def _prune_receipts(directory: Path, captures: dict) -> None:
     """Bound receipts once past MAX_RECEIPTS, oldest first.
 
     Receipts only answer whether these exact bytes were ingested. The newest
     receipt of each native source still covers a re-fired hook on an unchanged
-    transcript, and entries still in state keep theirs; older byte versions of
-    an append-only source never recur.
+    transcript, and entries still in state keep theirs. A pruned receipt that
+    certified its key leaves the key in the ingested index (see _fingerprint).
     """
     receipts = directory / "receipts"
     with os.scandir(receipts) as entries:
@@ -575,23 +631,32 @@ def _prune_receipts(directory: Path, captures: dict) -> None:
     if len(found) <= MAX_RECEIPTS:
         return
     newest: dict[tuple, tuple[float, str]] = {}
+    certified = set()
     for mtime, key, path in found:
         try:
-            scope = json.loads(_read_private(Path(path), MAX_RECEIPT_BYTES)).get("scope")
+            value = json.loads(_read_private(Path(path), MAX_RECEIPT_BYTES))
+            scope = value.get("scope")
         except (OSError, ValueError, AttributeError):
             continue
         if type(scope) is dict:
             source = (scope.get("host"), scope.get("session_id"), scope.get("source"))
             if source not in newest or newest[source][0] < mtime:
                 newest[source] = (mtime, key)
+            with contextlib.suppress(KeyError, TypeError, IndexError, ValueError):
+                if _digest(scope) == key and _certifies(value, Capture(directory, key, _capture_path(directory, key, scope), scope)):
+                    certified.add(key)
     kept = {key for _, key in newest.values()}
     # Older revisions go first; the newest per source go only if still too many.
     order = sorted(found, key=lambda item: (item[1] in kept, item[0]))
-    for _, key, path in order[:len(found) - MAX_RECEIPTS // 2]:
-        # A released entry is settled by state; only a live one still needs its receipt.
-        if type(captures.get(key)) is not dict or captures[key].get("released") is True:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(path)
+    # A released entry is settled by state; only a live one still needs its receipt.
+    pruned = [(key, path) for _, key, path in order[:len(found) - MAX_RECEIPTS // 2]
+              if type(captures.get(key)) is not dict or captures[key].get("released") is True]
+    # The key is durable before its receipt goes, so unchanged bytes
+    # re-admitted later are not ingested twice.
+    _fingerprint(directory, [key for key, _ in pruned if key in certified])
+    for _, path in pruned:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
 
 
 def _discard(directory: Path, captures: dict, forgotten: list[str] | tuple[str, ...] = ()) -> None:
@@ -939,11 +1004,16 @@ def strict_complete(result: object, capture: Capture | None = None) -> bool:
 def has_receipt(capture: Capture) -> bool:
     path = capture.directory / "receipts" / (capture.key + ".json")
     if not path.exists():
-        return False
+        # A pruned receipt leaves only its key.
+        return _fingerprinted(capture)
     try:
         value = json.loads(_read_private(path, MAX_RECEIPT_BYTES))
     except (OSError, ValueError, UnicodeDecodeError):
         return False
+    return _certifies(value, capture)
+
+
+def _certifies(value: object, capture: Capture) -> bool:
     if not (type(value) is dict and type(value.get("version")) is int and value["version"] == 1
             and value.get("capture_key") == capture.key
             and value.get("scope") == capture.metadata and value.get("coverage") == "observed_bytes"
