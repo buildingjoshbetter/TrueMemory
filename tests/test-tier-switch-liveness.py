@@ -604,5 +604,32 @@ CONFIG.write_text(json.dumps(config))
         self.assertEqual(child["config"]["tier"], "edge")
 
 
+
+class RerankerOverridesDoNotFailOtherOperations(unittest.TestCase):
+    def test_store_during_deep_search_waits_and_completes(self):
+        (result,) = run_scenario("""
+            seed(5)
+            stub_models()
+            from truememory.engine import TrueMemoryEngine
+            from truememory.tier_switch.runtime import engine_serving_operation
+            engine = TrueMemoryEngine(DB)
+            engine.get_all(limit=1); drain()
+            held, release = threading.Event(), threading.Event()
+            def deep():
+                with engine_serving_operation(engine, reranker_override="BAAI/bge-reranker-v2-m3"):
+                    held.set(); release.wait(10)
+            worker = threading.Thread(target=deep); worker.start(); held.wait(10)
+            threading.Timer(1.0, release.set).start()
+            started = time.monotonic()
+            added = engine.add("stored while a deep search runs", sender="alice")["id"]
+            waited = time.monotonic() - started
+            worker.join(10)
+            engine.close(); drain()
+            emit(added=added, waited=waited)
+        """)
+        self.assertEqual(result["added"], 6)
+        self.assertGreaterEqual(result["waited"], 0.8)
+
+
 if __name__ == "__main__":
     unittest.main()

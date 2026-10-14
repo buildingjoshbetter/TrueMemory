@@ -485,7 +485,10 @@ def serving_operation(
             if reranker._model is None or reranker._model_name != reranker_id:
                 if borrowed:
                     raise TierRuntimeError("Reranker loading requires a clean connection")
-                with serving.exclusive_activation(deadline=deadline, cancelled=cancelled):
+                # Swapping the shared reranker drains every reader; never wait
+                # unboundedly behind a long one (for example a maintenance run).
+                bounded = time.monotonic() + serving._KEY_WAIT_SECONDS if deadline is None else deadline
+                with serving.exclusive_activation(deadline=bounded, cancelled=cancelled):
                     try:
                         reranker.get_reranker(model_name=reranker_id, deadline=deadline, cancelled=cancelled)
                     except Exception as error:
