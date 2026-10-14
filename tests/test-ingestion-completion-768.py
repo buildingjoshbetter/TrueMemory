@@ -177,20 +177,34 @@ class InertCompletionControls(unittest.TestCase):
         def entries():
             for index in range(5005):
                 visited.append(index)
-                yield types.SimpleNamespace(path="/synthetic/pointer-" + str(index) + ".txt")
+                name = "pointer-" + str(index) + (".json" if index % 2 else ".txt")
+                yield types.SimpleNamespace(name=name, path="/synthetic/" + name)
+        adopted = []
         with patch.dict(sys.modules, {shared.__name__: shared, platform.__name__: platform}), \
                 patch.object(Path, "exists", return_value=True), patch.object(Path, "is_symlink", return_value=False), \
                 patch.object(Path, "unlink") as removed, \
                 patch.object(COMPLETION.os, "scandir", return_value=contextlib.nullcontext(entries())), \
-                patch.object(COMPLETION, "_open_private") as opened:
+                patch.object(COMPLETION, "_open_private") as opened, \
+                patch.object(COMPLETION, "_read_cursor", return_value=""), \
+                patch.object(COMPLETION, "_write_cursor") as saved, \
+                patch.object(COMPLETION, "adopt_legacy_pointer",
+                             side_effect=lambda pointer, scope: adopted.append(pointer.name)):
             COMPLETION.convert_legacy_pointers("synthetic-account", "/synthetic/db", "claude")
-        self.assertEqual(len(visited), COMPLETION.MAX_CAPTURES)
+        # Every name is listed so no pointer stays hidden, but one run inspects
+        # at most MAX_CAPTURES pointers in name order and never other files.
+        self.assertEqual(len(visited), 5005)
+        self.assertEqual(len(adopted), COMPLETION.MAX_CAPTURES)
+        self.assertEqual(adopted, sorted(adopted))
+        self.assertTrue(all(name.endswith(".json") for name in adopted))
+        self.assertEqual(saved.call_args.args[1], adopted[-1])
         opened.assert_not_called()
         removed.assert_not_called()
 
-    def test_legacy_conversion_requires_exact_scope_retains_pointer_and_avoids_live_workers(self) -> None:
+    def test_legacy_conversion_requires_exact_scope_retires_admitted_pointer_and_avoids_live_workers(self) -> None:
         shared = types.ModuleType("truememory.ingest.hooks._shared")
         shared.backlog_transcript_source = lambda value, host: (value["transcript_path"], value["session_id"])
+        marked = []
+        shared.mark_session_extracted = lambda session, transcript, **options: marked.append((session, options))
         platform = types.ModuleType("truememory._platform")
         platform.pid_is_alive = lambda pid: pid == 42
         baseline = {"transcript_path": "/synthetic/source.jsonl", "session_id": "synthetic/a",
@@ -206,33 +220,43 @@ class InertCompletionControls(unittest.TestCase):
             scenarios.append((value, ".json", False))
         for value, suffix, admitted in scenarios:
             raw = json.dumps(value).encode()
-            info = types.SimpleNamespace(st_dev=1, st_ino=1, st_size=len(raw), st_mtime_ns=1, st_ctime_ns=1)
+            info = types.SimpleNamespace(st_dev=1, st_ino=1, st_size=len(raw), st_mtime_ns=1, st_ctime_ns=1,
+                                         st_mode=stat.S_IFREG | 0o600)
             handle = types.SimpleNamespace(read=lambda count: raw[:count], fileno=lambda: 41)
-            entry = types.SimpleNamespace(path="/synthetic/pointer" + suffix)
+            entry = types.SimpleNamespace(name="pointer" + suffix, path="/synthetic/pointer" + suffix)
             with patch.dict(sys.modules, {shared.__name__: shared, platform.__name__: platform}), \
                     patch.object(Path, "exists", return_value=True), patch.object(Path, "is_symlink", return_value=False), \
-                    patch.object(Path, "unlink") as removed, \
+                    patch.object(Path, "is_file", return_value=True), patch.object(Path, "unlink") as removed, \
+                    patch.object(COMPLETION, "_private_directory"), \
+                    patch.object(COMPLETION, "_lock", side_effect=lambda *args, **kwargs: contextlib.nullcontext(True)), \
                     patch.object(COMPLETION.os, "scandir", return_value=contextlib.nullcontext(iter([entry]))), \
+                    patch.object(COMPLETION, "_read_cursor", return_value=""), patch.object(COMPLETION, "_write_cursor"), \
                     patch.object(COMPLETION, "_open_private", return_value=41), \
                     patch.object(COMPLETION.os, "fdopen", side_effect=lambda *args: contextlib.nullcontext(handle)), \
                     patch.object(COMPLETION.os, "fstat", return_value=info), \
+                    patch.object(COMPLETION.os, "lstat", return_value=info), \
                     patch.object(COMPLETION, "_source_owned"), \
                     patch.object(COMPLETION, "admit_capture", return_value=object()) as capture, \
                     patch.object(COMPLETION, "dispatch", return_value=0) as dispatch:
                 COMPLETION.convert_legacy_pointers("synthetic-account", "/synthetic/db", "claude")
             self.assertEqual(capture.call_count, int(admitted))
             self.assertEqual(dispatch.call_count, int(admitted))
-            removed.assert_not_called()
+            # Completion owns an admitted pointer's retries, so only it retires,
+            # and the stale-session scanner is told the session is handled.
+            self.assertEqual(removed.call_count, int(admitted))
+            self.assertEqual(len(marked), int(admitted))
+            if admitted:
+                self.assertEqual(marked.pop(), ("synthetic/a", {"running": False}))
             if admitted:
                 self.assertEqual(capture.call_args.args,
                     ("/synthetic/source.jsonl", "synthetic/a", "synthetic-account", "/synthetic/db", "claude"))
 
     def test_automatic_maintenance_failure_never_falls_back_to_legacy_cleanup(self) -> None:
         source = ROOT / "truememory/ingest/hooks/session_start.py"
-        node = next(node for node in ast.parse(source.read_text(encoding="utf-8")).body
-                    if isinstance(node, ast.FunctionDef) and node.name == "_drain_backlog")
+        nodes = [node for node in ast.parse(source.read_text(encoding="utf-8")).body
+                 if isinstance(node, ast.FunctionDef) and node.name in ("_drain_backlog", "_completion_scope")]
         namespace = {"os": os, "log": logging.getLogger(__name__)}
-        exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), str(source), "exec"), namespace)
+        exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), str(source), "exec"), namespace)
         module = types.ModuleType("truememory.ingest.completion")
         def retained_failure(*args):
             raise COMPLETION.CompletionError("synthetic retained failure")
@@ -372,9 +396,10 @@ class InertPipelineCompletionControls(unittest.TestCase):
         self.pipeline.gate = types.SimpleNamespace(reset_batch=lambda: None, evaluate=lambda *args: decision)
         self.parser = types.ModuleType("truememory.ingest.transcript")
         self.parser_calls = []
-        version = types.SimpleNamespace(stable=True, sha256="0" * 64, byte_count=7)
+        version = types.SimpleNamespace(stable=True, sha256="0" * 64, byte_count=7,
+                                        before=types.SimpleNamespace(inode=7))
         message = types.SimpleNamespace(role="human", timestamp="", content="synthetic")
-        self.parser.parse_transcript_outcome = lambda source: self.parser_calls.append(source) or types.SimpleNamespace(messages=[message], status="complete", file_version=version)
+        self.parser.parse_transcript_outcome = lambda source, **options: self.parser_calls.append(source) or types.SimpleNamespace(messages=[message], status="complete", file_version=version)
         self.extractor = types.ModuleType("truememory.ingest.extractor")
         self.extraction_calls = []
         self.extraction = types.SimpleNamespace(facts=[], status="complete")
@@ -504,14 +529,22 @@ class FilesystemCompletionControls(unittest.TestCase):
         second = self.capture()
         self.assertNotEqual(first.key, second.key)
         self.assertFalse(COMPLETION.has_receipt(second))
+        # Receipted bytes are released at the next admission; the receipt stays.
         self.assertTrue(COMPLETION.has_receipt(first))
-        self.assertEqual(first.path.read_bytes(), self.data)
+        self.assertFalse(first.path.exists())
+        self.assertEqual(second.path.read_bytes(), replacement)
 
     def test_limits_backpressure_preserve_original_and_prior_capture(self) -> None:
         first = self.capture()
-        with patch.object(COMPLETION, "MAX_CAPTURE_BYTES", len(self.data) - 1):
-            with self.assertRaises(COMPLETION.CompletionError):
+        with patch.object(COMPLETION, "MAX_SOURCE_BYTES", len(self.data) - 1):
+            with self.assertRaisesRegex(COMPLETION.CompletionError, "capture_limit"):
                 self.capture("other-session")
+        # Above the copy limit the source is referenced, never copied.
+        with patch.object(COMPLETION, "MAX_CAPTURE_BYTES", len(self.data) - 1):
+            referenced = self.capture("referenced-session")
+        self.assertEqual(referenced.metadata["storage"], "source_prefix")
+        self.assertEqual(referenced.path, self.source.resolve())
+        self.assertEqual(len(list((first.directory / "captures").iterdir())), 1)
         self.assertEqual(self.source.read_bytes(), self.data)
         self.assertEqual(first.path.read_bytes(), self.data)
         with patch.object(COMPLETION, "MAX_ACCOUNT_BYTES", len(self.data)):
@@ -533,7 +566,10 @@ class FilesystemCompletionControls(unittest.TestCase):
         state = json.loads((capture.directory / "state.json").read_text(encoding="utf-8"))["captures"][capture.key]
         self.assertEqual(state["status"], "exhausted")
         self.assertEqual(len(state["outcomes"]), 5)
-        self.assertEqual(capture.path.read_bytes(), self.data)
+        # Exhausted bytes are released at once; the outcomes are the evidence.
+        self.assertTrue(state["released"])
+        self.assertFalse(capture.path.exists())
+        self.assertEqual(self.source.read_bytes(), self.data)
         self.assertFalse(COMPLETION.has_receipt(capture))
 
     def test_os_claim_is_exclusive_and_exception_does_not_complete(self) -> None:

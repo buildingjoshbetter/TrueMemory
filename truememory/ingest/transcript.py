@@ -60,9 +60,16 @@ class TranscriptFileVersion:
     before: FileState
     after: FileState
     path_after: FileState | None
+    limit: int | None = None
 
     @property
     def stable(self) -> bool:
+        if self.limit is not None:
+            # A prefix of an append-only file stays fixed while the file grows;
+            # the caller proves these bytes by comparing their hash.
+            return self.byte_count == self.limit and all(
+                state is not None and (state.device, state.inode) == (self.before.device, self.before.inode)
+                and state.size >= self.limit for state in (self.after, self.path_after))
         return self.before == self.after == self.path_after and self.byte_count == self.after.size
 
 
@@ -120,6 +127,8 @@ _CODEX_PHASES = {"commentary", "partial_answer", "final_answer"}
 _CODEX_START = {"task_started", "turn_started"}
 _CODEX_END = {"task_complete", "turn_complete"}
 _CODEX_ANY = object()
+# Payload keys _reconcile_codex reads (lifecycle mode and turn context).
+_CODEX_RECONCILED = ("collaboration_mode_kind", "collaboration_mode", "turn_id")
 _CODEX_WHITE_SPACE = "\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
 _CodexCitation = tuple[tuple[tuple[str, int, int, str], ...], tuple[str, ...]]
 
@@ -813,37 +822,40 @@ def _transcript_path(source: str | Path) -> Path | None:
     return None
 
 
-def parse_transcript_outcome(source: str | Path) -> TranscriptOutcome:
+def parse_transcript_outcome(source: str | Path, *, compact: bool = False,
+                             byte_limit: int | None = None) -> TranscriptOutcome:
     """Parse with source coverage, retaining the legacy API separately.
 
     Explicit Paths are always files, including missing paths. String path
     detection follows the existing parser; other strings are inline content.
     Diagnostics contain categories and counts only. Stable means these
     observations agreed; it does not lock the source against later changes.
+
+    ``compact`` keeps only what extraction reads (see ``_Records``) and streams
+    JSONL files record by record. ``byte_limit`` reads only that prefix.
     """
     try:
         path = _transcript_path(source)
     except OSError:
         return TranscriptOutcome([], "unreadable", error_categories=("source_unreadable",))
 
+    if compact and path is not None and path.suffix.lower() == ".jsonl":
+        streamed = _stream_jsonl_outcome(path, byte_limit)
+        if streamed is not None:
+            return streamed
     version = None
     errors: list[str] = []
     if path is not None:
         try:
             with path.open("rb") as handle:
                 before = FileState.from_stat(os.fstat(handle.fileno()))
-                data = handle.read()
+                data = handle.read() if byte_limit is None else handle.read(byte_limit)
                 after = FileState.from_stat(os.fstat(handle.fileno()))
         except (OSError, ValueError):
             return TranscriptOutcome([], "unreadable", error_categories=("source_unreadable",))
-        try:
-            # Windows stat() and fstat() can give ctime different meanings.
-            # Reopen the pathname to check identity using the same API.
-            with path.open("rb") as identity_handle:
-                path_after = FileState.from_stat(os.fstat(identity_handle.fileno()))
-        except OSError:
-            path_after = None
-        version = TranscriptFileVersion(len(data), hashlib.sha256(data).hexdigest(), before, after, path_after)
+        path_after = _path_state(path)
+        version = TranscriptFileVersion(len(data), hashlib.sha256(data).hexdigest(), before, after, path_after,
+                                        byte_limit)
         if not version.stable:
             errors.append("source_changed_during_read")
         try:
@@ -854,13 +866,136 @@ def parse_transcript_outcome(source: str | Path) -> TranscriptOutcome:
     else:
         text = source
 
-    parsed = _parse_transcript_text_outcome(text.strip(), jsonl=path is not None and path.suffix.lower() == ".jsonl")
-    errors.extend(parsed.error_categories)
+    parsed = _parse_transcript_text_outcome(text.strip(), jsonl=path is not None and path.suffix.lower() == ".jsonl",
+                                            compact=compact)
+    return _with_source_errors(parsed, errors, version)
+
+
+def _path_state(path: Path) -> FileState | None:
+    try:
+        # Windows stat() and fstat() can give ctime different meanings.
+        # Reopen the pathname to check identity using the same API.
+        with path.open("rb") as identity_handle:
+            return FileState.from_stat(os.fstat(identity_handle.fileno()))
+    except OSError:
+        return None
+
+
+def _with_source_errors(parsed: TranscriptOutcome, errors: list[str],
+                        version: TranscriptFileVersion | None) -> TranscriptOutcome:
+    errors = errors + list(parsed.error_categories)
     status = parsed.status
     if errors and status == "complete":
         status = "partial" if parsed.messages else "malformed"
     return TranscriptOutcome(parsed.messages, status, parsed.total_records, parsed.malformed_records,
                              tuple(errors), version, parsed.unrecognized_records)
+
+
+_READ_CHUNK = 1024 * 1024
+_BLANK = object()
+
+
+class _Stream:
+    """Bounded chunked reader that hashes exactly the bytes it reads."""
+
+    def __init__(self, limit: int | None) -> None:
+        self.limit, self.count, self.digest = limit, 0, hashlib.sha256()
+
+    def records(self, handle) -> Iterator[bytes]:
+        buffer = bytearray()
+        scan = 0
+        while self.limit is None or self.count < self.limit:
+            chunk = handle.read(_READ_CHUNK if self.limit is None else min(_READ_CHUNK, self.limit - self.count))
+            if not chunk:
+                break
+            self.count += len(chunk)
+            self.digest.update(chunk)
+            buffer += chunk
+            start = 0
+            while (end := buffer.find(b"\n", scan)) >= 0:
+                yield bytes(buffer[start:end])
+                start = scan = end + 1
+            del buffer[:start]
+            scan = len(buffer)
+        if buffer:
+            yield bytes(buffer)
+
+
+def _decode_record(raw: bytes, errors: set[str]) -> object:
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("utf-8", errors="replace")
+        errors.add("invalid_utf8")
+    if not text.strip():
+        return _BLANK
+    try:
+        return json.loads(text)
+    except ValueError:
+        # Counted as one malformed record, like a JSONL null. ValueError also
+        # covers integer literals beyond the interpreter's digit limit.
+        return None
+
+
+def _stream_jsonl_outcome(path: Path, byte_limit: int | None) -> TranscriptOutcome | None:
+    """Parse JSONL one record at a time; None defers a JSON array to the whole-text reader."""
+    records = _Records(allow_strings=False, compact=True)
+    stream = _Stream(byte_limit)
+    decode_errors: set[str] = set()
+    try:
+        with path.open("rb") as handle:
+            before = FileState.from_stat(os.fstat(handle.fileno()))
+            for raw in stream.records(handle):
+                entry = _decode_record(raw, decode_errors)
+                if entry is _BLANK:
+                    continue
+                if not records.total and raw.lstrip().startswith(b"["):
+                    return None
+                records.add(entry)
+            after = FileState.from_stat(os.fstat(handle.fileno()))
+    except (OSError, ValueError):
+        return TranscriptOutcome([], "unreadable", error_categories=("source_unreadable",))
+    version = TranscriptFileVersion(stream.count, stream.digest.hexdigest(), before, after, _path_state(path),
+                                    byte_limit)
+    errors = ([] if version.stable else ["source_changed_during_read"]) + sorted(decode_errors)
+    return _with_source_errors(records.finish(), errors, version)
+
+
+def has_human_messages(source: Path, minimum: int, *, byte_limit: int | None = None,
+                       substantive: int | None = None) -> bool | None:
+    """Whether ``source`` holds ``minimum`` meaningful human turns, reading no further than needed.
+
+    A source larger than ``substantive`` bytes counts as enough without being
+    parsed, which bounds a hook's cost. Counting keeps no message list. None
+    means the source could not be read, which is not the same as too short.
+    """
+    def meaningful(message: Message | None) -> bool:
+        return message is not None and message.role == "human" and bool(strip_truememory_blocks(message.content).strip())
+
+    try:
+        with source.open("rb") as handle:
+            if substantive is not None and os.fstat(handle.fileno()).st_size > substantive:
+                return True
+            if source.suffix.lower() == ".jsonl":
+                records = _Records(allow_strings=False, compact=True, keep=False)
+                count = 0
+                for raw in _Stream(byte_limit).records(handle):
+                    entry = _decode_record(raw, set())
+                    if entry is _BLANK:
+                        continue
+                    if not records.total and raw.lstrip().startswith(b"["):
+                        break
+                    count += meaningful(records.add(entry))
+                    if count >= minimum:
+                        return True
+                else:
+                    return count >= minimum
+    except (OSError, ValueError):
+        return None
+    outcome = parse_transcript_outcome(source, compact=True, byte_limit=byte_limit)
+    if outcome.status == "unreadable":
+        return None
+    return sum(meaningful(message) for message in outcome.messages) >= minimum
 
 
 def _covered_content_blocks(blocks: list, *, nested: bool = False) -> tuple[list, bool, bool]:
@@ -906,86 +1041,148 @@ def _covered_content_blocks(blocks: list, *, nested: bool = False) -> tuple[list
     return covered, malformed, unrecognized
 
 
-def _parse_transcript_text_outcome(text: str, *, jsonl: bool = False) -> TranscriptOutcome:
+def _parse_transcript_text_outcome(text: str, *, jsonl: bool = False, compact: bool = False) -> TranscriptOutcome:
     if not text:
         return TranscriptOutcome([], "complete")
     if not jsonl and not text.startswith(("[", "{")):
         messages = _parse_plain_text(text)
         return TranscriptOutcome(messages, "complete", len(messages))
+    records = _Records(allow_strings=text.startswith("["), compact=compact)
     if text.startswith("["):
         try:
             entries = json.loads(text)
         except json.JSONDecodeError:
             messages = _parse_plain_text(text)
             return TranscriptOutcome(messages, "salvaged", 1, 1, ("invalid_json_array",))
-        allow_strings = True
+        for entry in entries:
+            records.add(entry)
     else:
-        entries = []
-        allow_strings = False
         for line in text.splitlines():
             if not line.strip():
                 continue
             try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                entries.append(None)
-        # None also represents a syntactically valid but unusable JSONL null;
-        # both count as one malformed record in the loop below.
+                entry = json.loads(line)
+            except ValueError:
+                # None also represents a syntactically valid but unusable JSONL
+                # null; both count as one malformed record.
+                entry = None
+            records.add(entry)
+    return records.finish()
 
-    messages: list[Message] = []
-    malformed = unrecognized = 0
-    native_records: list[tuple[int, _CodexRecord]] = []
-    prompts = _recorded_prompts(entries)
-    for index, entry in enumerate(entries):
-        if isinstance(entry, str) and allow_strings:
-            messages.append(Message(role="unknown", content=entry))
-            continue
+
+class _Records:
+    """Record-at-a-time coverage shared by whole-text and streamed reads.
+
+    ``compact`` drops what extraction never reads: tool and system payloads
+    are emptied and assistant text keeps its first 501 stripped characters,
+    which ``format_for_extraction`` renders the same way. Message order and
+    indices are unchanged, so provenance scopes stay the same. Two known
+    differences: nested tags that ``strip_truememory_blocks`` would leave
+    behind are stripped again, and the streamed reader splits records on
+    newline bytes only, so raw U+2028/U+2029/U+0085 stay inside their record.
+    """
+
+    def __init__(self, *, allow_strings: bool, compact: bool = False, keep: bool = True) -> None:
+        # keep=False only counts: messages are returned but never retained.
+        self.allow_strings, self.compact, self.keep = allow_strings, compact, keep
+        self.messages: list[Message | None] = []
+        self.total = self.malformed = self.unrecognized = 0
+        self.native: list[tuple[int, _CodexRecord]] = []
+        self.prompts: set[str] = set()
+        self.deferred: list[tuple[int, dict]] = []
+
+    def add(self, entry: object) -> Message | None:
+        index = self.total
+        self.total += 1
+        if self.keep:
+            # Recorded prompts only resolve deferred queue records.
+            self.prompts.update(_record_prompts(entry))
+        if isinstance(entry, str) and self.allow_strings:
+            return self._keep(Message(role="unknown", content=entry))
         if not isinstance(entry, dict):
-            malformed += 1
-            continue
+            self.malformed += 1
+            return None
         native = _decode_codex_record(entry)
         if native is not None:
-            native_records.append((index, native))
-            if native.message is not None:
-                messages.append(native.message)
-            continue
+            if self.compact:
+                # Reconciliation reads only these payload keys after decoding;
+                # tool output and other payload bodies need not stay in memory.
+                native.payload = {key: native.payload[key] for key in _CODEX_RECONCILED if key in native.payload}
+                if (native.kind == "response_item" and not native.role and native.projection is None
+                        and not (native.malformed or native.unrecognized or native.errors)):
+                    # A clean tool or reasoning item has no role or projection,
+                    # so reconciliation can neither credit nor reject it.
+                    return None
+            self.native.append((index, native))
+            return self._keep(native.message) if native.message is not None else None
         top_type = entry.get("type") or entry.get("role") or "unknown"
         if not isinstance(top_type, str):
-            malformed += 1
-            continue
-        if isinstance(top_type, str) and top_type in _NON_CONVERSATION_TYPES:
-            continue
-        if _claude_context_record(entry, prompts):
-            continue
+            self.malformed += 1
+            return None
+        if top_type in _NON_CONVERSATION_TYPES:
+            return None
+        if entry.get("type") == "queue-operation" and isinstance(entry.get("content"), str):
+            # Whether it repeats a recorded prompt is known only after every record.
+            if self.keep:
+                self.deferred.append((len(self.messages), entry))
+                self.messages.append(None)
+            return None
+        if _claude_context_record(entry, self.prompts):
+            return None
+        message = self._message(entry)
+        return self._keep(message) if message is not None else None
+
+    def finish(self) -> TranscriptOutcome:
+        for slot, entry in self.deferred:
+            if entry["content"] not in self.prompts:
+                message = self._message(entry)
+                self.messages[slot] = self._compact(message) if message is not None else None
+        messages = [message for message in self.messages if message is not None]
+        native_records = self.native
+        _reconcile_codex(native_records)
+        malformed = self.malformed + sum(record.malformed for _, record in native_records)
+        unrecognized = self.unrecognized + sum(record.unrecognized for _, record in native_records)
+        status = ("partial" if messages else "malformed") if malformed else "partial" if unrecognized else "complete"
+        errors = (("malformed_records",) if malformed else ()) + (("unrecognized_content",) if unrecognized else ())
+        errors += tuple(sorted({category for _, record in native_records for category in record.errors}))
+        return TranscriptOutcome(messages, status, self.total, malformed, errors, unrecognized_records=unrecognized)
+
+    def _message(self, entry: dict) -> Message | None:
         # The supported older tool-call format has name/input instead of
         # content. Keep its existing _extract_message behavior intact.
-        if top_type != "tool_use":
+        if (entry.get("type") or entry.get("role") or "unknown") != "tool_use":
             inner = entry.get("message")
             payload = inner if isinstance(inner, dict) else entry
             if "content" not in payload or not isinstance(payload["content"], (str, list)):
-                malformed += 1
-                continue
+                self.malformed += 1
+                return None
             if isinstance(payload["content"], list):
                 blocks, bad, unknown = _covered_content_blocks(payload["content"])
-                malformed += int(bad)
-                unrecognized += int(unknown)
+                self.malformed += int(bad)
+                self.unrecognized += int(unknown)
                 payload = {**payload, "content": blocks}
                 entry = {**entry, "message": payload} if isinstance(inner, dict) else payload
         try:
-            message = _extract_message(entry)
+            return _extract_message(entry)
         except (TypeError, AttributeError, ValueError):
-            malformed += 1
-            continue
-        if message is not None:
-            messages.append(message)
-    _reconcile_codex(native_records)
-    malformed += sum(record.malformed for _, record in native_records)
-    unrecognized += sum(record.unrecognized for _, record in native_records)
-    status = ("partial" if messages else "malformed") if malformed else "partial" if unrecognized else "complete"
-    errors = (("malformed_records",) if malformed else ()) + (("unrecognized_content",) if unrecognized else ())
-    errors += tuple(sorted({category for _, record in native_records for category in record.errors}))
-    return TranscriptOutcome(messages, status, len(entries), malformed, errors,
-                             unrecognized_records=unrecognized)
+            self.malformed += 1
+            return None
+
+    def _compact(self, message: Message) -> Message:
+        if not self.compact:
+            return message
+        if message.role in ("tool_use", "tool_result", "system"):
+            return Message(message.role, "", message.timestamp, message.tool_name)
+        if message.role == "assistant":
+            return Message(message.role, strip_truememory_blocks(message.content)[:501], message.timestamp,
+                           message.tool_name)
+        return message
+
+    def _keep(self, message: Message) -> Message:
+        message = self._compact(message)
+        if self.keep:
+            self.messages.append(message)
+        return message
 
 
 def parse_transcript(source: str | Path) -> list[Message]:
@@ -1124,17 +1321,21 @@ _CLAUDE_CONTEXT_ATTACHMENTS = frozenset({
 def _recorded_prompts(entries: list[object]) -> set[str]:
     prompts: set[str] = set()
     for entry in entries:
-        if not isinstance(entry, dict) or entry.get("type") != "user" or not isinstance(entry.get("message"), dict):
-            continue
-        content = entry["message"].get("content")
-        if isinstance(content, str):
-            prompts.add(content)
-        elif isinstance(content, list):
-            texts = [block.get("text") for block in content
-                     if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)]
-            prompts.update(texts)
-            prompts.add("".join(texts))
+        prompts.update(_record_prompts(entry))
     return prompts
+
+
+def _record_prompts(entry: object) -> set[str]:
+    if not isinstance(entry, dict) or entry.get("type") != "user" or not isinstance(entry.get("message"), dict):
+        return set()
+    content = entry["message"].get("content")
+    if isinstance(content, str):
+        return {content}
+    if isinstance(content, list):
+        texts = [block.get("text") for block in content
+                 if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)]
+        return {*texts, "".join(texts)}
+    return set()
 
 
 def _claude_context_record(entry: dict, prompts: set[str]) -> bool:

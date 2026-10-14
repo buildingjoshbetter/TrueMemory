@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 import uuid
+import contextlib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,13 @@ MAX_STATE_BYTES = 8 * 1024 * 1024
 CONTEXT_WAIT_SECONDS = 2.0
 MAX_ATTEMPTS = 5
 _HEX = re.compile(r"[a-f0-9]{64}\Z")
+_SNAPSHOT = re.compile(r"[a-f0-9]{64}\.json\Z")
+# Capture states that never need their snapshot for extraction again.
+_SETTLED = {"extraction_complete", "deferred", "superseded"}
+# Context states that need no further recall work or delivery.
+_CONTEXT_DONE = {"ready", "written", "expired"}
+# Released capture entries kept per session, counted in turns from the latest.
+RETAINED_TURNS = 64
 
 
 class BridgeError(ValueError):
@@ -386,17 +394,28 @@ class Store:
                     raise BridgeError("capture backpressure: scope busy")
                 state = self.state()
                 captures, turns = state["captures"], state["turns"]
+                # Free settled snapshots first so a full account can still admit.
+                self.release(state)
+                replaced = []
                 if name not in captures:
-                    _size, count = self.usage()
+                    size, count = self.usage()
+                    if size + len(_encoded(data)) > MAX_SCOPE_BYTES // 2 or count >= MAX_SNAPSHOTS // 2:
+                        # Other sessions' settled snapshots and finished sessions count
+                        # toward the same account; reclaim them well before it is full.
+                        self.release_account()
+                        size, count = self.usage()
                     if count >= MAX_SNAPSHOTS:
                         raise BridgeError("capture backpressure: retained snapshot quota")
                     self.write(self.path / name, data, immutable=True, quota_held=True)
+                    replaced = self.superseded(state, messages)
+                    # A superseded flushed snapshot hands its extraction to this one.
+                    flush = event == "post_llm_call" or any(captures[older].get("flush") for older in replaced)
                     captures[name] = {"turn": turn_key, "state": "captured", "attempts": 0,
-                                      "retry_at": 0.0, "flush": event == "post_llm_call"}
+                                      "retry_at": 0.0, "flush": flush}
                 else:
                     self.snapshot(name)
                 if turn_key not in turns:
-                    turns[turn_key] = {"ordinal": len(turns) + 1, "snapshot": name,
+                    turns[turn_key] = {"ordinal": _next_ordinal(turns), "snapshot": name,
                                        "context_state": "pending", "context_attempts": 0,
                                        "context_retry_at": 0.0, "context_requested": False}
                 turn_state = turns[turn_key]
@@ -404,8 +423,107 @@ class Store:
                     turn_state["context_requested"] = True
                     # Recall always uses original current input, never a post history row.
                     turn_state["snapshot"] = name
+                for older in replaced:
+                    # The new snapshot begins with these exact messages and covers them.
+                    captures[older].update(state="superseded", superseded_by=name)
                 self.save(state, quota_held=True)
+                if replaced:
+                    self.release(state)
+                    self.save(state, quota_held=True)
         return turn_key
+
+    def superseded(self, state: dict[str, object], messages: list[dict[str, str]]) -> list[str]:
+        """Unsettled captures whose messages begin the incoming messages."""
+        names = []
+        for name, item in state["captures"].items():
+            if item.get("state") in _SETTLED | {"processing"} or item.get("released"):
+                continue
+            try:
+                older = self.snapshot(name)["messages"]
+            except (OSError, ValueError):
+                continue
+            if isinstance(older, list) and older == messages[:len(older)]:
+                names.append(name)
+        return names
+
+    def release_account(self) -> None:
+        """Release settled snapshots of this account's other sessions; quota.lock is held."""
+        for entry in os.scandir(self.account_dir):
+            if entry.name == self.key or not _HEX.match(entry.name) or not entry.is_dir(follow_symlinks=False):
+                continue
+            try:
+                session = _identity(_read_owned(Path(entry.path) / "state.json").get("session_id"), "session_id")
+                other = Store(self.root, self.user, self.db, session)
+                if other.key != entry.name:
+                    continue
+                with _lock(other.capture_lock, 0.25) as held:
+                    if held:
+                        state = other.state()
+                        other.release(state)
+                        if other.idle(state) and other.state_path.stat().st_mtime < time.time() - 3600:
+                            # A finished session's residual state is not evidence anyone reads.
+                            other.remove()
+                        else:
+                            other.save(state, quota_held=True)
+            except (OSError, ValueError):
+                continue
+
+    def idle(self, state: dict[str, object]) -> bool:
+        """Every snapshot released, no context owed and no live worker."""
+        worker = state["worker"]
+        return (all(item.get("released") for item in state["captures"].values())
+                and all(turn.get("context_state") in _CONTEXT_DONE or not turn.get("context_requested")
+                        or not _due(turn, "context_") for turn in state["turns"].values())
+                and not (worker.get("state") in {"reserved", "running"}
+                         and (_alive(worker.get("child")) or _alive(worker.get("launcher")))))
+
+    def remove(self) -> None:
+        for entry in os.scandir(self.path):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(entry.path)
+        with contextlib.suppress(OSError):
+            os.rmdir(self.path)
+
+    def release(self, state: dict[str, object]) -> None:
+        """Delete settled snapshots, delivered contexts and unadmitted files.
+
+        Entries stay as evidence. A snapshot whose turn still awaits its context
+        is kept for recall. Only persisted settled states are released, so a
+        crash before the next save never strands live work without its bytes.
+        """
+        turns = state["turns"]
+        latest = max((turn.get("ordinal", 0) for turn in turns.values()), default=0)
+        for turn in turns.values():
+            if turn.get("ordinal", 0) < latest and turn.get("context_state") not in {"written", "expired"}:
+                # Only the hook of the latest turn can still deliver a context.
+                turn["context_state"] = "expired"
+        pending = {turn.get("snapshot") for turn in turns.values()
+                   if turn.get("context_requested") and turn.get("context_state") not in _CONTEXT_DONE
+                   and _due(turn, "context_")}
+        for name, item in state["captures"].items():
+            exhausted = item.get("state") != "processing" and not _due({"attempts": item.get("attempts", 0)})
+            if (item.get("state") in _SETTLED or exhausted) and name not in pending and not item.get("released"):
+                with contextlib.suppress(FileNotFoundError):
+                    (self.path / name).unlink()
+                item["released"] = True
+        for key, turn in turns.items():
+            if turn.get("context_state") in {"written", "expired"}:
+                with contextlib.suppress(FileNotFoundError):
+                    (self.path / f"{key}.context.json").unlink()
+        horizon = latest - RETAINED_TURNS
+        for name in [name for name, item in state["captures"].items()
+                     if item.get("released") and turns.get(item.get("turn"), {}).get("ordinal", 0) < horizon]:
+            # Old released entries are bounded; their bytes are already gone.
+            del state["captures"][name]
+        referenced = {item.get("turn") for item in state["captures"].values()}
+        for key in [key for key, turn in turns.items() if turn.get("ordinal", 0) < horizon and key not in referenced]:
+            # Ordinals continue from the latest kept turn, so old turns can go too.
+            del turns[key]
+        for entry in os.scandir(self.path):
+            # A snapshot written by a capture whose state save then failed.
+            if _SNAPSHOT.match(entry.name) and entry.name not in state["captures"]:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(entry.path)
 
     def flush(self) -> None:
         with _lock(self.capture_lock, 0.25) as allowed:
@@ -415,6 +533,11 @@ class Store:
             for item in state["captures"].values():
                 item["flush"] = True
             self.save(state)
+
+
+def _next_ordinal(turns: dict[str, dict]) -> int:
+    # Older turns are pruned, so count from the latest ordinal, not the length.
+    return max((turn.get("ordinal", 0) for turn in turns.values()), default=0) + 1
 
 
 def _recall(snapshot: dict[str, object], ordinal: int) -> str:
@@ -503,9 +626,9 @@ def _due(item: dict[str, object], prefix: str = "") -> bool:
 
 
 def _work_available(state: dict[str, object]) -> bool:
-    return (any(item.get("context_requested") and item.get("context_state") not in {"ready", "written"}
+    return (any(item.get("context_requested") and item.get("context_state") not in _CONTEXT_DONE
                 and _due(item, "context_") for item in state["turns"].values())
-            or any(item.get("flush") and item.get("state") not in {"extraction_complete", "deferred"}
+            or any(item.get("flush") and item.get("state") not in _SETTLED and not item.get("released")
                    and _due(item) for item in state["captures"].values()))
 
 
@@ -585,11 +708,11 @@ def _worker(store: Store, token: str) -> None:
                     raise BridgeError("worker queue claim busy")
                 current = store.state()
                 contexts = [(key, item) for key, item in current["turns"].items()
-                            if item.get("context_requested") and item.get("context_state") not in {"ready", "written"}
+                            if item.get("context_requested") and item.get("context_state") not in _CONTEXT_DONE
                             and _due(item, "context_")]
                 captures = [(key, item) for key, item in current["captures"].items()
-                            if item.get("flush") and item.get("state") not in {"extraction_complete", "deferred"}
-                            and _due(item)]
+                            if item.get("flush") and item.get("state") not in _SETTLED
+                            and not item.get("released") and _due(item)]
                 if not contexts and not captures:
                     break
                 is_context = bool(contexts)
@@ -628,6 +751,9 @@ def _worker(store: Store, token: str) -> None:
                 if selected[f"{prefix}state"] not in {"ready", "extraction_complete", "deferred"}:
                     _retry(selected, prefix)
                 store.save(current)
+                # Persisted settled snapshots and ready contexts' sources are released.
+                store.release(current)
+                store.save(current)
         with _lock(store.capture_lock, 2.0) as scope_lock:
             if not scope_lock:
                 raise BridgeError("worker final observation busy")
@@ -665,6 +791,28 @@ def _emit_context(store: Store, turn_key: str, output: TextIO) -> bool:
         if time.monotonic() >= deadline:
             return False
         time.sleep(0.01)
+
+
+def _emit_direct_context(store: Store, payload: dict[str, object], output: TextIO) -> bool:
+    """Recall in the hook when the spool cannot admit this turn's snapshot."""
+    extra = payload.get("extra")
+    if not isinstance(extra, dict):
+        return False
+    try:
+        ordinal = _next_ordinal(store.state()["turns"])
+    except (OSError, ValueError):
+        ordinal = 2
+    snapshot = {"user": store.user, "db": store.db, "session_id": store.session,
+                "native_user_message": extra.get("user_message")}
+    context = _recall(snapshot, ordinal)
+    if not isinstance(context, str) or not context or len(context.encode("utf-8")) > MAX_CONTEXT_BYTES:
+        return False
+    rendered = json.dumps({"context": context}, ensure_ascii=False)
+    written = output.write(rendered + "\n")
+    if written is not None and written != len(rendered) + 1:
+        raise BridgeError("incomplete context output write")
+    output.flush()
+    return True
 
 
 def _input(stream: TextIO) -> dict[str, object]:
@@ -708,7 +856,17 @@ def main() -> int:
         session = _identity(payload.get("session_id"), "session_id")
         store = Store(root, args.user, args.db, session)
         if args.event in {"pre_llm_call", "post_llm_call"}:
-            turn_key = store.capture(payload, args.event)
+            try:
+                turn_key = store.capture(payload, args.event)
+            except BridgeError as error:
+                if args.event != "pre_llm_call" or "backpressure" not in str(error):
+                    raise
+                # A full spool must not cost the turn its recall; the worker
+                # still runs so settled snapshots can be released.
+                with contextlib.suppress(OSError, ValueError):
+                    _spawn(store)
+                _emit_direct_context(store, payload, sys.stdout)
+                return 0
         else:
             turn_key = ""
             if args.event != "on_session_start":

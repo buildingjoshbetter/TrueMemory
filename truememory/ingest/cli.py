@@ -292,6 +292,9 @@ def _execute_ingest(args, capture=None):
                 )
                 sys.exit(3)
 
+    # A referenced capture names its append-only source; parse exactly its prefix.
+    limit = {"byte_limit": capture.metadata["byte_count"]} if (
+        capture is not None and capture.metadata.get("storage") == "source_prefix") else {}
     try:
         result = ingest(
             transcript_path=args.transcript,
@@ -301,6 +304,7 @@ def _execute_ingest(args, capture=None):
             llm_config=config,
             session_id=args.session,
             require_complete=True,
+            **limit,
         )
     except RuntimeError as e:
         # auto_detect raises RuntimeError when no LLM backend is available

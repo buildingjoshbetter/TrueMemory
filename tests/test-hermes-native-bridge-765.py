@@ -428,7 +428,7 @@ class HermesNativeBridgeControls(unittest.TestCase):
             self.assertEqual(BRIDGE._run_pipeline(snapshot)["state"], "deferred")
         self.assertEqual(len(calls), 1)
 
-    def test_worker_success_keeps_capture_and_distinct_context_extraction_states(self) -> None:
+    def test_worker_success_releases_settled_snapshot_and_keeps_distinct_states(self) -> None:
         key = self.store.capture(payload(), "pre_llm_call")
         self.store.flush()
         state = self.store.state()
@@ -444,10 +444,14 @@ class HermesNativeBridgeControls(unittest.TestCase):
         self.assertEqual(current["turns"][key]["context_state"], "ready")
         self.assertEqual(current["worker"]["state"], "returned")
         self.assertTrue(all(item["state"] == "extraction_complete" for item in current["captures"].values()))
-        self.assertEqual(captures, {name: (self.store.path / name).read_bytes() for name in captures})
+        # Settled entries stay as evidence; their snapshot bytes are released.
+        self.assertTrue(captures)
+        self.assertTrue(all(current["captures"][name]["released"] for name in captures))
+        self.assertFalse(any((self.store.path / name).exists() for name in captures))
+        self.assertTrue((self.store.path / f"{key}.context.json").is_file())
         self.assertTrue(all(item["attempts"] == 1 for item in current["captures"].values()))
 
-    def test_worker_failure_retry_is_bounded_and_never_evicts_capture(self) -> None:
+    def test_worker_failure_retry_is_bounded_and_releases_only_when_exhausted(self) -> None:
         self.store.capture(payload(post=True), "post_llm_call")
         before = next(iter(self.store.state()["captures"]))
         raw = (self.store.path / before).read_bytes()
@@ -462,11 +466,14 @@ class HermesNativeBridgeControls(unittest.TestCase):
                 self.store.save(state)
                 BRIDGE._worker(self.store, "synthetic-token")
                 self.assertEqual(self.store.state()["captures"][before]["attempts"], attempt + 1)
+                if attempt + 1 < BRIDGE.MAX_ATTEMPTS:
+                    self.assertEqual((self.store.path / before).read_bytes(), raw)
         state = self.store.state()
         self.assertEqual(state["captures"][before]["state"], "failed")
         self.assertGreater(state["captures"][before]["retry_at"], 0)
         self.assertFalse(BRIDGE._due(state["captures"][before]))
-        self.assertEqual((self.store.path / before).read_bytes(), raw)
+        self.assertTrue(state["captures"][before]["released"])
+        self.assertFalse((self.store.path / before).exists())
 
     def test_uncertain_attempt_can_retry_to_observed_complete(self) -> None:
         self.store.capture(payload(post=True), "post_llm_call")
@@ -484,8 +491,10 @@ class HermesNativeBridgeControls(unittest.TestCase):
                 self.store.save(state)
                 BRIDGE._worker(self.store, "synthetic-token")
                 self.assertEqual(self.store.state()["captures"][name]["attempts"], attempt + 1)
+                if attempt == 0:
+                    self.assertEqual((self.store.path / name).read_bytes(), raw)
         self.assertEqual(self.store.state()["captures"][name]["state"], "extraction_complete")
-        self.assertEqual((self.store.path / name).read_bytes(), raw)
+        self.assertFalse((self.store.path / name).exists())
 
     def test_intake_during_worker_is_retained_and_processed_with_separate_budget(self) -> None:
         self.store.capture(payload(post=True), "post_llm_call")

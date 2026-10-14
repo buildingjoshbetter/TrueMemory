@@ -299,6 +299,20 @@ def is_mps_oom(exc: Exception) -> bool:
     )
 
 
+# The allocator keeps freed heaps while its low watermark is 0. Return them
+# after a request once they exceed this, so a long batch is not held idle.
+_MPS_CACHE_TRIM_BYTES = 512 * 1024**2
+
+
+def trim_mps_cache() -> None:
+    """Return cached MPS heaps a long batch left behind."""
+    if _mps_budget is None:
+        return
+    import torch
+    if torch.mps.driver_allocated_memory() - torch.mps.current_allocated_memory() > _MPS_CACHE_TRIM_BYTES:
+        torch.mps.empty_cache()
+
+
 def prefer_float32_on_cpu(model: object) -> object:
     """Run a CPU-resident half-precision model in float32 on macOS.
 

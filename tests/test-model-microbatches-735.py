@@ -619,7 +619,7 @@ def load_order_runtime() -> dict:
             body.append(node)
 
     mps = types.SimpleNamespace(is_mps_oom=lambda error: "out of memory" in str(error),
-                                prefer_float32_on_cpu=lambda model: model,
+                                prefer_float32_on_cpu=lambda model: model, trim_mps_cache=lambda: None,
                                 flush_mps_cache=lambda: None)
 
     def safe_import(name: str, *args: object, **kwargs: object) -> object:

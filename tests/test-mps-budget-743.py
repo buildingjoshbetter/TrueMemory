@@ -285,7 +285,7 @@ class TestFactoryCoverage(BudgetTestCase):
         server = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "ModelServer")
         names = {"_build_embed_model", "_get_reranker", "_mark_sticky_cpu", "_flush_mps_cache",
                  "_check_process_memory", "_construct_model", "_discard_models", "_memory_stage",
-                 "_release_stage"}
+                 "_release_stage", "_construction_slot"}
         server.body = [node for node in server.body if isinstance(node, ast.FunctionDef) and node.name in names
                        or isinstance(node, ast.Assign) and any(
                            isinstance(target, ast.Name) and target.id == "_MODEL_WEIGHT_BYTES"

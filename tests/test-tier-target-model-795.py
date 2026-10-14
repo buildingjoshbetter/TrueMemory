@@ -125,6 +125,7 @@ class TestTierTargetIdentity(unittest.TestCase):
         self.mps.resolve_device = lambda _device: "cpu"
         self.mps.is_mps_oom = lambda error: "MPS backend out of memory" in str(error)
         self.mps.prefer_float32_on_cpu = lambda model: model
+        self.mps.trim_mps_cache = lambda: None
         self.mps.flush_mps_cache = Mock()
         modules = patch.dict(sys.modules, {
             "truememory": package, "truememory.vector_search": self.vector,
@@ -488,6 +489,8 @@ class TestTierTargetIdentity(unittest.TestCase):
         self.mps.resolve_device = lambda _device: "mps"
         with patch.object(self.ms, "time", clock):
             self.request("")
+            # Construction frees dropped models first; only recovery flushes are under test.
+            self.mps.flush_mps_cache.reset_mock()
             failed = self.server._embed_state.model
             failed.oom_once = True
 
