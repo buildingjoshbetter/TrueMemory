@@ -1556,6 +1556,67 @@ class ActivationFairness(unittest.TestCase):
 
 
 
+    def test_fresh_open_keeps_waiting_through_a_drain_gap(self):
+        # A fresh open finds maintenance busy during the reader drain and checks
+        # for an activation exactly when the drain hands maintenance back. The
+        # marker must still be held then (6ea1635), or the open fails.
+        (result,) = run_scenario("""
+            seed(30)
+            stub_models(delay=0.02)
+            from truememory.engine import TrueMemoryEngine
+            from truememory.tier_switch import job, serving
+            from truememory.tier_switch import manager as manager_module
+            from truememory.tier_switch.manager import RebuildManager
+            from truememory.tier_switch.runtime import engine_serving_operation
+            engine = TrueMemoryEngine(DB); engine.get_all(limit=1); drain()
+            held, in_gap, opened = threading.Event(), threading.Event(), threading.Event()
+            worker = [None]
+            def reader():
+                with engine_serving_operation(engine):
+                    held.set(); time.sleep(12)  # Outlasts one drain attempt, so a gap follows.
+            finalize = RebuildManager._finalize_rebuild
+            def finalize_during_a_long_read(self, *args, **kwargs):
+                threading.Thread(target=reader, daemon=True).start()
+                held.wait(10)
+                return finalize(self, *args, **kwargs)
+            RebuildManager._finalize_rebuild = finalize_during_a_long_read
+            class GapClock:
+                def __getattr__(self, name):
+                    return getattr(time, name)
+                def sleep(self, seconds):
+                    if seconds == 0.2 and threading.current_thread() is worker[0]:
+                        in_gap.set()  # Maintenance is released between drain attempts.
+                        opened.wait(10)
+                    time.sleep(seconds)
+            manager_module.time = GapClock()
+            in_progress = job.tier_activation_in_progress
+            def checked_in_the_gap(db_path):
+                in_gap.wait(30)
+                return in_progress(db_path)
+            job.tier_activation_in_progress = checked_in_the_gap
+            manager = switch("edge", join=False)["manager"]
+            worker[0] = manager._active_thread
+            held.wait(60)
+            started = time.monotonic()
+            while not serving._DEFAULT_GATE._waiting_writers and time.monotonic() - started < 30:
+                time.sleep(0.01)  # The activation owns maintenance and drains the reader.
+            fresh = {}
+            def fresh_open():
+                begun = time.monotonic()
+                try:
+                    fresh["rows"] = len(TrueMemoryEngine(DB).get_all(limit=100))
+                except Exception as error:
+                    fresh["rows"] = type(error).__name__
+                fresh["seconds"] = round(time.monotonic() - begun, 1)
+                opened.set()
+            opener = threading.Thread(target=fresh_open); opener.start(); opener.join(60)
+            worker[0].join(60)
+            engine.close(); drain()
+            emit(fresh=fresh, outcome=manager._last_outcome)
+        """)
+        self.assertEqual(result["fresh"].get("rows"), 30, result["fresh"])
+        self.assertEqual(result["outcome"], "complete")
+
     def test_reads_queued_behind_the_activation_writer_are_retried(self):
         (result,) = run_scenario("""
             seed(30)
