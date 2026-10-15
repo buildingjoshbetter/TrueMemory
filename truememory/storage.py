@@ -832,15 +832,18 @@ def newest_backup(db_path: str | Path) -> Path | None:
 # taking an EXCLUSIVE lock on the database file, which every open connection
 # blocks, so no writer can exist then.
 
-# SQLite's default autocheckpoint: 1000 pages of 4 KiB. A checkpoint does not
-# shrink the WAL file (writers reuse it from the start), so its size only says
-# that checkpoints are due; they run at most once a second per process.
+# Guarded connections set journal_size_limit=0, so the writer that restarts the
+# WAL after a complete checkpoint truncates it to what it has just written: the
+# file size is the WAL's current length. From SQLite's default autocheckpoint
+# size (1000 pages of 4 KiB) a commit tries a checkpoint at most every 0.2 s;
+# past 16 MiB on every commit, since writers keep winning the lock; past the
+# 64 MiB cap the committing writer waits up to a second for it.
 _WAL_LIMIT_BYTES = 4 * 1024 * 1024
-_WAL_INTERVAL_SECONDS = 1.0
+_WAL_INTERVAL_SECONDS = 0.2
 _WAL_HOLD_SECONDS = 0.05
-# Past this, busy writers have kept the lock through earlier attempts: wait longer for it.
 _WAL_FORCE_BYTES = 4 * _WAL_LIMIT_BYTES
-_WAL_FORCE_HOLD_SECONDS = 1.0
+_WAL_CAP_BYTES = 16 * _WAL_LIMIT_BYTES
+_WAL_CAP_HOLD_SECONDS = 1.0
 
 
 def wal_reset_affected(version: tuple[int, int, int] | None = None) -> bool:
@@ -867,6 +870,7 @@ def configure_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
     if WAL_RESET_GUARD:
         try:
             conn.execute("PRAGMA wal_autocheckpoint=0")
+            conn.execute("PRAGMA journal_size_limit=0")
         except BaseException:
             conn.close()
             raise
@@ -879,7 +883,7 @@ def wal_checkpoint_stats() -> dict:
 
 
 def checkpoint_if_due(path: str | os.PathLike[str] | None, *, hold_wait: float = _WAL_HOLD_SECONDS) -> bool | None:
-    """Checkpoint a large WAL, at most once a second. Call it outside any transaction.
+    """Checkpoint a WAL past the limit (rate-limited below 16 MiB). Call it outside any transaction.
 
     Returns None when nothing was due, else whether the checkpoint ran. It
     never raises: a skipped checkpoint is retried after a later commit. Only
@@ -895,11 +899,12 @@ def checkpoint_if_due(path: str | os.PathLike[str] | None, *, hold_wait: float =
     key, now = str(path), time.monotonic()
     with _wal_lock:
         _wal_stats["max_wal_bytes"] = max(_wal_stats["max_wal_bytes"], size)
-        if size < _WAL_LIMIT_BYTES or now - _wal_last_attempt.get(key, -_WAL_INTERVAL_SECONDS) < _WAL_INTERVAL_SECONDS:
+        if size < _WAL_LIMIT_BYTES or (size < _WAL_FORCE_BYTES and now - _wal_last_attempt.get(
+                key, -_WAL_INTERVAL_SECONDS) < _WAL_INTERVAL_SECONDS):
             return None
         _wal_last_attempt[key] = now
-    if size >= _WAL_FORCE_BYTES:
-        hold_wait = max(hold_wait, _WAL_FORCE_HOLD_SECONDS)
+    if size >= _WAL_CAP_BYTES:
+        hold_wait = max(hold_wait, _WAL_CAP_HOLD_SECONDS)
     try:
         return protected_checkpoint(path, hold_wait=hold_wait)
     except Exception:

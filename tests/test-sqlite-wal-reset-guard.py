@@ -301,7 +301,7 @@ committed = seq = checkpoints = 0
 problem = None
 stop = time.time() + seconds
 while time.time() < stop and problem is None:
-    roll = r.randrange(100)
+    roll = 0 if mode == "saturate" else r.randrange(100)
     try:
         if roll < 70:
             seq += 1
@@ -311,6 +311,8 @@ while time.time() < stop and problem is None:
             db.execute("UPDATE churn SET blob=randomblob(400) WHERE id IN (?, ?, ?)", tuple(r.randint(1, 300) for _ in range(3)))
             db.execute("COMMIT")
             committed = seq
+            if mode == "saturate":
+                storage.checkpoint_if_due(path)  # What the engine's idle hook does after each commit.
         elif roll < 90:
             if mode == "plain":
                 m = r.randrange(100)
@@ -327,7 +329,7 @@ while time.time() < stop and problem is None:
             problem = str(error)
     except sqlite3.DatabaseError as error:
         problem = str(error)
-    if r.randrange(8) == 0:
+    if mode != "saturate" and r.randrange(8) == 0:
         time.sleep(r.randrange(500) / 1e6)
 autocheckpoint = db.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
 db.close()
@@ -353,7 +355,7 @@ def wal_stress(directory: str, *, processes: int = 4, seconds: float = 8.0, mode
                  "INSERT INTO churn(blob) SELECT randomblob(400) FROM s")
     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     conn.close()
-    env = dict(os.environ, TRUEMEMORY_WAL_GUARD="force") if mode == "guard" else dict(os.environ)
+    env = dict(os.environ, TRUEMEMORY_WAL_GUARD="force") if mode in ("guard", "saturate") else dict(os.environ)
     workers = [subprocess.Popen([sys.executable, "-c", STRESS_WORKER, str(ROOT), path, str(i), str(seconds), mode],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
                for i in range(processes)]
@@ -389,6 +391,15 @@ class GuardedCheckpointStress(unittest.TestCase):
         self.assertEqual(result["autocheckpoint"], {0})
         self.assertGreater(result["commits"], 100)
         self.assertGreater(result["checkpoints"], 20)
+
+    def test_saturated_writers_keep_the_guarded_wal_bounded(self):
+        # Review v5 L-v5-7: with checkpoints at most once a second, saturated
+        # writers grew the guarded WAL to 237-336 MiB (441 MiB here on 3.47.1).
+        with tempfile.TemporaryDirectory() as directory:
+            result = wal_stress(directory, seconds=5.0, mode="saturate")
+        self.assertEqual((result["integrity"], result["problems"], result["lost"]), ("ok", [], {}))
+        self.assertGreater(result["commits"], 1000)
+        self.assertLess(result["max_wal_bytes"], 32 * 1024 * 1024)
 
 
 if __name__ == "__main__":

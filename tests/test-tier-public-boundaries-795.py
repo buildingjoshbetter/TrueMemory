@@ -2026,7 +2026,8 @@ class TestEngineReconnectReceipt(unittest.TestCase):
             with self.assertRaises(Completed):
                 module.open(engine)
         self.connect.assert_called_once_with(engine.db_path.as_uri() + "?mode=rw", uri=True, check_same_thread=False)
-        guard = ["PRAGMA wal_autocheckpoint=0"] if self.modules["storage"].WAL_RESET_GUARD else []
+        guard = (["PRAGMA wal_autocheckpoint=0", "PRAGMA journal_size_limit=0"]
+                 if self.modules["storage"].WAL_RESET_GUARD else [])
         self.assertEqual(queries, guard + ["PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=3000", "PRAGMA foreign_keys=ON",
                                            "PRAGMA synchronous=NORMAL", "PRAGMA cache_size=-64000", "PRAGMA mmap_size=268435456"])
         self.assertIs(engine.conn, self.conn)
