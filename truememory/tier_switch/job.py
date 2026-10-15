@@ -185,20 +185,20 @@ class TierJob:
 
 @contextmanager
 def _observe_file(path: Path) -> Iterator[tuple[int, int]]:
-    # Use fstat on every observation, including a fresh pathname reopen.
+    # Stat the pathname on every observation; never open the file. Closing any
+    # descriptor of the database drops every POSIX lock this process's SQLite
+    # connections hold on it, and older SQLite builds (3.47 and 3.50 at least,
+    # not 3.53) then let another process's close checkpoint and delete the WAL
+    # and -shm that this process still uses: the database corrupts.
     # ctime/mtime/size can change during legitimate writes and are not identity.
-    with ExitStack() as stack:
-        try:
-            flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
-            descriptor = os.open(path, flags)
-            stack.callback(os.close, descriptor)
-            value = os.fstat(descriptor)
-            if (not stat.S_ISREG(value.st_mode) or type(value.st_dev) is not int
-                    or type(value.st_ino) is not int or value.st_dev < 0 or value.st_ino <= 0):
-                raise TierJobIdentityError("Stable database file identity is unavailable")
-        except (OSError, ValueError):
-            raise TierJobIdentityError("Database file identity is unavailable") from None
-        yield value.st_dev, value.st_ino
+    try:
+        value = os.stat(path)
+        if (not stat.S_ISREG(value.st_mode) or type(value.st_dev) is not int
+                or type(value.st_ino) is not int or value.st_dev < 0 or value.st_ino <= 0):
+            raise TierJobIdentityError("Stable database file identity is unavailable")
+    except (OSError, ValueError):
+        raise TierJobIdentityError("Database file identity is unavailable") from None
+    yield value.st_dev, value.st_ino
 
 
 def _connection_path(conn: sqlite3.Connection) -> Path:

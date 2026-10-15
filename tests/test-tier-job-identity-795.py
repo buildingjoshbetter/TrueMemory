@@ -433,30 +433,30 @@ class TestTierJobIdentity(unittest.TestCase):
 
 
 class TestFileObservation(unittest.TestCase):
-    def test_same_handle_api_ignores_mutable_and_cross_api_ctime(self) -> None:
+    # Never open the database: closing any descriptor of it drops every POSIX
+    # lock this process's SQLite connections hold on the file.
+    NO_OPEN = AssertionError("File observation must not open the database")
+
+    def test_identity_comes_from_stat_and_ignores_mutable_ctime(self) -> None:
         api = load_modules()["tier_switch.job"]
         value = types.SimpleNamespace(st_mode=stat.S_IFREG, st_dev=5, st_ino=19, st_ctime_ns=10)
-        with patch.object(api.os, "open", return_value=81) as opened, patch.object(api.os, "fstat", return_value=value) as fstat, patch.object(api.os, "close") as closed:
+        with patch.object(api.os, "stat", return_value=value) as stated, patch.object(api.os, "open", side_effect=self.NO_OPEN):
             with api._observe_file(SYNTHETIC_PATH) as first:
                 value.st_ctime_ns = 999
             with api._observe_file(SYNTHETIC_PATH) as second:
                 self.assertEqual(first, second)
         self.assertEqual(first, (5, 19))
-        self.assertEqual(fstat.call_count, 2)
-        self.assertEqual(opened.call_args.args, (SYNTHETIC_PATH, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)))
-        self.assertEqual(closed.call_count, 2)
-        self.assertEqual(closed.call_args.args, (81,))
+        self.assertEqual([call.args for call in stated.call_args_list], [(SYNTHETIC_PATH,)] * 2)
 
-    def test_unsupported_identity_and_open_errors_fail_closed_without_path(self) -> None:
+    def test_unsupported_identity_and_stat_errors_fail_closed_without_path(self) -> None:
         api = load_modules()["tier_switch.job"]
         for mode, device, inode in ((stat.S_IFDIR, 5, 19), (stat.S_IFIFO, 5, 19), (stat.S_IFREG, 5, 0), (stat.S_IFREG, -1, 19), (stat.S_IFREG, True, 19)):
             value = types.SimpleNamespace(st_mode=mode, st_dev=device, st_ino=inode)
-            with patch.object(api.os, "open", return_value=81), patch.object(api.os, "fstat", return_value=value), patch.object(api.os, "close") as closed:
+            with patch.object(api.os, "stat", return_value=value), patch.object(api.os, "open", side_effect=self.NO_OPEN):
                 with self.assertRaises(api.TierJobIdentityError):
                     with api._observe_file(SYNTHETIC_PATH):
                         self.fail("Unsupported identity must not yield")
-            self.assertEqual(closed.call_count, 1)
-        with patch.object(api.os, "open", side_effect=OSError("/private/synthetic.db")):
+        with patch.object(api.os, "stat", side_effect=OSError("/private/synthetic.db")):
             with self.assertRaises(api.TierJobIdentityError) as caught:
                 with api._observe_file(SYNTHETIC_PATH):
                     self.fail("Failed file observation must not yield")
@@ -466,22 +466,47 @@ class TestFileObservation(unittest.TestCase):
         api = load_modules()["tier_switch.job"]
         value = types.SimpleNamespace(st_mode=stat.S_IFREG, st_dev=5, st_ino=19)
         for sentinel in (Cancelled("synthetic"), OSError("synthetic"), ValueError("synthetic")):
-            with patch.object(api.os, "open", return_value=81), patch.object(api.os, "fstat", return_value=value), patch.object(api.os, "close") as closed:
+            with patch.object(api.os, "stat", return_value=value):
                 with self.assertRaises(type(sentinel)) as raised:
                     with api._observe_file(SYNTHETIC_PATH):
                         raise sentinel
                 self.assertIs(raised.exception, sentinel)
-                self.assertEqual(closed.call_count, 1)
 
-    def test_fstat_cancellation_and_failure_close_the_readonly_descriptor(self) -> None:
+    def test_stat_cancellation_propagates_and_failure_fails_closed(self) -> None:
         api = load_modules()["tier_switch.job"]
         for sentinel in (Cancelled("synthetic"), OSError("synthetic")):
-            with patch.object(api.os, "open", return_value=81), patch.object(api.os, "fstat", side_effect=sentinel), patch.object(api.os, "close") as closed:
+            with patch.object(api.os, "stat", side_effect=sentinel):
                 expected = Cancelled if isinstance(sentinel, Cancelled) else api.TierJobIdentityError
                 with self.assertRaises(expected):
                     with api._observe_file(SYNTHETIC_PATH):
                         self.fail("Failed observation must not yield")
-                self.assertEqual(closed.call_args.args, (81,))
+
+    def test_observing_keeps_this_process_sqlite_locks(self) -> None:
+        # GPUBox D1/D2: the identity checks opened and closed the database, so
+        # on SQLite 3.47/3.50 another process's close then checkpointed and
+        # deleted the WAL and -shm this process still used (3.53 refuses).
+        import subprocess
+        import tempfile
+        api = load_modules()["tier_switch.job"]
+        with tempfile.TemporaryDirectory(prefix="truememory-synthetic-locks-") as directory:
+            path = Path(directory) / "synthetic.db"
+            conn = sqlite3.connect(path, isolation_level=None)
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("CREATE TABLE t(v)")
+                conn.execute("INSERT INTO t VALUES (1)")
+                with api._observe_file(path):
+                    pass
+                subprocess.run([sys.executable, "-c", "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); "
+                                "c.execute('INSERT INTO t VALUES (2)'); c.commit(); c.close()", str(path)], check=True)
+                self.assertTrue(Path(f"{path}-wal").exists())
+                conn.execute("INSERT INTO t VALUES (3)")
+                fresh = sqlite3.connect(path)
+                self.assertEqual(fresh.execute("SELECT group_concat(v) FROM t").fetchone()[0], "1,2,3")
+                self.assertEqual(fresh.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+                fresh.close()
+            finally:
+                conn.close()
 
 
 @unittest.skipUnless(os.environ.get("TRUEMEMORY_TIER_JOB_FILE_TEST") == "1", "opt-in synthetic file DB gate only")
