@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -191,20 +192,80 @@ class DatabaseFileAccess(unittest.TestCase):
     # Opening and closing a database file outside SQLite drops every POSIX lock
     # the process holds on it; on SQLite 3.47/3.50 another process's close then
     # deleted the WAL in use (GPUBox D1/D2). Copies also miss WAL content.
-    DATABASE_MODULES = ("storage.py", "engine.py", "maintenance.py", "vector_search.py",
-                        "client.py", "rebuild_source.py", "tier_switch")
+    # Copies of files that are not databases (MEMORY.md before its migration).
+    ALLOWED_COPIES = {("truememory/ingest/migrate_memory_md.py", "memory_md_path")}
+    COPIES = {"copy", "copy2", "copyfile", "copytree", "move"}
+    OPENS = {"open", "read_bytes", "read_text", "write_bytes", "write_text"}
+    DATABASE_NAME = re.compile(r"\b_?(db_path|database_path|DB_PATH|db_file)\b|memories\.db|-wal\b|-shm\b")
 
-    def test_database_modules_never_copy_or_move_files(self):
+    def test_no_module_copies_moves_or_opens_database_files(self):
+        # Every module, every import style (import shutil as x, from shutil
+        # import copy2 as y), and direct opens whose target names a database.
         found = []
-        for name in self.DATABASE_MODULES:
-            paths = sorted((ROOT / "truememory" / name).rglob("*.py")) if name == "tier_switch" else [ROOT / "truememory" / name]
-            for path in paths:
-                source = path.read_text(encoding="utf-8")
-                for node in ast.walk(ast.parse(source)):
-                    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                            and isinstance(node.func.value, ast.Name) and node.func.value.id == "shutil"):
-                        found.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+        for path in sorted((ROOT / "truememory").rglob("*.py")):
+            relative = path.relative_to(ROOT).as_posix()
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source)
+            modules, functions = set(), set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    modules.update(alias.asname or alias.name for alias in node.names if alias.name == "shutil")
+                elif isinstance(node, ast.ImportFrom) and node.module == "shutil":
+                    functions.update(alias.asname or alias.name for alias in node.names if alias.name in self.COPIES)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                target = ast.get_source_segment(source, node.args[0]) if node.args else ""
+                copy = ((isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                         and func.value.id in modules and func.attr in self.COPIES)
+                        or (isinstance(func, ast.Name) and func.id in functions))
+                if copy and (relative, target) not in self.ALLOWED_COPIES:
+                    found.append(f"{relative}:{node.lineno} copies {target}")
+                opened = (isinstance(func, ast.Name) and func.id == "open") or (
+                    isinstance(func, ast.Attribute) and func.attr in self.OPENS)
+                if opened:
+                    receiver = ast.get_source_segment(source, func.value) if isinstance(func, ast.Attribute) else ""
+                    if self.DATABASE_NAME.search(f"{receiver} {target}"):
+                        found.append(f"{relative}:{node.lineno} opens {receiver or target}")
         self.assertEqual(found, [])
+
+    def test_static_scan_catches_aliases_and_direct_header_reads(self):
+        # The two mutants review v5 found slipped past the previous guards.
+        mutants = {"from shutil import copy2 as _copy\n_copy(str(source), str(dest))\n": "copies",
+                   "import shutil as _sh\n_sh.copy2(db_path, backup)\n": "copies",
+                   "header = open(_DB_PATH, 'rb').read(16)\n": "opens"}
+        for mutant, kind in mutants.items():
+            with self.subTest(mutant=mutant), tempfile.TemporaryDirectory() as directory:
+                package = Path(directory) / "truememory"
+                package.mkdir()
+                (package / "mutant.py").write_text(mutant, encoding="utf-8")
+                with patch.dict(globals(), {"ROOT": Path(directory)}):
+                    with self.assertRaises(AssertionError) as caught:
+                        self.test_no_module_copies_moves_or_opens_database_files()
+                self.assertIn(kind, str(caught.exception))
+
+    def test_suite_guard_flags_product_code_opening_a_connected_database(self):
+        # conftest's audit hook fails any test whose truememory code opens the
+        # file of a database this process is connected to.
+        guard = next(module for name, module in sys.modules.items()
+                     if name.endswith("conftest") and hasattr(module, "_database_file_opens"))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "connected.db"
+            conn = sqlite3.connect(path)
+            conn.execute("CREATE TABLE t(v)")
+            namespace = {}
+            reader = os.path.join(directory, "truememory", "status.py")
+            exec(compile("def header(path):\n    with open(path, 'rb') as stream:\n        return stream.read(16)\n",
+                         reader, "exec"), namespace)
+            try:
+                namespace["header"](str(path))
+                caught = list(guard._database_file_opens)
+            finally:
+                del guard._database_file_opens[:]
+                conn.close()
+        self.assertEqual(len(caught), 1)
+        self.assertIn("connected.db from " + reader, caught[0])
 
     def test_tier_backup_includes_committed_wal_content(self):
         from truememory.tier_switch import manager
