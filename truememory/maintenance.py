@@ -1193,7 +1193,12 @@ def _owned_transaction(
 ) -> Iterator[None]:
     if conn.in_transaction:
         raise RuntimeError("Maintenance runner requires a clean transaction boundary")
-    conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+    try:
+        conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+    except sqlite3.OperationalError:
+        if on_rollback is not None and not conn.in_transaction:
+            on_rollback()  # Nothing started: as clean as a confirmed rollback.
+        raise
     completed = False
     automatic_rollback = False
     try:
