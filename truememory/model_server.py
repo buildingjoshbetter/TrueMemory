@@ -104,6 +104,10 @@ class _ProcessMemoryRefused(RuntimeError):
     """Current process memory cannot admit another model stage."""
 
 
+class _FastLaneNotReady(_ProcessMemoryRefused):
+    """The retired fast-lane clone is reloading; take the bounded fallback."""
+
+
 def _array_metadata(shape: tuple, encoded: str = "") -> dict:
     return {"__ndarray__": encoded, "dtype": "float32", "shape": list(shape)}
 
@@ -477,6 +481,16 @@ class ModelServer:
         self._fast_model_id: str | None = None
         self._fast_generation: object = None
         self._fast_lock = threading.Lock()
+        # The clone costs 2.4 GB in float32 but only serves single queries while
+        # batch work holds the main model. Release it after this many seconds
+        # without such contention (0 keeps it); a retired residency then
+        # rebuilds in the background so no query waits on the reload.
+        self._fast_idle_seconds = _admission_setting("TRUEMEMORY_FAST_LANE_IDLE_SECONDS", 600, 0, 2**31 - 1)
+        # Monotonic time of the last contention; every clone publication stamps it.
+        self._fast_last_used = 0.0
+        self._fast_retired_generation: object = None
+        # At most one background rebuild; set and cleared under _residency_lock.
+        self._fast_rebuild: threading.Thread | None = None
         # CPU constructions are admitted and built one at a time, so two
         # builds cannot both pass a size check sized for one. Innermost lock.
         self._construction_lock = threading.Lock()
@@ -930,22 +944,31 @@ class ModelServer:
         # Custom CrossEncoder constructors preserve num_labels=None; their
         # output may contain several labels per pair. Inspect its real shape.
 
-    def _retire_stale_fast_encoder(self) -> None:
-        """Drop an idle stale clone; an active owner retries this on release."""
+    def _retire_stale_fast_encoder(self, *, idle_at: float | None = None) -> bool:
+        """Drop an idle stale clone; an active owner retries this on release.
+
+        With *idle_at* (a monotonic time), a current clone is dropped too once
+        it has gone the idle period without contention and no batch holds the
+        main model. Its residency then rebuilds in the background.
+        """
         if not self._fast_lock.acquire(blocking=False):
-            return
+            return False
         release_fast = True
         try:
             with self._residency_lock:
                 state = self._embed_state
-                if self._fast_encoder is None or (
-                    state is not None and self._fast_generation is state.generation
-                ):
+                current = state is not None and self._fast_generation is state.generation
+                idle = (idle_at is not None and current and self._fast_idle_seconds > 0
+                        and idle_at - self._fast_last_used >= self._fast_idle_seconds
+                        and not self._inference_lock.locked())
+                if self._fast_encoder is None or (current and not idle):
                     # Unlock before publication can change the generation, so
                     # a following invalidation cannot miss an idle stale cache.
                     self._fast_lock.release()
                     release_fast = False
-                    return
+                    return False
+                if idle:
+                    self._fast_retired_generation = self._fast_generation
                 retired = self._fast_encoder
                 self._fast_encoder = None
                 self._fast_model_id = None
@@ -956,6 +979,27 @@ class ModelServer:
         finally:
             if release_fast:
                 self._fast_lock.release()
+        if idle:
+            # The clone is a reference cycle; collect it so its float32 weights
+            # return to the allocator now rather than at the next full collection.
+            self._discard_models()
+            log.info("Fast-lane CPU encoder released after %ds without contention",
+                     self._fast_idle_seconds)
+        return True
+
+    def _retire_idle_fast_encoder(self, now: float | None = None) -> bool:
+        return self._retire_stale_fast_encoder(idle_at=time.monotonic() if now is None else now)
+
+    def _fast_lane_retirer(self) -> None:
+        idle = self._fast_idle_seconds
+        if not idle:
+            return
+        interval = min(60.0, max(1.0, idle / 4))
+        while not self._stopped.wait(interval):
+            try:
+                self._retire_idle_fast_encoder()
+            except Exception:
+                log.warning("Fast-lane idle release failed; retrying later", exc_info=True)
 
     def _publish_embed_state(self, state: _EmbedState | None) -> None:
         """Caller owns the main state lock; retire without waiting for fast work."""
@@ -1105,8 +1149,11 @@ class ModelServer:
         """CPU-resident encoder for the single-text fast lane (issue #577).
 
         Loaded lazily on the first single-text request that finds the global
-        lock busy, then cached for that main residency. Caller must hold
-        ``self._fast_lock`` through inference and retire stale cache on release.
+        lock busy, then cached for that main residency until it goes unused
+        for ``TRUEMEMORY_FAST_LANE_IDLE_SECONDS``. A released residency reloads
+        in the background and raises ``_FastLaneNotReady`` meanwhile. Caller
+        must hold ``self._fast_lock`` through inference and retire stale cache
+        on release.
 
         Vector-space parity (panel rounds 1-2): the fast encoder is ONLY
         ever built from the main path's actual loaded identity, taken from
@@ -1142,33 +1189,101 @@ class ModelServer:
                     from truememory.embedding_target import EmbeddingTargetError
                     raise EmbeddingTargetError("Fast encoder cache does not match the serving target")
                 return self._fast_encoder
+            if self._fast_retired_generation is generation:
+                # This residency's clone was released while idle. Reload it in
+                # the background; this query takes the bounded fallback meanwhile.
+                self._start_fast_rebuild(model_id, generation)
+                raise _FastLaneNotReady("Model server busy: the fast-lane copy is reloading")
 
             self._fast_encoder = None
             self._fast_model_id = None
             self._fast_generation = None
-            self._check_process_memory("fast embed construction", deadline)
-            model, _ = self._construct_model(
-                "embed", "fast embed construction", "cpu", deadline,
-                lambda selected: self._build_embed_model(model_id, selected),
-                model_identity=(model_id, 256, "legacy"), known_bytes=self._MODEL_WEIGHT_BYTES.get(model_id, 0),
-            )
-            # A changed generation, including A -> B -> A, must not publish this
-            # construction. Its already-captured request may still finish on it.
-            if self._residency_lock.acquire(blocking=False):
-                try:
-                    state = self._embed_state
-                    if state is not None and state.generation is generation:
-                        self._fast_encoder = model
-                        self._fast_model_id = model_id
-                        self._fast_generation = generation
-                finally:
-                    self._residency_lock.release()
-                    state = None
+            model = self._build_fast_encoder(model_id, deadline)
+            self._publish_fast_encoder(model, model_id, generation, blocking=False)
             log.info(
                 "Fast-lane CPU encoder loaded (tier=%s, model=%s) — single-text "
                 "requests no longer queue behind batch work", tier, model_id,
             )
             return model
+
+    def _build_fast_encoder(self, model_id: str, deadline: _RequestDeadline | None) -> object:
+        """Construct a CPU clone; the caller's allocation session charges its size."""
+        self._check_process_memory("fast embed construction", deadline)
+        model, _ = self._construct_model(
+            "embed", "fast embed construction", "cpu", deadline,
+            lambda selected: self._build_embed_model(model_id, selected),
+            model_identity=(model_id, 256, "legacy"), known_bytes=self._MODEL_WEIGHT_BYTES.get(model_id, 0),
+        )
+        return model
+
+    def _publish_fast_encoder(self, model: object, model_id: str, generation: object, *, blocking: bool) -> bool:
+        """Cache a clone for its residency; the caller owns ``_fast_lock``.
+
+        A changed generation, including A -> B -> A, must not publish this
+        construction. Its already-captured request may still finish on it.
+        """
+        if not self._residency_lock.acquire(blocking=blocking):
+            return False
+        try:
+            state = self._embed_state
+            if state is None or state.generation is not generation:
+                return False
+            self._fast_encoder = model
+            self._fast_model_id = model_id
+            self._fast_generation = generation
+            self._fast_last_used = time.monotonic()
+            if self._fast_retired_generation is generation:
+                self._fast_retired_generation = None
+            return True
+        finally:
+            self._residency_lock.release()
+            state = None
+
+    def _start_fast_rebuild(self, model_id: str, generation: object) -> None:
+        """Start at most one background reload of a released clone."""
+        with self._residency_lock:
+            if self._fast_rebuild is not None or self._stopped.is_set():
+                return
+            thread = threading.Thread(target=self._rebuild_fast_encoder, args=(model_id, generation),
+                                      name="fast-lane-rebuild", daemon=True)
+            self._fast_rebuild = thread
+        # Counted as in-flight work: idle shutdown and cleanup wait for the load.
+        with self._activity_lock:
+            self._inflight += 1
+        try:
+            thread.start()
+        except RuntimeError:
+            with self._residency_lock:
+                self._fast_rebuild = None
+            with self._activity_lock:
+                self._inflight -= 1
+            log.warning("Cannot start the fast-lane reload; single queries keep the bounded fallback",
+                        exc_info=True)
+
+    def _rebuild_fast_encoder(self, model_id: str, generation: object) -> None:
+        # No request owns this load; only server shutdown stops it.
+        deadline = _RequestDeadline(None, _TransportRequest(0, math.inf, self._stopped, started=True))
+        model = None
+        published = False
+        try:
+            with self._memory_scope():
+                model = self._build_fast_encoder(model_id, deadline)
+            with deadline.locked(self._fast_lock):
+                published = self._publish_fast_encoder(model, model_id, generation, blocking=True)
+            if published:
+                log.info("Fast-lane CPU encoder reloaded in the background (model=%s)", model_id)
+        except (_ProcessMemoryRefused, _RequestDeadlineExceeded) as error:
+            log.info("Fast-lane reload not admitted: %s", error)
+        except Exception:
+            log.warning("Fast-lane reload failed; single queries keep the bounded fallback", exc_info=True)
+        finally:
+            model = None
+            if not published:
+                self._discard_models()
+            with self._residency_lock:
+                self._fast_rebuild = None
+            with self._activity_lock:
+                self._inflight -= 1
 
     def _get_reranker(
         self, model_name: str | None = None, deadline: _RequestDeadline | None = None,
@@ -1301,6 +1416,8 @@ class ModelServer:
             finally:
                 self._inference_lock.release()
 
+        # Contention: this query found the main model busy. It keeps the clone.
+        self._fast_last_used = time.monotonic()
         was_started = deadline.transport.started if deadline.transport is not None else False
         fast_owned = False
         wait_for_main = False
@@ -1315,7 +1432,8 @@ class ModelServer:
                             model = (self._get_fast_encoder(tier, deadline=deadline) if expected_target is None else
                                      self._get_fast_encoder(tier, deadline=deadline, expected_target=expected_target))
                         except _ProcessMemoryRefused:
-                            # Only the second copy does not fit; a process over budget stays refused.
+                            # The second copy does not fit or is reloading; a process
+                            # over budget stays refused.
                             self._check_process_memory("fast embed fallback", deadline)
                             wait_for_main = True
                         deadline.check()
@@ -2180,6 +2298,8 @@ class ModelServer:
 
         idle_thread = threading.Thread(target=self._idle_checker, daemon=True)
         idle_thread.start()
+        if self._fast_idle_seconds:
+            threading.Thread(target=self._fast_lane_retirer, name="fast-lane-retirer", daemon=True).start()
 
         log.info(
             "Model server started: pid=%d %s idle_timeout=%ds",
@@ -2227,6 +2347,7 @@ class ModelServer:
         self._fast_encoder = None
         self._fast_model_id = None
         self._fast_generation = None
+        self._fast_retired_generation = None
         self._token = None
         gc.collect()
         if getattr(self, "_memory_owner", None) is not None:
