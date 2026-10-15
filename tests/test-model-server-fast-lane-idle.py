@@ -242,11 +242,12 @@ def test_rebuild_still_requires_room_for_the_clone(monkeypatch):
         rss.rss = 500 * MIB
         batch = Batch(server)
         try:
-            with pytest.raises(ms._ProcessMemoryRefused):
-                _contended(server)
+            # With room, the reload is admitted and serves this same query.
+            response = _contended(server)
             _settle(server)
         finally:
             batch.end()
+        assert response["ok"] is True and response["vectors"][0][0] == 2.0
         assert builds.devices == ["cpu", "cpu"] and server._fast_encoder is builds.refs[1]()
     finally:
         _close(server)
@@ -344,3 +345,68 @@ def test_retire_does_not_take_a_clone_from_an_in_flight_request(lane):
     used = server._fast_last_used
     assert server._retire_idle_fast_encoder(now=used + 599) is False
     assert server._retire_idle_fast_encoder(now=used + 600) is True
+
+
+def test_reload_finishing_within_the_bounded_wait_serves_the_query(lane):
+    server, builds = lane
+    _first_clone(server, builds)
+    assert server._retire_idle_fast_encoder(now=server._fast_last_used + 600)
+    builds.gate = threading.Event()
+    builds.started.clear()
+    threading.Timer(0.3, builds.gate.set).start()
+    batch = Batch(server)
+    try:
+        started = time.monotonic()
+        response = _contended(server)
+        elapsed = time.monotonic() - started
+    finally:
+        builds.gate.set()
+        batch.end()
+        _settle(server)
+    assert response is not None and response["ok"] is True
+    assert response["vectors"][0][0] == 2.0 and elapsed < 1.0, elapsed
+
+
+def test_fast_lane_paths_never_touch_the_accelerator_cache(lane, monkeypatch):
+    server, builds = lane
+
+    def flush():
+        raise AssertionError("MPS cache emptied outside the inference lock")
+
+    monkeypatch.setattr(server, "_discard_models", flush)
+    clone = _first_clone(server, builds)
+    assert server._retire_idle_fast_encoder(now=server._fast_last_used + 600)
+    assert clone() is None
+    batch = Batch(server)
+    try:
+        assert _contended(server)["ok"] is True
+        _settle(server)
+    finally:
+        batch.end()
+    assert server._fast_encoder is builds.refs[1]()
+
+
+def test_cpu_float32_weights_live_in_returnable_mappings(monkeypatch):
+    torch = pytest.importorskip("torch")
+    import mmap
+
+    from truememory import mps_utils
+
+    mapped = []
+    real = mmap.mmap
+
+    def recording(*args, **kwargs):
+        mapped.append(args[1] if len(args) > 1 else kwargs.get("length"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mmap, "mmap", recording)
+    monkeypatch.setattr(mps_utils.sys, "platform", "darwin")
+    model = torch.nn.Sequential(torch.nn.Embedding(64, 8), torch.nn.Linear(8, 4)).to(torch.bfloat16)
+    model.device = torch.device("cpu")  # as SentenceTransformer reports
+    expected = [parameter.detach().float().clone() for parameter in model.parameters()]
+    assert mps_utils.prefer_float32_on_cpu(model) is model
+    parameters = list(model.parameters())
+    assert [parameter.dtype for parameter in parameters] == [torch.float32] * 3
+    assert all(torch.equal(parameter, value) for parameter, value in zip(parameters, expected))
+    assert sorted(mapped) == sorted(parameter.numel() * 4 for parameter in parameters)
+    assert model(torch.tensor([[1, 2]])).dtype == torch.float32

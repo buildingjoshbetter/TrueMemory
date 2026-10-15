@@ -330,8 +330,29 @@ def prefer_float32_on_cpu(model: object) -> object:
     import torch
     parameter = next(iter(model.parameters()), None)
     if parameter is not None and parameter.dtype in (torch.bfloat16, torch.float16):
-        model.float()
+        if callable(getattr(model, "_apply", None)):
+            model._apply(_mapped_float32)
+        else:
+            model.float()
     return model
+
+
+def _mapped_float32(tensor: object) -> object:
+    """Float32 copy of a half-precision tensor in an anonymous mapping.
+
+    macOS keeps freed large malloc blocks resident (about 1.2 GB of a dropped
+    2.4 GB Qwen copy stayed in footprint on macOS 26). A mapping is returned
+    to the system as soon as the model that owns it is collected.
+    """
+    import mmap
+    import torch
+    if tensor.dtype not in (torch.bfloat16, torch.float16):
+        return tensor
+    count = tensor.numel()
+    if not count:
+        return tensor.float()
+    mapped = torch.frombuffer(mmap.mmap(-1, count * 4), dtype=torch.float32, count=count)
+    return mapped.view(tensor.shape).copy_(tensor)
 
 
 def flush_mps_cache() -> None:

@@ -107,6 +107,8 @@ class _ProcessMemoryRefused(RuntimeError):
 class _FastLaneNotReady(_ProcessMemoryRefused):
     """The retired fast-lane clone is reloading; take the bounded fallback."""
 
+    fast_lane_reloading = True
+
 
 def _array_metadata(shape: tuple, encoded: str = "") -> dict:
     return {"__ndarray__": encoded, "dtype": "float32", "shape": list(shape)}
@@ -981,8 +983,8 @@ class ModelServer:
                 self._fast_lock.release()
         if idle:
             # The clone is a reference cycle; collect it so its float32 weights
-            # return to the allocator now rather than at the next full collection.
-            self._discard_models()
+            # return to the system now rather than at the next full collection.
+            self._collect_models()
             log.info("Fast-lane CPU encoder released after %ds without contention",
                      self._fast_idle_seconds)
         return True
@@ -1015,19 +1017,31 @@ class ModelServer:
         from truememory.mps_utils import flush_mps_cache
         flush_mps_cache()
 
+    @staticmethod
+    def _collect_models() -> None:
+        """Free dropped CPU models without touching the accelerator.
+
+        Emptying the MPS cache while another thread commits MPS work aborts
+        the process, so paths outside the inference lock only collect.
+        """
+        import gc as collector
+        collector.collect()
+
     def _construct_model(
         self, kind: str, stage: str, device: str | None, deadline: _RequestDeadline | None,
         build: Callable[[str | None], object], *, model_identity: tuple[str, int, str] | None = None,
-        known_bytes: int = 0,
+        known_bytes: int = 0, flush_accelerator: bool = True,
     ) -> tuple[object, str | None]:
         """Build within the memory budget on *device*, else on CPU.
 
         An MPS OOM while building degrades *kind* to CPU for the server
         lifetime, as an inference OOM does (issue #577), so a model that
-        cannot fit is not rebuilt and refused on every request.
+        cannot fit is not rebuilt and refused on every request. Callers that
+        do not own the main inference lock pass ``flush_accelerator=False``.
         """
+        discard = self._discard_models if flush_accelerator else self._collect_models
         # Dropped models are reference cycles; free them before admitting this one.
-        self._discard_models()
+        discard()
         selected = device
         while True:
             resident = selected
@@ -1057,7 +1071,7 @@ class ModelServer:
                         self._check_process_memory(stage + " completion", deadline)
                     except BaseException:
                         model = None
-                        self._discard_models()
+                        discard()
                         raise
                     self._release_stage(stage)
                     return model, selected
@@ -1213,6 +1227,7 @@ class ModelServer:
             "embed", "fast embed construction", "cpu", deadline,
             lambda selected: self._build_embed_model(model_id, selected),
             model_identity=(model_id, 256, "legacy"), known_bytes=self._MODEL_WEIGHT_BYTES.get(model_id, 0),
+            flush_accelerator=False,
         )
         return model
 
@@ -1279,7 +1294,7 @@ class ModelServer:
         finally:
             model = None
             if not published:
-                self._discard_models()
+                self._collect_models()
             with self._residency_lock:
                 self._fast_rebuild = None
             with self._activity_lock:
@@ -1355,7 +1370,7 @@ class ModelServer:
 
     def _handle_fast_embed(
         self, texts: list, tier: str, deadline: _RequestDeadline | None = None,
-        *, expected_target: "EmbeddingTarget | None" = None,
+        *, expected_target: "EmbeddingTarget | None" = None, serve_reload: bool = True,
     ) -> dict | None:
         """Single-text fast lane (issue #577).
 
@@ -1421,6 +1436,7 @@ class ModelServer:
         was_started = deadline.transport.started if deadline.transport is not None else False
         fast_owned = False
         wait_for_main = False
+        reloading = False
         try:
             try:
                 with deadline.locked(self._fast_lock):
@@ -1431,9 +1447,10 @@ class ModelServer:
                         try:
                             model = (self._get_fast_encoder(tier, deadline=deadline) if expected_target is None else
                                      self._get_fast_encoder(tier, deadline=deadline, expected_target=expected_target))
-                        except _ProcessMemoryRefused:
+                        except _ProcessMemoryRefused as error:
                             # The second copy does not fit or is reloading; a process
                             # over budget stays refused.
+                            reloading = serve_reload and getattr(error, "fast_lane_reloading", False)
                             self._check_process_memory("fast embed fallback", deadline)
                             wait_for_main = True
                         deadline.check()
@@ -1463,8 +1480,19 @@ class ModelServer:
                 # stays refused so hook recall falls back to keyword search promptly.
                 remaining = deadline.remaining()
                 wait = 1.0 if remaining is None else max(0.0, min(1.0, remaining))
-                if not self._inference_lock.acquire(timeout=wait):
-                    raise _ProcessMemoryRefused("Model server busy: the main model is serving a long batch")
+                ends = time.monotonic() + wait
+                while not self._inference_lock.acquire(timeout=min(0.05, wait) if reloading else wait):
+                    state = self._embed_state
+                    if (reloading and state is not None and self._fast_encoder is not None
+                            and self._fast_generation is state.generation):
+                        # The reload finished within the same bounded wait; serve from it once.
+                        state = None
+                        return self._handle_fast_embed(texts, tier, deadline, expected_target=expected_target,
+                                                       serve_reload=False)
+                    state = None
+                    wait = ends - time.monotonic()
+                    if wait <= 0:
+                        raise _ProcessMemoryRefused("Model server busy: the main model is serving a long batch")
                 self._inference_lock.release()
                 return None
             return (response if expected_target is not None else
