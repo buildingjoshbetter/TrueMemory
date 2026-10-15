@@ -384,8 +384,10 @@ class TrueMemoryEngine:
         self.conn: sqlite3.Connection | None = None
         self.ready = False
         self.stats: dict = {}
+        from truememory.storage import WAL_RESET_GUARD, checkpoint_if_due
         from truememory.tier_switch.runtime import ConnectionWriteLock
-        self._write_lock = ConnectionWriteLock(self)
+        path = self.db_path  # Not self: the lock must not keep the engine alive.
+        self._write_lock = ConnectionWriteLock(self, on_idle=(lambda: checkpoint_if_due(path)) if WAL_RESET_GUARD else None)
         self._init_lock = threading.Lock()
         self._backfill_guard = threading.Lock()
         self._backfill_thread: threading.Thread | None = None
@@ -630,7 +632,8 @@ class TrueMemoryEngine:
         identity = (str(path), stat.st_dev, stat.st_ino)
         if identity != receipt[:3] or _HAS_VECTOR != receipt[8]:
             return None
-        candidate = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, check_same_thread=False)
+        from truememory.storage import configure_connection
+        candidate = configure_connection(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, check_same_thread=False))
         retained = False
         try:
             # A receipt from a connection without extension loading must not
@@ -1848,8 +1851,9 @@ class TrueMemoryEngine:
 
         def open_existing(path: Path) -> sqlite3.Connection:
             from truememory.storage import _validate_db_path
+            from truememory.storage import configure_connection
             uri = Path(_validate_db_path(path)).as_uri() + "?mode=rw"
-            candidate = sqlite3.connect(uri, uri=True, check_same_thread=False)
+            candidate = configure_connection(sqlite3.connect(uri, uri=True, check_same_thread=False))
             try:
                 candidate.row_factory = None
                 candidate.execute("PRAGMA journal_mode=WAL")

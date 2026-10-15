@@ -820,6 +820,8 @@ class MaintenanceCoordinator:
                             conn.close()
                     finally:
                         conn = None
+                    from truememory.storage import checkpoint_if_due
+                    checkpoint_if_due(self.path)
         except BaseException as error:
             # Thread boundary: expose only a category, never source-bearing
             # exception text or a traceback through threading.excepthook.
@@ -1766,7 +1768,8 @@ def _open_style_database(path: Path, cancel: threading.Event | None = None) -> s
     conn = None
     progress = False
     try:
-        conn = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True)
+        from truememory.storage import configure_connection
+        conn = configure_connection(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True))
         conn.row_factory = None
         for sql in (f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}", "PRAGMA foreign_keys=ON",
                     "PRAGMA synchronous=NORMAL", "PRAGMA cache_size=-64000", "PRAGMA mmap_size=268435456"):

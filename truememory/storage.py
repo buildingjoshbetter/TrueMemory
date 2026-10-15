@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -815,6 +816,142 @@ def newest_backup(db_path: str | Path) -> Path | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# SQLite WAL-reset bug guard
+# ---------------------------------------------------------------------------
+# SQLite 3.7.0 through 3.51.2 (fixed in 3.51.3, backported to 3.50.7 and
+# 3.44.6) can lose committed pages when a checkpoint starts while another
+# connection's commit restarts the WAL: the checkpoint misses the restart and
+# marks the new frames as already copied (https://sqlite.org/wal.html).
+#
+# A WAL restart only happens in a writer holding SQLite's WAL write lock. On an
+# affected build no TrueMemory connection checkpoints automatically; a
+# checkpoint runs only while a sibling connection holds that lock through
+# BEGIN IMMEDIATE, so no writer in any process can restart the WAL during it.
+# Closing the last connection still checkpoints; SQLite does that only after
+# taking an EXCLUSIVE lock on the database file, which every open connection
+# blocks, so no writer can exist then.
+
+# SQLite's default autocheckpoint: 1000 pages of 4 KiB. A checkpoint does not
+# shrink the WAL file (writers reuse it from the start), so its size only says
+# that checkpoints are due; they run at most once a second per process.
+_WAL_LIMIT_BYTES = 4 * 1024 * 1024
+_WAL_INTERVAL_SECONDS = 1.0
+_WAL_HOLD_SECONDS = 0.05
+# Past this, busy writers have kept the lock through earlier attempts: wait longer for it.
+_WAL_FORCE_BYTES = 4 * _WAL_LIMIT_BYTES
+_WAL_FORCE_HOLD_SECONDS = 1.0
+
+
+def wal_reset_affected(version: tuple[int, int, int] | None = None) -> bool:
+    version = sqlite3.sqlite_version_info if version is None else version
+    if version >= (3, 51, 3):
+        return False
+    return not ((3, 50, 7) <= version < (3, 51, 0) or (3, 44, 6) <= version < (3, 45, 0))
+
+
+# TRUEMEMORY_WAL_GUARD=force exercises the guarded path on a fixed build (tests).
+WAL_RESET_GUARD = wal_reset_affected() or os.environ.get("TRUEMEMORY_WAL_GUARD") == "force"
+
+_wal_lock = threading.Lock()
+_wal_running: set[str] = set()
+_wal_stats = {"checkpoints": 0, "skipped_busy": 0, "failed": 0, "max_wal_bytes": 0}
+_wal_last_attempt: dict[str, float] = {}
+
+
+def configure_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
+    """Wrap every TrueMemory sqlite3.connect: no automatic checkpoints on affected builds.
+
+    Applied before any other statement; closes the connection if it fails.
+    """
+    if WAL_RESET_GUARD:
+        try:
+            conn.execute("PRAGMA wal_autocheckpoint=0")
+        except BaseException:
+            conn.close()
+            raise
+    return conn
+
+
+def wal_checkpoint_stats() -> dict:
+    with _wal_lock:
+        return dict(_wal_stats, affected=WAL_RESET_GUARD, sqlite_version=sqlite3.sqlite_version)
+
+
+def checkpoint_if_due(path: str | os.PathLike[str] | None, *, hold_wait: float = _WAL_HOLD_SECONDS) -> bool | None:
+    """Checkpoint a large WAL, at most once a second. Call it outside any transaction.
+
+    Returns None when nothing was due, else whether the checkpoint ran. It
+    never raises: a skipped checkpoint is retried after a later commit. Only
+    os.stat touches the files: opening and closing a database, WAL or -shm
+    file in this process would drop every POSIX lock SQLite holds on it.
+    """
+    if not WAL_RESET_GUARD or path is None or str(path) == ":memory:":
+        return None
+    try:
+        size = os.stat(f"{path}-wal").st_size
+    except OSError:
+        return None
+    key, now = str(path), time.monotonic()
+    with _wal_lock:
+        _wal_stats["max_wal_bytes"] = max(_wal_stats["max_wal_bytes"], size)
+        if size < _WAL_LIMIT_BYTES or now - _wal_last_attempt.get(key, -_WAL_INTERVAL_SECONDS) < _WAL_INTERVAL_SECONDS:
+            return None
+        _wal_last_attempt[key] = now
+    if size >= _WAL_FORCE_BYTES:
+        hold_wait = max(hold_wait, _WAL_FORCE_HOLD_SECONDS)
+    try:
+        return protected_checkpoint(path, hold_wait=hold_wait)
+    except Exception:
+        with _wal_lock:
+            _wal_stats["failed"] += 1
+        log.debug("Protected WAL checkpoint failed", exc_info=True)
+        return False
+
+
+def protected_checkpoint(path: str | os.PathLike[str], *, hold_wait: float = _WAL_HOLD_SECONDS) -> bool:
+    """Copy the WAL into the database while holding the WAL write lock elsewhere.
+
+    The holder takes the write lock without waiting longer than ``hold_wait``
+    and the checkpoint is skipped when a writer has it. Both connections are
+    private to this call and run in autocommit mode.
+    """
+    key = str(Path(path).absolute())
+    with _wal_lock:
+        if key in _wal_running:
+            return False
+        _wal_running.add(key)
+    try:
+        uri = Path(key).as_uri() + "?mode=rw"
+        holder = sqlite3.connect(uri, uri=True, timeout=hold_wait, isolation_level=None)
+        try:
+            holder.execute("PRAGMA wal_autocheckpoint=0")
+            try:
+                holder.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError:  # A writer has the lock; a later commit retries.
+                with _wal_lock:
+                    _wal_stats["skipped_busy"] += 1
+                return False
+            try:
+                checkpointer = sqlite3.connect(uri, uri=True, timeout=0, isolation_level=None)
+                try:
+                    if checkpointer.in_transaction:
+                        raise RuntimeError("Checkpoint connection opened inside a transaction")
+                    checkpointer.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+                finally:
+                    checkpointer.close()
+            finally:
+                holder.execute("ROLLBACK")
+        finally:
+            holder.close()
+        with _wal_lock:
+            _wal_stats["checkpoints"] += 1
+        return True
+    finally:
+        with _wal_lock:
+            _wal_running.discard(key)
+
+
 def _backup_database(db_path: Path) -> Path | None:
     """Create a complete backup of the database including WAL/SHM files.
 
@@ -838,7 +975,7 @@ def _backup_database(db_path: Path) -> Path | None:
     # restore is a single `cp backup db` with no sibling files.
     src = dst = None
     try:
-        src = sqlite3.connect(str(db_path))
+        src = configure_connection(sqlite3.connect(str(db_path)))
         dst = sqlite3.connect(str(backup))
         with dst:
             src.backup(dst)
@@ -1035,7 +1172,7 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
     # misleading raw error on the first WAL write.
     _check_dir_writable(db_path)
 
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn = configure_connection(sqlite3.connect(str(db_path), check_same_thread=False))
     # S1-2 (#688): the DB file holds every stored memory (PII). Restrict it to
     # owner-only so it isn't world-readable on a multi-user host. No-op on
     # Windows (POSIX modes don't apply) and for :memory:.

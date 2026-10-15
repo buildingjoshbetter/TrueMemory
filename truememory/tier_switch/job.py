@@ -286,7 +286,8 @@ def open_tier_job(job: TierJob) -> Iterator[sqlite3.Connection]:
             identity = stack.enter_context(_observe_file(job.database_path))
             if identity != job.file_identity:
                 raise TierJobIdentityError("Background database file changed before reopen")
-            conn = sqlite3.connect(job.database_path.as_uri() + "?mode=rw", uri=True)
+            from truememory.storage import configure_connection
+            conn = configure_connection(sqlite3.connect(job.database_path.as_uri() + "?mode=rw", uri=True))
             stack.callback(_close_connection, conn)
             check_tier_job(conn, job)
         except (OSError, ValueError, sqlite3.Error, MaintenanceUnavailableError):

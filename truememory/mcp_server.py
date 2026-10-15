@@ -1608,6 +1608,9 @@ def truememory_status(status_id: int = 0) -> str:
         includes availability, freshness, coverage and the last attempt.
         Every status is ``ok`` or ``degraded``; clustering's separate state
         distinguishes ``unknown``, ``pending`` and ``deferred`` readiness.
+      - ``sqlite_version`` and ``sqlite_wal_reset_affected``: whether this
+        SQLite build has the WAL-reset bug, and ``sqlite_wal_checkpoints``,
+        this process's guarded checkpoints, busy skips and largest WAL seen.
 
     When everything is healthy every subsystem shows ``"ok"``.
     When a component silently degrades (reranker OOM, HyDE outage,
@@ -1640,6 +1643,14 @@ def truememory_status(status_id: int = 0) -> str:
             result[key] = None if memory is None else getattr(memory._engine, report)()
         except Exception as e:
             result[key] = {"status": "unavailable", "error": type(e).__name__}
+
+    # SQLite builds before 3.51.3 can corrupt a WAL database under concurrent
+    # writers and checkpoints; TrueMemory then checkpoints only under a write lock.
+    from truememory.storage import wal_checkpoint_stats, wal_reset_affected
+    wal = wal_checkpoint_stats()
+    result["sqlite_version"] = wal.pop("sqlite_version")
+    result["sqlite_wal_reset_affected"] = wal_reset_affected()
+    result["sqlite_wal_checkpoints"] = wal
 
     return json.dumps(result, indent=2, default=str)
 

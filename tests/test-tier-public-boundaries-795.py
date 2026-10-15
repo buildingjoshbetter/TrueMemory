@@ -544,7 +544,8 @@ class TestPublicBoundaries(unittest.TestCase):
         # Controlled opens run the idempotent create_db upgrades (recorded here);
         # they never go through the legacy schema factory.
         self.modules["storage"] = types.SimpleNamespace(
-            DEFAULT_BUSY_TIMEOUT_MS=10000, _apply_schema_migrations=lambda conn, path: migrated.append((conn, path)))
+            DEFAULT_BUSY_TIMEOUT_MS=10000, _apply_schema_migrations=lambda conn, path: migrated.append((conn, path)),
+            configure_connection=lambda conn: conn)
         # This synthetic store has no native vec0 pair; journal coherence is
         # covered by the liveness suite on real create_db databases.
         coherence = []
@@ -1635,7 +1636,8 @@ class TestEngineReconnectReceipt(unittest.TestCase):
         enter_context(self, patch.object(Path, "stat", return_value=self.stat))
         enter_context(self, patch.object(Path, "mkdir"))
         enter_context(self, patch.object(Path, "chmod"))
-        self.modules["storage"] = definitions("storage.py", {"DatabaseOpenError", "_integrity_message", "_validate_db_path"},
+        self.modules["storage"] = definitions("storage.py", {"DatabaseOpenError", "_integrity_message", "_validate_db_path",
+                                                             "wal_reset_affected", "WAL_RESET_GUARD", "configure_connection"},
             self.namespace(sqlite3=sqlite3, Path=Path, os=os, newest_backup=lambda path: None))
         namespace = self.namespace(sqlite3=sqlite3, Path=Path, logger=logging.getLogger("synthetic-reconnect"),
             _HAS_VECTOR=vectors, DEFAULT_BUSY_TIMEOUT_MS=3000,

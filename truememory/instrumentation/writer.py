@@ -34,6 +34,7 @@ _emit_count = 0
 _last_prune_time: float = 0.0
 _conn_lock = threading.Lock()
 _conn: sqlite3.Connection | None = None
+_db_path: str | None = None
 _schema_created = False
 
 
@@ -45,7 +46,7 @@ def _resolve_db_path() -> str:
 
 def _get_connection() -> sqlite3.Connection:
     """Get or create the instrumentation DB connection (thread-safe)."""
-    global _conn, _schema_created
+    global _conn, _schema_created, _db_path
     if _conn is not None and _schema_created:
         return _conn
     with _conn_lock:
@@ -53,13 +54,15 @@ def _get_connection() -> sqlite3.Connection:
             return _conn
         db_path = _resolve_db_path()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(
+        from truememory.storage import WAL_RESET_GUARD, configure_connection
+        conn = configure_connection(sqlite3.connect(
             db_path,
             timeout=DEFAULT_BUSY_TIMEOUT_MS / 1000.0,
             check_same_thread=False,
-        )
+        ))
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA wal_autocheckpoint=1000")
+        if not WAL_RESET_GUARD:  # Affected builds checkpoint only through emit().
+            conn.execute("PRAGMA wal_autocheckpoint=1000")
         conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("""
@@ -79,6 +82,7 @@ def _get_connection() -> sqlite3.Connection:
         conn.commit()
         _conn = conn
         _schema_created = True
+        _db_path = db_path
         return conn
 
 
@@ -95,6 +99,8 @@ def emit(signal: str, data: dict | None = None) -> None:
         )
         conn.commit()
         _prune_if_needed(conn)
+        from truememory.storage import checkpoint_if_due
+        checkpoint_if_due(_db_path)
     except Exception:
         dlog("emit failed for signal=%s", signal)
 

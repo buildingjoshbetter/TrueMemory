@@ -69,12 +69,13 @@ def _get_db_path() -> Path:
 
 def _open_db(db_path: Path | None = None, *, initialize: bool = False) -> sqlite3.Connection:
     """Validate existing journal storage before any connection or schema writes."""
+    from truememory.storage import configure_connection
     from truememory.storage import DEFAULT_BUSY_TIMEOUT_MS, _validate_db_path
     from truememory.tier_switch.activation import read_activation_state
 
     path = Path(_validate_db_path(db_path or _get_db_path()))
-    conn = (sqlite3.connect(path, check_same_thread=False) if initialize else
-            sqlite3.connect(path.absolute().as_uri() + "?mode=rw", uri=True, check_same_thread=False))
+    conn = configure_connection(sqlite3.connect(path, check_same_thread=False) if initialize else
+                     sqlite3.connect(path.absolute().as_uri() + "?mode=rw", uri=True, check_same_thread=False))
     try:
         objects = conn.execute(
             "SELECT 1 FROM main.sqlite_master WHERE name NOT LIKE 'sqlite_%' LIMIT 1",
@@ -911,11 +912,14 @@ class RebuildManager:
 
         Never on the job connection: its source fence counts that connection's
         changes. A busy database skips a beat instead of stalling the encode.
+        Between pages the job holds no transaction, so the WAL is bounded here.
         """
+        from truememory.storage import checkpoint_if_due, configure_connection
         last = -_HEARTBEAT_SECONDS
 
         def heartbeat(processed: int, total: int, metrics: dict) -> None:
             nonlocal last
+            checkpoint_if_due(path)
             if time.monotonic() - last >= _HEARTBEAT_SECONDS:
                 last = time.monotonic()
                 eta = throttler.get_eta_seconds(max(0, total - processed))
@@ -925,7 +929,8 @@ class RebuildManager:
                 except Exception:
                     ram_pct = None
                 try:
-                    status = sqlite3.connect(Path(path).absolute().as_uri() + "?mode=rw", uri=True, timeout=0.25)
+                    status = configure_connection(sqlite3.connect(Path(path).absolute().as_uri() + "?mode=rw", uri=True,
+                                                       timeout=0.25))
                     try:
                         with status:
                             status.execute(

@@ -246,6 +246,8 @@ class Harness:
                 DEFAULT_BUSY_TIMEOUT_MS=1,
                 _validate_db_path=lambda p: p,
                 create_db=Mock(side_effect=AssertionError("initialization forbidden")),
+                configure_connection=lambda conn: conn,
+                checkpoint_if_due=lambda path, **kwargs: None,
             ),
         }
         self.modules["truememory"] = types.SimpleNamespace(

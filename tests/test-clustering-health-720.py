@@ -413,6 +413,9 @@ class TestMCPClusteringHealth(HealthFixture):
         modules = {
             "truememory.maintenance": MAINTENANCE,
             "truememory.engine": types.SimpleNamespace(get_vectors_load_error=lambda: "SyntheticVectorError"),
+            "truememory.storage": types.SimpleNamespace(
+                wal_reset_affected=lambda: False,
+                wal_checkpoint_stats=lambda: {"sqlite_version": "3.53.3", "checkpoints": 0}),
             "truememory.tier_switch.manager": types.SimpleNamespace(RebuildManager=types.SimpleNamespace(
                 get_instance=lambda: types.SimpleNamespace(get_status=lambda status_id: {"status_id": status_id}))),
         }

@@ -56,12 +56,14 @@ class ConnectionWriteLock:
     Re-entrant, so a public body that holds it can run nested Engine paths.
     """
 
-    def __init__(self, engine: object) -> None:
+    def __init__(self, engine: object, *, on_idle: Callable[[], None] | None = None) -> None:
         import weakref
         self._engine = weakref.ref(engine)
         self._lock = threading.RLock()
         self._owner: tuple[int, object, bool] | None = None
         self._depth = 0
+        # Called after the outermost release when no transaction is open.
+        self._on_idle = on_idle
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
         acquired = self._lock.acquire(blocking, timeout)
@@ -105,9 +107,17 @@ class ConnectionWriteLock:
         if owner is None or owner[0] != threading.get_ident():
             raise RuntimeError("Only the Engine writer owner can release its lock")
         self._depth -= 1
+        idle = False
         if not self._depth:
             self._owner = None
+            if self._on_idle is not None:
+                try:  # Read while still owning the connection (never another thread's step).
+                    idle = owner[1] is not None and not owner[1].in_transaction
+                except sqlite3.ProgrammingError:
+                    idle = False
         self._lock.release()
+        if idle:
+            self._on_idle()
 
     def locked(self) -> bool:
         return self._owner is not None
@@ -1218,7 +1228,8 @@ def _open_serving_connection_at_path(
     with maintenance_owner(path):
         if not path.exists():
             return legacy_factory(path)
-        conn = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, check_same_thread=False)
+        from truememory.storage import configure_connection
+        conn = configure_connection(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, check_same_thread=False))
         try:
             present = conn.execute(
                 "SELECT 1 FROM main.sqlite_master WHERE name='metadata' COLLATE NOCASE"
