@@ -83,7 +83,7 @@ class ConnectionWriteLock:
                 borrowed = False
             self._owner = (threading.get_ident(), conn, borrowed)
             self._depth = 1
-            _held_writers().append(self)
+            self.held_by_this_thread().append(self)
         except BaseException:
             self._lock.release()
             raise
@@ -111,7 +111,7 @@ class ConnectionWriteLock:
         idle = False
         if not self._depth:
             self._owner = None
-            held = _held_writers()
+            held = self.held_by_this_thread()
             if self in held:
                 held.remove(self)
             if self._on_idle is not None:
@@ -126,22 +126,22 @@ class ConnectionWriteLock:
     def locked(self) -> bool:
         return self._owner is not None
 
+    _held = threading.local()
+
+    @classmethod
+    def held_by_this_thread(cls) -> list:
+        """The engine locks the current thread holds, outermost first."""
+        held = getattr(cls._held, "locks", None)
+        if held is None:
+            held = cls._held.locks = []
+        return held
+
     def __enter__(self) -> ConnectionWriteLock:
         self.acquire()
         return self
 
     def __exit__(self, *exc: object) -> None:
         self.release()
-
-
-_writer_local = threading.local()
-
-
-def _held_writers() -> list:
-    held = getattr(_writer_local, "held", None)
-    if held is None:
-        held = _writer_local.held = []
-    return held
 
 
 @contextmanager
@@ -154,7 +154,7 @@ def released_connection_locks() -> Iterator[None]:
     another thread's statements. Callers have no cursor mid-iteration.
     """
     released = []
-    for lock in list(_held_writers()):
+    for lock in list(ConnectionWriteLock.held_by_this_thread()):
         owner = lock._owner
         if owner is None or owner[0] != threading.get_ident():
             continue
