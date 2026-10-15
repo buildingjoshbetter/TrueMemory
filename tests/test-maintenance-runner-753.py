@@ -278,7 +278,8 @@ class TestRunnerTransactions(RunnerFixture):
 
         result = self.run_layer(spec._replace(build=build))
         self.assertEqual(observed, ["running"])
-        self.assertEqual(result.outcome, "failed")  # Stale WAL snapshot cannot publish.
+        # A stale WAL snapshot cannot publish; that contention defers the layer.
+        self.assertEqual((result.outcome, result.error_category), ("deferred", "WriterBusy"))
         self.assertEqual(self.output(), [])
         self.assertIsNone(self.state().successful_revision)
 
@@ -295,7 +296,9 @@ class TestRunnerTransactions(RunnerFixture):
 
         result = self.run_layer(spec._replace(build=build), force=True)
         state = self.state()
-        self.assertEqual(result.outcome, "failed")
+        # The stale snapshot cannot publish; the commit is contention, so the
+        # layer is deferred (not failed) and stays eligible for the next pass.
+        self.assertEqual((result.outcome, result.error_category), ("deferred", "WriterBusy"))
         self.assertEqual(state.attempted_revision, 1)
         self.assertEqual(state.source.revision, 2)
         self.assertEqual(state.successful_revision, 1)
