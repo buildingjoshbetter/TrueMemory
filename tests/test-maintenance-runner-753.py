@@ -585,5 +585,67 @@ class TestRunnerMigrationAndAdapters(RunnerFixture):
         self.assertEqual(self.conn.execute("SELECT outcome FROM maintenance_layers WHERE layer='clusters'").fetchone(), ("pending",))
 
 
+
+class TestRunnerContention(RunnerFixture):
+    """Round v6 M6-1: maintenance layers ended "failed" on "database is locked"."""
+
+    def racing_spec(self, layer: str = "summaries", races: int = 1):
+        other = self.open_db()
+        raced = []
+
+        def build(conn: sqlite3.Connection) -> None:
+            # The build reads, a foreground add commits meanwhile, then the
+            # build's first write must upgrade a stale snapshot: SQLITE_BUSY.
+            count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
+            if len(raced) < races:
+                raced.append(True)
+                self.add(1, other)
+            conn.execute("DELETE FROM synthetic_output WHERE layer=?", (layer,))
+            conn.execute("INSERT INTO synthetic_output VALUES (?,?)", (layer, count))
+
+        def output_count(conn: sqlite3.Connection) -> int:
+            return conn.execute("SELECT count(*) FROM synthetic_output WHERE layer=?", (layer,)).fetchone()[0]
+
+        return MAINTENANCE.LayerSpec(layer, "synthetic_" + layer, lambda: self.dependency, build, output_count)
+
+    def test_a_commit_during_the_build_defers_and_the_next_pass_publishes(self) -> None:
+        self.add(30)
+        spec = self.racing_spec()
+        first = self.run_layer(spec)
+        self.assertEqual((first.outcome, first.error_category), ("deferred", "WriterBusy"))
+        self.assertNotIn(self.state(spec).outcome, {"failed", "running"})
+        self.assertEqual(self.output(), [])
+        second = self.run_layer(spec)
+        self.assertEqual((second.outcome, second.error_category), ("success", None))
+        self.assertEqual(self.output(), [("summaries", 31)])
+        self.assertEqual(self.state(spec).outcome, "success")
+
+    def test_maintenance_writes_wait_for_the_writer_instead_of_failing(self) -> None:
+        # Another connection holds the write lock briefly; the diagnostic and
+        # publication wait with the busy timeout rather than failing at once.
+        self.add(30)
+        self.conn.execute("PRAGMA busy_timeout=5000")
+        other = self.open_db()
+        other.execute("BEGIN IMMEDIATE")
+        release = threading.Timer(0.5, other.rollback)
+        release.start()
+        try:
+            result = self.run_layer()
+        finally:
+            release.join()
+        self.assertEqual(result.outcome, "success")
+
+    def test_a_failed_layer_logs_one_warning_naming_it(self) -> None:
+        self.add(30)
+        def explode(conn: sqlite3.Connection) -> None:
+            raise ValueError("synthetic builder fault")
+        with self.assertLogs(level="WARNING") as logs:
+            result = self.run_layer(self.spec("contradictions", explode))
+        self.assertEqual((result.outcome, result.error_category), ("failed", "ValueError"))
+        warnings = [record.getMessage() for record in logs.records if record.levelname == "WARNING"]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("contradictions", warnings[0])
+
+
 if __name__ == "__main__":
     unittest.main()

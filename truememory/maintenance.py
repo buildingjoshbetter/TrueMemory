@@ -51,7 +51,8 @@ class LayerDeferredError(RuntimeError):
     """A narrowly categorized transient condition establishes no attempt baseline."""
 
     def __init__(self, message: str, *, category: str = "ModelBusy") -> None:
-        if category not in {"ModelBusy", "StyleCancelled", "StyleSourceChanged", "StyleWriterBusy", "StyleTriggersUnsupported"}:
+        if category not in {"ModelBusy", "WriterBusy", "StyleCancelled", "StyleSourceChanged", "StyleWriterBusy",
+                            "StyleTriggersUnsupported"}:
             raise ValueError("Unsupported layer deferral category")
         self.category = category
         super().__init__(message)
@@ -1253,7 +1254,12 @@ def _record_attempt(
     source, dependency = state.source, state.dependency
     if dependency.deferred:
         raise ValueError("Transient deferral cannot be recorded as a durable attempt")
-    transaction = _borrowed_transaction if borrowed else _owned_transaction
+    if borrowed:
+        transaction = _borrowed_transaction
+    else:
+        def transaction(conn: sqlite3.Connection, **options: object):
+            # Take the writer first: a read-then-write upgrade fails at once once anyone commits.
+            return _owned_transaction(conn, immediate=True, **options)
     with (transaction(conn, on_rollback=lambda: None) if canonical_source else transaction(conn)):
         if state.layer == "style_vectors":
             conn.execute("UPDATE maintenance_layers SET layer=layer WHERE 0")
@@ -1299,7 +1305,7 @@ def _restore_deferred_attempt(
     current_owner = getattr(_thread_owners, "owners", {}).get(owner.path)
     if current_owner != owner or owner.process_id != os.getpid():
         raise MaintenanceBusyError("Maintenance ownership changed before diagnostic restoration")
-    with _owned_transaction(conn, on_rollback=(lambda: None) if protect_rollback else None):
+    with _owned_transaction(conn, on_rollback=(lambda: None) if protect_rollback else None, immediate=True):
         conn.execute("UPDATE maintenance_layers SET layer=layer WHERE 0")
         if canonical_source:
             _validate_routed_style_source(conn)
@@ -1424,7 +1430,7 @@ def run_layers(
                 try:
                     with _owned_transaction(conn, on_rollback=(
                         confirm_diagnostic_rollback if spec.layer == "style_vectors" else None
-                    )):
+                    ), immediate=True):
                         if spec.layer == "style_vectors":
                             conn.execute("UPDATE maintenance_layers SET layer=layer WHERE 0")
                             if _canonical_source:
@@ -1442,6 +1448,13 @@ def run_layers(
                         running_row = _read_layer_row(conn, spec.layer)
                 except (sqlite3.OperationalError, _StyleAppendChanged) as error:
                     category = error.category if isinstance(error, _StyleAppendChanged) else _style_sqlite_deferral(error)
+                    if spec.layer != "style_vectors" and category == "StyleWriterBusy" and not conn.in_transaction:
+                        # The writer stayed busy past the busy timeout: nothing was
+                        # recorded, so the next pass simply tries again.
+                        logger.info("Maintenance layer %s deferred: the database stayed busy", spec.layer)
+                        results.append(LayerResult(spec.layer, spec.result_key, "deferred", state.output_count,
+                            time.monotonic() - started, "WriterBusy", False, state.successful_coverage))
+                        continue
                     if (spec.layer != "style_vectors" or not diagnostic_rolled_back
                             or category not in {"StyleWriterBusy", "StyleTriggersUnsupported", "StyleSourceChanged"}):
                         raise
@@ -1504,6 +1517,15 @@ def run_layers(
                 reject = getattr(runtime, "raise_if_serving_rejection", None)
                 if reject is not None:
                     reject(error)
+                if (isinstance(error, sqlite3.OperationalError) and not borrowed and spec.layer != "style_vectors"
+                        and _style_sqlite_deferral(error) == "StyleWriterBusy"):
+                    # Output reads run in a deferred transaction so foreground
+                    # writers are never held off for a whole build; a commit by
+                    # anyone during the build makes its first write fail with
+                    # SQLITE_BUSY. That is contention, not a failure: restore the
+                    # diagnostic and let the next pass build again.
+                    logger.info("Maintenance layer %s deferred: another writer committed during the build", spec.layer)
+                    error = LayerDeferredError("Another writer committed during the build", category="WriterBusy")
                 if isinstance(error, LayerDeferredError):
                     if output_started and not rolled_back:
                         raise _LayerRollbackFailed("Deferred output has no confirmed rollback") from error
@@ -1542,6 +1564,9 @@ def run_layers(
                     category = "Error"
                 if not record_attempt(state, outcome, category):
                     outcome, category = "deferred", "StyleTriggersUnsupported"
+                if outcome == "failed":
+                    logger.warning("Maintenance layer %s failed (%s); it runs again once the source changes",
+                                   spec.layer, category)
                 results.append(LayerResult(spec.layer, spec.result_key, outcome, state.output_count,
                     time.monotonic() - started, category, True, state.successful_coverage, borrowed))
                 if not isinstance(error, Exception):
