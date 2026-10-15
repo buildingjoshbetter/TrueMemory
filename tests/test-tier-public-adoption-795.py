@@ -427,6 +427,8 @@ def configure_harness(h: Harness, manager: object):
             "_VALID_INTENSITIES": ("standard", "enhanced", "max"),
             "_config_file_lock": lambda **kwargs: contextlib.nullcontext(),
             "_config_write_lock": threading.RLock(),
+            "_MCP_STAGING_SECONDS": 2.0,
+            "_stage_switch_in_background": Mock(side_effect=AssertionError("unexpected background staging")),
         },
     )
 
