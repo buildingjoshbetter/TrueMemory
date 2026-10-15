@@ -1891,6 +1891,40 @@ class SwitchStaging(unittest.TestCase):
         self.assertTrue(result["waited"])
         self.assertEqual(result["state"]["selected"], "edge")
 
+    def test_cancel_of_a_durable_marker_waits_for_maintenance_elsewhere(self):
+        # Cancelling an interrupted job failed at once while another process ran
+        # a consolidation pass; it now waits a bounded time like staging does.
+        (result,) = run_scenario("""
+            import subprocess
+            seed(10)
+            from truememory.embedding_target import EmbeddingTarget
+            from truememory.rebuild_source import ensure_rebuild_tracking
+            from truememory.tier_switch.job import select_tier_job
+            from truememory.tier_switch.manager import RebuildManager
+            conn = sqlite3.connect(DB)
+            ensure_rebuild_tracking(conn)
+            job = select_tier_job(conn, EmbeddingTarget.capture("edge"))
+            conn.close()
+            holder = subprocess.Popen([sys.executable, "-c", PRELUDE_SOURCE + %r], stdin=subprocess.PIPE,
+                                      stdout=subprocess.PIPE, text=True)
+            holder.stdin.write("acquire\\n"); holder.stdin.flush()
+            holder.stdout.readline()
+            def release():
+                time.sleep(2)
+                holder.communicate("release\\n", timeout=30)
+            releaser = threading.Thread(target=release)
+            releaser.start()
+            started = time.monotonic()
+            try:
+                outcome = RebuildManager().cancel(7, expected_job_id=job.job_id, db_path=Path(DB))["status"]
+            except Exception as error:
+                outcome = type(error).__name__
+            waited = time.monotonic() - started
+            releaser.join()
+            emit(outcome=outcome, waited=waited >= 1.5, marker=state()["marker"])
+        """ % HOLD_MAINTENANCE)
+        self.assertEqual(result, {"outcome": "cancelled", "waited": True, "marker": "cancelled"})
+
     def test_switch_without_cached_models_fails_before_any_work(self):
         # With downloads off, a missing reranker surfaced only at activation,
         # after every memory had been re-embedded for the target.

@@ -711,20 +711,25 @@ class RebuildManager:
                 f"download them with network access{example}, then retry")
 
     @contextlib.contextmanager
-    def _staging_window(self, path: Path):
-        """Own maintenance to stage a job, waiting a bounded time for another owner."""
+    def _staging_window(self, path: Path, *, action: str = "the tier switch"):
+        """Own maintenance to stage or end a job, waiting a bounded time for another owner.
+
+        A durable-marker cancellation passes its own action and is never
+        cut short by a cancel request meant for local work.
+        """
         from truememory.maintenance import MaintenanceBusyError
+        cancelled = self._cancel_requested if action == "the tier switch" else None
         with contextlib.ExitStack() as stack:
             try:
                 stack.enter_context(self._publication_window(
                     path, deadline=time.monotonic() + _STAGING_MAINTENANCE_SECONDS,
-                    cancelled=self._cancel_requested, mark=False))
+                    cancelled=cancelled, mark=False))
             except MaintenanceBusyError as error:
-                if self._cancel_requested.is_set():
+                if cancelled is not None and cancelled.is_set():
                     raise
                 raise MaintenanceBusyError(
                     f"A maintenance pass kept this database busy for {_STAGING_MAINTENANCE_SECONDS:.0f} s; "
-                    "retry the tier switch when it finishes") from error
+                    f"retry {action} when it finishes") from error
             yield
 
     @staticmethod
@@ -1037,7 +1042,6 @@ class RebuildManager:
     def cancel(self, status_id: int = 0, *, expected_job_id: str | None = None,
                db_path: Path | None = None) -> dict:
         """Signal local work, or explicitly cancel one durable interrupted marker."""
-        from truememory.maintenance import maintenance_owner
         from truememory.tier_switch.activation import ActivationIntent, _transaction, read_activation_state
         from truememory.tier_switch.job import (
             _cancel_policy_job_in_writer, end_abandoned_tier_job, read_selected_job_marker, tier_job_owner,
@@ -1056,7 +1060,7 @@ class RebuildManager:
                 return {"status": "cancellation_requested", "status_id": self._active_status_id}
         path = db_path or self._active_db_path or _get_db_path()
         # Holding the tier-job lock proves no worker (in any process) owns the marker.
-        with tier_job_owner(path), maintenance_owner(path):
+        with tier_job_owner(path), self._staging_window(path, action="the cancellation"):
             conn = _open_db(path)
             try:
                 state = read_activation_state(conn)
