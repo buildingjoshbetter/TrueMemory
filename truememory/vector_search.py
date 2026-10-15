@@ -44,10 +44,11 @@ import os
 import re
 import struct
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import closing, contextmanager
+from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -1287,8 +1288,24 @@ def _is_mps_oom(exc: Exception) -> bool:
     return is_mps_oom(exc)
 
 
+def released_connection() -> AbstractContextManager[None]:
+    """Free this thread's engine connection lock for model or LLM work (no-op without an engine).
+
+    Other threads' statements run meanwhile; a connection with a transaction
+    open stays locked (see runtime.released_connection_locks).
+    """
+    runtime = sys.modules.get("truememory.tier_switch.runtime")
+    release = getattr(runtime, "released_connection_locks", None)
+    return release() if release is not None else nullcontext()
+
+
 def _encode_with_mps_fallback(model, texts, **kwargs):
     """Encode texts with MPS OOM fallback. Thread-safe device transitions."""
+    with released_connection():
+        return _encode_unlocked(model, texts, **kwargs)
+
+
+def _encode_unlocked(model, texts, **kwargs):
     if "_LOCAL_MEMORY_POLICY" in globals():
         from truememory.memory_budget import (
             ProfileKey, budgeted_encode_with_mps_fallback, validate_local_policy,

@@ -1855,6 +1855,47 @@ class SharedEngineThreads(unittest.TestCase):
         self.assertEqual(result["errors"], {})
         self.assertEqual(result["ops"], ["add", "delete", "get", "get_all", "search"])
 
+    def test_a_search_frees_the_engine_during_model_work(self):
+        # Review v5 L-v5-1: the whole search, query encoding included, ran under
+        # the engine lock, so a get waited up to 6.2 s behind back-to-back searches.
+        (result,) = run_scenario("""
+            import model2vec
+            slow = {"on": False, "encodes": 0}
+            class SlowEncoder(FakeEncoder):
+                def encode(self, texts, **kwargs):
+                    if slow["on"]:
+                        slow["encodes"] += 1
+                        time.sleep(0.25)
+                    return super().encode(texts, **kwargs)
+            model2vec.StaticModel.from_pretrained = staticmethod(lambda *args, **kwargs: SlowEncoder())
+            stub_models()
+            from truememory.engine import TrueMemoryEngine
+            engine = TrueMemoryEngine(DB)
+            for i in range(10):
+                engine.add(f"memory number {i} about the garden", sender="alice")
+            drain()
+            slow["on"] = True
+            stop = time.monotonic() + 3
+            searches = []
+            def searcher():
+                while time.monotonic() < stop:  # A new query each time: nothing is cached.
+                    searches.append(len(engine.search(f"garden memory {len(searches)}", limit=5)))
+            thread = threading.Thread(target=searcher)
+            thread.start()
+            latencies = []
+            while time.monotonic() < stop:
+                started = time.perf_counter()
+                engine.get(1)
+                latencies.append(time.perf_counter() - started)
+                time.sleep(0.01)
+            thread.join()
+            engine.close()
+            emit(gets=len(latencies), worst=max(latencies), searches=len(searches), encodes=slow["encodes"])
+        """, tier="edge")
+        self.assertGreaterEqual(result["encodes"], 6)  # Searches kept encoding throughout.
+        self.assertGreaterEqual(result["gets"], 50)
+        self.assertLess(result["worst"], 0.5)
+
     def test_a_write_waiting_on_another_connection_does_not_freeze_the_process(self):
         # The waiting writer holds SQLite's connection mutex; a second thread that
         # read the connection then held the GIL until the wait failed, so the

@@ -436,8 +436,12 @@ def rerank(
     # Build (query, content) pairs
     pairs = [(query, r.get("content", "")) for r in results]
 
-    # Score all pairs (locked for thread safety with parallel queries)
-    with _inference_lock:
+    # Score all pairs (locked for thread safety with parallel queries). The
+    # engine connection is free meanwhile; take it back before the next SQL.
+    import sys
+    from contextlib import nullcontext
+    runtime = sys.modules.get("truememory.tier_switch.runtime")
+    with (runtime.released_connection_locks() if runtime is not None else nullcontext()), _inference_lock:
         from contextlib import nullcontext
         from truememory.mps_utils import _own_model
         if configured_memory:
@@ -626,7 +630,11 @@ def rerank_with_llm(
     )
 
     try:
-        response = llm_fn(prompt)
+        import sys
+        from contextlib import nullcontext
+        runtime = sys.modules.get("truememory.tier_switch.runtime")
+        with runtime.released_connection_locks() if runtime is not None else nullcontext():
+            response = llm_fn(prompt)
         # Parse scores from "D1: 8" format
         import re
         scores = {}

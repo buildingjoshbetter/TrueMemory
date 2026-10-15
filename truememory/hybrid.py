@@ -192,7 +192,7 @@ def search_hybrid(
     # ------------------------------------------------------------------
     # 1. Retrieve candidates from all engines.
     # ------------------------------------------------------------------
-    from truememory.vector_search import get_model, serialize_f32
+    from truememory.vector_search import get_model, released_connection, serialize_f32
     from truememory.mps_utils import encode_with_mps_fallback
     configured_memory = "_LOCAL_MEMORY_POLICY" in globals()
     if configured_memory:
@@ -201,12 +201,13 @@ def search_hybrid(
         )
         validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
     _q_model = get_model()
-    if configured_memory:
-        _q_values = budgeted_encode_with_mps_fallback(
-            _q_model, [query], ProfileKey("hybrid query embedding", "local_embedding", input_item_count=1),
-        )
-    else:
-        _q_values = encode_with_mps_fallback(_q_model, [query])
+    with released_connection():  # Other threads may use the connection while the query encodes.
+        if configured_memory:
+            _q_values = budgeted_encode_with_mps_fallback(
+                _q_model, [query], ProfileKey("hybrid query embedding", "local_embedding", input_item_count=1),
+            )
+        else:
+            _q_values = encode_with_mps_fallback(_q_model, [query])
     _q_emb = _q_values[0]
     _q_blob = serialize_f32(_q_emb)
 

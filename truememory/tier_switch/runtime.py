@@ -83,6 +83,7 @@ class ConnectionWriteLock:
                 borrowed = False
             self._owner = (threading.get_ident(), conn, borrowed)
             self._depth = 1
+            _held_writers().append(self)
         except BaseException:
             self._lock.release()
             raise
@@ -110,6 +111,9 @@ class ConnectionWriteLock:
         idle = False
         if not self._depth:
             self._owner = None
+            held = _held_writers()
+            if self in held:
+                held.remove(self)
             if self._on_idle is not None:
                 try:  # Read while still owning the connection (never another thread's step).
                     idle = owner[1] is not None and not owner[1].in_transaction
@@ -128,6 +132,48 @@ class ConnectionWriteLock:
 
     def __exit__(self, *exc: object) -> None:
         self.release()
+
+
+_writer_local = threading.local()
+
+
+def _held_writers() -> list:
+    held = getattr(_writer_local, "held", None)
+    if held is None:
+        held = _writer_local.held = []
+    return held
+
+
+@contextmanager
+def released_connection_locks() -> Iterator[None]:
+    """Let other threads use this thread's engine connections during model or LLM work.
+
+    A public body holds its engine's connection lock; encoding a query,
+    reranking or an LLM call can take seconds and needs no SQL. Locks whose
+    connection has a transaction open stay held: that work must not see
+    another thread's statements. Callers have no cursor mid-iteration.
+    """
+    released = []
+    for lock in list(_held_writers()):
+        owner = lock._owner
+        if owner is None or owner[0] != threading.get_ident():
+            continue
+        try:  # This thread owns the lock, so reading the connection is safe.
+            busy = owner[1] is not None and owner[1].in_transaction
+        except sqlite3.ProgrammingError:
+            busy = False
+        if busy:
+            continue
+        depth = lock._depth
+        for _ in range(depth):
+            lock.release()
+        released.append((lock, depth))
+    try:
+        yield
+    finally:
+        for lock, depth in reversed(released):
+            for _ in range(depth):
+                lock.acquire()
 
 
 _local = threading.local()
