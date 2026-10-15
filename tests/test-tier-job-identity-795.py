@@ -481,6 +481,44 @@ class TestFileObservation(unittest.TestCase):
                     with api._observe_file(SYNTHETIC_PATH):
                         self.fail("Failed observation must not yield")
 
+    @unittest.skipUnless(sys.platform in ("darwin", "linux"), "struct flock layout known for macOS and Linux only")
+    def test_observing_keeps_sqlite_shared_lock_on_every_sqlite(self) -> None:
+        # Deterministic on any SQLite build: after the identity checks, another
+        # process asks the kernel (F_GETLK) who holds SQLite's SHARED byte range
+        # of the database; it must still be this process's read lock.
+        import subprocess
+        import tempfile
+        api = load_modules()["tier_switch.job"]
+        probe = """
+import fcntl, os, struct, sys
+pending = 0x40000000; shared_first, shared_size = pending + 2, 510
+layout = "qqihh" if sys.platform == "darwin" else "hh4xqqi4x"
+def pack(kind):
+    if sys.platform == "darwin":
+        return struct.pack(layout, shared_first, shared_size, 0, kind, os.SEEK_SET)
+    return struct.pack(layout, kind, os.SEEK_SET, shared_first, shared_size, 0)
+fd = os.open(sys.argv[1], os.O_RDWR)
+result = struct.unpack(layout, fcntl.fcntl(fd, fcntl.F_GETLK, pack(fcntl.F_WRLCK)))
+kind, pid = (result[3], result[2]) if sys.platform == "darwin" else (result[0], result[4])
+print("held" if kind == fcntl.F_RDLCK else "unlocked" if kind == fcntl.F_UNLCK else kind, pid)
+"""
+        with tempfile.TemporaryDirectory(prefix="truememory-synthetic-shared-") as directory:
+            path = Path(directory) / "synthetic.db"
+            conn = sqlite3.connect(path, isolation_level=None)
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("CREATE TABLE t(v)")
+                conn.execute("SELECT count(*) FROM t").fetchone()
+                before = subprocess.run([sys.executable, "-c", probe, str(path)], capture_output=True, text=True, check=True)
+                with api._observe_file(path):
+                    with api._observe_file(path):
+                        pass
+                after = subprocess.run([sys.executable, "-c", probe, str(path)], capture_output=True, text=True, check=True)
+            finally:
+                conn.close()
+        self.assertEqual(before.stdout.split(), ["held", str(os.getpid())])
+        self.assertEqual(after.stdout.split(), ["held", str(os.getpid())])
+
     def test_observing_keeps_this_process_sqlite_locks(self) -> None:
         # GPUBox D1/D2: the identity checks opened and closed the database, so
         # on SQLite 3.47/3.50 another process's close then checkpointed and
