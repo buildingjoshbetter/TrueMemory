@@ -74,6 +74,9 @@ _config_write_lock = CONFIG_WRITE_LOCK
 # read-modify-write and clobber another writer's API key. The companion lockfile
 # (config.json.lock) is held with fcntl/msvcrt for the duration of each write.
 _CONFIG_LOCK_PATH = _TRUEMEMORY_DIR / "config.json.lock"
+# truememory_configure waits this long for another process's maintenance pass
+# before staging the switch in a background thread (tools run on the event loop).
+_MCP_STAGING_SECONDS = 2.0
 
 
 class _config_file_lock(ConfigFileLock):
@@ -1470,9 +1473,12 @@ def truememory_configure(
     from truememory.tier_switch.cache import get_transition_action
     manager = RebuildManager.get_instance()
     rebuild_action = get_transition_action(old_tier, tier)
+    switch_options = {"target_tier": tier, "db_path": Path(_DB_PATH), "config_path": _CONFIG_PATH,
+                      "config_lock_path": _CONFIG_LOCK_PATH}
     try:
-        rebuild_status_id = manager.start_rebuild(target_tier=tier, db_path=Path(_DB_PATH),
-                                                  config_path=_CONFIG_PATH, config_lock_path=_CONFIG_LOCK_PATH)
+        # This tool runs on the MCP event loop: wait only briefly for another
+        # process's maintenance pass, then stage the switch in the background.
+        rebuild_status_id = manager.start_rebuild(**switch_options, staging_seconds=_MCP_STAGING_SECONDS)
         if rebuild_status_id:
             switch_status = "building"
         elif manager._last_outcome == "activation_pending":
@@ -1480,9 +1486,13 @@ def truememory_configure(
         elif manager._last_outcome == "preparing":
             switch_status = "preparing"
     except Exception as error:
-        rebuild_error = type(error).__name__ + ": " + str(error)
-        switch_status = "activation_pending" if manager._last_outcome == "activation_pending" else "switch_failed"
-        log.exception("truememory_configure tier activation did not complete")
+        if type(error).__name__ == "MaintenanceBusyError":
+            _stage_switch_in_background(manager, switch_options)
+            switch_status = "pending"
+        else:
+            rebuild_error = type(error).__name__ + ": " + str(error)
+            switch_status = "activation_pending" if manager._last_outcome == "activation_pending" else "switch_failed"
+            log.exception("truememory_configure tier activation did not complete")
     finally:
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -1519,6 +1529,11 @@ def truememory_configure(
         result["status_id"] = rebuild_status_id
     elif switch_status == "preparing":
         result["note"] = "Tier preparation is in progress; no rebuild status ID has been allocated yet."
+    elif switch_status == "pending":
+        result["note"] = (
+            f"Another TrueMemory process is running maintenance. The switch to {tier} starts in the "
+            "background as soon as it finishes (within about a minute); check truememory_status() for progress."
+        )
     if rebuild_error is not None:
         result["rebuild_error"] = rebuild_error
         result["warning"] = (
@@ -1594,6 +1609,16 @@ def truememory_configure(
     )
 
     return json.dumps(result, indent=2)
+
+
+def _stage_switch_in_background(manager: object, options: dict) -> None:
+    """Wait the full staging window off the event loop, then start the switch."""
+    def stage() -> None:
+        try:
+            manager.start_rebuild(**options)
+        except Exception:
+            log.exception("Background tier switch staging did not complete")
+    threading.Thread(target=stage, daemon=True, name="truememory-switch-staging").start()
 
 
 @mcp.tool()

@@ -161,8 +161,13 @@ class RebuildManager:
         self, target_tier: str, force: bool = False,
         backup_path: Path | None = None, db_path: Path | None = None, *,
         config_path: Path | None = None, config_lock_path: Path | None = None,
+        staging_seconds: float | None = None,
     ) -> int:
-        """Stage an inactive job, then hand only its immutable identity to a thread."""
+        """Stage an inactive job, then hand only its immutable identity to a thread.
+
+        ``staging_seconds`` shortens the wait for another owner's maintenance
+        (default 60 s) for callers that must not block that long.
+        """
         with self._state_lock:
             if self._claimed or self._active_thread and self._active_thread.is_alive():
                 if self._requested_tier != target_tier:
@@ -192,7 +197,7 @@ class RebuildManager:
             # Tier-job liveness before maintenance: the worker keeps it, so a
             # selected marker seen under this lock can only be abandoned.
             job_lock = self._acquire_job_lock(path) if path.exists() else None
-            with self._staging_window(path):
+            with self._staging_window(path, seconds=staging_seconds):
                 if self._bootstrap_empty_configuration(path, target_tier, force):
                     return 0
                 if job_lock is None:
@@ -726,7 +731,7 @@ class RebuildManager:
                 f"download them with network access{example}, then retry")
 
     @contextlib.contextmanager
-    def _staging_window(self, path: Path, *, action: str = "the tier switch"):
+    def _staging_window(self, path: Path, *, action: str = "the tier switch", seconds: float | None = None):
         """Own maintenance to stage or end a job, waiting a bounded time for another owner.
 
         A durable-marker cancellation passes its own action and is never
@@ -734,16 +739,16 @@ class RebuildManager:
         """
         from truememory.maintenance import MaintenanceBusyError
         cancelled = self._cancel_requested if action == "the tier switch" else None
+        seconds = _STAGING_MAINTENANCE_SECONDS if seconds is None else seconds
         with contextlib.ExitStack() as stack:
             try:
                 stack.enter_context(self._publication_window(
-                    path, deadline=time.monotonic() + _STAGING_MAINTENANCE_SECONDS,
-                    cancelled=cancelled, mark=False))
+                    path, deadline=time.monotonic() + seconds, cancelled=cancelled, mark=False))
             except MaintenanceBusyError as error:
                 if cancelled is not None and cancelled.is_set():
                     raise
                 raise MaintenanceBusyError(
-                    f"A maintenance pass kept this database busy for {_STAGING_MAINTENANCE_SECONDS:.0f} s; "
+                    f"A maintenance pass kept this database busy for {seconds:.0f} s; "
                     f"retry {action} when it finishes") from error
             yield
 
