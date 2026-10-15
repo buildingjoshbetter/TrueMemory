@@ -10,7 +10,6 @@ import dataclasses
 import json
 import logging
 import os
-import shutil
 import sqlite3
 import threading
 import time
@@ -1419,8 +1418,12 @@ def _expected_status_columns(sql: str) -> tuple[tuple, ...]:
 def backup_db(db_path: Path | None = None) -> Path:
     """Create a timestamped backup of the memory database.
 
-    Returns the backup path. Keeps the last 3 backups.
+    Uses SQLite's online backup API, never a file copy: a copy misses
+    committed pages still in the WAL, and opening and closing the database
+    file outside SQLite drops every POSIX lock this process's connections
+    hold on it. Returns the backup path. Keeps the last 3 backups.
     """
+    from truememory.storage import configure_connection
     source = db_path or _get_db_path()
     if not source.exists():
         raise FileNotFoundError(f"Database not found: {source}")
@@ -1430,7 +1433,16 @@ def backup_db(db_path: Path | None = None) -> Path:
 
     ts = int(time.time())
     dest = backup_dir / f"memories.db.pre-tier-switch-{ts}"
-    shutil.copy2(str(source), str(dest))
+    src = configure_connection(sqlite3.connect(str(source)))
+    try:
+        dst = sqlite3.connect(str(dest))
+        try:
+            with dst:
+                src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
 
     backups = sorted(backup_dir.glob("memories.db.pre-tier-switch-*"))
     for old in backups[:-3]:

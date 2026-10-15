@@ -143,6 +143,7 @@ class Openers(unittest.TestCase):
         ("truememory/ingest/cli.py", "str(path)"),  # PRAGMA quick_check only.
         ("truememory/storage.py", "str(backup)"),  # The new backup file; its only connection.
         ("truememory/storage.py", "uri, uri=True"),  # The guard's own lock holder and checkpointer.
+        ("truememory/tier_switch/manager.py", "str(dest)"),  # Likewise for backup_db.
     }
 
     def test_every_database_opener_is_configured_by_the_guard(self):
@@ -184,6 +185,45 @@ class Openers(unittest.TestCase):
                         finally:
                             conn.close()
 
+
+
+class DatabaseFileAccess(unittest.TestCase):
+    # Opening and closing a database file outside SQLite drops every POSIX lock
+    # the process holds on it; on SQLite 3.47/3.50 another process's close then
+    # deleted the WAL in use (GPUBox D1/D2). Copies also miss WAL content.
+    DATABASE_MODULES = ("storage.py", "engine.py", "maintenance.py", "vector_search.py",
+                        "client.py", "rebuild_source.py", "tier_switch")
+
+    def test_database_modules_never_copy_or_move_files(self):
+        found = []
+        for name in self.DATABASE_MODULES:
+            paths = sorted((ROOT / "truememory" / name).rglob("*.py")) if name == "tier_switch" else [ROOT / "truememory" / name]
+            for path in paths:
+                source = path.read_text(encoding="utf-8")
+                for node in ast.walk(ast.parse(source)):
+                    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                            and isinstance(node.func.value, ast.Name) and node.func.value.id == "shutil"):
+                        found.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+        self.assertEqual(found, [])
+
+    def test_tier_backup_includes_committed_wal_content(self):
+        from truememory.tier_switch import manager
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "backup-source.db"
+            conn = sqlite3.connect(path, isolation_level=None)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA wal_autocheckpoint=0")
+            conn.execute("CREATE TABLE t(v)")
+            conn.execute("INSERT INTO t VALUES ('only in the WAL')")
+            try:
+                with patch.object(manager, "_TRUEMEMORY_DIR", Path(directory)):
+                    backup = manager.backup_db(path)
+                self.assertTrue(Path(f"{path}-wal").exists())
+            finally:
+                conn.close()
+            copy = sqlite3.connect(backup)
+            self.assertEqual(copy.execute("SELECT v FROM t").fetchall(), [("only in the WAL",)])
+            copy.close()
 
 
 STRESS_WORKER = """

@@ -1996,5 +1996,42 @@ class FailedSwitchRecovery(unittest.TestCase):
         self.assertEqual(result["state"]["selected"], "base")
 
 
+
+class DatabaseFileAccess(unittest.TestCase):
+    def test_store_and_switch_never_open_database_files_outside_sqlite(self):
+        # Every Python-level open (open, os.open, shutil copies) raises an "open"
+        # audit event; SQLite's own opens do not. Closing a descriptor opened
+        # outside SQLite drops the process's POSIX locks on the file (D1/D2).
+        (result,) = run_scenario("""
+            import traceback
+            watched = {os.path.realpath(DB + suffix) for suffix in ("", "-wal", "-shm")}
+            opened = []
+            def audit(event, args):
+                if event == "open" and args and isinstance(args[0], (str, bytes, os.PathLike)):
+                    name = os.fsdecode(args[0])
+                    if name.endswith(("memories.db", "-wal", "-shm")) and os.path.realpath(name) in watched:
+                        opened.append(name + " " + traceback.format_stack(limit=4)[0].strip().replace(chr(10), " "))
+            sys.addaudithook(audit)
+            seed(30)
+            stub_models()
+            import model2vec
+            model2vec.StaticModel.from_pretrained = staticmethod(lambda *args, **kwargs: FakeEncoder())
+            from truememory.engine import TrueMemoryEngine
+            from truememory.tier_switch.manager import RebuildManager, backup_db
+            engine = TrueMemoryEngine(DB)
+            added = engine.add("stored before the switch", sender="alice")["id"]
+            engine.search("synthetic fact", limit=3); engine.get(added); engine.get_all(limit=5)
+            outcome = switch("edge")["outcome"]
+            engine.add("stored after the switch", sender="alice"); engine.delete(added)
+            drain()
+            backup_db(Path(DB))
+            RebuildManager().get_status()
+            engine.close()
+            emit(outcome=outcome, opened=opened)
+        """)
+        self.assertEqual(result["outcome"], "complete")
+        self.assertEqual(result["opened"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
