@@ -33,6 +33,9 @@ _PRUNE_WALL_CLOCK_SEC = 86400  # 24 hours
 _emit_count = 0
 _last_prune_time: float = 0.0
 _conn_lock = threading.Lock()
+# Every statement on the shared connection: sqlite3 shares cached statements
+# per connection, and two threads stepping one corrupt each other.
+_statement_lock = threading.RLock()
 _conn: sqlite3.Connection | None = None
 _db_path: str | None = None
 _schema_created = False
@@ -93,12 +96,13 @@ def emit(signal: str, data: dict | None = None) -> None:
         conn = _get_connection()
         now = time.time()
         payload = json.dumps(data or {}, default=str)
-        conn.execute(
-            "INSERT INTO telemetry (ts, signal, data) VALUES (?, ?, ?)",
-            (now, signal, payload),
-        )
-        conn.commit()
-        _prune_if_needed(conn)
+        with _statement_lock:
+            conn.execute(
+                "INSERT INTO telemetry (ts, signal, data) VALUES (?, ?, ?)",
+                (now, signal, payload),
+            )
+            conn.commit()
+            _prune_if_needed(conn)
         from truememory.storage import checkpoint_if_due
         checkpoint_if_due(_db_path)
     except Exception:
@@ -138,7 +142,8 @@ def prune_now() -> None:
     """Force an immediate prune.  Called on install()."""
     try:
         conn = _get_connection()
-        _do_prune(conn)
+        with _statement_lock:
+            _do_prune(conn)
     except Exception:
         pass
 
@@ -146,7 +151,7 @@ def prune_now() -> None:
 def close() -> None:
     """Close the instrumentation DB connection."""
     global _conn, _schema_created
-    with _conn_lock:
+    with _conn_lock, _statement_lock:
         if _conn is not None:
             try:
                 _conn.close()
