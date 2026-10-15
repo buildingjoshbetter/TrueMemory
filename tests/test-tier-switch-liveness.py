@@ -887,6 +887,41 @@ class ProjectionFaultsAfterCommit(unittest.TestCase):
         self.assertEqual((other["window"], other["get_all"], other["add"]), (21, 21, 22))
         self.assertIsInstance(other["search"], list, other["search"])
 
+    def test_kept_selection_still_allows_switching_back(self):
+        # Review v5 M-v5-1: after a post-commit projection failure keeps the new
+        # selection, switching back was refused ("The committed tier must be
+        # reconciled before another switch") and the job's row stayed running.
+        (result,) = run_scenario("""
+            import subprocess
+            seed(20)
+            stub_models()
+            other = subprocess.Popen([sys.executable, "-c", PRELUDE_SOURCE + %r], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            assert other.stdout.readline().startswith("OPEN")
+            from truememory import vector_search
+            loaded = vector_search._load_frozen_embedding_target
+            seen = {}
+            def load(target, timeout=None):
+                if "fault" not in seen:
+                    seen["fault"] = True
+                    other.stdin.write("go\\n"); other.stdin.flush()
+                    seen["added"] = other.stdout.readline().strip()
+                    raise OSError("synthetic: frozen target could not load after the commit")
+                return loaded(target, timeout)
+            vector_search._load_frozen_embedding_target = load
+            kept = switch("edge")["outcome"]
+            other.communicate("go\\n", timeout=120)
+            pending = state()
+            back = switch("base")
+            emit(kept=kept, pending=pending, back=back.get("outcome", back.get("message")), state=state(),
+                 config=json.loads(CONFIG.read_text())["tier"])
+        """ % LONG_RUNNING)
+        self.assertEqual(result["kept"], "activation_pending")
+        self.assertEqual(result["pending"]["selected"], "edge")
+        self.assertEqual(result["pending"]["status_rows"], [[1, "activation_pending"]])
+        self.assertEqual(result["back"], "complete")
+        self.assertEqual((result["state"]["selected"], result["state"]["acknowledged"], result["config"]), ("base", True, "base"))
+
     def test_unused_selection_is_restored(self):
         (result,) = run_scenario("""
             seed(20)

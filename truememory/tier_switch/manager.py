@@ -306,7 +306,8 @@ class RebuildManager:
                 conn.close()
                 conn = None
             if self._last_outcome == "activation_pending":
-                self._refresh_committed_serving(path)
+                self._refresh_committed_serving(path, status_id=prepared[2] if prepared else 0,
+                                                group=prepared[0].target.tier_group if prepared else None)
             else:
                 if self._last_outcome != "failed":  # failed: activation was rolled back
                     self._last_outcome = "interrupted"
@@ -320,8 +321,12 @@ class RebuildManager:
             if job_lock is not None:
                 job_lock.release()
 
-    def _refresh_committed_serving(self, path: Path) -> None:
-        """Read back on a fresh validated connection after discarding ambiguity."""
+    def _refresh_committed_serving(self, path: Path, *, status_id: int = 0, group: str | None = None) -> None:
+        """Read back on a fresh validated connection after discarding ambiguity.
+
+        A job whose selection committed but whose projection failed ends its
+        status row as activation_pending; the next open or switch completes it.
+        """
         from truememory.tier_switch.activation import read_activation_state
         self._served_tier = None
         try:
@@ -331,6 +336,9 @@ class RebuildManager:
                 result = state.selection or state.legacy_policy
                 if result is not None:
                     self._served_tier = result.target.tier
+                if status_id:
+                    self._terminate_status(conn, status_id, "activation_pending",
+                                           "Committed; this process could not project it yet", group=group)
             finally:
                 conn.close()
         except Exception:
@@ -508,10 +516,17 @@ class RebuildManager:
                 self._served_tier = previous.target.tier
             if previous is not None and not previous.config_acknowledged:
                 self._last_action = "config_only" if type(state.intent).__name__ == "PolicyIntent" else "reconcile"
-                if previous.target != target:
-                    raise TierSwitchUnsupportedError("The committed tier must be reconciled before another switch")
-                self._project_result(conn, previous, state.intent, policy=state.legacy_policy is not None or type(state.intent).__name__ == "PolicyIntent")
-                return None
+                policy = state.legacy_policy is not None or type(state.intent).__name__ == "PolicyIntent"
+                if previous.target == target:
+                    self._project_result(conn, previous, state.intent, policy=policy)
+                    return None
+                # A committed selection whose projection failed (activation
+                # pending): reconcile the config to it first, as an open would,
+                # without loading the models being left, then serve the request.
+                self._project_result(conn, previous, state.intent, policy=policy, runtime=False)
+                state = read_activation_state(conn)
+                guard = capture_config_guard(config_path=self._config_path, lock_path=self._config_lock_path)
+                previous = state.selection or state.legacy_policy
             old_target, old_tables = self._serving_identity(conn, state, guard)
             self._served_tier = old_target.tier
             if old_target == target:
@@ -889,7 +904,7 @@ class RebuildManager:
             return result
 
     def _project_result(self, conn: sqlite3.Connection, result: "TierSelection | LegacyTierPolicy",
-                        intent: object, *, policy: bool = False) -> None:
+                        intent: object, *, policy: bool = False, runtime: bool = True) -> None:
         from truememory.tier_switch.activation import acknowledge_config, acknowledge_policy_config, LegacyTierPolicy
         from truememory.tier_switch.projection import mirror_activation
         from truememory.tier_switch.runtime import apply_frozen_selection, apply_runtime_policy, note_projected_database
@@ -897,11 +912,14 @@ class RebuildManager:
         self._last_outcome = "activation_pending"
         self._served_tier = result.target.tier
         mirror_activation(result, expected_config=intent.expected_config, config_path=self._config_path, lock_path=self._config_lock_path)
-        if policy:
+        if not runtime:
+            pass  # The next serving admission projects whatever is selected then.
+        elif policy:
             apply_runtime_policy(result)
         else:
             apply_frozen_selection(result)
-        note_projected_database(conn)
+        if runtime:
+            note_projected_database(conn)
         if type(result) is LegacyTierPolicy:
             acknowledge_policy_config(conn, generation=result.generation)
         else:
@@ -1103,7 +1121,7 @@ class RebuildManager:
         except Exception as error:
             # Never reuse a possibly uncertain connection: cleanup reopens.
             if self._last_outcome == "activation_pending":
-                self._refresh_committed_serving(job.database_path)
+                self._refresh_committed_serving(job.database_path, status_id=status_id, group=job.target.tier_group)
             else:
                 if self._last_outcome != "failed":  # failed: activation was rolled back
                     self._last_outcome = "interrupted"

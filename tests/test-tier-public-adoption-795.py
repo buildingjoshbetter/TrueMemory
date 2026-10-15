@@ -529,13 +529,18 @@ class PublicAdoptionTests(unittest.TestCase):
         self.assertIn("apply_policy", h.events)
         self.assertEqual(h.manager._last_outcome, "complete")
 
-    def test_pending_other_tier_refuses(self):
+    def test_pending_other_tier_is_reconciled_before_the_switch(self):
+        # A committed but unacknowledged selection no longer blocks switching
+        # elsewhere: the config is mirrored and acknowledged first (no runtime
+        # projection of the tier being left), then the request is planned.
         h = self.h
         h.state.legacy_policy = h.result
         h.state.intent = PolicyIntent(expected_config=h.guard, intent_id="policy")
-        with self.assertRaises(h.manager_module.TierSwitchUnsupportedError):
-            h.prepare("pro", "edge")
-        self.assertNotIn("mirror", h.events)
+        self.assertIsNotNone(h.prepare("pro", "edge"))
+        self.assertEqual(h.events[:3], ["exclusive_enter", "mirror", "ack"])
+        self.assertNotIn("apply_policy", h.events)
+        self.assertNotIn("apply_frozen", h.events)
+        self.assertIn("stage", h.events)
 
     def test_acknowledged_same_tier_still_projects_runtime(self):
         h = self.h
