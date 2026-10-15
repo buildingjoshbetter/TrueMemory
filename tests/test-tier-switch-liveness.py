@@ -2107,6 +2107,51 @@ class FailedSwitchRecovery(unittest.TestCase):
 
 
 
+class MaintenanceUnderForegroundLoad(unittest.TestCase):
+    def test_a_burst_of_adds_leaves_no_failed_or_deferred_layer(self):
+        # Round v6 M6-1: the in-process maintenance thread raced 200 back-to-back
+        # adds; its read-then-write transactions hit SQLITE_BUSY at once and
+        # layers ended failed (on 6e1e459: 27 aborted passes in 44).
+        (result,) = run_scenario("""
+            import collections
+            import model2vec
+            model2vec.StaticModel.from_pretrained = staticmethod(lambda *args, **kwargs: FakeEncoder())
+            stub_models()
+            from truememory import maintenance
+            errors, outcomes = collections.Counter(), collections.Counter()
+            run_layers = maintenance.run_layers
+            def observed(*args, **kwargs):
+                try:
+                    results = run_layers(*args, **kwargs)
+                except BaseException as error:
+                    errors[type(error).__name__ + ": " + str(error)[:60]] += 1
+                    raise
+                for item in results:
+                    if item[2] in ("failed", "deferred") and item[5] != "ModelBusy":
+                        outcomes[f"{item[0]} {item[2]} {item[5]}"] += 1
+                return results
+            maintenance.run_layers = observed
+            from truememory.engine import TrueMemoryEngine
+            engine = TrueMemoryEngine(DB)
+            words = "alice bob carol dave moved to austin started job at acme likes coffee hates rain said that".split()
+            latencies = []
+            for i in range(200):
+                r = random.Random(i)
+                started = time.perf_counter()
+                engine.add(f"{r.choice(words).title()} {' '.join(r.choice(words) for _ in range(12))} {i}",
+                           sender=r.choice(["alice", "bob", "carol"]))
+                latencies.append(time.perf_counter() - started)
+            engine._get_maintenance_coordinator().wait(120)
+            rows = engine.conn.execute("SELECT layer, outcome FROM maintenance_layers "
+                                       "WHERE outcome IN ('failed', 'running')").fetchall()
+            engine.close()
+            latencies.sort()
+            emit(errors=errors, outcomes=outcomes, rows=rows, p95=latencies[int(len(latencies) * 0.95)])
+        """, tier="edge")
+        self.assertEqual((result["errors"], result["outcomes"], result["rows"]), ({}, {}, []))
+        self.assertLess(result["p95"], 0.25)
+
+
 class DatabaseFileAccess(unittest.TestCase):
     def test_store_and_switch_never_open_database_files_outside_sqlite(self):
         # Every Python-level open (open, os.open, shutil copies) raises an "open"

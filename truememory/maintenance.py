@@ -1117,6 +1117,11 @@ def layer_read_snapshot(
             conn.rollback()
 
 
+# (source epoch, layer) pairs whose failure this process already retried once.
+_failure_retried: set[tuple[str, str]] = set()
+_RETRIED_FAILURES = frozenset({"OperationalError"})
+
+
 def _eligible(state: LayerState, threshold: int, force: bool) -> bool:
     if state.dependency.deferred:
         return False
@@ -1129,6 +1134,12 @@ def _eligible(state: LayerState, threshold: int, force: bool) -> bool:
         return False
     if (state.attempted_epoch != source.epoch or state.attempted_revision is None
             or state.attempted_insert_count is None or state.attempted_dependency != state.dependency.key):
+        return True
+    if (state.outcome == "failed" and state.error_category in _RETRIED_FAILURES
+            and (source.epoch, state.layer) not in _failure_retried):
+        # A database error (lock contention, a transient I/O error) is retried
+        # once per process on the next pass, even an idle one; a builder error
+        # keeps waiting for the source to change, so it cannot fail every pass.
         return True
     terminal_failure = state.outcome in {"failed", "unavailable"}
     if terminal_failure and state.attempted_revision == source.revision:
@@ -1414,6 +1425,8 @@ def run_layers(
                     layer_freshness(state.source, state, state.dependency), state.output_count, 0.0,
                     state.error_category, False, state.successful_coverage, borrowed))
                 continue
+            if state.outcome == "failed" and state.error_category in _RETRIED_FAILURES:
+                _failure_retried.add((state.source.epoch, spec.layer))
             started = time.monotonic()
             baseline_state = state
             if not state.dependency.available:
@@ -1483,8 +1496,12 @@ def run_layers(
                     raise LayerUnavailableError("The adapter has no borrowed publication contract")
                 guard = factory(conn) if factory is not None else None
                 with ExitStack() as publication:
-                    transaction = _borrowed_transaction if borrowed else _owned_transaction
-                    with transaction(conn, on_rollback=confirm_rollback), (
+                    # An owned build takes the writer first: once anyone commits,
+                    # a read-then-write upgrade fails at once (SQLITE_BUSY), and
+                    # foreground writes now wait for the build instead.
+                    output = (_borrowed_transaction(conn, on_rollback=confirm_rollback) if borrowed
+                              else _owned_transaction(conn, on_rollback=confirm_rollback, immediate=True))
+                    with output, (
                         spec.execution_guard(conn, not borrowed) if spec.execution_guard is not None else nullcontext()
                     ):
                         output_started = True

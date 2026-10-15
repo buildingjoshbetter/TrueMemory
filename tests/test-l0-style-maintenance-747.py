@@ -692,15 +692,21 @@ class StyleMaintenanceTests(unittest.TestCase):
         self.add(first)
         MAINTENANCE.run_style_maintenance(first)
         before, checkpoint = self.output(first), self.checkpoint(first)
-        compute = STYLE.compute_style_vector
+        restore = MAINTENANCE._restore_deferred_attempt
 
-        def contend(text: str) -> list[float]:
+        def busy(text: str) -> list[float]:
+            # The build now holds the writer, so contention reaches it only as a
+            # deferral; another writer then takes the lock before restoration.
+            raise MAINTENANCE.LayerDeferredError("synthetic busy writer", category="StyleWriterBusy")
+
+        def contend(*args, **kwargs):
             second.execute("BEGIN IMMEDIATE")
             second.execute("INSERT INTO sentinel VALUES ('synthetic writer stays active')")
-            return compute(text)
+            return restore(*args, **kwargs)
 
         try:
-            with patch.object(STYLE, "compute_style_vector", contend):
+            with patch.object(STYLE, "compute_style_vector", busy), \
+                    patch.object(MAINTENANCE, "_restore_deferred_attempt", contend):
                 result = MAINTENANCE.run_style_maintenance(first, force=True)
             self.assertEqual((result.outcome, result.error_category), ("deferred", "StyleWriterBusy"))
             self.assertTrue(second.in_transaction)
