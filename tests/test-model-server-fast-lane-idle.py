@@ -410,3 +410,30 @@ def test_cpu_float32_weights_live_in_returnable_mappings(monkeypatch):
     assert all(torch.equal(parameter, value) for parameter, value in zip(parameters, expected))
     assert sorted(mapped) == sorted(parameter.numel() * 4 for parameter in parameters)
     assert model(torch.tensor([[1, 2]])).dtype == torch.float32
+
+
+def test_fast_lane_never_empties_the_mps_cache_beside_a_running_batch(lane, monkeypatch):
+    """Regression: torch.mps.empty_cache() on one thread while another thread
+    synchronizes MPS work aborts the process ("commit an already committed
+    command buffer"). The fast lane runs while a batch owns the main model."""
+    import sys
+
+    from truememory import mps_utils
+
+    server, builds = lane
+    emptied = []
+    torch = types.SimpleNamespace(mps=types.SimpleNamespace(
+        empty_cache=lambda: emptied.append(server._inference_lock.locked()),
+    ))
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(mps_utils, "_mps_budget", object())
+    _first_clone(server, builds)
+    assert server._retire_idle_fast_encoder(now=server._fast_last_used + 600)
+    batch = Batch(server)
+    try:
+        assert _contended(server)["ok"] is True
+        _settle(server)
+    finally:
+        batch.end()
+    assert builds.devices == ["cpu", "cpu"]
+    assert emptied == [], "MPS cache emptied while another thread owned MPS work"
