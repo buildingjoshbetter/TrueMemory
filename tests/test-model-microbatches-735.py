@@ -246,6 +246,12 @@ def test_contended_single_text_fast_lane_keeps_limit(
     assert model.calls[0][2] == 1
 
 
+def _current_reranker() -> str:
+    # The request names no reranker, so the failed one is the configured default.
+    from truememory.reranker import get_current_reranker_name
+    return get_current_reranker_name()
+
+
 @pytest.mark.parametrize("op,key", [("embed", "vectors"), ("rerank", "scores")])
 def test_only_failed_microbatch_retries_and_completed_work_is_retained(
     runtime: tuple, op: str, key: str,
@@ -260,7 +266,7 @@ def test_only_failed_microbatch_retries_and_completed_work_is_retained(
         source[:2], source[2:4], source[2:4], source[4:],
     ]
     assert [limit for _, _, limit in model.calls] == [2, 2, 2, 2]
-    assert server._sticky_cpu == ({"embed"} if op == "embed" else {"rerank:cross-encoder/ms-marco-MiniLM-L-6-v2"})
+    assert server._sticky_cpu == ({"embed"} if op == "embed" else {f"rerank:{_current_reranker()}"})
     expected = vectors(source) if op == "embed" else [len(pair[1]) / 10 for pair in source]
     np.testing.assert_array_equal(response[key], np.asarray(expected, dtype=np.float32))
 
@@ -299,7 +305,7 @@ def test_expiry_on_later_oom_skips_retry_and_remaining_inputs(
     assert not response["ok"]
     assert "deadline" in response["error"]
     assert len(model.calls) == 2
-    assert server._sticky_cpu == ({"embed"} if op == "embed" else {"rerank:cross-encoder/ms-marco-MiniLM-L-6-v2"})
+    assert server._sticky_cpu == ({"embed"} if op == "embed" else {f"rerank:{_current_reranker()}"})
     assert model.moves == []
 
 
