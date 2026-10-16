@@ -72,6 +72,8 @@ PID_PATH = _TRUEMEMORY_DIR / "model_server.pid"
 PORT_PATH = _TRUEMEMORY_DIR / "model_server.port"
 TOKEN_PATH = _TRUEMEMORY_DIR / "model_server.token"
 IDLE_TIMEOUT = _env_int("TRUEMEMORY_MODEL_SERVER_IDLE", 300, lo=0)
+# After TERM, in-flight model work gets this long to reach a stopping point.
+_TERM_GRACE_SECONDS = 5.0
 
 LOCK_PATH = _TRUEMEMORY_DIR / "model_server.lock"
 START_STATE_PATH = _TRUEMEMORY_DIR / "model_server.start.json"
@@ -102,6 +104,11 @@ class _ServingIdentityMismatch(ValueError):
 
 class _ProcessMemoryRefused(RuntimeError):
     """Current process memory cannot admit another model stage."""
+
+
+def _on_cpu(model: object) -> bool:
+    device = getattr(model, "device", None)
+    return getattr(device, "type", device) == "cpu"
 
 
 class _FastLaneNotReady(_ProcessMemoryRefused):
@@ -496,6 +503,11 @@ class ModelServer:
         self._fast_retired_generation: object = None
         # At most one background rebuild; set and cleared under _residency_lock.
         self._fast_rebuild: threading.Thread | None = None
+        # (monotonic time until which reloads wait, RSS when the last one was refused)
+        self._fast_rebuild_refusal: tuple[float, int | None] = (0.0, None)
+        # Embedding sticky CPU is retried on MPS after a backoff (see _repromote_embed).
+        self._embed_cpu_since: float | None = None
+        self._embed_ooms = 0
         # CPU constructions are admitted and built one at a time, so two
         # builds cannot both pass a size check sized for one. Innermost lock.
         self._construction_lock = threading.Lock()
@@ -609,10 +621,10 @@ class ModelServer:
             raise _ProcessMemoryRefused(f"Model server busy: {error}") from error
 
     def _mark_sticky_cpu(self, kind: str) -> bool:
-        """Permanently degrade *kind* ("embed"/"rerank") to CPU after an
-        MPS OOM (issue #577). Re-promoting to MPS after recovery guaranteed
-        the next OOM (the pool never drops below the watermark cap), so the
-        degradation is sticky for the server's lifetime.
+        """Degrade *kind* ("embed" or "rerank:<name>") to CPU after an MPS OOM
+        (issue #577). The model is not moved back while it serves; embedding
+        returns to MPS only through a fresh load after a quiet backoff
+        (``_repromote_embed``), and a reranker when its CPU copy is released.
 
         Caller must hold ``self._lock``. Returns True on the first marking
         (which is logged loudly, once).
@@ -620,6 +632,10 @@ class ModelServer:
         if kind in self._sticky_cpu:
             return False
         self._sticky_cpu.add(kind)
+        if kind == "embed":
+            import time as clock  # this method is also loaded alone by source tests
+            self._embed_cpu_since = clock.monotonic()
+            self._embed_ooms = getattr(self, "_embed_ooms", 0) + 1
         if kind.startswith("rerank:"):
             # One reranker that does not fit says nothing about the others.
             log.error("MPS OOM with reranker %s — serving it on CPU until it is "
@@ -627,11 +643,10 @@ class ModelServer:
             self._write_status_file()
             return True
         log.error(
-            "MPS OOM in the %s path — degrading the %s model to CPU for the "
-            "lifetime of this model server (no MPS re-promotion). Restart "
-            "the server to try MPS again, or set TRUEMEMORY_DEVICE=cpu to "
-            "make CPU permanent.",
-            kind, kind,
+            "MPS OOM in the %s path — degrading the %s model to CPU. MPS is "
+            "retried with a fresh load after %ds; set TRUEMEMORY_DEVICE=cpu "
+            "to make CPU permanent.",
+            kind, kind, self._embed_repromote_after() if kind == "embed" and hasattr(self, "_embed_repromote_after") else 0,
         )
         self._write_status_file()
         return True
@@ -711,6 +726,9 @@ class ModelServer:
                 self._release_stage("embed CPU transfer")
                 # The moved weights' accelerator storage is free only now.
                 flush_mps_cache()
+                # A fast-lane clone now duplicates the CPU main model. A clone in
+                # use is released by its owner when the query finishes.
+                self._retire_stale_fast_encoder()
 
     def _check_embed_recovery_deadline_locked(
         self, model: object, deadline: _RequestDeadline,
@@ -844,6 +862,14 @@ class ModelServer:
     # is released after the longer period.
     _RERANKER_EVICT_IDLE_SECONDS = 60
     _PARKED_RERANKER_IDLE_SECONDS = 600
+    # A refused fast-lane reload is not retried for this long (see _start_fast_rebuild).
+    _FAST_REBUILD_BACKOFF_SECONDS = 60
+    # After an embedding MPS OOM the model runs on CPU; MPS is retried after this
+    # long, doubled for every further OOM up to the cap, once the server has been
+    # quiet for the shorter period.
+    _EMBED_REPROMOTE_SECONDS = 600
+    _EMBED_REPROMOTE_MAX_FACTOR = 16
+    _EMBED_REPROMOTE_QUIET_SECONDS = 60
 
     def _resolve_embed_cache(self, tier: str) -> tuple[str, _EmbedState | None]:
         """Return the requested identity and its compatible cached snapshot."""
@@ -974,7 +1000,9 @@ class ModelServer:
 
         With *idle_at* (a monotonic time), a current clone is dropped too once
         it has gone the idle period without contention and no batch holds the
-        main model. Its residency then rebuilds in the background.
+        main model. Its residency then rebuilds in the background. A clone of
+        a main model that is itself on CPU duplicates its weights and is
+        dropped at once; single queries then use the main model.
         """
         if not self._fast_lock.acquire(blocking=False):
             return False
@@ -986,13 +1014,14 @@ class ModelServer:
                 idle = (idle_at is not None and current and self._fast_idle_seconds > 0
                         and idle_at - self._fast_last_used >= self._fast_idle_seconds
                         and not self._inference_lock.locked())
-                if self._fast_encoder is None or (current and not idle):
+                redundant = current and self._duplicates_cpu_main(state)
+                if self._fast_encoder is None or (current and not idle and not redundant):
                     # Unlock before publication can change the generation, so
                     # a following invalidation cannot miss an idle stale cache.
                     self._fast_lock.release()
                     release_fast = False
                     return False
-                if idle:
+                if idle and not redundant:
                     self._fast_retired_generation = self._fast_generation
                 retired = self._fast_encoder
                 self._fast_encoder = None
@@ -1004,25 +1033,82 @@ class ModelServer:
         finally:
             if release_fast:
                 self._fast_lock.release()
-        if idle:
+        if idle or redundant:
             # The clone is a reference cycle; collect it so its float32 weights
             # return to the system now rather than at the next full collection.
             self._collect_models()
-            log.info("Fast-lane CPU encoder released after %ds without contention",
-                     self._fast_idle_seconds)
+            if redundant:
+                log.info("Fast-lane CPU encoder released: the main embedding model is on CPU")
+            else:
+                log.info("Fast-lane CPU encoder released after %ds without contention",
+                         self._fast_idle_seconds)
         return True
+
+    def _embed_repromote_after(self) -> int:
+        """Seconds on CPU before embedding retries MPS: doubles per OOM, capped."""
+        factor = min(2 ** max(0, getattr(self, "_embed_ooms", 1) - 1), self._EMBED_REPROMOTE_MAX_FACTOR)
+        return self._EMBED_REPROMOTE_SECONDS * factor
+
+    def _repromote_embed(self, now: float | None = None) -> bool:
+        """Retry MPS for embedding after its backoff, once the server is quiet.
+
+        The CPU model is dropped, not moved: the next request loads a fresh
+        copy in its checkpoint dtype, under MPS construction admission, so a
+        model that no longer fits is placed on CPU without a new OOM.
+        """
+        since = getattr(self, "_embed_cpu_since", None)
+        if since is None or "embed" not in self._sticky_cpu:
+            return False
+        from truememory.mps_utils import resolve_device
+        if resolve_device(None) == "cpu":
+            return False  # TRUEMEMORY_DEVICE=cpu keeps CPU.
+        now = time.monotonic() if now is None else now
+        if now - since < self._embed_repromote_after():
+            return False
+        with self._activity_lock:
+            busy = self._inflight or time.time() - self._last_activity < self._EMBED_REPROMOTE_QUIET_SECONDS
+        if busy or not self._inference_lock.acquire(blocking=False):
+            return False
+        try:
+            if not self._lock.acquire(blocking=False):
+                return False
+            try:
+                self._sticky_cpu.discard("embed")
+                self._embed_cpu_since = None
+                state = self._embed_state
+                if state is not None and _on_cpu(state.model):
+                    state = None
+                    self._publish_embed_state(None)
+                self._write_status_file()
+            finally:
+                self._lock.release()
+            # Inference is owned here, so emptying the MPS cache races no work.
+            self._discard_models()
+            log.info("Embedding returns to MPS at its next load (OOM count %d)", self._embed_ooms)
+            return True
+        finally:
+            self._inference_lock.release()
+
+    @staticmethod
+    def _resident_bytes() -> int | None:
+        try:
+            usage = psutil.Process().memory_info().rss if psutil is not None else None
+        except Exception:
+            return None
+        return usage if type(usage) is int and usage > 0 else None
 
     def _retire_idle_fast_encoder(self, now: float | None = None) -> bool:
         return self._retire_stale_fast_encoder(idle_at=time.monotonic() if now is None else now)
 
     def _idle_retirer(self) -> None:
-        """Release the idle fast-lane copy and long-parked rerankers."""
-        periods = [period for period in (self._fast_idle_seconds, self._PARKED_RERANKER_IDLE_SECONDS) if period]
+        """Release the idle fast-lane copy and long-parked rerankers; retry MPS for embedding."""
+        periods = [period for period in (self._fast_idle_seconds, self._PARKED_RERANKER_IDLE_SECONDS,
+                                         self._EMBED_REPROMOTE_QUIET_SECONDS) if period]
         if not periods:
             return
         interval = min(60.0, max(1.0, min(periods) / 4))
         while not self._stopped.wait(interval):
-            for retire in (self._retire_idle_fast_encoder, self._retire_parked_rerankers):
+            for retire in (self._retire_idle_fast_encoder, self._retire_parked_rerankers, self._repromote_embed):
                 try:
                     retire()
                 except Exception:
@@ -1304,6 +1390,12 @@ class ModelServer:
                 return None
 
             model_id, generation = state.model_id, state.generation
+            if self._duplicates_cpu_main(state):
+                # A CPU main model serves single queries itself; a second CPU
+                # copy would only duplicate 2.4 GB of identical weights.
+                state = None
+                self._drop_redundant_fast_encoder_locked()
+                raise _ProcessMemoryRefused("Model server busy: the main model serves single queries on CPU")
             if getattr(self, "_small_host", False):
                 # A second CPU copy (2.4 GB in float32 on macOS) does not fit beside
                 # the MPS cap on an 8 GiB host; wait for the main model instead.
@@ -1334,6 +1426,26 @@ class ModelServer:
                 "requests no longer queue behind batch work", tier, model_id,
             )
             return model
+
+    # A clone of a CPU main model is kept only when it is this small (model2vec);
+    # the float32 Qwen copy duplicates 2.4 GB.
+    _CLONE_DUPLICATE_LIMIT_BYTES = 256 * 1024**2
+
+    def _duplicates_cpu_main(self, state: _EmbedState) -> bool:
+        return (_on_cpu(state.model)
+                and self._MODEL_WEIGHT_BYTES.get(state.model_id, 0) > self._CLONE_DUPLICATE_LIMIT_BYTES)
+
+    def _drop_redundant_fast_encoder_locked(self) -> None:
+        """Caller owns ``_fast_lock``: drop a clone that duplicates a CPU main model."""
+        with self._residency_lock:
+            retired = self._fast_encoder
+            self._fast_encoder = None
+            self._fast_model_id = None
+            self._fast_generation = None
+        if retired is not None:
+            retired = None
+            self._collect_models()
+            log.info("Fast-lane CPU encoder released: the main embedding model is on CPU")
 
     def _build_fast_encoder(self, model_id: str, deadline: _RequestDeadline | None) -> object:
         """Construct a CPU clone; the caller's allocation session charges its size."""
@@ -1370,7 +1482,18 @@ class ModelServer:
             state = None
 
     def _start_fast_rebuild(self, model_id: str, generation: object) -> None:
-        """Start at most one background reload of a released clone."""
+        """Start at most one background reload of a released clone.
+
+        After a refused reload, contended queries do not retry the admission
+        and its collections for a minute, unless resident memory has since
+        dropped by the clone's size.
+        """
+        refused_until, refused_rss = self._fast_rebuild_refusal
+        if time.monotonic() < refused_until:
+            usage = self._resident_bytes()
+            room = self._MODEL_WEIGHT_BYTES.get(model_id, 0)
+            if usage is None or refused_rss is None or refused_rss - usage < room:
+                return
         with self._residency_lock:
             if self._fast_rebuild is not None or self._stopped.is_set():
                 return
@@ -1394,21 +1517,26 @@ class ModelServer:
         # No request owns this load; only server shutdown stops it.
         deadline = _RequestDeadline(None, _TransportRequest(0, math.inf, self._stopped, started=True))
         model = None
-        published = False
+        built = published = False
         try:
             with self._memory_scope():
                 model = self._build_fast_encoder(model_id, deadline)
+                built = True
             with deadline.locked(self._fast_lock):
                 published = self._publish_fast_encoder(model, model_id, generation, blocking=True)
             if published:
                 log.info("Fast-lane CPU encoder reloaded in the background (model=%s)", model_id)
-        except (_ProcessMemoryRefused, _RequestDeadlineExceeded) as error:
+        except _ProcessMemoryRefused as error:
+            self._fast_rebuild_refusal = (time.monotonic() + self._FAST_REBUILD_BACKOFF_SECONDS,
+                                          self._resident_bytes())
+            log.info("Fast-lane reload not admitted: %s", error)
+        except _RequestDeadlineExceeded as error:
             log.info("Fast-lane reload not admitted: %s", error)
         except Exception:
             log.warning("Fast-lane reload failed; single queries keep the bounded fallback", exc_info=True)
         finally:
             model = None
-            if not published:
+            if built and not published:
                 self._collect_models()
             with self._residency_lock:
                 self._fast_rebuild = None
@@ -2515,6 +2643,38 @@ class ModelServer:
             # bind owner after this process exits.
             log.info("Shutdown retains model-server ownership until process exit")
             return
+        self._release_resources()
+
+    def _finish_after_signal(self, grace: float | None = None) -> None:
+        """Exit promptly after a stop signal, abandoning native work past *grace*.
+
+        Admission stops at once (``_cleanup`` already ran). Requests stop at
+        their next slice boundary; a native forward pass cannot be interrupted,
+        so after *grace* seconds the process exits without waiting for it. The
+        next server reclaims the endpoint files under its bind lock.
+        """
+        grace = _TERM_GRACE_SECONDS if grace is None else grace
+        self._stop_clients()
+        expires = time.monotonic() + grace
+        while True:
+            with self._admission_lock:
+                with self._activity_lock:
+                    busy = bool(self._clients) or self._inflight > 0
+            if not busy:
+                self._release_resources()
+                return
+            if time.monotonic() >= expires:
+                break
+            time.sleep(0.05)
+        log.warning("Model work still running %.0fs after the stop signal; exiting without it", grace)
+        logging.shutdown()
+        os._exit(0)
+
+    def _release_resources(self) -> None:
+        """Drop models, then endpoint artifacts and the bind lock, once."""
+        if getattr(self, "_resources_released", False):
+            return
+        self._resources_released = True
         # Keep bind ownership until every cached model has been released,
         # including cycles collected below. If teardown fails, retain the
         # lock until process exit instead of overlapping a successor's load.
@@ -2584,7 +2744,12 @@ def main():
     atexit.register(server._cleanup)
 
     try:
-        server.run()
+        try:
+            server.run()
+        except (SystemExit, KeyboardInterrupt):
+            # TERM/INT/HUP: never wait unboundedly for a native forward pass.
+            server._finish_after_signal()
+            raise
     except RuntimeError as e:
         # Lost the bind-lock race to a concurrent starter (M-20). Exit
         # cleanly without touching the winner's artifacts.

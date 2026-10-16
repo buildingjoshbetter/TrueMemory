@@ -240,6 +240,7 @@ def test_rebuild_still_requires_room_for_the_clone(monkeypatch):
             batch.end()
         assert builds.devices == ["cpu"] and server._fast_encoder is None
         rss.rss = 500 * MIB
+        server._fast_rebuild_refusal = (0.0, None)  # the refusal backoff has elapsed
         batch = Batch(server)
         try:
             # With room, the reload is admitted and serves this same query.
