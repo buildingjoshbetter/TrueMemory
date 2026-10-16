@@ -423,15 +423,39 @@ def refund_extraction_budget() -> None:
 
 
 def record_stale_processing_pid(processing_path: Path, pid: int) -> None:
-    """Write the spawned PID into a .processing file for liveness checks."""
+    """Write the spawned PID and its birth time into a .processing file for liveness checks."""
     try:
         data = json.loads(processing_path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             return
         data["claimed_pid"] = pid
+        try:
+            born = _platform.process_birth(pid)
+        except OSError:
+            born = None
+        data.pop("claimed_born", None)
+        if born is not None:
+            data["claimed_born"] = born
         _atomic_write_text(processing_path, json.dumps(data))
     except (OSError, json.JSONDecodeError):
         pass
+
+
+def claim_worker_alive(data: dict, age: float) -> bool:
+    """Whether the worker a ``.processing`` claim records may still be running.
+
+    The claim records the worker's birth time with its pid, so a pid reused
+    by an unrelated live process does not keep the claim. A claim without one
+    (written before birth times were recorded) trusts a live-looking pid only
+    until the 30-minute threshold.
+    """
+    pid = data.get("claimed_pid", 0)
+    if not _pid_is_alive(pid):
+        return False
+    born = data.get("claimed_born")
+    if type(born) in (int, float):
+        return _platform.same_process(pid, born)
+    return age <= _STALE_PROCESSING_THRESHOLD
 
 
 def clear_backlog_processing(session_id: str, backlog_dir: Path | None = None) -> bool:
@@ -476,6 +500,7 @@ def _requeue_claim(claim: Path, data: dict, reason: str) -> None:
     data["attempts"] = attempts + 1
     data["requeued"] = reason
     data.pop("claimed_pid", None)
+    data.pop("claimed_born", None)
     _atomic_write_text(claim, json.dumps(data))
     target = claim.with_suffix(".json")
     if target.exists():
@@ -535,10 +560,11 @@ def _quarantine_marker(path: Path) -> None:
 def cleanup_stale_processing(backlog_dir: Path) -> None:
     """Restore .processing files whose owning process has died.
 
-    A claim whose recorded worker is no longer running returns to the queue
-    after _DEAD_CLAIM_GRACE. A claim with no recorded worker, or one that
-    cannot be read, waits for the 30-minute threshold. A live worker keeps
-    its claim. A restored claim counts the attempt it used.
+    A claim whose recorded worker is no longer running (see
+    claim_worker_alive) returns to the queue after _DEAD_CLAIM_GRACE. A claim
+    with no recorded worker, or one that cannot be read, waits for the
+    30-minute threshold. A live worker keeps its claim. A restored claim
+    counts the attempt it used.
     """
     for stale in backlog_dir.glob("*.processing"):
         try:
@@ -552,7 +578,7 @@ def cleanup_stale_processing(backlog_dir: Path) -> None:
             pid = data.get("claimed_pid", 0) if isinstance(data, dict) else 0
             valid = isinstance(pid, int) and not isinstance(pid, bool) and pid >= 0
             try:
-                dead = valid and pid > 0 and not _pid_is_alive(pid)
+                dead = valid and pid > 0 and not claim_worker_alive(data, age)
             except OverflowError:
                 valid = dead = False
             if age <= _STALE_PROCESSING_THRESHOLD and not dead:

@@ -343,7 +343,8 @@ def test_stale_claim_thresholds(env):
 
     fresh_dead = claim("fresh-dead", 30, claimed_pid=_dead_pid())
     dead = claim("dead", 300, claimed_pid=_dead_pid())
-    live = claim("live", 7200, claimed_pid=os.getpid())
+    from truememory._platform import process_birth
+    live = claim("live", 7200, claimed_pid=os.getpid(), claimed_born=process_birth(os.getpid()))
     unrecorded = claim("unrecorded", 600)
     unrecorded_old = claim("unrecorded-old", 1860, attempts=2)
     overflow = claim("overflow", 1860, claimed_pid=2 ** 70)
@@ -356,3 +357,48 @@ def test_stale_claim_thresholds(env):
     assert not dead.exists() and dead.with_suffix(".json").exists()
     assert json.loads(unrecorded_old.with_suffix(".json").read_text(encoding="utf-8"))["attempts"] == 3
     assert overflow.with_suffix(".corrupt").exists() and garbage.with_suffix(".json").exists()
+
+
+def test_a_claim_whose_pid_was_reused_returns(env):
+    # Pre-fix: a claim whose worker died and whose pid now names an unrelated
+    # live process never returned to the queue.
+    from truememory._platform import process_birth
+    unrelated = _POPEN([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        born = process_birth(unrelated.pid)
+        assert born is not None
+        session, path = _session(env)
+        now = time.time()
+
+        def claim(name: str, age: float, **fields) -> Path:
+            target = env.backlog / f"{name}.processing"
+            _shared._atomic_write_text(target, json.dumps({
+                "transcript_path": str(path), "transcript_host": "claude", "session_id": session, "user_id": "",
+                "db_path": str(env.database), "claimed_pid": unrelated.pid, **fields}))
+            os.utime(target, (now - age, now - age))
+            return target
+
+        reused = claim("reused", 300, claimed_born=born - 1000.0)
+        current = claim("current", 7200, claimed_born=born)
+        unrecorded = claim("unrecorded", 600)
+        unrecorded_old = claim("unrecorded-old", 1860)
+        _shared.cleanup_stale_processing(env.backlog)
+        assert not reused.exists() and reused.with_suffix(".json").exists()
+        assert current.exists() and unrecorded.exists()
+        # Without a birth time a live-looking pid is trusted for 30 minutes.
+        assert not unrecorded_old.exists() and unrecorded_old.with_suffix(".json").exists()
+
+        # Adoption tells the reused pid apart too, and keeps the true claimant's claim.
+        adopted = claim(session, 300, claimed_born=born - 1000.0)
+        assert completion.adopt_legacy_pointer(adopted, ("", str(env.database), "claude")) is not None
+        assert not adopted.exists()
+        kept = claim(session, 300, claimed_born=born)
+        assert completion.adopt_legacy_pointer(kept, ("", str(env.database), "claude")) is None
+        assert kept.exists()
+
+        # The drainers record the birth time beside the pid.
+        _shared.record_stale_processing_pid(kept, unrelated.pid)
+        assert json.loads(kept.read_text(encoding="utf-8"))["claimed_born"] == born
+    finally:
+        unrelated.kill()
+        unrelated.wait()

@@ -1466,7 +1466,12 @@ def adopt_legacy_pointer(pointer: Path, scope: tuple[str, str | None, str] | Non
         if type(pid) is not int or pid < 0:
             raise ValueError("legacy pointer claim is invalid")
         # A claim is free once its worker is gone, or when the caller is that worker.
-        if pointer.suffix == ".processing" and (not pid or (pid not in claimants and pid_is_alive(pid))):
+        alive = bool(pid) and pid not in claimants and pid_is_alive(pid)
+        if alive and type(value.get("claimed_born")) in (int, float):
+            # A pid now held by a process born at another time is not the claimant.
+            from truememory._platform import same_process
+            alive = same_process(pid, value["claimed_born"])
+        if pointer.suffix == ".processing" and (not pid or alive):
             return None
         transcript, session = source
         # A removed transcript can never be admitted; retire its pointer too.
