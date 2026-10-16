@@ -272,7 +272,7 @@ class TestIssue736RequestDeadlines(unittest.TestCase):
                 }):
                     self.assert_expired(self.server.handle_request(self.request(op, single=single)))
                     self.assertEqual(failed_model.calls, 1)
-                    self.assertEqual(self.server._sticky_cpu, {op})
+                    self.assertEqual(self.server._sticky_cpu, {op} if op == "embed" else {"rerank:fixture"})
                     self.assertIsNone(self.server._embed_state)
                     self.assertIsNone(self.server._reranker)
                     self.assertIsNone(self.server._reranker_name)
@@ -364,7 +364,9 @@ class TestIssue736RequestDeadlines(unittest.TestCase):
         self.assert_expired(self.server.handle_request(self.request("rerank")))
         self.assertEqual(self.loads, ["fixture"])
         self.assertEqual(self.model.calls, 1)
-        self.assertEqual(self.recoveries, ["rerank"])
+        # Only the failing reranker is marked, never the whole rerank path.
+        self.assertEqual(len(self.recoveries), 1)
+        self.assertTrue(self.recoveries[0].startswith("rerank:"))
         self.assertIsNone(self.server._reranker)
         self.assertIsNone(self.server._reranker_name)
 

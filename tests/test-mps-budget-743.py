@@ -10,6 +10,7 @@ import logging
 import re
 import sys
 import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -285,14 +286,14 @@ class TestFactoryCoverage(BudgetTestCase):
         server = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "ModelServer")
         names = {"_build_embed_model", "_get_reranker", "_mark_sticky_cpu", "_flush_mps_cache",
                  "_check_process_memory", "_construct_model", "_discard_models", "_memory_stage",
-                 "_release_stage", "_construction_slot"}
+                 "_release_stage", "_construction_slot", "_parked_reranker_table"}
         server.body = [node for node in server.body if isinstance(node, ast.FunctionDef) and node.name in names
                        or isinstance(node, ast.Assign) and any(
-                           isinstance(target, ast.Name) and target.id == "_MODEL_WEIGHT_BYTES"
+                           isinstance(target, ast.Name) and target.id in ("_MODEL_WEIGHT_BYTES", "_MPS_WEIGHT_BYTES")
                            for target in node.targets)]
         refusal = next(node for node in tree.body if isinstance(node, ast.ClassDef)
                        and node.name == "_ProcessMemoryRefused")
-        namespace = {"sys": sys, "os": types.SimpleNamespace(environ=self.env),
+        namespace = {"sys": sys, "os": types.SimpleNamespace(environ=self.env), "time": time,
                      "log": logging.getLogger("synthetic743"), "gc": types.SimpleNamespace(collect=Mock())}
         future = ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)
         exec(compile(ast.fix_missing_locations(ast.Module(body=[future, refusal, server], type_ignores=[])),
@@ -351,7 +352,7 @@ class TestFactoryCoverage(BudgetTestCase):
     def test_cpu_fast_encoder_sticky_reranker_and_explicit_cpu_skip_budget(self) -> None:
         server = self.server()
         server._build_embed_model("qwen3_256", "cpu")
-        server._sticky_cpu.add("rerank")
+        server._sticky_cpu.add("rerank:synthetic/reranker")
         server._get_reranker("synthetic/reranker")
         self.local_reranker().get_reranker("synthetic/reranker", device="cpu")
         self.assertEqual([kwargs["device"] for _, kwargs in self.factories], ["cpu"] * 3)

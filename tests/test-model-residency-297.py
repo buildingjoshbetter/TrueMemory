@@ -212,13 +212,22 @@ class TestModelResidency(unittest.TestCase):
         self.build_hook = check
         self.assertEqual(self.request(tier="base")["vectors"].data, [22.0, 22.0])
 
-    def test_reranker_replacement_releases_old_before_actual_handler_constructor(self) -> None:
+    def test_reranker_switch_parks_previous_and_reuses_it_without_reload(self) -> None:
+        # The default and the deep-search reranker alternate; neither reloads.
         self.assertEqual(self.request("rerank")["scores"].data, [31.0, 31.0])
         old = self.refs[-1]
-        self.build_hook = lambda identity, device: self.assertIsNone(
-            old(), "Obsolete reranker remains live during replacement",
+        self.build_hook = lambda identity, device: self.assertIsNotNone(
+            old(), "Previous reranker dropped instead of parked",
         )
         self.assertEqual(self.request("rerank", name="rank-b")["scores"].data, [32.0, 32.0])
+        self.assertEqual(self.request("rerank")["scores"].data, [31.0, 31.0])
+        self.assertIs(self.server._reranker, old())
+        self.assertEqual(self.builds, [("rank-a", "cpu"), ("rank-b", "cpu")])
+        # Released after the idle period, then loaded again on demand.
+        self.assertTrue(self.server._retire_parked_rerankers(
+            now=self.ms.time.monotonic() + self.server._PARKED_RERANKER_IDLE_SECONDS))
+        self.assertEqual(self.request("rerank", name="rank-b")["scores"].data, [32.0, 32.0])
+        self.assertEqual(self.builds[-1], ("rank-b", "cpu"))
 
     def test_failed_replacements_leave_empty_cache_and_later_reload_old_identity(self) -> None:
         for op in ("embed", "rerank"):
@@ -227,8 +236,9 @@ class TestModelResidency(unittest.TestCase):
                 self.request(op)
                 old = self.refs[-1]
 
-                def fail(identity: str, device: str) -> None:
-                    self.assertIsNone(old())
+                def fail(identity: str, device: str, op: str = op) -> None:
+                    # An obsolete embedding model is released first; a reranker is parked.
+                    (self.assertIsNone if op == "embed" else self.assertIsNotNone)(old())
                     raise RuntimeError("synthetic construction failure")
 
                 self.build_hook = fail
@@ -237,6 +247,8 @@ class TestModelResidency(unittest.TestCase):
                 self.assertIsNone(self.server._embed_state if op == "embed" else self.server._reranker)
                 if op == "rerank":
                     self.assertIsNone(self.server._reranker_name)
+                    # The previous reranker was parked, not dropped, and serves the reload.
+                    self.assertIn("rank-a", self.server._parked_rerankers)
                 self.assertFalse(self.server._lock.locked())
                 self.assertFalse(self.server._inference_lock.locked())
                 self.build_hook = lambda identity, device: None

@@ -333,6 +333,8 @@ class TestTierTargetIdentity(unittest.TestCase):
             check.assert_called_once_with((2, 256), "vectors")
 
     def test_fast_and_main_lanes_keep_captured_default_identity(self) -> None:
+        # The clone serves beside an accelerator main model only.
+        self.mps.resolve_device = lambda _device: "mps"
         self.vector.EMBEDDING_MODEL = "base"
         self.request("")
         snapshot = self.server._embed_state
@@ -422,6 +424,8 @@ class TestTierTargetIdentity(unittest.TestCase):
         self.assertFalse(self.server._inference_lock.locked())
 
     def test_alias_publication_preserves_snapshot_for_fast_lane(self) -> None:
+        # The clone serves beside an accelerator main model only.
+        self.mps.resolve_device = lambda _device: "mps"
         self.request("base")
         snapshot = self.server._embed_state
         self.request("pro")

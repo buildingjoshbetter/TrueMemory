@@ -16,6 +16,7 @@ from truememory import model_server as ms
 from truememory import mps_utils
 
 MIB = 1024 ** 2
+MODERNBERT = "Alibaba-NLP/gte-reranker-modernbert-base"
 
 
 class FakeRSS:
@@ -168,7 +169,7 @@ def test_construction_oom_degrades_to_cpu_once(plain, monkeypatch, kind):
                             types.SimpleNamespace(CrossEncoder=lambda name, device=None: make(device)))
 
         def load():
-            return plain._get_reranker("Alibaba-NLP/gte-reranker-modernbert-base")
+            return plain._get_reranker(MODERNBERT)
 
         def forget():
             plain._reranker = None
@@ -176,7 +177,8 @@ def test_construction_oom_degrades_to_cpu_once(plain, monkeypatch, kind):
     with plain._lock:
         assert load().device == "cpu"
     assert builds[-1] == "cpu" and builds[0] != "cpu"
-    assert kind in plain._sticky_cpu
+    # A reranker that does not fit moves alone; the embedding path is one model.
+    assert plain._sticky_cpu == ({"embed"} if kind == "embed" else {f"rerank:{MODERNBERT}"})
     forget()
     with plain._lock:
         assert load().device == "cpu"
