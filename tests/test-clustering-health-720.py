@@ -428,7 +428,7 @@ class TestMCPClusteringHealth(HealthFixture):
             "_encoding_gate_last_error": "SyntheticGateError", "_encoding_gate_degradation_count": 2,
             "_build_model_server_health": lambda: {"status": "ok", "running": True},
             "_load_config": lambda: {"tier": "edge"}, "__version__": "synthetic",
-            "_get_rss_mb": lambda: 0, "_MAX_RSS_MB": 0,
+            "_get_rss_mb": lambda: 0, "_MAX_RSS_MB": 0, "_staging_report": lambda: None,
         })
 
     def test_existing_health_contract_and_values_are_preserved(self) -> None:

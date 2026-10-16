@@ -429,6 +429,8 @@ def configure_harness(h: Harness, manager: object):
             "_config_write_lock": threading.RLock(),
             "_MCP_STAGING_SECONDS": 2.0,
             "_stage_switch_in_background": Mock(side_effect=AssertionError("unexpected background staging")),
+            "_staging_report": lambda: None, "_background_staging": None,
+            "_background_staging_lock": threading.Lock(),
         },
     )
 

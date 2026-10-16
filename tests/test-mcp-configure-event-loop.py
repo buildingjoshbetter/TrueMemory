@@ -58,3 +58,83 @@ def test_busy_maintenance_returns_pending_and_stages_in_the_background(server, m
     assert "starts in the background" in result["note"]
     assert staged.wait(10)
     assert calls == [server._MCP_STAGING_SECONDS, None]
+
+
+def _staging_manager(outcome):
+    from truememory.maintenance import MaintenanceBusyError
+    done = threading.Event()
+
+    class Manager:
+        _last_outcome = _served_tier = _last_action = None
+
+        def start_rebuild(self, *, target_tier, db_path, config_path, config_lock_path, staging_seconds=None):
+            if staging_seconds is not None:
+                raise MaintenanceBusyError("synthetic: the short wait ran out")
+            try:
+                return outcome()
+            finally:
+                done.set()
+
+        def get_status(self, status_id=0):
+            return {"status": "no_rebuild_found"}
+
+    return Manager(), done
+
+
+def _wait_for_staging(server, state):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        report = server._staging_report()
+        if report is not None and report["state"] == state:
+            return report
+        time.sleep(0.01)
+    raise AssertionError(server._staging_report())
+
+
+@pytest.mark.parametrize("error", ["busy", "preflight"])
+def test_a_failed_background_staging_is_reported_with_its_time_and_reason(server, monkeypatch, error):
+    # Review v6 L-v6-2: the staging thread only logged its failure, and
+    # truememory_status showed "no_rebuild_found" with no trace of the request.
+    from truememory.maintenance import MaintenanceBusyError
+    from truememory.tier_switch.manager import RebuildManager
+
+    def fail():
+        if error == "busy":
+            raise MaintenanceBusyError("synthetic: maintenance stayed busy for the whole window")
+        raise RuntimeError("synthetic: base models are not downloaded: synthetic-embedder")
+
+    manager, done = _staging_manager(fail)
+    server._save_config({"tier": "edge"})
+    monkeypatch.setattr(server, "_background_staging", None)
+    monkeypatch.setattr(RebuildManager, "get_instance", staticmethod(lambda: manager))
+    assert json.loads(server.truememory_configure(tier="base"))["status"] == "pending"
+    assert done.wait(10)
+    report = _wait_for_staging(server, "failed")
+    expected = ("MaintenanceBusyError: synthetic: maintenance stayed busy" if error == "busy"
+                else "RuntimeError: synthetic: base models are not downloaded")
+    assert report["error"].startswith(expected), report
+    assert report["requested_tier"] == "base"
+    assert time.strptime(report["failed_at"], "%Y-%m-%dT%H:%M:%SZ")
+    status = json.loads(server.truememory_status())
+    assert status["rebuild"] == {"status": "no_rebuild_found"}
+    assert status["switch_staging"] == report
+
+    # The next configure call reports it, then supersedes it.
+    manager.start_rebuild = lambda **options: 9
+    again = json.loads(server.truememory_configure(tier="base"))
+    assert again["previous_background_staging"] == report
+    assert "switch_staging" not in json.loads(server.truememory_status())
+
+
+def test_a_started_background_staging_reports_its_status_id(server, monkeypatch):
+    from truememory.tier_switch.manager import RebuildManager
+    manager, done = _staging_manager(lambda: 7)
+    server._save_config({"tier": "edge"})
+    monkeypatch.setattr(server, "_background_staging", None)
+    monkeypatch.setattr(RebuildManager, "get_instance", staticmethod(lambda: manager))
+    assert json.loads(server.truememory_configure(tier="base"))["status"] == "pending"
+    assert done.wait(10)
+    report = _wait_for_staging(server, "started")
+    assert (report["requested_tier"], report["status_id"]) == ("base", 7)
+    assert "error" not in report
+    assert json.loads(server.truememory_status())["switch_staging"] == report
