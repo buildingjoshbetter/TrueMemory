@@ -1118,9 +1118,39 @@ def layer_read_snapshot(
             conn.rollback()
 
 
-# (source epoch, layer) pairs whose failure this process already retried once.
-_failure_retried: set[tuple[str, str]] = set()
+# A layer that failed with a database error (lock contention, a transient I/O
+# error) runs again even on an idle pass: at once after its first consecutive
+# failure in this process, then after 30 s, doubling up to 30 minutes, so a
+# persistent error never spins. A builder error keeps waiting for the source to
+# change, so it cannot fail every pass.
 _RETRIED_FAILURES = frozenset({"OperationalError"})
+_RETRY_FIRST_SECONDS = 30.0
+_RETRY_MAX_SECONDS = 1800.0
+_monotonic = time.monotonic
+
+
+class _RetryBackoff(NamedTuple):
+    failures: int
+    not_before: float
+
+
+# (source epoch, layer) -> this process's consecutive database-error failures.
+_failure_backoff: dict[tuple[str, str], _RetryBackoff] = {}
+
+
+def _retry_due(state: LayerState) -> bool:
+    backoff = _failure_backoff.get((state.source.epoch, state.layer))
+    return backoff is None or _monotonic() >= backoff.not_before
+
+
+def _note_layer_outcome(source: SourceRevision, layer: str, outcome: str, category: str | None) -> None:
+    key = (source.epoch, layer)
+    if outcome != "failed" or category not in _RETRIED_FAILURES:
+        _failure_backoff.pop(key, None)
+        return
+    failures = _failure_backoff[key].failures + 1 if key in _failure_backoff else 1
+    delay = 0.0 if failures == 1 else min(_RETRY_MAX_SECONDS, _RETRY_FIRST_SECONDS * 2 ** (failures - 2))
+    _failure_backoff[key] = _RetryBackoff(failures, _monotonic() + delay)
 
 
 def _eligible(state: LayerState, threshold: int, force: bool) -> bool:
@@ -1136,11 +1166,7 @@ def _eligible(state: LayerState, threshold: int, force: bool) -> bool:
     if (state.attempted_epoch != source.epoch or state.attempted_revision is None
             or state.attempted_insert_count is None or state.attempted_dependency != state.dependency.key):
         return True
-    if (state.outcome == "failed" and state.error_category in _RETRIED_FAILURES
-            and (source.epoch, state.layer) not in _failure_retried):
-        # A database error (lock contention, a transient I/O error) is retried
-        # once per process on the next pass, even an idle one; a builder error
-        # keeps waiting for the source to change, so it cannot fail every pass.
+    if state.outcome == "failed" and state.error_category in _RETRIED_FAILURES and _retry_due(state):
         return True
     terminal_failure = state.outcome in {"failed", "unavailable"}
     if terminal_failure and state.attempted_revision == source.revision:
@@ -1509,8 +1535,6 @@ def run_layers(
                     layer_freshness(state.source, state, state.dependency), state.output_count, 0.0,
                     state.error_category, False, state.successful_coverage, borrowed))
                 continue
-            if state.outcome == "failed" and state.error_category in _RETRIED_FAILURES:
-                _failure_retried.add((state.source.epoch, spec.layer))
             started = time.monotonic()
             baseline_state = state
             if not state.dependency.available:
@@ -1692,9 +1716,11 @@ def run_layers(
                     category = "Error"
                 if not record_attempt(state, outcome, category):
                     outcome, category = "deferred", "StyleTriggersUnsupported"
+                else:
+                    _note_layer_outcome(state.source, spec.layer, outcome, category)
                 if outcome == "failed":
-                    logger.warning("Maintenance layer %s failed (%s); it runs again once the source changes",
-                                   spec.layer, category)
+                    logger.warning("Maintenance layer %s failed (%s); it runs again %s", spec.layer, category,
+                                   "after a backoff" if category in _RETRIED_FAILURES else "once the source changes")
                 results.append(LayerResult(spec.layer, spec.result_key, outcome, state.output_count,
                     time.monotonic() - started, category, True, state.successful_coverage, borrowed))
                 if not isinstance(error, Exception):
@@ -1702,6 +1728,8 @@ def run_layers(
                 if interrupted:
                     break
             else:
+                if not borrowed:
+                    _note_layer_outcome(state.source, spec.layer, "success", None)
                 results.append(LayerResult(spec.layer, spec.result_key, "success" if count else "success_empty",
                     count, time.monotonic() - started, None, True, coverage, borrowed))
                 _yield_writer(publication, cancel)

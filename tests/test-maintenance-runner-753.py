@@ -661,30 +661,52 @@ class TestRunnerContention(RunnerFixture):
         self.assertEqual((second.outcome, second.error_category), ("success", None))
         self.assertEqual(self.output(), [("summaries", 30)])
 
-    def test_a_database_error_is_retried_once_on_the_next_idle_pass(self) -> None:
+    def test_a_database_error_is_retried_on_idle_passes_with_a_bounded_backoff(self) -> None:
         # Review: a failed layer waited for 25 new memories, so an idle store
-        # kept it stale. A database error is retried on the next pass; a
-        # builder error still waits for the source to change.
+        # kept it stale; then (v6 L-v6-1) only one retry per process. Every
+        # database error is retried on an idle pass: at once, then after 30 s,
+        # doubling to 30 minutes. A builder error still waits for the source.
         self.add(30)
-        faults = [sqlite3.OperationalError("disk I/O error")]
+        clock = [1000.0]
+        faults = []
 
         def flaky(conn: sqlite3.Connection) -> None:
             if faults:
                 raise faults.pop()
 
-        failed = self.run_layer(self.spec(action=flaky))
-        self.assertEqual((failed.outcome, failed.error_category), ("failed", "OperationalError"))
-        retried = self.run_layer(self.spec(action=flaky))
-        self.assertEqual(retried.outcome, "success")
-        self.assertEqual(self.output(), [("summaries", 30)])
+        def run():
+            return self.run_layer(self.spec(action=flaky))
+
+        with patch.object(MAINTENANCE, "_monotonic", lambda: clock[0]):
+            faults[:] = [sqlite3.OperationalError("disk I/O error")] * 2
+            self.assertEqual((run().outcome, run().outcome), ("failed", "failed"))  # Fails, retried at once.
+            self.assertFalse(run().attempted)  # Not due for 30 s.
+            clock[0] += 30
+            self.assertEqual(run().outcome, "success")
+            self.assertEqual(self.output(), [("summaries", 30)])
+
+            # A later failure gets its own idle retries (v6: none after the first).
+            self.add(30)
+            delays = []
+            faults[:] = [sqlite3.OperationalError("disk I/O error")] * 12
+            self.assertEqual(run().outcome, "failed")
+            for _ in range(11):
+                waited = 0.0
+                while not run().attempted:
+                    clock[0] += 15
+                    waited += 15
+                delays.append(waited)
+            self.assertEqual(delays, [0, 30, 60, 120, 240, 480, 960, 1800, 1800, 1800, 1800])
+            clock[0] += 1800
+            self.assertEqual(run().outcome, "success")
+            self.assertNotIn((self.state().source.epoch, "summaries"), MAINTENANCE._failure_backoff)
 
         def broken(conn: sqlite3.Connection) -> None:
-            raise sqlite3.OperationalError("database disk image is malformed")
+            raise ValueError("synthetic builder fault")
 
         self.add(30)
         self.assertEqual(self.run_layer(self.spec("contradictions", broken)).outcome, "failed")
-        self.assertEqual(self.run_layer(self.spec("contradictions", broken)).outcome, "failed")  # The one retry.
-        self.assertNotEqual(self.run_layer(self.spec("contradictions", broken)).outcome, "failed")  # Then it waits.
+        self.assertFalse(self.run_layer(self.spec("contradictions", broken)).attempted)  # It waits.
 
     def test_maintenance_writes_wait_for_the_writer_instead_of_failing(self) -> None:
         # Another connection holds the write lock briefly; the diagnostic and
