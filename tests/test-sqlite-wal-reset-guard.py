@@ -148,16 +148,25 @@ class Openers(unittest.TestCase):
     }
 
     def test_every_database_opener_is_configured_by_the_guard(self):
-        # Each sqlite3.connect is wrapped as configure(sqlite3.connect(...)) unless it never writes.
+        # Each sqlite3.connect is wrapped as configure(sqlite3.connect(...)) unless it never writes,
+        # under any import style (import sqlite3 as x, from sqlite3 import connect as y).
         unwrapped = set()
         for path in sorted((ROOT / "truememory").rglob("*.py")):
             relative = path.relative_to(ROOT).as_posix()
             source = path.read_text(encoding="utf-8")
             tree = ast.parse(source)
             parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+            modules, functions = {"sqlite3"}, set()
             for node in ast.walk(tree):
-                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "connect"
-                        and isinstance(node.func.value, ast.Name) and node.func.value.id == "sqlite3"):
+                if isinstance(node, ast.Import):
+                    modules.update(alias.asname or alias.name for alias in node.names if alias.name == "sqlite3")
+                elif isinstance(node, ast.ImportFrom) and node.module == "sqlite3":
+                    functions.update(alias.asname or alias.name for alias in node.names if alias.name == "connect")
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call) and (
+                        isinstance(node.func, ast.Attribute) and node.func.attr == "connect"
+                        and isinstance(node.func.value, ast.Name) and node.func.value.id in modules
+                        or isinstance(node.func, ast.Name) and node.func.id in functions)):
                     continue
                 parent = parents.get(node)
                 while isinstance(parent, ast.IfExp):
@@ -168,6 +177,47 @@ class Openers(unittest.TestCase):
                                + "".join(f", {k.arg}={ast.get_source_segment(source, k.value)}" for k in node.keywords
                                          if k.arg == "uri")))
         self.assertEqual(unwrapped, self.ALLOWED)
+
+    def test_static_scan_catches_aliased_connects(self):
+        # Review v6 L-v6-4: an aliased connect (the m7_conn mutant) passed every guard test.
+        for mutant in ("from sqlite3 import connect as _c\nconn = _c(path)\n",
+                       "from sqlite3 import connect\nconn = connect(path)\n",
+                       "import sqlite3 as _s\nconn = _s.connect(path)\n"):
+            with self.subTest(mutant=mutant), tempfile.TemporaryDirectory() as directory:
+                package = Path(directory) / "truememory"
+                package.mkdir()
+                (package / "mutant.py").write_text(mutant, encoding="utf-8")
+                with patch.dict(globals(), {"ROOT": Path(directory)}):
+                    with self.assertRaises(AssertionError) as caught:
+                        self.test_every_database_opener_is_configured_by_the_guard()
+                self.assertIn("truememory/mutant.py", str(caught.exception))
+
+    def test_suite_guard_flags_a_product_connection_that_skipped_configure(self):
+        # conftest's audit hook fails any test whose truememory code opened a
+        # writable connection without storage.configure_connection, however
+        # sqlite3.connect was reached.
+        guard = next(module for name, module in sys.modules.items()
+                     if name.endswith("conftest") and hasattr(module, "_unconfigured_connections"))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "opened.db"
+            source = ("from sqlite3 import connect as _c\n"
+                      "def raw(path):\n    return _c(path)\n"
+                      "def guarded(path):\n    return configure(sqlite3.connect(path))\n"
+                      "def readonly(path):\n    return sqlite3.connect(f'file:{path}?mode=ro', uri=True)\n")
+            namespace = {"configure": storage.configure_connection, "sqlite3": sqlite3}
+            exec(compile(source, os.path.join(directory, "truememory", "worker.py"), "exec"), namespace)
+            connections = []
+            try:
+                connections.append(namespace["guarded"](str(path)))
+                connections.append(namespace["readonly"](str(path)))
+                self.assertEqual(guard._unconfigured_connections, {})
+                connections.append(namespace["raw"](str(path)))
+                caught = sorted(guard._unconfigured_connections.values())
+            finally:
+                guard._unconfigured_connections.clear()
+                for conn in connections:
+                    conn.close()
+        self.assertEqual(caught, [os.path.join(directory, "truememory", "worker.py") + ":3"])
 
     def test_openers_disable_autocheckpoint_only_on_affected_builds(self):
         from truememory.storage import create_db

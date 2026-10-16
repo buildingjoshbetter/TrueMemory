@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -899,6 +900,7 @@ def configure_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
     """Wrap every TrueMemory sqlite3.connect: no automatic checkpoints on affected builds.
 
     Applied before any other statement; closes the connection if it fails.
+    The audit event lets the test suite check that no writer skipped this.
     """
     if WAL_RESET_GUARD:
         try:
@@ -907,6 +909,7 @@ def configure_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
         except BaseException:
             conn.close()
             raise
+    sys.audit("truememory.configure_connection", conn)
     return conn
 
 

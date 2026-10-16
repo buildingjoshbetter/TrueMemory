@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 
 import pytest
 
@@ -202,6 +203,30 @@ _connected_databases: set[str] = set()
 _database_file_opens: list[str] = []
 _PRODUCT = os.sep + "truememory" + os.sep
 
+# Every connection product code opens must pass through
+# storage.configure_connection (no automatic checkpoints on SQLite builds with
+# the WAL-reset bug) unless it never writes. A connection opened from
+# truememory/ stays pending until configure_connection's audit event names it;
+# the fixture below fails the test that left one pending.
+_unconfigured_connections: dict[int, str] = {}
+_opening_database = threading.local()
+_RAW_CONNECTIONS = {  # (module, function): writers that are not TrueMemory stores.
+    ("storage.py", "protected_checkpoint"),  # The guard's own lock holder and checkpointer.
+    ("storage.py", "_backup_database"),  # The new backup file; its only connection.
+    (os.path.join("tier_switch", "manager.py"), "backup_db"),  # Likewise.
+    (os.path.join("ingest", "cli.py"), "_preflight_writable_target"),  # PRAGMA quick_check only.
+}
+
+
+def _product_caller():
+    import sys
+    frame = sys._getframe(2)
+    while frame is not None and frame.f_code.co_filename.endswith(("conftest.py", "<frozen importlib._bootstrap>")):
+        frame = frame.f_back
+    if frame is None or _PRODUCT not in frame.f_code.co_filename or os.sep + "tests" + os.sep in frame.f_code.co_filename:
+        return None
+    return frame
+
 
 def _database_target(database: object) -> str | None:
     try:
@@ -222,6 +247,17 @@ def _audit_database_files(event: str, args: tuple) -> None:
         target = _database_target(args[0]) if args else None
         if target is not None:
             _connected_databases.add(target)
+        name = os.fsdecode(args[0]) if args and isinstance(args[0], (str, bytes, os.PathLike)) else ""
+        _opening_database.writable = target is not None and "mode=ro" not in name
+    elif event == "sqlite3.connect/handle" and args and getattr(_opening_database, "writable", False):
+        _opening_database.writable = False
+        frame = _product_caller()
+        if frame is not None:
+            module = frame.f_code.co_filename.rsplit(_PRODUCT, 1)[1]
+            if (module, frame.f_code.co_name) not in _RAW_CONNECTIONS:
+                _unconfigured_connections[id(args[0])] = f"{frame.f_code.co_filename}:{frame.f_lineno}"
+    elif event == "truememory.configure_connection" and args:
+        _unconfigured_connections.pop(id(args[0]), None)
     elif event == "open" and _connected_databases and args and isinstance(args[0], (str, bytes, os.PathLike)):
         name = os.fsdecode(args[0])
         base = name[:-4] if name.endswith(("-wal", "-shm")) else name
@@ -246,9 +282,15 @@ def _forbid_database_file_opens_outside_sqlite():
     """Fail any test whose product code opened a connected database's files directly."""
     _connected_databases.clear()
     del _database_file_opens[:]
+    _unconfigured_connections.clear()
     yield
     found = list(_database_file_opens)
     del _database_file_opens[:]
+    unconfigured = sorted(set(_unconfigured_connections.values()))
+    _unconfigured_connections.clear()
     if found:
         pytest.fail("Database files opened outside SQLite (drops this process's POSIX locks): "
                     + "; ".join(found[:5]), pytrace=False)
+    if unconfigured:
+        pytest.fail("Database connections opened without storage.configure_connection: "
+                    + "; ".join(unconfigured[:5]), pytrace=False)

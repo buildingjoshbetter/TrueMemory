@@ -1638,7 +1638,7 @@ class TestEngineReconnectReceipt(unittest.TestCase):
         enter_context(self, patch.object(Path, "chmod"))
         self.modules["storage"] = definitions("storage.py", {"DatabaseOpenError", "_integrity_message", "_validate_db_path",
                                                              "wal_reset_affected", "WAL_RESET_GUARD", "configure_connection"},
-            self.namespace(sqlite3=sqlite3, Path=Path, os=os, newest_backup=lambda path: None))
+            self.namespace(sqlite3=sqlite3, Path=Path, os=os, sys=sys, newest_backup=lambda path: None))
         namespace = self.namespace(sqlite3=sqlite3, Path=Path, logger=logging.getLogger("synthetic-reconnect"),
             _HAS_VECTOR=vectors, DEFAULT_BUSY_TIMEOUT_MS=3000,
             _ALL_VEC_TABLES=("vec_messages", "vec_messages_sep", "vec_messages_edge", "vec_messages_sep_edge",
