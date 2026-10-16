@@ -3,6 +3,7 @@
 import ast
 import runpy
 import sqlite3
+import sys
 import tempfile
 import threading
 import types
@@ -764,6 +765,29 @@ class TestRunnerContention(RunnerFixture):
         self.assertEqual([result.outcome for result in results], ["success", "success"])
         self.assertEqual(sleeps, [MAINTENANCE._WRITER_YIELD_SECONDS])
         self.assertGreater(MAINTENANCE._WRITER_YIELD_SECONDS, 0.1)
+
+    def test_a_build_switches_threads_faster_until_the_last_build_ends(self) -> None:
+        # pK10 on 10,484 memories: a CPU-bound build held the GIL for up to the
+        # 5 ms switch interval each time a foreground add gave it up around a
+        # SQLite call, so adds took about a second during builds.
+        saved = sys.getswitchinterval()
+        self.addCleanup(sys.setswitchinterval, saved)
+        sys.setswitchinterval(0.005)
+        during = []
+
+        def observe(conn: sqlite3.Connection) -> None:
+            during.append(sys.getswitchinterval())
+
+        def change(conn: sqlite3.Connection) -> None:
+            sys.setswitchinterval(0.003)
+
+        MAINTENANCE.run_layers(self.conn, (self.spec("summaries", compute=observe),
+                                           self.spec("contradictions", compute=observe)))
+        self.assertEqual(len(during), 2)
+        self.assertTrue(all(abs(value - MAINTENANCE._BUILD_SWITCH_INTERVAL) < 1e-9 for value in during), during)
+        self.assertAlmostEqual(sys.getswitchinterval(), 0.005)
+        MAINTENANCE.run_layers(self.conn, (self.spec("summaries", compute=change),), force=True)
+        self.assertAlmostEqual(sys.getswitchinterval(), 0.003)  # A change made meanwhile is kept.
 
     def test_a_failed_layer_logs_one_warning_naming_it(self) -> None:
         self.add(30)

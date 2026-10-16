@@ -14,6 +14,7 @@ import re
 import sqlite3
 import sys
 import threading
+from sys import getswitchinterval, setswitchinterval
 import time
 import uuid
 import weakref
@@ -1400,6 +1401,39 @@ class _SnapshotPublication:
             self.appends = True
 
 
+# A build is CPU-bound Python. A foreground thread in this process releases the
+# GIL around each SQLite call and then waits for the build to hand it back, up
+# to the switch interval every time (5 ms by default): on a 10k-memory store an
+# add then took about a second. While any build runs, threads switch every
+# 0.5 ms; the previous interval comes back when the last build ends.
+_BUILD_SWITCH_INTERVAL = 0.0005
+_switch_lock = threading.Lock()
+_switch_builds = 0
+_switch_restore: tuple[float, float] | None = None
+
+
+@contextmanager
+def _responsive_build() -> Iterator[None]:
+    global _switch_builds, _switch_restore
+    with _switch_lock:
+        if _switch_builds == 0:
+            previous = getswitchinterval()
+            if previous > _BUILD_SWITCH_INTERVAL:
+                setswitchinterval(_BUILD_SWITCH_INTERVAL)
+                _switch_restore = (previous, getswitchinterval())
+        _switch_builds += 1
+    try:
+        yield
+    finally:
+        with _switch_lock:
+            _switch_builds -= 1
+            if _switch_builds == 0 and _switch_restore is not None:
+                previous, applied = _switch_restore
+                _switch_restore = None
+                if getswitchinterval() == applied:  # Leave a value someone else set meanwhile.
+                    setswitchinterval(previous)
+
+
 def _yield_writer(publication: _SnapshotPublication | None, cancel: threading.Event | None) -> None:
     if publication is not None and publication.contended and not (cancel is not None and cancel.is_set()):
         time.sleep(_WRITER_YIELD_SECONDS)
@@ -1629,7 +1663,8 @@ def run_layers(
                             publication = _SnapshotPublication(conn, spec.layer, state.source)
                             push_layer_publication(conn, publication)
                             try:
-                                spec.build(conn)
+                                with _responsive_build():
+                                    spec.build(conn)
                             finally:
                                 pop_layer_publication(conn)
                             # A builder that never wrote has nothing that bounds
