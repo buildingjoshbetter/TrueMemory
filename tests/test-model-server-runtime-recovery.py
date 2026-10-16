@@ -376,3 +376,59 @@ def test_status_never_claims_lifetime_degradation(server, caplog):
         instance._mark_sticky_cpu("embed")
     assert "lifetime" not in caplog.text and "retried" in caplog.text
     assert os.environ.get("TRUEMEMORY_DEVICE") is None
+
+
+def test_on_a_small_budget_the_clone_is_released_before_the_cpu_transfer(monkeypatch):
+    """16 GiB Mac shape: 4 GiB RSS budget, a 2.4 GB clone and a 2.4 GB CPU transfer."""
+    live: dict[int, weakref.ref] = {}
+
+    class Resident:
+        def __init__(self) -> None:
+            self.rss = 700 * MIB
+
+        def virtual_memory(self) -> types.SimpleNamespace:
+            return types.SimpleNamespace(total=16 * 1024 ** 3)
+
+        def Process(self) -> "Resident":
+            return self
+
+        def memory_info(self) -> types.SimpleNamespace:
+            cpu_copies = sum(1 for ref in live.values() if ref() is not None and ref().device == "cpu")
+            return types.SimpleNamespace(rss=self.rss + cpu_copies * 2_400_000_000)
+
+    monkeypatch.setattr(ms, "psutil", Resident())
+    monkeypatch.setenv("TRUEMEMORY_MODEL_SERVER_MAX_RSS_MB", "4096")
+    monkeypatch.delenv("TRUEMEMORY_DEVICE", raising=False)
+    monkeypatch.setattr(mps_utils, "auto_detect_device", lambda: "mps")
+    monkeypatch.setattr(mps_utils, "ensure_mps_memory_budget", lambda device: None)
+    instance = ms.ModelServer(automatic_rss_budget=True)
+    instance._write_status_file = lambda: None
+    instance._embed_device = lambda: "cpu" if "embed" in instance._sticky_cpu else "mps"
+    builds = Builds()
+
+    def build(model_id, device):
+        model = builds(model_id, device)
+        live[id(model)] = weakref.ref(model)
+        return model
+
+    monkeypatch.setattr(instance, "_build_embed_model", build)
+    try:
+        with instance._memory_scope():
+            assert _embed(instance, ["load"])["ok"]
+            batch = Batch(instance)
+            try:
+                assert _contended(instance)["ok"]
+            finally:
+                batch.end()
+        clone = builds.refs[1]
+        assert clone() is not None
+        builds.oom = True
+        response = _embed(instance, ["a", "b"])
+        builds.oom = False
+        assert response["ok"] is True, response
+        assert clone() is None and instance._embed_state.model.device == "cpu"
+    finally:
+        instance._stopped.set()
+        instance._workers.shutdown(wait=False)
+        if instance._memory_owner is not None:
+            instance._memory_owner.close()
