@@ -655,6 +655,39 @@ def _initialize_maintenance_tracking(conn: sqlite3.Connection) -> None:
 DEFAULT_BUSY_TIMEOUT_MS = 10_000
 
 
+# The maintenance runner builds a layer in a read snapshot and registers a hook
+# here for the builder's connection. A builder calls begin_layer_publication
+# right before its first write, outside any savepoint of its own: the runner then
+# trades the snapshot for SQLite's writer, so the compute never holds the lock.
+_layer_publication = threading.local()
+
+
+def push_layer_publication(conn: sqlite3.Connection, hook: Callable[[bool], int]) -> None:
+    hooks = _layer_publication.__dict__.setdefault("hooks", [])
+    hooks.append((conn, hook))
+
+
+def pop_layer_publication(conn: sqlite3.Connection) -> None:
+    hooks = _layer_publication.__dict__.get("hooks", [])
+    if not hooks or hooks[-1][0] is not conn:
+        raise RuntimeError("Layer publication hooks are unbalanced")
+    hooks.pop()
+
+
+def begin_layer_publication(conn: sqlite3.Connection, *, appends: bool = True) -> int | None:
+    """Take the writer for a runner-built layer; None outside such a build.
+
+    Inside a build, returns the highest message id the build's snapshot could
+    see. With ``appends`` the runner accepts messages appended since the
+    snapshot (their ids are all higher), so a builder's own source check must
+    compare only ids up to this watermark. Without it any change defers.
+    """
+    for connection, hook in reversed(getattr(_layer_publication, "hooks", ())):
+        if connection is conn:
+            return hook(appends)
+    return None
+
+
 class DatabaseOpenError(sqlite3.DatabaseError):
     """Raised by :func:`create_db` with an actionable, user-facing message.
 

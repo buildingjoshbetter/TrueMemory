@@ -38,11 +38,15 @@ class RunnerFixture(unittest.TestCase):
                          [()] * count)
         conn.commit()
 
-    def spec(self, layer: str = "summaries", action=None):
+    def spec(self, layer: str = "summaries", action=None, compute=None):
         def build(conn: sqlite3.Connection) -> None:
+            # Like the real builders: read, compute, then take the writer to publish.
             self.calls.append(layer)
-            conn.execute("DELETE FROM synthetic_output WHERE layer=?", (layer,))
             count = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
+            if compute is not None:
+                compute(conn)
+            STORAGE.begin_layer_publication(conn)
+            conn.execute("DELETE FROM synthetic_output WHERE layer=?", (layer,))
             if count:
                 conn.execute("INSERT INTO synthetic_output VALUES (?,?)", (layer, count))
             if action is not None:
@@ -264,66 +268,94 @@ class TestRunnerEligibility(RunnerFixture):
 
 
 class TestRunnerTransactions(RunnerFixture):
-    def test_running_diagnostic_is_committed_before_the_build_takes_the_writer(self) -> None:
+    def test_running_diagnostic_is_committed_and_the_build_holds_no_writer(self) -> None:
         # The diagnostic commits first, so others see "running"; the build then
-        # holds the writer, and a foreground write waits for it instead of
-        # turning the build's first write into SQLITE_BUSY (round v6 M6-1).
+        # reads and computes in a snapshot, so a foreground write commits at
+        # once instead of waiting for the build (round v7 H-v6-1).
         self.add(1)
         writer = self.open_db()
-        writer.execute("PRAGMA busy_timeout=5000")
-        spec = self.spec()
-        observed, written = [], threading.Event()
+        observed = []
 
-        def write() -> None:
+        def compute(conn: sqlite3.Connection) -> None:
+            observed.append(writer.execute("SELECT outcome FROM maintenance_layers WHERE layer='summaries'").fetchone()[0])
             writer.execute("INSERT INTO metadata(key,value) VALUES ('synthetic_writer','committed')")
             writer.commit()
-            written.set()
+            observed.append(writer.in_transaction)
 
-        thread = threading.Thread(target=write)
-
-        def build(conn: sqlite3.Connection) -> None:
-            observed.append(writer.execute("SELECT outcome FROM maintenance_layers WHERE layer='summaries'").fetchone()[0])
-            thread.start()
-            observed.append(written.wait(0.3))
-            spec.build(conn)
-
-        result = self.run_layer(spec._replace(build=build))
-        thread.join(5)
+        result = self.run_layer(self.spec(compute=compute))
         self.assertEqual(observed, ["running", False])
-        self.assertTrue(written.is_set())
         self.assertEqual(result.outcome, "success")
         self.assertEqual(self.output(), [("summaries", 1)])
+        self.assertEqual(MAINTENANCE.layer_freshness(self.state().source, self.state(), self.dependency), "current")
 
-    def test_a_correction_during_the_build_waits_and_leaves_the_layer_pending(self) -> None:
-        # The build holds the writer, so a correction cannot slip under its
-        # snapshot: it lands after the commit and leaves the layer pending.
+    def test_an_append_during_the_build_publishes_the_snapshot_and_leaves_the_layer_pending(self) -> None:
+        self.add(1)
+        writer = self.open_db()
+
+        def append(conn: sqlite3.Connection) -> None:
+            self.add(2, writer)
+
+        result = self.run_layer(self.spec(compute=append))
+        state = self.state()
+        self.assertEqual(result.outcome, "success")
+        self.assertEqual(self.output(), [("summaries", 1)])
+        self.assertEqual((state.successful_revision, state.attempted_insert_count, state.source.revision), (1, 1, 3))
+        self.assertEqual(MAINTENANCE.layer_freshness(state.source, state, self.dependency), "append_pending")
+
+    def test_a_correction_during_the_build_defers_without_waiting_for_it(self) -> None:
         self.add(1)
         self.run_layer()
+        before, previous = self.state(), self.output()
         writer = self.open_db()
-        writer.execute("PRAGMA busy_timeout=5000")
-        spec = self.spec()
-        corrected = threading.Event()
 
-        def correct() -> None:
+        def correct(conn: sqlite3.Connection) -> None:
             writer.execute("UPDATE messages SET content='synthetic correction' WHERE id=1")
             writer.commit()
-            corrected.set()
 
-        thread = threading.Thread(target=correct)
-
-        def build(conn: sqlite3.Connection) -> None:
-            thread.start()
-            if corrected.wait(0.3):
-                raise AssertionError("The correction landed under the build's snapshot")
-            spec.build(conn)
-
-        result = self.run_layer(spec._replace(build=build), force=True)
-        thread.join(5)
+        spec = self.spec(compute=correct)
+        result = self.run_layer(spec, force=True)
         state = self.state()
-        self.assertTrue(corrected.is_set())
-        self.assertEqual(result.outcome, "success")
-        self.assertEqual((state.successful_revision, state.source.revision), (1, 2))
+        self.assertEqual((result.outcome, result.error_category), ("deferred", "SourceChanged"))
+        self.assertEqual(self.output(), previous)
+        self.assertEqual((state.outcome, state.successful_revision, state.attempted_revision),
+                         (before.outcome, before.successful_revision, before.attempted_revision))
         self.assertEqual(len(MAINTENANCE.plan_layers(self.conn, (spec,))), 1)
+        self.assertEqual(self.run_layer(spec._replace(build=self.spec().build)).outcome, "success")
+
+    def test_a_builder_slower_than_the_busy_timeout_never_fails_a_foreground_writer(self) -> None:
+        # Review v6 H-v6-1: a build that held the writer for longer than the
+        # busy timeout made every foreground write in that window fail.
+        self.add(30)
+        writer = self.open_db()  # 200 ms busy timeout, like the fixture.
+        stop, errors, latencies = threading.Event(), [], []
+
+        def write() -> None:
+            while not stop.is_set():
+                started = MAINTENANCE.time.monotonic()
+                try:
+                    self.add(1, writer)
+                except sqlite3.OperationalError as error:
+                    errors.append(str(error))
+                    writer.rollback()
+                latencies.append(MAINTENANCE.time.monotonic() - started)
+                stop.wait(0.02)
+
+        def slow(conn: sqlite3.Connection) -> None:
+            stop.wait(1.0)  # Five busy timeouts of compute.
+
+        thread = threading.Thread(target=write)
+        thread.start()
+        try:
+            results = MAINTENANCE.run_layers(self.conn, (self.spec("summaries", compute=slow),
+                                                         self.spec("contradictions", compute=slow)))
+        finally:
+            stop.set()
+            thread.join(5)
+        self.assertEqual(errors, [])
+        self.assertGreater(len(latencies), 20)
+        self.assertLess(max(latencies), 0.2)
+        self.assertEqual([(result.layer, result.outcome) for result in results],
+                         [("summaries", "success"), ("contradictions", "success")])
 
     def test_dependency_change_after_output_write_rolls_back_output_and_checkpoint(self) -> None:
         self.add(1)
@@ -590,6 +622,7 @@ class TestRunnerMigrationAndAdapters(RunnerFixture):
             tree.body = [node for node in tree.body if not (
                 isinstance(node, ast.ImportFrom) and node.module in {"truememory.storage", "truememory.fts_search"}
             )]
+            module.begin_layer_publication = STORAGE.begin_layer_publication
             exec(compile(tree, str(path), "exec"), module.__dict__)
             modules["truememory." + name] = module
         self.conn.executemany(
@@ -667,6 +700,48 @@ class TestRunnerContention(RunnerFixture):
         finally:
             release.join()
         self.assertEqual(result.outcome, "success")
+
+    def test_publication_waits_a_bounded_time_for_the_writer_then_defers(self) -> None:
+        self.add(30)
+        self.conn.execute("PRAGMA busy_timeout=5000")
+        other = self.open_db()
+        release = threading.Timer(1.0, other.rollback)
+
+        def hold(conn: sqlite3.Connection) -> None:
+            other.execute("BEGIN IMMEDIATE")
+            release.start()
+
+        started = MAINTENANCE.time.monotonic()
+        with patch.object(MAINTENANCE, "_PUBLISH_BUSY_TIMEOUT_MS", 100):
+            try:
+                result = self.run_layer(self.spec(compute=hold))
+            finally:
+                release.join()
+        # The writer is released after 1 s: with the 5 s busy timeout the
+        # publication would have succeeded. The diagnostic restoration then waits.
+        self.assertEqual((result.outcome, result.error_category), ("deferred", "WriterBusy"))
+        self.assertLess(MAINTENANCE.time.monotonic() - started, 4)
+        self.assertEqual(self.conn.execute("PRAGMA busy_timeout").fetchone()[0], 5000)
+        self.assertNotIn(self.state().outcome, {"failed", "running"})
+        self.assertEqual(self.output(), [])
+        self.assertEqual(self.run_layer().outcome, "success")
+
+    def test_a_contended_publication_yields_the_writer_before_the_next_layer(self) -> None:
+        # A writer polling in SQLite's busy handler sleeps up to 100 ms between
+        # tries; the runner pauses longer than that before its next write.
+        self.add(1)
+        writer = self.open_db()
+        sleeps = []
+
+        def append(conn: sqlite3.Connection) -> None:
+            self.add(1, writer)
+
+        with patch.object(MAINTENANCE.time, "sleep", side_effect=sleeps.append):
+            results = MAINTENANCE.run_layers(self.conn, (self.spec("summaries", compute=append),
+                                                         self.spec("contradictions")))
+        self.assertEqual([result.outcome for result in results], ["success", "success"])
+        self.assertEqual(sleeps, [MAINTENANCE._WRITER_YIELD_SECONDS])
+        self.assertGreater(MAINTENANCE._WRITER_YIELD_SECONDS, 0.1)
 
     def test_a_failed_layer_logs_one_warning_naming_it(self) -> None:
         self.add(30)

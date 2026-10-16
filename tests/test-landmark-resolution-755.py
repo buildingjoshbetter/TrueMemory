@@ -511,7 +511,8 @@ class BoundaryControls(unittest.TestCase):
         current = (ROOT / "truememory/temporal.py").read_text(encoding="utf-8")
         baseline_hashes = {
             "detect_temporal_intent": "2a752baf88d85db0eb61b91c087284c4e02dd3d4b89dece12bc5bf9e04ded287",
-            "detect_landmark_events": "d3bbd201a06107765f0b80448f5cec8d2dde800d54f20e84cd442c137b91fe9c",
+            # Round v7 H-v6-1 added the maintenance publication hook and its bounded source check.
+            "detect_landmark_events": "e11b7090e18e2847c647cc2249ca79ee004b7886e3588ee879aae0ede1f6b74d",
             "parse_date_reference": "8f8d13024c23b012ee9a960992060f7abf77d74939cb8000110f55f599df98ad",
         }
         for name, baseline_hash in baseline_hashes.items():

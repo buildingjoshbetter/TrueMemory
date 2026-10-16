@@ -39,6 +39,7 @@ from types import ModuleType
 import numpy as np
 
 from truememory.memory_budget import LocalMemoryPolicy
+from truememory.storage import begin_layer_publication
 
 _LOCAL_MEMORY_POLICY = LocalMemoryPolicy()
 
@@ -47,6 +48,10 @@ logger = logging.getLogger(__name__)
 
 class ClusterModelBusyError(RuntimeError):
     """Model ownership is temporarily unavailable; no input version changed."""
+
+
+class ClusterSourceChangedError(RuntimeError):
+    """Messages or vectors changed while clustering computed; retry later."""
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +178,7 @@ def cluster_publication_guard(conn: sqlite3.Connection) -> AbstractContextManage
 
 def _cluster_source_state(
     conn: sqlite3.Connection, vector_search: ModuleType, *, collect_categories: bool = False,
+    watermark: int | None = None,
 ) -> tuple[bytes, dict[int, str | None]]:
     """Fingerprint raw inputs under the model lock and a database snapshot."""
     digest = hashlib.sha256()
@@ -202,12 +208,16 @@ def _cluster_source_state(
     vec_table = identity[0][-1]
     add(("vectors",))
     quoted_table = '"' + vec_table.replace('"', '""') + '"'
-    for row in conn.execute(f"SELECT rowid, embedding FROM {quoted_table} ORDER BY rowid"):
+    # Vector rowids are message ids, so one watermark bounds both inputs.
+    bound = "" if watermark is None else " WHERE rowid <= ?"
+    parameters = () if watermark is None else (watermark,)
+    for row in conn.execute(f"SELECT rowid, embedding FROM {quoted_table}{bound} ORDER BY rowid", parameters):
         add(tuple(row))
     add(("messages",))
     categories = {}
     for row in conn.execute(
-        "SELECT id, content, sender, recipient, timestamp, category, modality FROM messages ORDER BY id"
+        "SELECT id, content, sender, recipient, timestamp, category, modality FROM messages"
+        + bound.replace("rowid", "id") + " ORDER BY id", parameters,
     ):
         add(tuple(row))
         if collect_categories:
@@ -340,6 +350,9 @@ def cluster_messages(
         centroids.append((int(cid), _serialize_f32(centroid), len(vecs), session_range))
 
     model_lock_acquired = False
+    # A maintenance build may publish over messages appended since its
+    # snapshot; they stay unclustered until the next build.
+    watermark = begin_layer_publication(conn)
     try:
         with _cluster_transaction(conn, write=True):
             # Never hold SQLite's writer lock while waiting for native model
@@ -347,9 +360,9 @@ def cluster_messages(
             model_lock_acquired = vector_search._lock.acquire(blocking=False)
             if not model_lock_acquired:
                 raise ClusterModelBusyError("Embedding model is busy; retry clustering after model loading or tier switching")
-            current_state, _ = _cluster_source_state(conn, vector_search)
+            current_state, _ = _cluster_source_state(conn, vector_search, watermark=watermark)
             if current_state != source_state:
-                raise RuntimeError("Clustering source changed during computation; retry consolidation")
+                raise ClusterSourceChangedError("Clustering source changed during computation; retry consolidation")
             _init_cluster_tables(conn)
             conn.execute("DELETE FROM message_clusters")
             conn.execute("DELETE FROM cluster_centroids")

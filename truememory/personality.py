@@ -39,7 +39,7 @@ from truememory.fts_search import _build_safe_fts_query, _fts_search
 from truememory.personality_style_vec import (
     _l0_directive_filter, _l0_source_schema, _l0_transaction, _l0_validate_source,
 )
-from truememory.storage import _dunbar_ownership_ready, _initialize_dunbar_ownership
+from truememory.storage import _dunbar_ownership_ready, _initialize_dunbar_ownership, begin_layer_publication
 
 
 # ---------------------------------------------------------------------------
@@ -1499,7 +1499,7 @@ def _dunbar_has_ledger(conn: sqlite3.Connection) -> bool:
     ).fetchone() is not None
 
 
-def _dunbar_snapshot(conn: sqlite3.Connection) -> tuple[bytes, ...]:
+def _dunbar_snapshot(conn: sqlite3.Connection, watermark: int | None = None) -> tuple[bytes, ...]:
     schema = conn.execute(
         "SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name IN "
         "('messages','entity_relationships','dunbar_generated_relationships') ORDER BY type,name"
@@ -1507,6 +1507,8 @@ def _dunbar_snapshot(conn: sqlite3.Connection) -> tuple[bytes, ...]:
     schema_hash = _dunbar_fingerprint(schema)
     source_hash = _dunbar_fingerprint(conn.execute(
         "SELECT id,sender,recipient,timestamp FROM messages ORDER BY id"
+    ) if watermark is None else conn.execute(
+        "SELECT id,sender,recipient,timestamp FROM messages WHERE id <= ? ORDER BY id", (watermark,)
     ))
     relationship_hash = _dunbar_fingerprint(conn.execute(
         f"SELECT {_DUNBAR_RELATIONSHIP_COLUMNS} FROM entity_relationships ORDER BY id"
@@ -1592,8 +1594,11 @@ def build_dunbar_hierarchy(conn: sqlite3.Connection, primary_entity: str | None 
             """, (primary, primary)).fetchall() if primary is not None else []
     hierarchy = _compute_dunbar_hierarchy(rows)
 
+    # A maintenance build may publish over messages appended since its
+    # snapshot; they count toward the next build.
+    watermark = begin_layer_publication(conn)
     with _dunbar_transaction(conn, write=True):
-        if _dunbar_snapshot(conn) != snapshot:
+        if _dunbar_snapshot(conn, watermark) != snapshot:
             raise sqlite3.OperationalError("Dunbar source or ownership changed during computation")
         _initialize_dunbar_ownership(conn)
         # Materialize IDs before deleting from either side of the ledger join.

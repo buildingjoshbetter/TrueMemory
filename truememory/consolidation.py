@@ -37,6 +37,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from truememory.fts_search import _build_safe_fts_query, _fts_search
+from truememory.storage import begin_layer_publication
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +80,9 @@ def _consolidation_write(conn: sqlite3.Connection, name: str):
     short DELETE+rewrite.
     """
     sp = f"consolidation_{name}"
+    # Inside a maintenance build this trades the read snapshot for the writer.
+    # These builders replace their rows wholesale, so appends need no check here.
+    begin_layer_publication(conn)
     conn.execute(f"SAVEPOINT {sp}")
     completed = False
     try:

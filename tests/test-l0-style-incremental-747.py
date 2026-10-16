@@ -740,6 +740,46 @@ class StyleIncrementalTests(unittest.TestCase):
         self.assertEqual(MAINTENANCE.run_style_maintenance(conn).outcome, "success")
         self.assertEqual(conn.execute("SELECT message_count FROM entity_style_vectors").fetchone()[0], 1)
 
+    def test_a_foreground_append_during_a_snapshot_build_defers_it_and_the_pass_goes_on(self) -> None:
+        # Round v7 H-v6-1: style builds compute in a read snapshot, so a
+        # foreground append commits meanwhile and replaces the running
+        # diagnostic. The build defers; the restoration conflict no longer
+        # aborts the maintenance pass.
+        import os
+        import tempfile
+        directory = tempfile.TemporaryDirectory(prefix="synthetic-style-snapshot-")
+        self.addCleanup(directory.cleanup)
+        path = os.path.join(directory.name, "style.sqlite")
+
+        def open_file() -> sqlite3.Connection:
+            conn = sqlite3.connect(path, timeout=5)
+            self.addCleanup(conn.close)
+            return conn
+
+        conn = open_file()
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript(STORAGE._SCHEMA_SQL)
+        STORAGE._initialize_maintenance_tracking(conn)
+        conn.commit()
+        self.assertEqual(MAINTENANCE.run_style_maintenance(conn).outcome, "success_empty")
+        self.engine(conn).add("synthetic baseline", sender="Synthetic")
+        foreground = self.engine(open_file())
+        compute, appended = STYLE.compute_style_vector, []
+
+        def append_during_compute(text: str) -> list[float]:
+            if not appended:
+                appended.append(True)
+                foreground.add("synthetic foreground append", sender="Synthetic")
+            return compute(text)
+
+        with patch.object(STYLE, "compute_style_vector", append_during_compute):
+            result = MAINTENANCE.run_style_maintenance(conn, force=True)
+        self.assertEqual((result.outcome, result.error_category), ("deferred", "StyleSourceChanged"))
+        self.assertNotEqual(self.checkpoint(conn)[2], "running")
+        self.assertEqual(conn.execute("SELECT count(*) FROM messages").fetchone()[0], 2)
+        self.assertIn(MAINTENANCE.run_style_maintenance(conn, force=True).outcome, {"success", "success_empty"})
+        self.assertEqual(conn.execute("SELECT message_count FROM entity_style_vectors").fetchone()[0], 2)
+
     def test_publication_error_rolls_back_profile_but_keeps_source_and_pending(self) -> None:
         for error in (ValueError("synthetic failure"), sqlite3.OperationalError("synthetic SQL failure"),
                       sqlite3.OperationalError("database is locked")):

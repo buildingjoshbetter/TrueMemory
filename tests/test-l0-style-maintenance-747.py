@@ -590,12 +590,15 @@ class StyleMaintenanceTests(unittest.TestCase):
             def rollback(boundary) -> None:
                 first.rollback()
                 rollbacks.append(not first.in_transaction)
-                second.rollback()
+                if len(rollbacks) == 2:
+                    second.rollback()
 
         with patch.object(STYLE, "compute_style_vector", contend):
             result = MAINTENANCE.run_style_maintenance(WriterBoundary(), force=True)
         self.assertEqual((result.outcome, result.error_category), ("deferred", "StyleWriterBusy"))
-        self.assertEqual(rollbacks, [True])
+        # The first rollback ends the build's read snapshot before publication
+        # waits for the writer; the second is the runner's output rollback.
+        self.assertEqual(rollbacks, [True, True])
         self.assertEqual(self.output(first), before)
         self.assertEqual(self.checkpoint(first), checkpoint)
 

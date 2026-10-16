@@ -2108,12 +2108,16 @@ class FailedSwitchRecovery(unittest.TestCase):
 
 
 class MaintenanceUnderForegroundLoad(unittest.TestCase):
-    def test_a_burst_of_adds_leaves_no_failed_or_deferred_layer(self):
+    def test_a_burst_of_adds_leaves_no_failed_layer(self):
         # Round v6 M6-1: the in-process maintenance thread raced 200 back-to-back
         # adds; its read-then-write transactions hit SQLITE_BUSY at once and
-        # layers ended failed (on 6e1e459: 27 aborted passes in 44).
+        # layers ended failed (on 6e1e459: 27 aborted passes in 44). Since round
+        # v7 a build that sees a correction, or style input, change under it
+        # defers to the next pass; nothing fails. The seeded memories keep the
+        # first pass off HDBSCAN's minimum sample count, which fails on fewer.
         (result,) = run_scenario("""
             import collections
+            seed(30, group="edge")
             import model2vec
             model2vec.StaticModel.from_pretrained = staticmethod(lambda *args, **kwargs: FakeEncoder())
             stub_models()
@@ -2127,7 +2131,8 @@ class MaintenanceUnderForegroundLoad(unittest.TestCase):
                     errors[type(error).__name__ + ": " + str(error)[:60]] += 1
                     raise
                 for item in results:
-                    if item[2] in ("failed", "deferred") and item[5] != "ModelBusy":
+                    if item[2] == "failed" or item[2] == "deferred" and item[5] not in (
+                            "ModelBusy", "SourceChanged", "StyleSourceChanged", "WriterBusy"):
                         outcomes[f"{item[0]} {item[2]} {item[5]}"] += 1
                 return results
             maintenance.run_layers = observed
@@ -2149,6 +2154,54 @@ class MaintenanceUnderForegroundLoad(unittest.TestCase):
             emit(errors=errors, outcomes=outcomes, rows=rows, p95=latencies[int(len(latencies) * 0.95)])
         """, tier="edge")
         self.assertEqual((result["errors"], result["outcomes"], result["rows"]), ({}, {}, []))
+        self.assertLess(result["p95"], 0.25)
+
+    def test_a_build_slower_than_the_busy_timeout_never_fails_an_add(self):
+        # Review v6 H-v6-1: each layer was built under SQLite's writer, so on a
+        # 10k-memory store an add arriving during a build longer than the busy
+        # timeout failed with "database is locked". Here the busy timeout is
+        # 1 s and the surprise index takes 2.5 s to compute.
+        (result,) = run_scenario("""
+            import collections
+            seed(30, group="edge")
+            import model2vec
+            model2vec.StaticModel.from_pretrained = staticmethod(lambda *args, **kwargs: FakeEncoder())
+            stub_models()
+            from truememory import engine as engine_module, maintenance, predictive, storage
+            storage.DEFAULT_BUSY_TIMEOUT_MS = engine_module.DEFAULT_BUSY_TIMEOUT_MS = 1000
+            compute, builds = predictive._compute_surprise_rows, []
+            def slow(rows):
+                builds.append(len(rows))
+                time.sleep(2.5)
+                return compute(rows)
+            predictive._compute_surprise_rows = slow
+            failed = collections.Counter()
+            run_layers = maintenance.run_layers
+            def observed(*args, **kwargs):
+                results = run_layers(*args, **kwargs)
+                failed.update(f"{item[0]} {item[5]}" for item in results if item[2] == "failed")
+                return results
+            maintenance.run_layers = observed
+            engine = engine_module.TrueMemoryEngine(DB)
+            latencies, errors = [], collections.Counter()
+            for i in range(150):
+                started = time.perf_counter()
+                try:
+                    engine.add(f"synthetic fact {i} about alice moving to austin", sender="alice")
+                except Exception as error:
+                    errors[type(error).__name__ + ": " + str(error)[:60]] += 1
+                latencies.append(time.perf_counter() - started)
+                time.sleep(0.03)
+            engine._get_maintenance_coordinator().wait(120)
+            surprise = engine.conn.execute("SELECT outcome FROM maintenance_layers WHERE layer='surprise'").fetchone()
+            engine.close()
+            latencies.sort()
+            emit(errors=errors, failed=failed, builds=len(builds), surprise=surprise,
+                 p95=latencies[int(len(latencies) * 0.95)])
+        """, tier="edge")
+        self.assertEqual((result["errors"], result["failed"]), ({}, {}))
+        self.assertGreaterEqual(result["builds"], 2)
+        self.assertEqual(result["surprise"], ["success"])
         self.assertLess(result["p95"], 0.25)
 
 

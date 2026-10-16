@@ -29,6 +29,7 @@ from truememory.storage import (
     _STYLE_OUTPUT_INVALIDATE_SQL, _STYLE_OUTPUT_TRIGGERS,
     _maintenance_trigger_definitions, _messages_have_rowid_id,
     _prepare_style_maintenance, _style_output_tracking_ready, create_db,
+    begin_layer_publication, pop_layer_publication, push_layer_publication,
 )
 
 
@@ -51,8 +52,8 @@ class LayerDeferredError(RuntimeError):
     """A narrowly categorized transient condition establishes no attempt baseline."""
 
     def __init__(self, message: str, *, category: str = "ModelBusy") -> None:
-        if category not in {"ModelBusy", "WriterBusy", "StyleCancelled", "StyleSourceChanged", "StyleWriterBusy",
-                            "StyleTriggersUnsupported"}:
+        if category not in {"ModelBusy", "WriterBusy", "SourceChanged", "StyleCancelled", "StyleSourceChanged",
+                            "StyleWriterBusy", "StyleTriggersUnsupported"}:
             raise ValueError("Unsupported layer deferral category")
         self.category = category
         super().__init__(message)
@@ -1169,9 +1170,14 @@ def plan_layers(
 def record_layer_success_in_transaction(
     conn: sqlite3.Connection, *, layer: str, dependency: LayerDependency,
     source: SourceRevision, output_count: int, run_generation: str | None = None,
-    coverage: str = "complete",
+    coverage: str = "complete", allow_appends: bool = False,
 ) -> None:
-    """Publish provenance beside completed output, without owning caller commit."""
+    """Publish provenance beside completed output, without owning caller commit.
+
+    With ``allow_appends`` the output may describe an earlier snapshot of an
+    append-only source: it is recorded at that snapshot, so the layer reads
+    append_pending and the messages appended since count toward the next build.
+    """
     _validate_layer(layer)
     if not conn.in_transaction:
         raise RuntimeError("Layer publication requires an existing transaction")
@@ -1179,7 +1185,8 @@ def record_layer_success_in_transaction(
         raise ValueError("Successful layer publication requires available output")
     if coverage not in _LAYER_COVERAGE:
         raise ValueError("Invalid layer coverage")
-    if read_source_revision(conn) != source:
+    current = read_source_revision(conn)
+    if current != source and not (allow_appends and current.is_append_only_since(source)):
         raise sqlite3.OperationalError("Maintenance source changed before publication")
     conn.execute(
         "INSERT INTO maintenance_layers(layer,builder_version,outcome,successful_epoch,successful_revision,"
@@ -1293,6 +1300,83 @@ def _record_attempt(
             (state.layer, dependency.builder_version, outcome, source.epoch, source.revision,
              dependency.key, source.insert_count, generation, error_category),
         )
+
+
+# Publication waits at most this long for the writer, then defers the layer.
+_PUBLISH_BUSY_TIMEOUT_MS = 2_000
+# After a contended publication the next layer's first write waits this long,
+# longer than SQLite's slowest busy-handler poll (100 ms), so a foreground
+# writer that is waiting gets the lock before maintenance writes again.
+_WRITER_YIELD_SECONDS = 0.15
+
+
+class _SnapshotPublication:
+    """Trade an owned build's read snapshot for SQLite's writer at its first write.
+
+    The build reads and computes in a deferred transaction, so foreground
+    writers never wait for it. Its first write cannot upgrade that snapshot
+    once anyone has committed (SQLITE_BUSY at once), so the runner ends the
+    snapshot, takes the writer in a fresh transaction, and publishes only if
+    the source is unchanged or, when the builder bounds its own source check
+    by the returned watermark, changed by appends alone.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, layer: str, source: SourceRevision) -> None:
+        self.conn, self.layer, self.source = conn, layer, source
+        self.writer = False
+        self.appends = False
+        self.contended = False
+
+    def __call__(self, appends: bool = True) -> int:
+        if not self.writer:
+            self._take_writer(appends)
+        return self.source.max_seen_message_id
+
+    def _take_writer(self, appends: bool) -> None:
+        conn = self.conn
+        previous = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        try:
+            conn.execute("PRAGMA busy_timeout = 0")
+            try:
+                # Succeeds at once when the builder already writes or no one has
+                # committed since the snapshot.
+                conn.execute("UPDATE maintenance_layers SET layer=layer WHERE 0")
+                upgraded = True
+            except sqlite3.OperationalError as error:
+                if _style_sqlite_deferral(error) != "StyleWriterBusy":
+                    raise
+                upgraded = False
+            if not upgraded:
+                # Only a read-only snapshot fails to take the writer, so nothing is lost.
+                conn.rollback()
+                conn.execute(f"PRAGMA busy_timeout = {min(previous, _PUBLISH_BUSY_TIMEOUT_MS)}")
+                started = time.monotonic()
+                try:
+                    conn.execute("BEGIN IMMEDIATE")
+                except sqlite3.OperationalError:
+                    # Leave an empty transaction for the runner's rollback, which
+                    # then confirms that nothing was published.
+                    conn.execute("BEGIN")
+                    raise
+                if time.monotonic() - started > 0.005:
+                    self.contended = True
+        finally:
+            conn.execute(f"PRAGMA busy_timeout = {previous}")
+        self.writer = True
+        current = read_source_revision(conn)
+        if current != self.source:
+            self.contended = True
+            if not (appends and current.is_append_only_since(self.source)):
+                logger.info("Maintenance layer %s deferred: its source changed during the build", self.layer)
+                raise LayerDeferredError(
+                    "The source changed during the build",
+                    category="StyleSourceChanged" if self.layer == "style_vectors" else "SourceChanged")
+            self.appends = True
+
+
+def _yield_writer(publication: _SnapshotPublication | None, cancel: threading.Event | None) -> None:
+    if publication is not None and publication.contended and not (cancel is not None and cancel.is_set()):
+        time.sleep(_WRITER_YIELD_SECONDS)
 
 
 class _LayerCancelled(Exception):
@@ -1482,6 +1566,7 @@ def run_layers(
             count = None
             coverage = state.successful_coverage
             built = output_started = rolled_back = False
+            publication = None
 
             def confirm_rollback() -> None:
                 nonlocal rolled_back
@@ -1495,12 +1580,12 @@ def run_layers(
                 if borrowed and spec.publication_guard is not None and factory is None:
                     raise LayerUnavailableError("The adapter has no borrowed publication contract")
                 guard = factory(conn) if factory is not None else None
-                with ExitStack() as publication:
-                    # An owned build takes the writer first: once anyone commits,
-                    # a read-then-write upgrade fails at once (SQLITE_BUSY), and
-                    # foreground writes now wait for the build instead.
+                with ExitStack() as publication_guards:
+                    # An owned build reads and computes in a deferred snapshot
+                    # and takes the writer only to publish (_SnapshotPublication),
+                    # so foreground writes never wait for a build.
                     output = (_borrowed_transaction(conn, on_rollback=confirm_rollback) if borrowed
-                              else _owned_transaction(conn, on_rollback=confirm_rollback, immediate=True))
+                              else _owned_transaction(conn, on_rollback=confirm_rollback))
                     with output, (
                         spec.execution_guard(conn, not borrowed) if spec.execution_guard is not None else nullcontext()
                     ):
@@ -1514,7 +1599,18 @@ def run_layers(
                         if not state.dependency.available:
                             raise MaintenanceUnavailableError("Layer dependency became unavailable")
                         built = True
-                        spec.build(conn)
+                        if borrowed:
+                            spec.build(conn)
+                        else:
+                            publication = _SnapshotPublication(conn, spec.layer, state.source)
+                            push_layer_publication(conn, publication)
+                            try:
+                                spec.build(conn)
+                            finally:
+                                pop_layer_publication(conn)
+                            # A builder that never wrote has nothing that bounds
+                            # its source check, so it publishes only an exact source.
+                            publication(False)
                         if not conn.in_transaction:
                             raise RuntimeError("Layer builder committed the runner transaction")
                         count = spec.count_output(conn)
@@ -1523,12 +1619,13 @@ def run_layers(
                             raise _LayerCancelled()
                         _check_layer_dependency(spec.resolve_dependency(), state.dependency)
                         record_layer_success_in_transaction(conn, layer=spec.layer, dependency=state.dependency,
-                            source=state.source, output_count=count, run_generation=owner.generation, coverage=coverage)
+                            source=state.source, output_count=count, run_generation=owner.generation, coverage=coverage,
+                            allow_appends=publication is not None and publication.appends)
                         _check_layer_dependency(spec.resolve_dependency(), state.dependency)
                         if guard is not None:
                             # Register release before validation can fail, so
                             # validation errors also roll back under ownership.
-                            validate_publication = publication.enter_context(guard)
+                            validate_publication = publication_guards.enter_context(guard)
                             validate_publication()
                         if cancel is not None and cancel.is_set():
                             raise _LayerCancelled()
@@ -1541,13 +1638,12 @@ def run_layers(
                     reject(error)
                 if (isinstance(error, sqlite3.OperationalError) and not borrowed and spec.layer != "style_vectors"
                         and _style_sqlite_deferral(error) == "StyleWriterBusy"):
-                    # Output reads run in a deferred transaction so foreground
-                    # writers are never held off for a whole build; a commit by
-                    # anyone during the build makes its first write fail with
-                    # SQLITE_BUSY. That is contention, not a failure: restore the
-                    # diagnostic and let the next pass build again.
-                    logger.info("Maintenance layer %s deferred: another writer committed during the build", spec.layer)
-                    error = LayerDeferredError("Another writer committed during the build", category="WriterBusy")
+                    # The writer stayed busy past the publication wait, or a
+                    # builder wrote in its snapshot after someone committed.
+                    # That is contention, not a failure: restore the diagnostic
+                    # and let the next pass build again.
+                    logger.info("Maintenance layer %s deferred: the database writer stayed busy", spec.layer)
+                    error = LayerDeferredError("The database writer stayed busy", category="WriterBusy")
                 if isinstance(error, LayerDeferredError):
                     if output_started and not rolled_back:
                         raise _LayerRollbackFailed("Deferred output has no confirmed rollback") from error
@@ -1573,10 +1669,20 @@ def run_layers(
                             # Another writer still owns SQLite. Keep the
                             # committed running row for later owner recovery;
                             # do not claim restoration or retry under this owner.
+                        except MaintenanceBusyError:
+                            # A foreground style append that committed during the
+                            # snapshot build replaced the running diagnostic (it
+                            # advanced or invalidated the layer). That row stands;
+                            # only a change by anyone else aborts the pass.
+                            current = None if conn.in_transaction else _read_layer_row(conn, spec.layer)
+                            if (spec.layer != "style_vectors" or current is None or current[2] == "running"
+                                    or current[_LAYER_ROW_COLUMNS.index("run_generation")] == owner.generation):
+                                raise
                     results.append(LayerResult(spec.layer, spec.result_key, "deferred", baseline_state.output_count,
                         time.monotonic() - started, error.category, built, baseline_state.successful_coverage, borrowed))
                     if cancel is not None and cancel.is_set():
                         break
+                    _yield_writer(publication, cancel)
                     continue
                 interrupted = not isinstance(error, Exception) or isinstance(error, _LayerCancelled)
                 unavailable = not state.dependency.available or isinstance(error, LayerUnavailableError)
@@ -1598,6 +1704,7 @@ def run_layers(
             else:
                 results.append(LayerResult(spec.layer, spec.result_key, "success" if count else "success_empty",
                     count, time.monotonic() - started, None, True, coverage, borrowed))
+                _yield_writer(publication, cancel)
     return tuple(results)
 
 
@@ -2240,7 +2347,9 @@ def style_layer_spec(
         result, stored_rows = style._compute_entity_style_vectors(rows, check_cancel=check_cancel)
         check_cancel()
         # The runner owns final commit. Upgrade before both format and source
-        # validation; a stale reader cannot replace a newer generation.
+        # validation; a stale reader cannot replace a newer generation. Style
+        # appends also write these vectors, so any source change defers.
+        begin_layer_publication(connection, appends=False)
         connection.execute("UPDATE messages SET sender=sender WHERE 0")
         if _canonical_source:
             try:
@@ -2503,6 +2612,8 @@ def _build_clusters(conn: sqlite3.Connection) -> int:
         return module.cluster_messages(conn)
     except module.ClusterModelBusyError as error:
         raise LayerDeferredError("Embedding runtime is temporarily busy") from error
+    except module.ClusterSourceChangedError as error:
+        raise LayerDeferredError("Clustering input changed during the build", category="SourceChanged") from error
     except ImportError as error:
         raise LayerUnavailableError("Clustering dependency import failed") from error
 
