@@ -727,6 +727,10 @@ class ModelServer:
         with memory_scope() as _memory:
             from truememory.mps_utils import flush_mps_cache
             self._mark_sticky_cpu("embed")
+            # The CPU copy about to be made duplicates any fast-lane clone.
+            # Release the clone first, so the transfer is admitted against
+            # memory that is actually free.
+            self._release_fast_clone()
             flush_mps_cache()
             if deadline is not None:
                 self._check_embed_recovery_deadline_locked(model, deadline)
@@ -1476,6 +1480,15 @@ class ModelServer:
     def _duplicates_cpu_main(self, state: _EmbedState) -> bool:
         return (_on_cpu(state.model)
                 and self._MODEL_WEIGHT_BYTES.get(state.model_id, 0) > self._CLONE_DUPLICATE_LIMIT_BYTES)
+
+    def _release_fast_clone(self) -> None:
+        """Drop the clone unless a query is using it; that query's owner drops it."""
+        if not self._fast_lock.acquire(blocking=False):
+            return
+        try:
+            self._drop_redundant_fast_encoder_locked()
+        finally:
+            self._fast_lock.release()
 
     def _drop_redundant_fast_encoder_locked(self) -> None:
         """Caller owns ``_fast_lock``: drop a clone that duplicates a CPU main model."""
