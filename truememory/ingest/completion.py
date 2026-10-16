@@ -683,11 +683,14 @@ def _discard(directory: Path, captures: dict, forgotten: list[str] | tuple[str, 
     if extracted.is_dir():
         with os.scandir(extracted) as entries:
             names = [entry.name for entry in islice(entries, 2 * MAX_CAPTURES)]
+        cutoff = time.time() - 3600
         for name in names:
             key = name.split(".", 1)[0]
-            # An interrupted save leaves a temporary that no live key will read.
-            if not (_KEY.fullmatch(key) and name == key + ".json" and key in live):
-                with contextlib.suppress(OSError):
+            if _KEY.fullmatch(key) and name == key + ".json" and key in live:
+                continue
+            with contextlib.suppress(OSError):
+                # A worker saves outside state.lock; only an hour-old temporary is abandoned.
+                if not name.endswith(".tmp") or (extracted / name).lstat().st_mtime < cutoff:
                     (extracted / name).unlink()
     incoming = directory / "incoming"
     if incoming.is_dir():

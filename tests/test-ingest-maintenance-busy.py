@@ -259,6 +259,25 @@ def test_a_deferred_attempt_is_redispatched_under_its_number_with_a_new_log(env,
 
 
 
+def test_collection_removes_unused_extractions_but_not_a_save_in_progress(env):
+    session, path = _session(env)
+    capture = completion.admit_capture(str(path), session, "", str(env.database), "claude")
+    assert completion.save_extraction(capture, {"facts": []})
+    extracted = capture.directory / "extracted"
+    orphan = extracted / ("a" * 64 + ".json")
+    in_progress = extracted / ("b" * 64 + ".synthetic.tmp")
+    abandoned = extracted / ("c" * 64 + ".synthetic.tmp")
+    for item in (orphan, in_progress, abandoned):
+        fd = os.open(item, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+    old = time.time() - 7200
+    os.utime(abandoned, (old, old))
+    other, other_path = _session(env)
+    completion.admit_capture(str(other_path), other, "", str(env.database), "claude")
+    assert sorted(item.name for item in extracted.iterdir()) == sorted([capture.key + ".json", in_progress.name])
+    assert completion.load_extraction(capture) == {"facts": []}
+
+
 def test_a_dead_workers_claim_returns_within_minutes_from_the_cascade(env):
     # Pre-fix: a claim waited 30 minutes after its worker died, and the
     # automatic cascade only adopted claims of its own account.
@@ -316,7 +335,13 @@ def test_stale_claim_thresholds(env):
     live = claim("live", 7200, claimed_pid=os.getpid())
     unrecorded = claim("unrecorded", 600)
     unrecorded_old = claim("unrecorded-old", 1860, attempts=2)
+    overflow = claim("overflow", 1860, claimed_pid=2 ** 70)
+    garbage = env.backlog / "garbage.processing"
+    garbage.write_bytes(b"\xff\xfe synthetic")
+    os.utime(garbage, (now - 1860, now - 1860))
+    # Unreadable shapes never stop the cleanup that every drainer tick now runs.
     _shared.cleanup_stale_processing(env.backlog)
     assert fresh_dead.exists() and live.exists() and unrecorded.exists()
     assert not dead.exists() and dead.with_suffix(".json").exists()
     assert json.loads(unrecorded_old.with_suffix(".json").read_text(encoding="utf-8"))["attempts"] == 3
+    assert overflow.with_suffix(".corrupt").exists() and garbage.with_suffix(".json").exists()

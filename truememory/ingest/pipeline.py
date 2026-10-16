@@ -505,7 +505,7 @@ class IngestionPipeline:
         require_complete: bool = False,
         byte_limit: int | None = None,
         maintenance_wait: float = 0.0,
-        extracted: dict | None = None,
+        extraction: dict | None = None,
     ) -> IngestionResult:
         """
         Ingest a full conversation transcript.
@@ -519,7 +519,7 @@ class IngestionPipeline:
             byte_limit: Ingest only this prefix of an append-only source.
             maintenance_wait: Seconds a background worker waits for another
                 process's maintenance before storing; hooks pass 0 and fail fast.
-            extracted: A completed extraction of these exact bytes from an
+            extraction: A completed extraction of these exact bytes from an
                 earlier attempt, used instead of calling the provider again.
 
         A MaintenanceBusyError that escapes carries ``extraction``, the
@@ -581,11 +581,11 @@ class IngestionPipeline:
 
         # 2. Extract facts
         log.info("Extracting facts from %d messages (%d chars)", len(messages), len(conversation))
-        restored = _restored_facts(extracted, result.coverage) if require_complete and extracted is not None else None
+        restored = _restored_facts(extraction, result.coverage) if require_complete and extraction is not None else None
         if restored is not None:
             # An earlier attempt extracted these bytes and could not store them.
             facts = restored
-            result.coverage.update(extracted["coverage"])
+            result.coverage.update(extraction["coverage"])
             result.coverage["extraction_reused"] = True
             log.info("Reusing %d facts extracted by an earlier attempt", len(facts))
         elif self.llm_config:

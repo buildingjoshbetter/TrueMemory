@@ -304,7 +304,7 @@ def _execute_ingest(args, capture=None):
         retry["maintenance_wait"] = MAINTENANCE_WAIT_SECONDS
         prior = load_extraction(capture)
         if prior is not None:
-            retry["extracted"] = prior
+            retry["extraction"] = prior
     try:
         result = ingest(
             transcript_path=args.transcript,

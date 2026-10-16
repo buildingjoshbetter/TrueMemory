@@ -547,20 +547,20 @@ def cleanup_stale_processing(backlog_dir: Path) -> None:
                 continue
             try:
                 data = json.loads(stale.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
+            except (ValueError, OSError):
                 data = None
             pid = data.get("claimed_pid", 0) if isinstance(data, dict) else 0
-            dead = (isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
-                    and not _pid_is_alive(pid))
+            valid = isinstance(pid, int) and not isinstance(pid, bool) and pid >= 0
+            try:
+                dead = valid and pid > 0 and not _pid_is_alive(pid)
+            except OverflowError:
+                valid = dead = False
             if age <= _STALE_PROCESSING_THRESHOLD and not dead:
                 continue
             if data is None:
                 stale.rename(stale.with_suffix(".json"))
                 continue
-            if not isinstance(data, dict):
-                _quarantine_marker(stale)
-                continue
-            if not isinstance(pid, int) or isinstance(pid, bool) or pid < 0:
+            if not isinstance(data, dict) or not valid:
                 _quarantine_marker(stale)
                 continue
             if pid and not dead:
