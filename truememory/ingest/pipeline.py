@@ -982,7 +982,11 @@ class IngestionPipeline:
         self._store_fact(new_content, fact, session_id, metadata=metadata)
 
     def _merge_fact_provenance(self, existing_id: int | None, metadata: dict[str, object]) -> bool:
-        """Append a citation on SKIP without changing content or its primary vector."""
+        """Append a citation on SKIP without changing content or its primary vector.
+
+        A memory whose bounded citations are full keeps them unchanged: the
+        duplicate adds no content, so only its own citation goes unrecorded.
+        """
         if existing_id is None:
             raise ProvenanceError("dedup source target identifier unavailable")
         engine = getattr(self.memory, "_engine", None)
@@ -997,7 +1001,13 @@ class IngestionPipeline:
             existing = getter(existing_id, _source_snapshot=True)
             if existing is None:
                 raise ProvenanceError("dedup source target no longer exists")
-            merged, changed = merge_metadata(existing.get("metadata", {}), metadata)
+            try:
+                merged, changed = merge_metadata(existing.get("metadata", {}), metadata)
+            except ProvenanceError as exc:
+                if not getattr(exc, "at_capacity", False):
+                    raise
+                log.info("Dedup citation not added: memory %s already holds its bounded provenance", existing_id)
+                return False
             if not changed:
                 return False
             if updater(existing_id, metadata=merged, timestamp=source_timestamp(merged),

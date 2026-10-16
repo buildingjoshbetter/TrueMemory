@@ -22,6 +22,12 @@ class ProvenanceError(sqlite3.OperationalError):
     """A citation cannot be persisted without losing existing evidence."""
 
 
+class ProvenanceCapacityError(ProvenanceError):
+    """The bounded citations cannot hold another one; existing evidence is intact."""
+
+    at_capacity = True
+
+
 @dataclass(frozen=True)
 class SourceSegment:
     start: int
@@ -138,14 +144,16 @@ def _scope(context: SourceContext, start: int, end: int) -> dict[str, object]:
 
 def _check_bounds(namespace: dict[str, object]) -> None:
     citations = namespace.get("citations")
-    if not isinstance(citations, list) or len(citations) > MAX_CITATIONS:
-        raise ProvenanceError("source citation count exceeds provenance bounds")
+    if not isinstance(citations, list):
+        raise ProvenanceError("source citations are not a list")
+    if len(citations) > MAX_CITATIONS:
+        raise ProvenanceCapacityError("source citation count exceeds provenance bounds")
     try:
         encoded = json.dumps(namespace, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise ProvenanceError("source provenance is not valid bounded JSON") from exc
     if len(encoded) > MAX_NAMESPACE_BYTES:
-        raise ProvenanceError("source provenance byte count exceeds provenance bounds")
+        raise ProvenanceCapacityError("source provenance byte count exceeds provenance bounds")
 
 
 def fact_metadata(context: SourceContext, fact: object, observation: dict[str, object], ingested_at: str) -> dict[str, object]:
