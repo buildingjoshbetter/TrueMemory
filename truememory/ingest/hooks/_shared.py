@@ -160,6 +160,8 @@ _BUDGET_FILE = Path.home() / ".truememory" / ".extraction_budget"
 _MAX_EXTRACTIONS_PER_HOUR = _env_int("TRUEMEMORY_MAX_EXTRACTIONS_PER_HOUR", 20, lo=0)
 
 _STALE_PROCESSING_THRESHOLD = 1800  # 30 minutes
+# A claim whose recorded worker is provably gone needs no 30-minute wait.
+_DEAD_CLAIM_GRACE = 120
 
 # How long after SessionStart injects recall the first user prompt is treated
 # as redundant. SessionStart writes the marker just before the first prompt
@@ -439,8 +441,8 @@ def clear_backlog_processing(session_id: str, backlog_dir: Path | None = None) -
     that the claim marker for that session is deleted. If the worker instead
     crashes / exits non-zero, this is NOT called, the ``.processing`` marker is
     left in place, and ``cleanup_stale_processing`` later restores it to
-    ``.json`` (once the claiming PID is dead and the 30-minute threshold has
-    elapsed) so the session is re-queued rather than silently lost.
+    ``.json`` (minutes after the claiming PID dies, or after 30 minutes when
+    no PID was recorded) so the session is re-queued rather than silently lost.
 
     The drainers (``session_start._drain_backlog`` and ``cli._cascade_next``)
     name claim markers ``{sanitized_session_id}.processing``, mirroring how
@@ -533,28 +535,37 @@ def _quarantine_marker(path: Path) -> None:
 def cleanup_stale_processing(backlog_dir: Path) -> None:
     """Restore .processing files whose owning process has died.
 
-    Uses a 30-minute threshold AND PID liveness check. Only restores
-    if the file is old enough AND the claiming process is no longer running.
+    A claim whose recorded worker is no longer running returns to the queue
+    after _DEAD_CLAIM_GRACE. A claim with no recorded worker, or one that
+    cannot be read, waits for the 30-minute threshold. A live worker keeps
+    its claim. A restored claim counts the attempt it used.
     """
     for stale in backlog_dir.glob("*.processing"):
         try:
             age = time.time() - stale.stat().st_mtime
-            if age <= _STALE_PROCESSING_THRESHOLD:
+            if age <= _DEAD_CLAIM_GRACE:
                 continue
             try:
                 data = json.loads(stale.read_text(encoding="utf-8"))
-                if not isinstance(data, dict):
-                    _quarantine_marker(stale)
-                    continue
-                pid = data.get("claimed_pid", 0)
-                if not isinstance(pid, int) or isinstance(pid, bool) or pid < 0:
-                    _quarantine_marker(stale)
-                    continue
-                if pid and _pid_is_alive(pid):
-                    continue
             except (json.JSONDecodeError, OSError):
-                pass
-            stale.rename(stale.with_suffix(".json"))
+                data = None
+            pid = data.get("claimed_pid", 0) if isinstance(data, dict) else 0
+            dead = (isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+                    and not _pid_is_alive(pid))
+            if age <= _STALE_PROCESSING_THRESHOLD and not dead:
+                continue
+            if data is None:
+                stale.rename(stale.with_suffix(".json"))
+                continue
+            if not isinstance(data, dict):
+                _quarantine_marker(stale)
+                continue
+            if not isinstance(pid, int) or isinstance(pid, bool) or pid < 0:
+                _quarantine_marker(stale)
+                continue
+            if pid and not dead:
+                continue
+            _requeue_claim(stale, data, "worker_lost")
         except OSError:
             pass
 

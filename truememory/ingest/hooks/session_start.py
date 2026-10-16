@@ -400,8 +400,8 @@ def _drain_backlog(host: str = "claude") -> None:
             # claim for cleanup_stale_processing to recover, silently dropping
             # the session. We now leave the claim in place: the ingest CLI
             # deletes it on confirmed success (clear_backlog_processing), and a
-            # dead worker leaves it so the 30-minute stale watcher restores it
-            # to .json and re-queues the session.
+            # dead worker leaves it so the stale watcher restores it to .json
+            # within minutes and re-queues the session.
             log.info("Drained backlog session: %s", data.get("session_id", "?"))
         except Exception as e:
             try:

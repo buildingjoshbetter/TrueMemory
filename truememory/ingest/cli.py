@@ -390,6 +390,11 @@ def _cascade_next(host: str = "claude", *, automatic: bool = False,
     """
     if automatic:
         from truememory.ingest.completion import convert_legacy_pointers
+        from truememory.ingest.hooks._shared import cleanup_stale_processing
+        backlog = Path(os.environ.get("TRUEMEMORY_BACKLOG_DIR", str(Path.home() / ".truememory" / "backlog")))
+        if backlog.is_dir():
+            # A worker that died returns its claim within minutes, not at the next session.
+            cleanup_stale_processing(backlog)
         convert_legacy_pointers(user_id, db_path, host)
         return
     import subprocess as _sp

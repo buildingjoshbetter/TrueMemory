@@ -13,6 +13,8 @@ database:
   2. When the bounded wait expires, the extraction is kept, the completion
      attempt is given back, and the backlog claim returns to the queue with an
      attempt count. The next attempt stores the kept facts without extracting.
+  3. A claim whose worker died returns to the queue within minutes from the
+     cascade and the MCP drainer, not only at the next session start.
 """
 from __future__ import annotations
 
@@ -254,3 +256,67 @@ def test_a_deferred_attempt_is_redispatched_under_its_number_with_a_new_log(env,
     assert [outcome["category"] for outcome in entry["outcomes"]] == ["worker_unproven"]
     assert sorted(log.name for log in (capture.directory / "logs").iterdir()) == [
         capture.key + "-1-1.log", capture.key + "-1.log"]
+
+
+
+def test_a_dead_workers_claim_returns_within_minutes_from_the_cascade(env):
+    # Pre-fix: a claim waited 30 minutes after its worker died, and the
+    # automatic cascade only adopted claims of its own account.
+    from truememory.ingest import cli
+    five_minutes_ago = time.time() - 300
+    session, path = _session(env)
+    # Another account's claim: this cascade cannot adopt it, only requeue it.
+    other = env.backlog / f"{session}.processing"
+    _shared._atomic_write_text(other, json.dumps({
+        "transcript_path": str(path), "transcript_host": "claude", "session_id": session, "user_id": "other",
+        "db_path": "", "claimed_pid": _dead_pid()}))
+    os.utime(other, (five_minutes_ago, five_minutes_ago))
+    cli._cascade_next("claude", automatic=True, user_id="", db_path=str(env.database))
+    assert not other.exists()
+    queued = json.loads(other.with_suffix(".json").read_text(encoding="utf-8"))
+    assert queued["attempts"] == 1 and queued["requeued"] == "worker_lost"
+
+
+
+def test_the_mcp_drainer_recovers_a_dead_claim_with_nothing_queued(env, monkeypatch):
+    # Pre-fix: the drainer cleaned up claims only when a .json marker was
+    # queued, and only after 30 minutes.
+    import truememory.mcp_server as ms
+    five_minutes_ago = time.time() - 300
+    mine, mine_path = _session(env)
+    claim = _claim(env, mine, mine_path, _dead_pid())
+    os.utime(claim, (five_minutes_ago, five_minutes_ago))
+    monkeypatch.setattr(ms, "_BACKLOG_DIR", env.backlog)
+    ticks = []
+
+    def sleep(seconds):
+        ticks.append(seconds)
+        if len(ticks) > 1:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(time, "sleep", sleep)
+    with pytest.raises(KeyboardInterrupt):
+        ms._backlog_drainer()
+    assert not claim.exists() and not claim.with_suffix(".json").exists()
+    assert len(env.spawned) == 1, "the recovered session was not handed to completion"
+
+
+def test_stale_claim_thresholds(env):
+    session, path = _session(env)
+    now = time.time()
+
+    def claim(name: str, age: float, **fields) -> Path:
+        target = env.backlog / f"{name}.processing"
+        _shared._atomic_write_text(target, json.dumps({"transcript_path": str(path), "session_id": name, **fields}))
+        os.utime(target, (now - age, now - age))
+        return target
+
+    fresh_dead = claim("fresh-dead", 30, claimed_pid=_dead_pid())
+    dead = claim("dead", 300, claimed_pid=_dead_pid())
+    live = claim("live", 7200, claimed_pid=os.getpid())
+    unrecorded = claim("unrecorded", 600)
+    unrecorded_old = claim("unrecorded-old", 1860, attempts=2)
+    _shared.cleanup_stale_processing(env.backlog)
+    assert fresh_dead.exists() and live.exists() and unrecorded.exists()
+    assert not dead.exists() and dead.with_suffix(".json").exists()
+    assert json.loads(unrecorded_old.with_suffix(".json").read_text(encoding="utf-8"))["attempts"] == 3
