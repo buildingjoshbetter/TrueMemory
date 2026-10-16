@@ -102,6 +102,21 @@ _mps_budget: MPSMemoryBudget | None = None
 _mps_budget_failure: str | None = None
 
 
+def mps_free_bytes() -> int | None:
+    """Configured MPS budget not held by live tensors; None when it is unknown."""
+    limit = getattr(_mps_budget, "effective_bytes", None)
+    if type(limit) is not int or limit <= 0:
+        return None
+    try:
+        import torch
+        used = torch.mps.current_allocated_memory()
+    except Exception:
+        return None
+    if type(used) is not int or used < 0:
+        return None
+    return limit - used
+
+
 def get_mps_memory_budget() -> MPSMemoryBudget | None:
     """Read this process's successfully configured policy without importing torch."""
     return _mps_budget
@@ -118,6 +133,9 @@ def _positive_bytes(value: object, name: str) -> int:
 # embedding cap) needs a 3.75 GiB cap, so smaller caps pushed long memories
 # onto the CPU. 4 GiB keeps margin above that measurement.
 _MPS_MIN_BUDGET_BYTES = int(4 * _GIB)
+# MPS room kept beside resident weights for one forward pass: the measured
+# 2,048-token text needs 3.75 GiB with 1.67 GiB of weights resident.
+MPS_ACTIVATION_RESERVE_BYTES = int(3.75 * _GIB) - int(1.67 * _GIB)
 
 
 def _default_mps_budget_bytes(physical_bytes: int) -> int:

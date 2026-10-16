@@ -335,7 +335,7 @@ class TestIssue577RerankOom:
         def fake_get_reranker(self, model_name=None, deadline=None):
             # Before sticky degradation the loaded model is on MPS and OOMs;
             # after, the reload is CPU-resident and succeeds.
-            return FakeReranker(fail="rerank" not in self._sticky_cpu)
+            return FakeReranker(fail=f"rerank:{model_name}" not in self._sticky_cpu)
 
         monkeypatch.setattr(ModelServer, "_get_reranker", fake_get_reranker)
         server = ModelServer()
@@ -345,7 +345,8 @@ class TestIssue577RerankOom:
         )
         assert resp["ok"] is True, "rerank OOM must be recovered, not surfaced"
         assert len(resp["scores"]) == 2
-        assert "rerank" in server._sticky_cpu
+        # Only the reranker that ran out of MPS memory moves to CPU.
+        assert server._sticky_cpu == {"rerank:m"}
 
     def test_issue_577_rerank_sticky_reloads_on_cpu(self, monkeypatch):
         """After sticky degradation, _get_reranker loads with device=cpu even
@@ -360,7 +361,7 @@ class TestIssue577RerankOom:
         monkeypatch.setenv("TRUEMEMORY_DEVICE", "cpu")
 
         server = ModelServer()
-        server._sticky_cpu.add("rerank")
+        server._sticky_cpu.add("rerank:test-model")
         server._get_reranker("test-model")
         assert captured["cross_encoder_device"] == "cpu"
 
@@ -376,7 +377,7 @@ class TestIssue577RerankOom:
         server = ModelServer()
         with pytest.raises(RuntimeError, match="tokenizer"):
             server.handle_request({"op": "rerank", "pairs": [["q", "d"]], "model_name": "m"})
-        assert "rerank" not in server._sticky_cpu
+        assert not any(key.startswith("rerank") for key in server._sticky_cpu)
 
 
 # ---------------------------------------------------------------------------

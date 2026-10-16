@@ -317,7 +317,7 @@ class TestProcessAdmission(unittest.TestCase):
 
         self.inference_hook = fail
         self.assert_busy(self.request("rerank"))
-        self.assertIn("rerank", self.server._sticky_cpu)
+        self.assertIn("rerank:rank-a", self.server._sticky_cpu)
         self.assertEqual(len(self.builds), 1)
         self.assertIsNone(self.server._reranker)
         self.assertIsNone(self.server._reranker_name)
@@ -441,7 +441,7 @@ class TestProcessAdmission(unittest.TestCase):
 
                     def measure() -> types.SimpleNamespace:
                         value = self.measure()
-                        if route != "recovery" or "rerank" in self.server._sticky_cpu:
+                        if route != "recovery" or "rerank:rank-a" in self.server._sticky_cpu:
                             expired_samples.append(value)
                             tick[0] = 1002.0
                             if outcome == "error":
@@ -466,7 +466,7 @@ class TestProcessAdmission(unittest.TestCase):
                     self.assertEqual(self.builds, [("rank-a", "mps")] if route == "recovery" else [])
                     self.assertEqual(len(self.calls), 1 if route == "recovery" else 0)
                     if route == "recovery":
-                        self.assertIn("rerank", self.server._sticky_cpu)
+                        self.assertIn("rerank:rank-a", self.server._sticky_cpu)
                         self.assertIsNone(self.server._reranker)
                         self.assertIsNone(self.server._reranker_name)
                         self.assertIsNone(self.refs[-1]())

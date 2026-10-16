@@ -291,7 +291,7 @@ def test_retirer_thread_drops_an_idle_clone(monkeypatch):
     server, builds, _ = _server(monkeypatch, idle="1")
     try:
         clone = _first_clone(server, builds)
-        retirer = threading.Thread(target=server._fast_lane_retirer)
+        retirer = threading.Thread(target=server._idle_retirer)
         retirer.start()
         deadline = time.monotonic() + 5
         while server._fast_encoder is not None and time.monotonic() < deadline:
@@ -304,12 +304,18 @@ def test_retirer_thread_drops_an_idle_clone(monkeypatch):
         _close(server)
 
 
-def test_never_retiring_starts_no_retirer(monkeypatch):
-    server, _, _ = _server(monkeypatch, idle="0")
+def test_never_retiring_keeps_the_clone_while_the_retirer_runs(monkeypatch):
+    server, builds, _ = _server(monkeypatch, idle="0")
+    monkeypatch.setattr(server, "_PARKED_RERANKER_IDLE_SECONDS", 4)
     try:
-        retirer = threading.Thread(target=server._fast_lane_retirer)
+        clone = _first_clone(server, builds)
+        server._fast_last_used -= 10 ** 6
+        retirer = threading.Thread(target=server._idle_retirer)
         retirer.start()
-        retirer.join(1)
+        time.sleep(2.5)
+        assert server._fast_encoder is clone()
+        server._stopped.set()
+        retirer.join(5)
         assert not retirer.is_alive()
     finally:
         _close(server)

@@ -453,6 +453,9 @@ class ModelServer:
         self._embed_state: _EmbedState | None = None
         self._reranker = None
         self._reranker_name: str | None = None
+        self._reranker_device: str | None = None
+        # name -> (model, device, monotonic time it was switched out); under _lock.
+        self._parked_rerankers: dict[str, tuple[object, str | None, float]] = {}
         self._lock = threading.Lock()
         # Only snapshot/cache publication, never model work or destruction.
         # Main state -> residency; fast -> residency; never the reverse.
@@ -617,6 +620,12 @@ class ModelServer:
         if kind in self._sticky_cpu:
             return False
         self._sticky_cpu.add(kind)
+        if kind.startswith("rerank:"):
+            # One reranker that does not fit says nothing about the others.
+            log.error("MPS OOM with reranker %s — serving it on CPU until it is "
+                      "released; other models keep MPS.", kind.partition(":")[2])
+            self._write_status_file()
+            return True
         log.error(
             "MPS OOM in the %s path — degrading the %s model to CPU for the "
             "lifetime of this model server (no MPS re-promotion). Restart "
@@ -820,7 +829,21 @@ class ModelServer:
         "model2vec": 32_000_000,
         "Alibaba-NLP/gte-reranker-modernbert-base": 600_000_000,
         "cross-encoder/ms-marco-MiniLM-L-6-v2": 92_000_000,
+        "BAAI/bge-reranker-v2-m3": 2_272_000_000,
     }
+    # Bytes each model holds on MPS, in its checkpoint dtype.
+    _MPS_WEIGHT_BYTES = {
+        "qwen3_256": 1_200_000_000,
+        "Alibaba-NLP/gte-reranker-modernbert-base": 600_000_000,
+        "cross-encoder/ms-marco-MiniLM-L-6-v2": 92_000_000,
+        "BAAI/bge-reranker-v2-m3": 2_272_000_000,
+    }
+    # A switched-out reranker stays resident (parked) so alternating between the
+    # default and the deep-search reranker reloads neither. It leaves MPS for a
+    # newcomer only after this long unused, so alternation never thrashes, and
+    # is released after the longer period.
+    _RERANKER_EVICT_IDLE_SECONDS = 60
+    _PARKED_RERANKER_IDLE_SECONDS = 600
 
     def _resolve_embed_cache(self, tier: str) -> tuple[str, _EmbedState | None]:
         """Return the requested identity and its compatible cached snapshot."""
@@ -992,16 +1015,18 @@ class ModelServer:
     def _retire_idle_fast_encoder(self, now: float | None = None) -> bool:
         return self._retire_stale_fast_encoder(idle_at=time.monotonic() if now is None else now)
 
-    def _fast_lane_retirer(self) -> None:
-        idle = self._fast_idle_seconds
-        if not idle:
+    def _idle_retirer(self) -> None:
+        """Release the idle fast-lane copy and long-parked rerankers."""
+        periods = [period for period in (self._fast_idle_seconds, self._PARKED_RERANKER_IDLE_SECONDS) if period]
+        if not periods:
             return
-        interval = min(60.0, max(1.0, idle / 4))
+        interval = min(60.0, max(1.0, min(periods) / 4))
         while not self._stopped.wait(interval):
-            try:
-                self._retire_idle_fast_encoder()
-            except Exception:
-                log.warning("Fast-lane idle release failed; retrying later", exc_info=True)
+            for retire in (self._retire_idle_fast_encoder, self._retire_parked_rerankers):
+                try:
+                    retire()
+                except Exception:
+                    log.warning("Idle model release failed; retrying later", exc_info=True)
 
     def _publish_embed_state(self, state: _EmbedState | None) -> None:
         """Caller owns the main state lock; retire without waiting for fast work."""
@@ -1030,14 +1055,18 @@ class ModelServer:
     def _construct_model(
         self, kind: str, stage: str, device: str | None, deadline: _RequestDeadline | None,
         build: Callable[[str | None], object], *, model_identity: tuple[str, int, str] | None = None,
-        known_bytes: int = 0, flush_accelerator: bool = True,
+        known_bytes: int = 0, flush_accelerator: bool = True, sticky: str | None = None,
+        mps_bytes: int = 0, make_room: Callable[[int], bool] | None = None,
     ) -> tuple[object, str | None]:
         """Build within the memory budget on *device*, else on CPU.
 
-        An MPS OOM while building degrades *kind* to CPU for the server
-        lifetime, as an inference OOM does (issue #577), so a model that
-        cannot fit is not rebuilt and refused on every request. Callers that
-        do not own the main inference lock pass ``flush_accelerator=False``.
+        An MPS build is admitted first: its *mps_bytes* plus room for one
+        forward pass must fit beside the resident models, after *make_room*
+        frees what it may; otherwise the model is placed on CPU. An MPS OOM
+        while building marks *sticky* (default *kind*) CPU, as an inference
+        OOM does (issue #577), so a model that cannot fit is not rebuilt and
+        refused on every request. Callers that do not own the main inference
+        lock pass ``flush_accelerator=False``.
         """
         discard = self._discard_models if flush_accelerator else self._collect_models
         # Dropped models are reference cycles; free them before admitting this one.
@@ -1048,6 +1077,9 @@ class ModelServer:
             if resident is None:
                 from truememory.mps_utils import auto_detect_device
                 resident = auto_detect_device()
+            label = model_identity[0] if model_identity else stage
+            if resident == "mps" and mps_bytes and not self._mps_admits(label, mps_bytes, make_room):
+                selected = resident = "cpu"
             # Accelerator weights are not in sampled RSS; only CPU builds are charged.
             charged = known_bytes if resident == "cpu" else 0
             with self._construction_slot(charged, deadline):
@@ -1076,10 +1108,89 @@ class ModelServer:
                     self._release_stage(stage)
                     return model, selected
             # Outside the handler, so the failed build's frames are released.
-            self._mark_sticky_cpu(kind)
+            self._mark_sticky_cpu(sticky or kind)
             self._discard_models()
             selected = "cpu"
             self._check_process_memory(stage, deadline)
+
+    def _mps_admits(self, label: str, mps_bytes: int, make_room: Callable[[int], bool] | None) -> bool:
+        """Whether *mps_bytes* and room for inference fit the MPS budget now.
+
+        Caller owns the main inference lock: no other MPS work is running.
+        Before the first MPS model configures the budget nothing is measured,
+        and an unmeasured build still falls back to CPU on an OOM.
+        """
+        from truememory import mps_utils
+        measure = getattr(mps_utils, "mps_free_bytes", None)
+        free = measure() if callable(measure) else None
+        if free is None:
+            return True
+        need = mps_bytes + mps_utils.MPS_ACTIVATION_RESERVE_BYTES
+        if need > free and make_room is not None and make_room(need - free):
+            self._discard_models()
+            free = measure()
+            if free is None:
+                return True
+        if need <= free:
+            return True
+        log.info("%s placed on CPU: it needs %.2f GiB of MPS with room for inference, %.2f GiB is free",
+                 label, need / 1024**3, max(free, 0) / 1024**3)
+        return False
+
+    def _parked_reranker_table(self) -> dict[str, tuple[object, str | None, float]]:
+        table = getattr(self, "_parked_rerankers", None)
+        if table is None:
+            table = self._parked_rerankers = {}
+        return table
+
+    def _evict_parked_rerankers(self, shortfall: int, *, min_idle: float) -> bool:
+        """Drop parked MPS rerankers, least recently used first, if that frees *shortfall*."""
+        now = time.monotonic()
+        candidates = sorted(
+            (since, name) for name, (_model, device, since) in self._parked_reranker_table().items()
+            if device != "cpu" and now - since >= min_idle and name in self._MPS_WEIGHT_BYTES
+        )
+        if sum(self._MPS_WEIGHT_BYTES[name] for _, name in candidates) < shortfall:
+            return False
+        freed = 0
+        for _, name in candidates:
+            self._drop_parked_reranker(name)
+            freed += self._MPS_WEIGHT_BYTES[name]
+            log.info("Released idle reranker %s from MPS for a new model", name)
+            if freed >= shortfall:
+                break
+        return True
+
+    def _drop_parked_reranker(self, name: str) -> None:
+        """Forget a parked reranker; a CPU placement is retried on MPS at its next load."""
+        self._parked_reranker_table().pop(name, None)
+        key = f"rerank:{name}"
+        if key in self._sticky_cpu:
+            self._sticky_cpu.discard(key)
+            self._write_status_file()
+
+    def _retire_parked_rerankers(self, now: float | None = None) -> bool:
+        """Release rerankers parked longer than the idle period."""
+        now = time.monotonic() if now is None else now
+        if not self._inference_lock.acquire(blocking=False):
+            return False
+        try:
+            if not self._lock.acquire(blocking=False):
+                return False
+            try:
+                idle = [name for name, (_model, _device, since) in self._parked_reranker_table().items()
+                        if now - since >= self._PARKED_RERANKER_IDLE_SECONDS]
+                for name in idle:
+                    self._drop_parked_reranker(name)
+            finally:
+                self._lock.release()
+            if idle:
+                # Inference is owned here, so emptying the MPS cache races no work.
+                self._discard_models()
+                log.info("Released idle rerankers: %s", ", ".join(idle))
+            return bool(idle)
+        finally:
+            self._inference_lock.release()
 
     def _construction_slot(self, charged: int, deadline: _RequestDeadline | None):
         if not charged:
@@ -1120,6 +1231,8 @@ class ModelServer:
                 model_identity=((model_id, 256, "legacy")
                                 if model_id in self._FAST_LANE_SAFE_MODEL_IDS else None),
                 known_bytes=self._MODEL_WEIGHT_BYTES.get(model_id, 0),
+                mps_bytes=self._MPS_WEIGHT_BYTES.get(model_id, 0),
+                make_room=lambda shortfall: self._evict_parked_rerankers(shortfall, min_idle=0),
             )
             # ONE atomic reference assignment of an immutable snapshot — the
             # fast lane can never observe a torn (model, tier, model_id) triple.
@@ -1150,6 +1263,8 @@ class ModelServer:
                 "embed", "prepared embed construction", device, deadline,
                 lambda selected: build_target_model(target, selected, check=deadline.check),
                 model_identity=target.identity, known_bytes=self._MODEL_WEIGHT_BYTES.get(target.model_id, 0),
+                mps_bytes=self._MPS_WEIGHT_BYTES.get(target.model_id, 0),
+                make_room=lambda shortfall: self._evict_parked_rerankers(shortfall, min_idle=0),
             )
             self._publish_embed_state(_EmbedState(
                 model=model, tier=target.tier, model_id=target.model_id,
@@ -1312,14 +1427,25 @@ class ModelServer:
             if self._reranker is not None and self._reranker_name == name:
                 return self._reranker
 
+            # Park the previous reranker instead of dropping it, so switching
+            # between the default and the deep-search reranker reloads neither.
+            parked_rerankers = self._parked_reranker_table()
+            previous, previous_name = self._reranker, self._reranker_name
             self._reranker = None
             self._reranker_name = None
-            self._check_process_memory("reranker construction", deadline)
+            if previous is not None and previous_name is not None:
+                parked_rerankers[previous_name] = (previous, getattr(self, "_reranker_device", None),
+                                                   time.monotonic())
+            previous = None
+            self._reranker_device = None
+            parked = parked_rerankers.pop(name, None)
+            if parked is not None:
+                self._reranker, self._reranker_device = parked[0], parked[1]
+                self._reranker_name = name
+                return self._reranker
+
             from truememory.mps_utils import auto_detect_device, ensure_mps_memory_budget, resolve_device
-            if "rerank" in self._sticky_cpu:
-                device = "cpu"
-            else:
-                device = resolve_device(auto_detect_device())
+            sticky = f"rerank:{name}"
 
             def build(selected: str | None) -> object:
                 ensure_mps_memory_budget(selected)
@@ -1328,12 +1454,30 @@ class ModelServer:
                     deadline.check()
                 return CrossEncoder(name, device=selected)
 
-            model, device = self._construct_model(
-                "rerank", "reranker construction", device, deadline, build,
-                model_identity=(name, 0, "reranker"), known_bytes=self._MODEL_WEIGHT_BYTES.get(name, 0),
-            )
+            def construct() -> tuple[object, str | None]:
+                self._check_process_memory("reranker construction", deadline)
+                device = "cpu" if sticky in self._sticky_cpu else resolve_device(auto_detect_device())
+                return self._construct_model(
+                    "rerank", "reranker construction", device, deadline, build,
+                    model_identity=(name, 0, "reranker"), known_bytes=self._MODEL_WEIGHT_BYTES.get(name, 0),
+                    sticky=sticky, mps_bytes=self._MPS_WEIGHT_BYTES.get(name, 0),
+                    make_room=lambda shortfall: self._evict_parked_rerankers(
+                        shortfall, min_idle=self._RERANKER_EVICT_IDLE_SECONDS),
+                )
+
+            try:
+                model, device = construct()
+            except _ProcessMemoryRefused:
+                if not parked_rerankers:
+                    raise
+                # Parked rerankers hold memory; release them and admit once more.
+                for parked_name in list(parked_rerankers):
+                    self._drop_parked_reranker(parked_name)
+                self._discard_models()
+                model, device = construct()
             self._reranker = model
             self._reranker_name = name
+            self._reranker_device = device
             log.info("Loaded reranker model=%s device=%s", name, device)
             return self._reranker
 
@@ -1750,9 +1894,15 @@ class ModelServer:
                                         raise
                                     recover = True
                                 if recover:
-                                    self._mark_sticky_cpu("rerank")
+                                    # Only this reranker moves to CPU; parked ones keep MPS.
+                                    failed_name = self._reranker_name or recovery_name
+                                    if failed_name is None:
+                                        from truememory.reranker import get_current_reranker_name
+                                        failed_name = get_current_reranker_name()
+                                    self._mark_sticky_cpu(f"rerank:{failed_name}")
                                     self._reranker = None
                                     self._reranker_name = None
+                                    self._reranker_device = None
                                     # Neither the failed traceback nor this
                                     # local may retain the obsolete accelerator
                                     # model while its CPU replacement is built.
@@ -2326,8 +2476,7 @@ class ModelServer:
 
         idle_thread = threading.Thread(target=self._idle_checker, daemon=True)
         idle_thread.start()
-        if self._fast_idle_seconds:
-            threading.Thread(target=self._fast_lane_retirer, name="fast-lane-retirer", daemon=True).start()
+        threading.Thread(target=self._idle_retirer, name="idle-model-retirer", daemon=True).start()
 
         log.info(
             "Model server started: pid=%d %s idle_timeout=%ds",
@@ -2372,6 +2521,7 @@ class ModelServer:
         self._embed_state = None
         self._reranker = None
         self._reranker_name = None
+        self._parked_reranker_table().clear()
         self._fast_encoder = None
         self._fast_model_id = None
         self._fast_generation = None

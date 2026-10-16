@@ -260,7 +260,7 @@ def test_only_failed_microbatch_retries_and_completed_work_is_retained(
         source[:2], source[2:4], source[2:4], source[4:],
     ]
     assert [limit for _, _, limit in model.calls] == [2, 2, 2, 2]
-    assert server._sticky_cpu == {op}
+    assert server._sticky_cpu == ({"embed"} if op == "embed" else {"rerank:cross-encoder/ms-marco-MiniLM-L-6-v2"})
     expected = vectors(source) if op == "embed" else [len(pair[1]) / 10 for pair in source]
     np.testing.assert_array_equal(response[key], np.asarray(expected, dtype=np.float32))
 
@@ -299,7 +299,7 @@ def test_expiry_on_later_oom_skips_retry_and_remaining_inputs(
     assert not response["ok"]
     assert "deadline" in response["error"]
     assert len(model.calls) == 2
-    assert server._sticky_cpu == {op}
+    assert server._sticky_cpu == ({"embed"} if op == "embed" else {"rerank:cross-encoder/ms-marco-MiniLM-L-6-v2"})
     assert model.moves == []
 
 
@@ -1323,7 +1323,7 @@ class TestModernBertGlobalOrder(unittest.TestCase):
         self.assertEqual(locks, [True, True, False, True])
         self.assertEqual(module["np"].sort_sizes.count(129), 1)
         self.assertEqual(module["np"].allocations, [(129,)])
-        self.assertEqual(server._sticky_cpu, {"rerank"})
+        self.assertEqual(server._sticky_cpu, {"rerank:Alibaba-NLP/gte-reranker-modernbert-base"})
 
     def test_lower_limit_recovery_keeps_existing_resolution_behavior(self) -> None:
         _module, server, model = self.runtime()

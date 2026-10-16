@@ -361,7 +361,7 @@ class TestAllocationPreflight(unittest.TestCase):
 
         def get_model(name: str, deadline: object = None) -> Model:
             if self.server._reranker is None:
-                replacing = "rerank" in self.server._sticky_cpu
+                replacing = any(key.startswith("rerank:") for key in self.server._sticky_cpu)
                 if replacing:
                     self.assertIsNone(workspaces[-1]())
                     self.assertIsNone(old_models[-1]())
@@ -402,7 +402,7 @@ class TestAllocationPreflight(unittest.TestCase):
         self.assertIsNone(self.server._reranker)
         self.assertFalse(self.server._lock.locked())
         self.assertFalse(self.server._inference_lock.locked())
-        self.assertIn("rerank", self.server._sticky_cpu)
+        self.assertTrue(any(key.startswith("rerank:") for key in self.server._sticky_cpu))
 
     def test_replacement_retains_ownership_while_ping_remains_responsive(self) -> None:
         entered, release, competitor_started, loaded = (threading.Event() for _ in range(4))
@@ -480,7 +480,7 @@ class TestAllocationPreflight(unittest.TestCase):
                 self.assertEqual(len(models), 1)
                 self.assertIsNone(models[0]())
                 self.assertIsNone(workspaces[0]())
-                self.assertIn(op, self.server._sticky_cpu)
+                self.assertIn(op if op == "embed" else "rerank:synthetic/reranker", self.server._sticky_cpu)
                 self.mps.flush_mps_cache.assert_not_called()
 
 
