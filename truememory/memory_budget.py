@@ -414,6 +414,11 @@ class ProcessRegistry:
             raise StaleBudgetOwner("Owner has retired")
         return record
 
+    def ceiling(self) -> int:
+        """Tightest enrolled owner limit in bytes, or 0 when none is enrolled."""
+        with self._lock:
+            return self._ceiling()
+
     def _ceiling(self) -> int:
         ceiling = 0
         for record in self._owners.values():
@@ -706,6 +711,12 @@ def get_process_registry() -> ProcessRegistry:
 def resolve_allocation_plan(key: ProfileKey) -> AllocationPlan:
     registry = getattr(_sessions, "resolution_registry", None)
     return (registry or get_process_registry()).resolve_profile(key)
+
+
+def process_rss_limit() -> int:
+    """The process RSS ceiling: the tightest enrolled owner, else the automatic budget."""
+    ceiling = get_process_registry().ceiling()
+    return ceiling if ceiling else automatic_budget_bytes()
 
 
 def automatic_budget_bytes() -> int:

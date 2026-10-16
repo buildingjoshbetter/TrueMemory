@@ -117,6 +117,40 @@ class _FastLaneNotReady(_ProcessMemoryRefused):
     fast_lane_reloading = True
 
 
+def _run_in_pieces(run: Callable[[list, int], object], items: list, lengths: list[int] | None,
+                   budget: int) -> object:
+    """Run *items* in longest-first pieces whose batch x tokens^2 fits *budget*.
+
+    Results come back in item order. Without lengths, one call runs them all.
+    """
+    from truememory._rerank_budget import budgeted_slices
+    slices = None if lengths is None else budgeted_slices(lengths, max(1, len(items)), budget)
+    if slices is None:
+        return run(items, max(1, len(items)))
+    results: list = [None] * len(items)
+    for group in slices:
+        values = run([items[index] for index in group], len(group))
+        for position, index in enumerate(group):
+            results[index] = values[position]
+    return np.stack(results)
+
+
+def _reslice_remaining(order: np.ndarray | None, lengths: list[int], start: int, total: int, limit: int,
+                       budget: int) -> tuple[np.ndarray, dict[int, int]]:
+    """Order and piece sizes for positions from *start* on, under a new budget."""
+    from truememory._rerank_budget import budgeted_slices
+    done = [int(index) for index in order[:start]] if order is not None else list(range(start))
+    remaining = [int(index) for index in order[start:]] if order is not None else list(range(start, total))
+    slices = budgeted_slices([lengths[index] for index in remaining], limit, budget)
+    groups = ([[remaining[position] for position in group] for group in slices] if slices is not None
+              else [remaining[offset:offset + limit] for offset in range(0, len(remaining), limit)])
+    steps, position = {}, start
+    for group in groups:
+        steps[position] = len(group)
+        position += len(group)
+    return np.array(done + [index for group in groups for index in group], dtype=np.intp), steps
+
+
 def _array_metadata(shape: tuple, encoded: str = "") -> dict:
     return {"__ndarray__": encoded, "dtype": "float32", "shape": list(shape)}
 
@@ -1908,6 +1942,7 @@ class ModelServer:
                     offset = 0
                     order = None
                     steps = None
+                    lengths = None
                     while offset < len(texts) or vectors is None:
                         retry = None
                         with deadline.locked(self._lock):
@@ -1977,7 +2012,20 @@ class ModelServer:
                             self._check_process_memory("embed CPU retry", deadline)
                             deadline.check()
                             log.warning("MPS OOM during encoding; retrying microbatch on CPU")
-                            values = model.encode(retry, batch_size=len(retry) or limit, show_progress_bar=False)
+                            if lengths is None:
+                                values = model.encode(retry, batch_size=len(retry) or limit, show_progress_bar=False)
+                            else:
+                                # MPS-sized pieces do not fit CPU memory: size the retry and
+                                # every remaining piece against the RSS budget instead.
+                                from truememory._embed_budget import embed_token_budget
+                                from truememory._rerank_budget import accelerator_token_budget
+                                budget = accelerator_token_budget(model, embed_token_budget())
+                                retry_lengths = ([lengths[int(index)] for index in indices] if indices is not None
+                                                 else lengths[offset:offset + len(retry)])
+                                values = _run_in_pieces(
+                                    lambda items, size: model.encode(items, batch_size=size, show_progress_bar=False),
+                                    retry, retry_lengths, budget,
+                                )
                             if target is not None or expected_target is not None:
                                 check_target_vectors(target or expected_target, values, len(retry))
                             vectors = _store_batch_result(
@@ -1985,6 +2033,8 @@ class ModelServer:
                                 **result_options,
                             )
                             offset += len(retry)
+                            if lengths is not None and offset < len(texts):
+                                order, steps = _reslice_remaining(order, lengths, offset, len(texts), limit, budget)
                     self._after_request_batches(throttler, len(texts), encode_start, deadline)
 
                     with deadline.locked(self._lock):
@@ -2022,6 +2072,7 @@ class ModelServer:
                     offset = 0
                     order = None
                     steps = None
+                    lengths = None
                     recovery_name = model_name
                     while offset < len(pairs) or scores is None:
                         retry = None
@@ -2108,7 +2159,18 @@ class ModelServer:
                         if retry is not None:
                             self._check_process_memory("reranker CPU retry", deadline)
                             deadline.check()
-                            values = reranker.predict(retry, batch_size=len(retry) or limit, show_progress_bar=False)
+                            if lengths is None:
+                                values = reranker.predict(retry, batch_size=len(retry) or limit, show_progress_bar=False)
+                            else:
+                                # Size the retry and remaining pieces for the CPU replacement.
+                                from truememory._rerank_budget import accelerator_token_budget, rerank_token_budget
+                                budget = accelerator_token_budget(reranker, rerank_token_budget())
+                                retry_lengths = ([lengths[int(index)] for index in indices] if indices is not None
+                                                 else lengths[offset:offset + len(retry)])
+                                values = _run_in_pieces(
+                                    lambda items, size: reranker.predict(items, batch_size=size, show_progress_bar=False),
+                                    retry, retry_lengths, budget,
+                                )
                             if indices is None:
                                 scores = _store_batch_result(scores, values, offset, len(retry), len(pairs),
                                                              "scores", **result_options)
@@ -2118,6 +2180,8 @@ class ModelServer:
                                     **result_options,
                                 )
                             offset += len(retry)
+                            if lengths is not None and offset < len(pairs):
+                                order, steps = _reslice_remaining(order, lengths, offset, len(pairs), limit, budget)
                     self._after_request_batches(throttler, len(pairs), predict_start, deadline)
                     return ({"ok": True, "scores": scores} if expected_name is None else
                             {"ok": True, "scores": scores, "protocol": PROTOCOL_VERSION,

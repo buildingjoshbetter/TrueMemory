@@ -74,14 +74,43 @@ def _attention_heads(model: object) -> int | None:
     return None
 
 
-def accelerator_token_budget(model: object, budget: int) -> int:
-    """Lower *budget* so one batch's attention fits the free MPS allocation.
+# Peak CPU bytes per batch x tokens^2 x attention head: eager attention keeps
+# two float32 score tensors alive at its softmax (11 x 1,718 tokens x 16 heads
+# is 4.16 GB per layer).
+_CPU_BYTES_PER_SCORE = 8
 
-    MPS allocations are capped per process. A batch above the remaining cap
-    fails with an OOM that degrades the model to CPU for the server lifetime.
+
+def _cpu_token_budget(model: object, budget: int) -> int:
+    """Lower *budget* so one CPU batch's attention fits the process RSS budget.
+
+    CPU attention lands in resident memory. Pieces are sized against the RSS
+    budget minus what is already resident, not against free system memory.
+    """
+    heads = _attention_heads(model)
+    if heads is None:
+        return budget
+    try:
+        import psutil
+        from truememory.memory_budget import process_rss_limit
+        room = process_rss_limit() - psutil.Process().memory_info().rss
+    except Exception:
+        return budget
+    fit = int(max(0, room) * _MPS_HEADROOM_SHARE) // (heads * _CPU_BYTES_PER_SCORE)
+    return max(1, min(budget, fit))
+
+
+def accelerator_token_budget(model: object, budget: int) -> int:
+    """Lower *budget* so one batch's attention fits where the model runs.
+
+    MPS allocations are capped per process: a batch above the remaining cap
+    fails with an OOM that degrades the model to CPU. On CPU the attention is
+    resident memory, so a batch must fit the process RSS budget.
     """
     device = getattr(model, "device", None)
-    if getattr(device, "type", device) != "mps":
+    kind = getattr(device, "type", device)
+    if kind == "cpu":
+        return _cpu_token_budget(model, budget)
+    if kind != "mps":
         return budget
     from truememory.mps_utils import get_mps_memory_budget
     policy = get_mps_memory_budget()
