@@ -156,6 +156,91 @@ def _check_bounds(namespace: dict[str, object]) -> None:
         raise ProvenanceCapacityError("source provenance byte count exceeds provenance bounds")
 
 
+def _fits(namespace: dict[str, object]) -> bool:
+    try:
+        _check_bounds(namespace)
+    except ProvenanceCapacityError:
+        return False
+    return True
+
+
+def _window(items: list[object]) -> dict[str, object]:
+    """One source_time covering the input scopes of every given citation."""
+    starts: list[str] = []
+    ends: list[str] = []
+    unknown = 0
+    for item in items:
+        scope = item.get("scope") if isinstance(item, dict) else None
+        value = scope.get("source_time") if isinstance(scope, dict) else None
+        value = value if isinstance(value, dict) else {}
+        start, end, count = _known_time(value.get("start")), _known_time(value.get("end")), value.get("unknown_count")
+        count = count if type(count) is int and count > 0 else 0
+        if value.get("status") in ("known", "mixed") and start is not None and end is not None and start <= end:
+            starts.append(start)
+            ends.append(end)
+            unknown += count if value["status"] == "mixed" else 0
+        else:
+            unknown += max(count, 1)
+    return {"status": ("mixed" if unknown else "known") if starts else "unknown",
+            "start": min(starts) if starts else None, "end": max(ends) if ends else None, "unknown_count": unknown}
+
+
+def _elision(record: object) -> dict[str, object] | None:
+    if record is None:
+        return None
+    if (not isinstance(record, dict) or type(record.get("count")) is not int or record["count"] < 1
+            or not isinstance(record.get("first_id"), str) or not isinstance(record.get("last_id"), str)
+            or not isinstance(record.get("scope"), dict)):
+        raise ProvenanceError("elided citation record is invalid")
+    return record
+
+
+def _elided(previous: dict[str, object] | None, dropped: list[dict]) -> dict[str, object] | None:
+    """Count, first and last ids, and one window covering every elided citation."""
+    if not dropped:
+        return previous
+    return {"count": (previous["count"] if previous else 0) + len(dropped),
+            "first_id": previous["first_id"] if previous else dropped[0]["id"],
+            "last_id": dropped[-1]["id"],
+            "scope": {"kind": "extraction_input_scope",
+                      "source_time": _window(([previous] if previous else []) + dropped)}}
+
+
+def _truncated(citation: dict) -> dict:
+    # Identity and input scope stay; the gate observation is the bulk.
+    return {**{key: value for key, value in citation.items() if key != "gate"}, "truncated": True}
+
+
+def _fit(namespace: dict[str, object], added: int) -> dict[str, object]:
+    """Fit a namespace in its bounds, keeping the origin and the newest citations.
+
+    The oldest citations between the first one (the origin) and the ``added``
+    ones go first; ``elided_citations`` keeps their count, the first and last
+    elided ids, and one input scope covering all of them, so source intervals
+    stay complete. If that is not enough, the added citations and then the
+    origin lose their gate observation behind a ``truncated`` marker, and
+    finally the oldest added citations after the origin are elided too.
+    """
+    citations = list(namespace["citations"])
+    previous = _elision(namespace.get("elided_citations"))
+    dropped: list[dict] = []
+
+    def shaped() -> dict[str, object]:
+        record = _elided(previous, dropped)
+        return {**namespace, "citations": citations, **({"elided_citations": record} if record else {})}
+
+    while not _fits(shaped()) and len(citations) - added > 1:
+        dropped.append(citations.pop(1))
+    for first in (len(citations) - min(added, len(citations)), 0):
+        if not _fits(shaped()):
+            citations = citations[:first] + [_truncated(citation) for citation in citations[first:]]
+    while not _fits(shaped()) and len(citations) > 2:
+        dropped.append(citations.pop(1))
+    result = shaped()
+    _check_bounds(result)
+    return result
+
+
 def fact_metadata(context: SourceContext, fact: object, observation: dict[str, object], ingested_at: str) -> dict[str, object]:
     spans = getattr(fact, "source_spans", ()) or ((0, context.length),)
     content = getattr(fact, "content", "")
@@ -185,8 +270,6 @@ def fact_metadata(context: SourceContext, fact: object, observation: dict[str, o
             "extractor_role_assertion": getattr(fact, "source_role", "") if getattr(fact, "source_role", "") in ("user", "inferred") else "unknown",
             "gate": observation,
         })
-        if len(citations) > MAX_CITATIONS:
-            raise ProvenanceError("source citation count exceeds provenance bounds")
     namespace: dict[str, object] = {
         "version": 1,
         "ingested_at": ingested_at,
@@ -194,25 +277,42 @@ def fact_metadata(context: SourceContext, fact: object, observation: dict[str, o
         "timestamp_semantics": "source_scope_end",
         "citations": citations,
     }
-    _check_bounds(namespace)
-    return {NAMESPACE: namespace}
+    # A fact cited by more spans than fit keeps its first and newest citations.
+    return {NAMESPACE: _fit(namespace, len(citations))}
 
 
-def merge_metadata(existing: object, incoming: dict[str, object]) -> tuple[dict[str, object], bool]:
+def merge_metadata(existing: object, incoming: dict[str, object], *,
+                   elide: bool = False) -> tuple[dict[str, object], bool]:
+    """Append incoming citations; past the bounds, raise or (``elide``) make room.
+
+    A content UPDATE elides so it is never dropped for a full citation list;
+    a SKIP leaves existing citations as they are.
+    """
     if not isinstance(existing, dict):
         raise ProvenanceError("existing source metadata is not an object")
     new = incoming.get(NAMESPACE)
     if not isinstance(new, dict) or type(new.get("version")) is not int or new.get("version") != 1:
         raise ProvenanceError("incoming source provenance version is unsupported")
-    _check_bounds(new)
+    try:
+        _check_bounds(new)
+    except ProvenanceCapacityError:
+        # An oversized newcomer is truncated by the fit below.
+        if not elide:
+            raise
     previous = existing.get(NAMESPACE)
     if previous is None:
         namespace = {**new, "legacy_unknown": True}
+        namespace = _fit(namespace, len(new["citations"])) if elide else namespace
         _check_bounds(namespace)
         return {**existing, NAMESPACE: namespace}, True
     if not isinstance(previous, dict) or type(previous.get("version")) is not int or previous.get("version") != 1:
         raise ProvenanceError("existing source provenance version is unsupported")
-    _check_bounds(previous)
+    try:
+        _check_bounds(previous)
+    except ProvenanceCapacityError:
+        # An over-full namespace from an earlier version is fitted below.
+        if not elide:
+            raise
     old_citations, new_citations = previous["citations"], new["citations"]
     if any(not isinstance(citation, dict) or not isinstance(citation.get("id"), str) for citation in old_citations + new_citations):
         raise ProvenanceError("source citation identity is invalid")
@@ -221,6 +321,16 @@ def merge_metadata(existing: object, incoming: dict[str, object]) -> tuple[dict[
     if not added:
         return dict(existing), False
     namespace = {**previous, "citations": [*old_citations, *added], "last_ingested_at": new["last_ingested_at"]}
+    incoming_elided = _elision(new.get("elided_citations"))
+    if incoming_elided is not None:
+        # Spans the incoming fact already elided stay counted.
+        current = _elision(previous.get("elided_citations"))
+        namespace["elided_citations"] = incoming_elided if current is None else {
+            "count": current["count"] + incoming_elided["count"], "first_id": current["first_id"],
+            "last_id": incoming_elided["last_id"],
+            "scope": {"kind": "extraction_input_scope", "source_time": _window([current, incoming_elided])}}
+    if elide:
+        namespace = _fit(namespace, len(added))
     _check_bounds(namespace)
     return {**existing, NAMESPACE: namespace}, True
 
@@ -243,7 +353,12 @@ def source_intervals(metadata: object) -> tuple[list[tuple[str, str]], bool] | N
         return [], True
     intervals: list[tuple[str, str]] = []
     unknown = namespace.get("legacy_unknown", False)
-    for citation in citations:
+    try:
+        elided = _elision(namespace.get("elided_citations"))
+    except ProvenanceError:
+        return [], True
+    # Elided citations still contribute the one window that covers them.
+    for citation in [*citations, *([elided] if elided else [])]:
         scope = citation.get("scope") if isinstance(citation, dict) else None
         value = scope.get("source_time") if isinstance(scope, dict) else None
         if (not isinstance(scope, dict) or scope.get("kind") != "extraction_input_scope"

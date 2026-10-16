@@ -964,7 +964,8 @@ class IngestionPipeline:
                     raise ProvenanceError("source-fenced engine update capability unavailable")
                 existing = getter(existing_id, _source_snapshot=True)
                 if existing is not None:
-                    merged, _ = merge_metadata(existing.get("metadata", {}), metadata)
+                    # A full citation list makes room; an update is never dropped for it.
+                    merged, _ = merge_metadata(existing.get("metadata", {}), metadata, elide=True)
                     result = updater(existing_id, content=new_content, metadata=merged,
                                      timestamp=source_timestamp(merged), _expected_source=existing)
                     if result is not None:
