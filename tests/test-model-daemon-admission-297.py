@@ -209,7 +209,7 @@ class DaemonAdmissionControls(unittest.TestCase):
         self.assertIn('[executable, "-m", "truememory.model_server"]', client)
         self.assertIn('truememory-model-server = "truememory.model_server:main"', (ROOT / "pyproject.toml").read_text())
         self.assertEqual(hashlib.sha256((ROOT / "truememory/mps_utils.py").read_bytes()).hexdigest(),
-                         "a09676f73f31c9d690f17445486454eb92c27656f270c7b70a3a4ff315f7cd10")
+                         "0a0e2e8e1a24c307d3a612f87e7ea05c67462fd1b2612ed753b0b668392592e8")
 
 
 if __name__ == "__main__":

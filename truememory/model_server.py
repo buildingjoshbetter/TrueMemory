@@ -72,6 +72,8 @@ PID_PATH = _TRUEMEMORY_DIR / "model_server.pid"
 PORT_PATH = _TRUEMEMORY_DIR / "model_server.port"
 TOKEN_PATH = _TRUEMEMORY_DIR / "model_server.token"
 IDLE_TIMEOUT = _env_int("TRUEMEMORY_MODEL_SERVER_IDLE", 300, lo=0)
+# After TERM, in-flight model work gets this long to reach a stopping point.
+_TERM_GRACE_SECONDS = 5.0
 
 LOCK_PATH = _TRUEMEMORY_DIR / "model_server.lock"
 START_STATE_PATH = _TRUEMEMORY_DIR / "model_server.start.json"
@@ -102,6 +104,17 @@ class _ServingIdentityMismatch(ValueError):
 
 class _ProcessMemoryRefused(RuntimeError):
     """Current process memory cannot admit another model stage."""
+
+
+def _on_cpu(model: object) -> bool:
+    device = getattr(model, "device", None)
+    return getattr(device, "type", device) == "cpu"
+
+
+class _FastLaneNotReady(_ProcessMemoryRefused):
+    """The retired fast-lane clone is reloading; take the bounded fallback."""
+
+    fast_lane_reloading = True
 
 
 def _array_metadata(shape: tuple, encoded: str = "") -> dict:
@@ -447,6 +460,9 @@ class ModelServer:
         self._embed_state: _EmbedState | None = None
         self._reranker = None
         self._reranker_name: str | None = None
+        self._reranker_device: str | None = None
+        # name -> (model, device, monotonic time it was switched out); under _lock.
+        self._parked_rerankers: dict[str, tuple[object, str | None, float]] = {}
         self._lock = threading.Lock()
         # Only snapshot/cache publication, never model work or destruction.
         # Main state -> residency; fast -> residency; never the reverse.
@@ -477,6 +493,21 @@ class ModelServer:
         self._fast_model_id: str | None = None
         self._fast_generation: object = None
         self._fast_lock = threading.Lock()
+        # The clone costs 2.4 GB in float32 but only serves single queries while
+        # batch work holds the main model. Release it after this many seconds
+        # without such contention (0 keeps it); a retired residency then
+        # rebuilds in the background so no query waits on the reload.
+        self._fast_idle_seconds = _admission_setting("TRUEMEMORY_FAST_LANE_IDLE_SECONDS", 600, 0, 2**31 - 1)
+        # Monotonic time of the last contention; every clone publication stamps it.
+        self._fast_last_used = 0.0
+        self._fast_retired_generation: object = None
+        # At most one background rebuild; set and cleared under _residency_lock.
+        self._fast_rebuild: threading.Thread | None = None
+        # (monotonic time until which reloads wait, RSS when the last one was refused)
+        self._fast_rebuild_refusal: tuple[float, int | None] = (0.0, None)
+        # Embedding sticky CPU is retried on MPS after a backoff (see _repromote_embed).
+        self._embed_cpu_since: float | None = None
+        self._embed_ooms = 0
         # CPU constructions are admitted and built one at a time, so two
         # builds cannot both pass a size check sized for one. Innermost lock.
         self._construction_lock = threading.Lock()
@@ -590,10 +621,10 @@ class ModelServer:
             raise _ProcessMemoryRefused(f"Model server busy: {error}") from error
 
     def _mark_sticky_cpu(self, kind: str) -> bool:
-        """Permanently degrade *kind* ("embed"/"rerank") to CPU after an
-        MPS OOM (issue #577). Re-promoting to MPS after recovery guaranteed
-        the next OOM (the pool never drops below the watermark cap), so the
-        degradation is sticky for the server's lifetime.
+        """Degrade *kind* ("embed" or "rerank:<name>") to CPU after an MPS OOM
+        (issue #577). The model is not moved back while it serves; embedding
+        returns to MPS only through a fresh load after a quiet backoff
+        (``_repromote_embed``), and a reranker when its CPU copy is released.
 
         Caller must hold ``self._lock``. Returns True on the first marking
         (which is logged loudly, once).
@@ -601,12 +632,21 @@ class ModelServer:
         if kind in self._sticky_cpu:
             return False
         self._sticky_cpu.add(kind)
+        if kind == "embed":
+            import time as clock  # this method is also loaded alone by source tests
+            self._embed_cpu_since = clock.monotonic()
+            self._embed_ooms = getattr(self, "_embed_ooms", 0) + 1
+        if kind.startswith("rerank:"):
+            # One reranker that does not fit says nothing about the others.
+            log.error("MPS OOM with reranker %s — serving it on CPU until it is "
+                      "released; other models keep MPS.", kind.partition(":")[2])
+            self._write_status_file()
+            return True
         log.error(
-            "MPS OOM in the %s path — degrading the %s model to CPU for the "
-            "lifetime of this model server (no MPS re-promotion). Restart "
-            "the server to try MPS again, or set TRUEMEMORY_DEVICE=cpu to "
-            "make CPU permanent.",
-            kind, kind,
+            "MPS OOM in the %s path — degrading the %s model to CPU. MPS is "
+            "retried with a fresh load after %ds; set TRUEMEMORY_DEVICE=cpu "
+            "to make CPU permanent.",
+            kind, kind, self._embed_repromote_after() if kind == "embed" and hasattr(self, "_embed_repromote_after") else 0,
         )
         self._write_status_file()
         return True
@@ -686,6 +726,9 @@ class ModelServer:
                 self._release_stage("embed CPU transfer")
                 # The moved weights' accelerator storage is free only now.
                 flush_mps_cache()
+                # A fast-lane clone now duplicates the CPU main model. A clone in
+                # use is released by its owner when the query finishes.
+                self._retire_stale_fast_encoder()
 
     def _check_embed_recovery_deadline_locked(
         self, model: object, deadline: _RequestDeadline,
@@ -804,7 +847,29 @@ class ModelServer:
         "model2vec": 32_000_000,
         "Alibaba-NLP/gte-reranker-modernbert-base": 600_000_000,
         "cross-encoder/ms-marco-MiniLM-L-6-v2": 92_000_000,
+        "BAAI/bge-reranker-v2-m3": 2_272_000_000,
     }
+    # Bytes each model holds on MPS, in its checkpoint dtype.
+    _MPS_WEIGHT_BYTES = {
+        "qwen3_256": 1_200_000_000,
+        "Alibaba-NLP/gte-reranker-modernbert-base": 600_000_000,
+        "cross-encoder/ms-marco-MiniLM-L-6-v2": 92_000_000,
+        "BAAI/bge-reranker-v2-m3": 2_272_000_000,
+    }
+    # A switched-out reranker stays resident (parked) so alternating between the
+    # default and the deep-search reranker reloads neither. It leaves MPS for a
+    # newcomer only after this long unused, so alternation never thrashes, and
+    # is released after the longer period.
+    _RERANKER_EVICT_IDLE_SECONDS = 60
+    _PARKED_RERANKER_IDLE_SECONDS = 600
+    # A refused fast-lane reload is not retried for this long (see _start_fast_rebuild).
+    _FAST_REBUILD_BACKOFF_SECONDS = 60
+    # After an embedding MPS OOM the model runs on CPU; MPS is retried after this
+    # long, doubled for every further OOM up to the cap, once the server has been
+    # quiet for the shorter period.
+    _EMBED_REPROMOTE_SECONDS = 600
+    _EMBED_REPROMOTE_MAX_FACTOR = 16
+    _EMBED_REPROMOTE_QUIET_SECONDS = 60
 
     def _resolve_embed_cache(self, tier: str) -> tuple[str, _EmbedState | None]:
         """Return the requested identity and its compatible cached snapshot."""
@@ -930,22 +995,34 @@ class ModelServer:
         # Custom CrossEncoder constructors preserve num_labels=None; their
         # output may contain several labels per pair. Inspect its real shape.
 
-    def _retire_stale_fast_encoder(self) -> None:
-        """Drop an idle stale clone; an active owner retries this on release."""
+    def _retire_stale_fast_encoder(self, *, idle_at: float | None = None) -> bool:
+        """Drop an idle stale clone; an active owner retries this on release.
+
+        With *idle_at* (a monotonic time), a current clone is dropped too once
+        it has gone the idle period without contention and no batch holds the
+        main model. Its residency then rebuilds in the background. A clone of
+        a main model that is itself on CPU duplicates its weights and is
+        dropped at once; single queries then use the main model.
+        """
         if not self._fast_lock.acquire(blocking=False):
-            return
+            return False
         release_fast = True
         try:
             with self._residency_lock:
                 state = self._embed_state
-                if self._fast_encoder is None or (
-                    state is not None and self._fast_generation is state.generation
-                ):
+                current = state is not None and self._fast_generation is state.generation
+                idle = (idle_at is not None and current and self._fast_idle_seconds > 0
+                        and idle_at - self._fast_last_used >= self._fast_idle_seconds
+                        and not self._inference_lock.locked())
+                redundant = current and self._duplicates_cpu_main(state)
+                if self._fast_encoder is None or (current and not idle and not redundant):
                     # Unlock before publication can change the generation, so
                     # a following invalidation cannot miss an idle stale cache.
                     self._fast_lock.release()
                     release_fast = False
-                    return
+                    return False
+                if idle and not redundant:
+                    self._fast_retired_generation = self._fast_generation
                 retired = self._fast_encoder
                 self._fast_encoder = None
                 self._fast_model_id = None
@@ -956,6 +1033,86 @@ class ModelServer:
         finally:
             if release_fast:
                 self._fast_lock.release()
+        if idle or redundant:
+            # The clone is a reference cycle; collect it so its float32 weights
+            # return to the system now rather than at the next full collection.
+            self._collect_models()
+            if redundant:
+                log.info("Fast-lane CPU encoder released: the main embedding model is on CPU")
+            else:
+                log.info("Fast-lane CPU encoder released after %ds without contention",
+                         self._fast_idle_seconds)
+        return True
+
+    def _embed_repromote_after(self) -> int:
+        """Seconds on CPU before embedding retries MPS: doubles per OOM, capped."""
+        factor = min(2 ** max(0, getattr(self, "_embed_ooms", 1) - 1), self._EMBED_REPROMOTE_MAX_FACTOR)
+        return self._EMBED_REPROMOTE_SECONDS * factor
+
+    def _repromote_embed(self, now: float | None = None) -> bool:
+        """Retry MPS for embedding after its backoff, once the server is quiet.
+
+        The CPU model is dropped, not moved: the next request loads a fresh
+        copy in its checkpoint dtype, under MPS construction admission, so a
+        model that no longer fits is placed on CPU without a new OOM.
+        """
+        since = getattr(self, "_embed_cpu_since", None)
+        if since is None or "embed" not in self._sticky_cpu:
+            return False
+        from truememory.mps_utils import resolve_device
+        if resolve_device(None) == "cpu":
+            return False  # TRUEMEMORY_DEVICE=cpu keeps CPU.
+        now = time.monotonic() if now is None else now
+        if now - since < self._embed_repromote_after():
+            return False
+        with self._activity_lock:
+            busy = self._inflight or time.time() - self._last_activity < self._EMBED_REPROMOTE_QUIET_SECONDS
+        if busy or not self._inference_lock.acquire(blocking=False):
+            return False
+        try:
+            if not self._lock.acquire(blocking=False):
+                return False
+            try:
+                self._sticky_cpu.discard("embed")
+                self._embed_cpu_since = None
+                state = self._embed_state
+                if state is not None and _on_cpu(state.model):
+                    state = None
+                    self._publish_embed_state(None)
+                self._write_status_file()
+            finally:
+                self._lock.release()
+            # Inference is owned here, so emptying the MPS cache races no work.
+            self._discard_models()
+            log.info("Embedding returns to MPS at its next load (OOM count %d)", self._embed_ooms)
+            return True
+        finally:
+            self._inference_lock.release()
+
+    @staticmethod
+    def _resident_bytes() -> int | None:
+        try:
+            usage = psutil.Process().memory_info().rss if psutil is not None else None
+        except Exception:
+            return None
+        return usage if type(usage) is int and usage > 0 else None
+
+    def _retire_idle_fast_encoder(self, now: float | None = None) -> bool:
+        return self._retire_stale_fast_encoder(idle_at=time.monotonic() if now is None else now)
+
+    def _idle_retirer(self) -> None:
+        """Release the idle fast-lane copy and long-parked rerankers; retry MPS for embedding."""
+        periods = [period for period in (self._fast_idle_seconds, self._PARKED_RERANKER_IDLE_SECONDS,
+                                         self._EMBED_REPROMOTE_QUIET_SECONDS) if period]
+        if not periods:
+            return
+        interval = min(60.0, max(1.0, min(periods) / 4))
+        while not self._stopped.wait(interval):
+            for retire in (self._retire_idle_fast_encoder, self._retire_parked_rerankers, self._repromote_embed):
+                try:
+                    retire()
+                except Exception:
+                    log.warning("Idle model release failed; retrying later", exc_info=True)
 
     def _publish_embed_state(self, state: _EmbedState | None) -> None:
         """Caller owns the main state lock; retire without waiting for fast work."""
@@ -971,25 +1128,44 @@ class ModelServer:
         from truememory.mps_utils import flush_mps_cache
         flush_mps_cache()
 
+    @staticmethod
+    def _collect_models() -> None:
+        """Free dropped CPU models without touching the accelerator.
+
+        Emptying the MPS cache while another thread commits MPS work aborts
+        the process, so paths outside the inference lock only collect.
+        """
+        import gc as collector
+        collector.collect()
+
     def _construct_model(
         self, kind: str, stage: str, device: str | None, deadline: _RequestDeadline | None,
         build: Callable[[str | None], object], *, model_identity: tuple[str, int, str] | None = None,
-        known_bytes: int = 0,
+        known_bytes: int = 0, flush_accelerator: bool = True, sticky: str | None = None,
+        mps_bytes: int = 0, make_room: Callable[[int], bool] | None = None,
     ) -> tuple[object, str | None]:
         """Build within the memory budget on *device*, else on CPU.
 
-        An MPS OOM while building degrades *kind* to CPU for the server
-        lifetime, as an inference OOM does (issue #577), so a model that
-        cannot fit is not rebuilt and refused on every request.
+        An MPS build is admitted first: its *mps_bytes* plus room for one
+        forward pass must fit beside the resident models, after *make_room*
+        frees what it may; otherwise the model is placed on CPU. An MPS OOM
+        while building marks *sticky* (default *kind*) CPU, as an inference
+        OOM does (issue #577), so a model that cannot fit is not rebuilt and
+        refused on every request. Callers that do not own the main inference
+        lock pass ``flush_accelerator=False``.
         """
+        discard = self._discard_models if flush_accelerator else self._collect_models
         # Dropped models are reference cycles; free them before admitting this one.
-        self._discard_models()
+        discard()
         selected = device
         while True:
             resident = selected
             if resident is None:
                 from truememory.mps_utils import auto_detect_device
                 resident = auto_detect_device()
+            label = model_identity[0] if model_identity else stage
+            if resident == "mps" and mps_bytes and not self._mps_admits(label, mps_bytes, make_room):
+                selected = resident = "cpu"
             # Accelerator weights are not in sampled RSS; only CPU builds are charged.
             charged = known_bytes if resident == "cpu" else 0
             with self._construction_slot(charged, deadline):
@@ -1013,15 +1189,94 @@ class ModelServer:
                         self._check_process_memory(stage + " completion", deadline)
                     except BaseException:
                         model = None
-                        self._discard_models()
+                        discard()
                         raise
                     self._release_stage(stage)
                     return model, selected
             # Outside the handler, so the failed build's frames are released.
-            self._mark_sticky_cpu(kind)
+            self._mark_sticky_cpu(sticky or kind)
             self._discard_models()
             selected = "cpu"
             self._check_process_memory(stage, deadline)
+
+    def _mps_admits(self, label: str, mps_bytes: int, make_room: Callable[[int], bool] | None) -> bool:
+        """Whether *mps_bytes* and room for inference fit the MPS budget now.
+
+        Caller owns the main inference lock: no other MPS work is running.
+        Before the first MPS model configures the budget nothing is measured,
+        and an unmeasured build still falls back to CPU on an OOM.
+        """
+        from truememory import mps_utils
+        measure = getattr(mps_utils, "mps_free_bytes", None)
+        free = measure() if callable(measure) else None
+        if free is None:
+            return True
+        need = mps_bytes + mps_utils.MPS_ACTIVATION_RESERVE_BYTES
+        if need > free and make_room is not None and make_room(need - free):
+            self._discard_models()
+            free = measure()
+            if free is None:
+                return True
+        if need <= free:
+            return True
+        log.info("%s placed on CPU: it needs %.2f GiB of MPS with room for inference, %.2f GiB is free",
+                 label, need / 1024**3, max(free, 0) / 1024**3)
+        return False
+
+    def _parked_reranker_table(self) -> dict[str, tuple[object, str | None, float]]:
+        table = getattr(self, "_parked_rerankers", None)
+        if table is None:
+            table = self._parked_rerankers = {}
+        return table
+
+    def _evict_parked_rerankers(self, shortfall: int, *, min_idle: float) -> bool:
+        """Drop parked MPS rerankers, least recently used first, if that frees *shortfall*."""
+        now = time.monotonic()
+        candidates = sorted(
+            (since, name) for name, (_model, device, since) in self._parked_reranker_table().items()
+            if device != "cpu" and now - since >= min_idle and name in self._MPS_WEIGHT_BYTES
+        )
+        if sum(self._MPS_WEIGHT_BYTES[name] for _, name in candidates) < shortfall:
+            return False
+        freed = 0
+        for _, name in candidates:
+            self._drop_parked_reranker(name)
+            freed += self._MPS_WEIGHT_BYTES[name]
+            log.info("Released idle reranker %s from MPS for a new model", name)
+            if freed >= shortfall:
+                break
+        return True
+
+    def _drop_parked_reranker(self, name: str) -> None:
+        """Forget a parked reranker; a CPU placement is retried on MPS at its next load."""
+        self._parked_reranker_table().pop(name, None)
+        key = f"rerank:{name}"
+        if key in self._sticky_cpu:
+            self._sticky_cpu.discard(key)
+            self._write_status_file()
+
+    def _retire_parked_rerankers(self, now: float | None = None) -> bool:
+        """Release rerankers parked longer than the idle period."""
+        now = time.monotonic() if now is None else now
+        if not self._inference_lock.acquire(blocking=False):
+            return False
+        try:
+            if not self._lock.acquire(blocking=False):
+                return False
+            try:
+                idle = [name for name, (_model, _device, since) in self._parked_reranker_table().items()
+                        if now - since >= self._PARKED_RERANKER_IDLE_SECONDS]
+                for name in idle:
+                    self._drop_parked_reranker(name)
+            finally:
+                self._lock.release()
+            if idle:
+                # Inference is owned here, so emptying the MPS cache races no work.
+                self._discard_models()
+                log.info("Released idle rerankers: %s", ", ".join(idle))
+            return bool(idle)
+        finally:
+            self._inference_lock.release()
 
     def _construction_slot(self, charged: int, deadline: _RequestDeadline | None):
         if not charged:
@@ -1062,6 +1317,8 @@ class ModelServer:
                 model_identity=((model_id, 256, "legacy")
                                 if model_id in self._FAST_LANE_SAFE_MODEL_IDS else None),
                 known_bytes=self._MODEL_WEIGHT_BYTES.get(model_id, 0),
+                mps_bytes=self._MPS_WEIGHT_BYTES.get(model_id, 0),
+                make_room=lambda shortfall: self._evict_parked_rerankers(shortfall, min_idle=0),
             )
             # ONE atomic reference assignment of an immutable snapshot — the
             # fast lane can never observe a torn (model, tier, model_id) triple.
@@ -1092,6 +1349,8 @@ class ModelServer:
                 "embed", "prepared embed construction", device, deadline,
                 lambda selected: build_target_model(target, selected, check=deadline.check),
                 model_identity=target.identity, known_bytes=self._MODEL_WEIGHT_BYTES.get(target.model_id, 0),
+                mps_bytes=self._MPS_WEIGHT_BYTES.get(target.model_id, 0),
+                make_room=lambda shortfall: self._evict_parked_rerankers(shortfall, min_idle=0),
             )
             self._publish_embed_state(_EmbedState(
                 model=model, tier=target.tier, model_id=target.model_id,
@@ -1105,8 +1364,11 @@ class ModelServer:
         """CPU-resident encoder for the single-text fast lane (issue #577).
 
         Loaded lazily on the first single-text request that finds the global
-        lock busy, then cached for that main residency. Caller must hold
-        ``self._fast_lock`` through inference and retire stale cache on release.
+        lock busy, then cached for that main residency until it goes unused
+        for ``TRUEMEMORY_FAST_LANE_IDLE_SECONDS``. A released residency reloads
+        in the background and raises ``_FastLaneNotReady`` meanwhile. Caller
+        must hold ``self._fast_lock`` through inference and retire stale cache
+        on release.
 
         Vector-space parity (panel rounds 1-2): the fast encoder is ONLY
         ever built from the main path's actual loaded identity, taken from
@@ -1128,6 +1390,12 @@ class ModelServer:
                 return None
 
             model_id, generation = state.model_id, state.generation
+            if self._duplicates_cpu_main(state):
+                # A CPU main model serves single queries itself; a second CPU
+                # copy would only duplicate 2.4 GB of identical weights.
+                state = None
+                self._drop_redundant_fast_encoder_locked()
+                raise _ProcessMemoryRefused("Model server busy: the main model serves single queries on CPU")
             if getattr(self, "_small_host", False):
                 # A second CPU copy (2.4 GB in float32 on macOS) does not fit beside
                 # the MPS cap on an 8 GiB host; wait for the main model instead.
@@ -1142,33 +1410,138 @@ class ModelServer:
                     from truememory.embedding_target import EmbeddingTargetError
                     raise EmbeddingTargetError("Fast encoder cache does not match the serving target")
                 return self._fast_encoder
+            if self._fast_retired_generation is generation:
+                # This residency's clone was released while idle. Reload it in
+                # the background; this query takes the bounded fallback meanwhile.
+                self._start_fast_rebuild(model_id, generation)
+                raise _FastLaneNotReady("Model server busy: the fast-lane copy is reloading")
 
             self._fast_encoder = None
             self._fast_model_id = None
             self._fast_generation = None
-            self._check_process_memory("fast embed construction", deadline)
-            model, _ = self._construct_model(
-                "embed", "fast embed construction", "cpu", deadline,
-                lambda selected: self._build_embed_model(model_id, selected),
-                model_identity=(model_id, 256, "legacy"), known_bytes=self._MODEL_WEIGHT_BYTES.get(model_id, 0),
-            )
-            # A changed generation, including A -> B -> A, must not publish this
-            # construction. Its already-captured request may still finish on it.
-            if self._residency_lock.acquire(blocking=False):
-                try:
-                    state = self._embed_state
-                    if state is not None and state.generation is generation:
-                        self._fast_encoder = model
-                        self._fast_model_id = model_id
-                        self._fast_generation = generation
-                finally:
-                    self._residency_lock.release()
-                    state = None
+            model = self._build_fast_encoder(model_id, deadline)
+            self._publish_fast_encoder(model, model_id, generation, blocking=False)
             log.info(
                 "Fast-lane CPU encoder loaded (tier=%s, model=%s) — single-text "
                 "requests no longer queue behind batch work", tier, model_id,
             )
             return model
+
+    # A clone of a CPU main model is kept only when it is this small (model2vec);
+    # the float32 Qwen copy duplicates 2.4 GB.
+    _CLONE_DUPLICATE_LIMIT_BYTES = 256 * 1024**2
+
+    def _duplicates_cpu_main(self, state: _EmbedState) -> bool:
+        return (_on_cpu(state.model)
+                and self._MODEL_WEIGHT_BYTES.get(state.model_id, 0) > self._CLONE_DUPLICATE_LIMIT_BYTES)
+
+    def _drop_redundant_fast_encoder_locked(self) -> None:
+        """Caller owns ``_fast_lock``: drop a clone that duplicates a CPU main model."""
+        with self._residency_lock:
+            retired = self._fast_encoder
+            self._fast_encoder = None
+            self._fast_model_id = None
+            self._fast_generation = None
+        if retired is not None:
+            retired = None
+            self._collect_models()
+            log.info("Fast-lane CPU encoder released: the main embedding model is on CPU")
+
+    def _build_fast_encoder(self, model_id: str, deadline: _RequestDeadline | None) -> object:
+        """Construct a CPU clone; the caller's allocation session charges its size."""
+        self._check_process_memory("fast embed construction", deadline)
+        model, _ = self._construct_model(
+            "embed", "fast embed construction", "cpu", deadline,
+            lambda selected: self._build_embed_model(model_id, selected),
+            model_identity=(model_id, 256, "legacy"), known_bytes=self._MODEL_WEIGHT_BYTES.get(model_id, 0),
+            flush_accelerator=False,
+        )
+        return model
+
+    def _publish_fast_encoder(self, model: object, model_id: str, generation: object, *, blocking: bool) -> bool:
+        """Cache a clone for its residency; the caller owns ``_fast_lock``.
+
+        A changed generation, including A -> B -> A, must not publish this
+        construction. Its already-captured request may still finish on it.
+        """
+        if not self._residency_lock.acquire(blocking=blocking):
+            return False
+        try:
+            state = self._embed_state
+            if state is None or state.generation is not generation:
+                return False
+            self._fast_encoder = model
+            self._fast_model_id = model_id
+            self._fast_generation = generation
+            self._fast_last_used = time.monotonic()
+            if self._fast_retired_generation is generation:
+                self._fast_retired_generation = None
+            return True
+        finally:
+            self._residency_lock.release()
+            state = None
+
+    def _start_fast_rebuild(self, model_id: str, generation: object) -> None:
+        """Start at most one background reload of a released clone.
+
+        After a refused reload, contended queries do not retry the admission
+        and its collections for a minute, unless resident memory has since
+        dropped by the clone's size.
+        """
+        refused_until, refused_rss = self._fast_rebuild_refusal
+        if time.monotonic() < refused_until:
+            usage = self._resident_bytes()
+            room = self._MODEL_WEIGHT_BYTES.get(model_id, 0)
+            if usage is None or refused_rss is None or refused_rss - usage < room:
+                return
+        with self._residency_lock:
+            if self._fast_rebuild is not None or self._stopped.is_set():
+                return
+            thread = threading.Thread(target=self._rebuild_fast_encoder, args=(model_id, generation),
+                                      name="fast-lane-rebuild", daemon=True)
+            self._fast_rebuild = thread
+        # Counted as in-flight work: idle shutdown and cleanup wait for the load.
+        with self._activity_lock:
+            self._inflight += 1
+        try:
+            thread.start()
+        except RuntimeError:
+            with self._residency_lock:
+                self._fast_rebuild = None
+            with self._activity_lock:
+                self._inflight -= 1
+            log.warning("Cannot start the fast-lane reload; single queries keep the bounded fallback",
+                        exc_info=True)
+
+    def _rebuild_fast_encoder(self, model_id: str, generation: object) -> None:
+        # No request owns this load; only server shutdown stops it.
+        deadline = _RequestDeadline(None, _TransportRequest(0, math.inf, self._stopped, started=True))
+        model = None
+        built = published = False
+        try:
+            with self._memory_scope():
+                model = self._build_fast_encoder(model_id, deadline)
+                built = True
+            with deadline.locked(self._fast_lock):
+                published = self._publish_fast_encoder(model, model_id, generation, blocking=True)
+            if published:
+                log.info("Fast-lane CPU encoder reloaded in the background (model=%s)", model_id)
+        except _ProcessMemoryRefused as error:
+            self._fast_rebuild_refusal = (time.monotonic() + self._FAST_REBUILD_BACKOFF_SECONDS,
+                                          self._resident_bytes())
+            log.info("Fast-lane reload not admitted: %s", error)
+        except _RequestDeadlineExceeded as error:
+            log.info("Fast-lane reload not admitted: %s", error)
+        except Exception:
+            log.warning("Fast-lane reload failed; single queries keep the bounded fallback", exc_info=True)
+        finally:
+            model = None
+            if built and not published:
+                self._collect_models()
+            with self._residency_lock:
+                self._fast_rebuild = None
+            with self._activity_lock:
+                self._inflight -= 1
 
     def _get_reranker(
         self, model_name: str | None = None, deadline: _RequestDeadline | None = None,
@@ -1182,14 +1555,25 @@ class ModelServer:
             if self._reranker is not None and self._reranker_name == name:
                 return self._reranker
 
+            # Park the previous reranker instead of dropping it, so switching
+            # between the default and the deep-search reranker reloads neither.
+            parked_rerankers = self._parked_reranker_table()
+            previous, previous_name = self._reranker, self._reranker_name
             self._reranker = None
             self._reranker_name = None
-            self._check_process_memory("reranker construction", deadline)
+            if previous is not None and previous_name is not None:
+                parked_rerankers[previous_name] = (previous, getattr(self, "_reranker_device", None),
+                                                   time.monotonic())
+            previous = None
+            self._reranker_device = None
+            parked = parked_rerankers.pop(name, None)
+            if parked is not None:
+                self._reranker, self._reranker_device = parked[0], parked[1]
+                self._reranker_name = name
+                return self._reranker
+
             from truememory.mps_utils import auto_detect_device, ensure_mps_memory_budget, resolve_device
-            if "rerank" in self._sticky_cpu:
-                device = "cpu"
-            else:
-                device = resolve_device(auto_detect_device())
+            sticky = f"rerank:{name}"
 
             def build(selected: str | None) -> object:
                 ensure_mps_memory_budget(selected)
@@ -1201,12 +1585,30 @@ class ModelServer:
                 cap_reranker_length(model)
                 return model
 
-            model, device = self._construct_model(
-                "rerank", "reranker construction", device, deadline, build,
-                model_identity=(name, 0, "reranker"), known_bytes=self._MODEL_WEIGHT_BYTES.get(name, 0),
-            )
+            def construct() -> tuple[object, str | None]:
+                self._check_process_memory("reranker construction", deadline)
+                device = "cpu" if sticky in self._sticky_cpu else resolve_device(auto_detect_device())
+                return self._construct_model(
+                    "rerank", "reranker construction", device, deadline, build,
+                    model_identity=(name, 0, "reranker"), known_bytes=self._MODEL_WEIGHT_BYTES.get(name, 0),
+                    sticky=sticky, mps_bytes=self._MPS_WEIGHT_BYTES.get(name, 0),
+                    make_room=lambda shortfall: self._evict_parked_rerankers(
+                        shortfall, min_idle=self._RERANKER_EVICT_IDLE_SECONDS),
+                )
+
+            try:
+                model, device = construct()
+            except _ProcessMemoryRefused:
+                if not parked_rerankers:
+                    raise
+                # Parked rerankers hold memory; release them and admit once more.
+                for parked_name in list(parked_rerankers):
+                    self._drop_parked_reranker(parked_name)
+                self._discard_models()
+                model, device = construct()
             self._reranker = model
             self._reranker_name = name
+            self._reranker_device = device
             log.info("Loaded reranker model=%s device=%s", name, device)
             return self._reranker
 
@@ -1243,7 +1645,7 @@ class ModelServer:
 
     def _handle_fast_embed(
         self, texts: list, tier: str, deadline: _RequestDeadline | None = None,
-        *, expected_target: "EmbeddingTarget | None" = None,
+        *, expected_target: "EmbeddingTarget | None" = None, serve_reload: bool = True,
     ) -> dict | None:
         """Single-text fast lane (issue #577).
 
@@ -1304,9 +1706,12 @@ class ModelServer:
             finally:
                 self._inference_lock.release()
 
+        # Contention: this query found the main model busy. It keeps the clone.
+        self._fast_last_used = time.monotonic()
         was_started = deadline.transport.started if deadline.transport is not None else False
         fast_owned = False
         wait_for_main = False
+        reloading = False
         try:
             try:
                 with deadline.locked(self._fast_lock):
@@ -1317,8 +1722,10 @@ class ModelServer:
                         try:
                             model = (self._get_fast_encoder(tier, deadline=deadline) if expected_target is None else
                                      self._get_fast_encoder(tier, deadline=deadline, expected_target=expected_target))
-                        except _ProcessMemoryRefused:
-                            # Only the second copy does not fit; a process over budget stays refused.
+                        except _ProcessMemoryRefused as error:
+                            # The second copy does not fit or is reloading; a process
+                            # over budget stays refused.
+                            reloading = serve_reload and getattr(error, "fast_lane_reloading", False)
                             self._check_process_memory("fast embed fallback", deadline)
                             wait_for_main = True
                         deadline.check()
@@ -1348,8 +1755,19 @@ class ModelServer:
                 # stays refused so hook recall falls back to keyword search promptly.
                 remaining = deadline.remaining()
                 wait = 1.0 if remaining is None else max(0.0, min(1.0, remaining))
-                if not self._inference_lock.acquire(timeout=wait):
-                    raise _ProcessMemoryRefused("Model server busy: the main model is serving a long batch")
+                ends = time.monotonic() + wait
+                while not self._inference_lock.acquire(timeout=min(0.05, wait) if reloading else wait):
+                    state = self._embed_state
+                    if (reloading and state is not None and self._fast_encoder is not None
+                            and self._fast_generation is state.generation):
+                        # The reload finished within the same bounded wait; serve from it once.
+                        state = None
+                        return self._handle_fast_embed(texts, tier, deadline, expected_target=expected_target,
+                                                       serve_reload=False)
+                    state = None
+                    wait = ends - time.monotonic()
+                    if wait <= 0:
+                        raise _ProcessMemoryRefused("Model server busy: the main model is serving a long batch")
                 self._inference_lock.release()
                 return None
             return (response if expected_target is not None else
@@ -1630,9 +2048,15 @@ class ModelServer:
                                         raise
                                     recover = True
                                 if recover:
-                                    self._mark_sticky_cpu("rerank")
+                                    # Only this reranker moves to CPU; parked ones keep MPS.
+                                    failed_name = self._reranker_name or recovery_name
+                                    if failed_name is None:
+                                        from truememory.reranker import get_current_reranker_name
+                                        failed_name = get_current_reranker_name()
+                                    self._mark_sticky_cpu(f"rerank:{failed_name}")
                                     self._reranker = None
                                     self._reranker_name = None
+                                    self._reranker_device = None
                                     # Neither the failed traceback nor this
                                     # local may retain the obsolete accelerator
                                     # model while its CPU replacement is built.
@@ -2206,6 +2630,7 @@ class ModelServer:
 
         idle_thread = threading.Thread(target=self._idle_checker, daemon=True)
         idle_thread.start()
+        threading.Thread(target=self._idle_retirer, name="idle-model-retirer", daemon=True).start()
 
         log.info(
             "Model server started: pid=%d %s idle_timeout=%ds",
@@ -2244,15 +2669,49 @@ class ModelServer:
             # bind owner after this process exits.
             log.info("Shutdown retains model-server ownership until process exit")
             return
+        self._release_resources()
+
+    def _finish_after_signal(self, grace: float | None = None) -> None:
+        """Exit promptly after a stop signal, abandoning native work past *grace*.
+
+        Admission stops at once (``_cleanup`` already ran). Requests stop at
+        their next slice boundary; a native forward pass cannot be interrupted,
+        so after *grace* seconds the process exits without waiting for it. The
+        next server reclaims the endpoint files under its bind lock.
+        """
+        grace = _TERM_GRACE_SECONDS if grace is None else grace
+        self._stop_clients()
+        expires = time.monotonic() + grace
+        while True:
+            with self._admission_lock:
+                with self._activity_lock:
+                    busy = bool(self._clients) or self._inflight > 0
+            if not busy:
+                self._release_resources()
+                return
+            if time.monotonic() >= expires:
+                break
+            time.sleep(0.05)
+        log.warning("Model work still running %.0fs after the stop signal; exiting without it", grace)
+        logging.shutdown()
+        os._exit(0)
+
+    def _release_resources(self) -> None:
+        """Drop models, then endpoint artifacts and the bind lock, once."""
+        if getattr(self, "_resources_released", False):
+            return
+        self._resources_released = True
         # Keep bind ownership until every cached model has been released,
         # including cycles collected below. If teardown fails, retain the
         # lock until process exit instead of overlapping a successor's load.
         self._embed_state = None
         self._reranker = None
         self._reranker_name = None
+        self._parked_reranker_table().clear()
         self._fast_encoder = None
         self._fast_model_id = None
         self._fast_generation = None
+        self._fast_retired_generation = None
         self._token = None
         gc.collect()
         if getattr(self, "_memory_owner", None) is not None:
@@ -2311,7 +2770,12 @@ def main():
     atexit.register(server._cleanup)
 
     try:
-        server.run()
+        try:
+            server.run()
+        except (SystemExit, KeyboardInterrupt):
+            # TERM/INT/HUP: never wait unboundedly for a native forward pass.
+            server._finish_after_signal()
+            raise
     except RuntimeError as e:
         # Lost the bind-lock race to a concurrent starter (M-20). Exit
         # cleanly without touching the winner's artifacts.

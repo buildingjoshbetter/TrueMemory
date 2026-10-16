@@ -24,8 +24,106 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 
 import pytest
+
+
+def _establish_test_home() -> object:
+    """Isolate HOME before any truememory import; guard the real home.
+
+    Modules capture paths and read the tier config at import, and pytest
+    imports every test module during collection, before any fixture runs.
+    A session fixture therefore set HOME too late: vector_search read the
+    user's real ~/.truememory/config.json at collection. HOME is set here,
+    at conftest import, and subprocesses inherit it. The Hugging Face cache
+    (read offline) and the user site stay where they were.
+
+    ``tests.conftest`` imports load this file a second time, so the state
+    lives on ``sys`` and is created once per process.
+    """
+    state = getattr(sys, "_truememory_test_isolation", None)
+    if state is not None:
+        return state
+    import atexit
+    import shutil
+    import site
+    import tempfile
+    import types
+
+    homes = {os.path.realpath(os.path.expanduser("~"))}
+    try:
+        import pwd
+        homes.add(os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir))
+    except (ImportError, KeyError, OSError):
+        pass
+    protected = tuple(sorted(os.path.join(home, name) for home in homes
+                             for name in (".truememory", ".claude", ".codex")))
+    real_cache = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    os.environ.setdefault("HF_HOME", os.path.join(real_cache, "huggingface"))
+    os.environ.setdefault("PYTHONUSERBASE", site.getuserbase())
+    home = tempfile.mkdtemp(prefix="tmh-")
+    atexit.register(shutil.rmtree, home, True)
+    os.environ["HOME"] = home
+    for name, relative in (("XDG_CONFIG_HOME", ".config"), ("XDG_CACHE_HOME", ".cache"),
+                           ("XDG_DATA_HOME", ".local/share"), ("XDG_STATE_HOME", ".local/state")):
+        os.environ[name] = os.path.join(home, relative)
+    state = types.SimpleNamespace(home=home, protected=protected if os.name != "nt" else (),
+                                  touches=[], phase="collection")
+    sys._truememory_test_isolation = state
+    sys.addaudithook(_guard_real_home)
+    return state
+
+
+# Audited operations that read, write, list or connect to a path.
+_PATH_EVENTS = {
+    "open": 1, "sqlite3.connect": 1, "os.listdir": 1, "os.scandir": 1, "os.mkdir": 1,
+    "os.rmdir": 1, "os.remove": 1, "os.chmod": 1, "os.chown": 1, "os.truncate": 1,
+    "os.utime": 1, "shutil.rmtree": 1, "os.rename": 2, "os.link": 2, "os.symlink": 2,
+    "shutil.copyfile": 2, "shutil.copytree": 2, "shutil.move": 2,
+}
+
+
+def _protected_path(value: object, protected: tuple[str, ...]) -> str | None:
+    if isinstance(value, int) or value is None:
+        return None
+    try:
+        path = os.fsdecode(os.fspath(value))
+    except TypeError:
+        return None
+    if path.startswith("file:"):
+        path = path[len("file:"):].split("?", 1)[0]
+    if not path or path == ":memory:":
+        return None
+    path = os.path.abspath(path)
+    for root in protected:
+        if path == root or path.startswith(root + os.sep):
+            return path
+    return None
+
+
+def _guard_real_home(event: str, args: tuple) -> None:
+    state = getattr(sys, "_truememory_test_isolation", None)
+    if state is None or not state.protected:
+        return
+    if event in ("socket.connect", "socket.bind"):
+        values = args[1:2] if len(args) > 1 and isinstance(args[1], (str, bytes)) else ()
+    else:
+        count = _PATH_EVENTS.get(event)
+        if count is None:
+            return
+        values = args[:count]
+    for value in values:
+        path = _protected_path(value, state.protected)
+        if path is not None:
+            # Refuse before the operation runs, and record it in case the
+            # caller swallows the error: the per-test check fails the test.
+            state.touches.append((state.phase, event, path))
+            raise PermissionError(f"Test isolation: {event} on {path} is inside the real home")
+
+
+_ISOLATION = _establish_test_home()
+TEST_HOME = _ISOLATION.home
 
 # V-cigate-1 (#697): offline mode is set ONCE here, in the single conftest that
 # pytest imports before any test module, instead of each test module doing its
@@ -61,8 +159,22 @@ requires_sqlite_ext = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _forbid_real_home(request):
+    """Fail any test that opens, writes or connects under the real home."""
+    start = len(_ISOLATION.touches)
+    _ISOLATION.phase = request.node.nodeid
+    try:
+        yield
+    finally:
+        _ISOLATION.phase = "between tests"
+    touched = _ISOLATION.touches[start:]
+    if touched:
+        pytest.fail("Test touched the real home: " + "; ".join(f"{event} {path}" for _, event, path in touched))
+
+
 @pytest.fixture(scope="session", autouse=True)
-def _isolate_truememory_home(tmp_path_factory):
+def _isolate_truememory_home():
     """Point the model-server socket/state and ``$HOME`` at a session tmp dir.
 
     Issue #654 (M-54): ``model_client.SOCK_PATH`` / ``model_server.SOCK_PATH``
@@ -79,12 +191,12 @@ def _isolate_truememory_home(tmp_path_factory):
     override these baselines within their own scope, so existing socket tests
     are unaffected.
     """
-    home = tmp_path_factory.mktemp("tm_home")
+    from pathlib import Path
+
+    # HOME was isolated at conftest import; keep this session on the same dir.
+    home = Path(TEST_HOME)
     tm_dir = home / ".truememory"
     tm_dir.mkdir(parents=True, exist_ok=True)
-
-    # Set HOME first so it is captured by the per-test ``_isolate_environ``
-    # snapshot and therefore persists across the whole session.
     os.environ["HOME"] = str(home)
 
     for mod_name in ("truememory.model_client", "truememory.model_server"):
