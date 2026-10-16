@@ -238,25 +238,42 @@ def test_hooks_still_fail_fast_and_keep_the_extraction_on_the_error(env):
     assert [fact["content"] for fact in raised.value.extraction["facts"]] == list(env.facts)
 
 
-def test_a_deferred_attempt_is_redispatched_under_its_number_with_a_new_log(env, monkeypatch):
-    monkeypatch.setattr(completion, "DEFER_SECONDS", 0, raising=False)
-    monkeypatch.setattr(completion, "MAX_DEFERRALS", 1, raising=False)
+def test_busy_maintenance_never_spends_an_attempt_or_drops_the_kept_facts(env, monkeypatch, capsys):
+    # Pre-fix: past MAX_DEFERRALS each busy wait spent an attempt, so about
+    # five hours of maintenance exhausted the capture and deleted its facts.
+    from truememory.ingest import cli, models
+    monkeypatch.setattr(completion, "MAX_DEFERRALS", 2, raising=False)
     session, path = _session(env)
     capture = completion.admit_capture(str(path), session, "", str(env.database), "claude")
-    for round_ in range(2):
+    assert completion.save_extraction(capture, {"facts": []})
+    delays = []
+    for _ in range(completion.MAX_ATTEMPTS + 3):
         assert completion.dispatch(capture)
         attempt = int(env.spawned[-1][env.spawned[-1].index("--completion-attempt") + 1])
-        assert attempt == 1
+        assert attempt == 1, "a deferral spent the attempt"
         with completion.worker_claim(capture, attempt) as allowed:
             assert allowed
-            # Past MAX_DEFERRALS the attempt is spent like any other.
-            assert completion.defer_attempt(capture) is (round_ == 0)
-    entry = json.loads((capture.directory / "state.json").read_text(encoding="utf-8"))["captures"][capture.key]
-    assert entry["deferred"] == 1 and entry["attempts"] == 1
-    assert [outcome["category"] for outcome in entry["outcomes"]] == ["worker_unproven"]
-    assert sorted(log.name for log in (capture.directory / "logs").iterdir()) == [
-        capture.key + "-1-1.log", capture.key + "-1.log"]
+            assert completion.defer_attempt(capture)
+        with completion._lock(capture.directory / "state.lock"):
+            state = completion._state(capture.directory)
+            entry = state["captures"][capture.key]
+            delays.append(round(entry["next_attempt_at"] - time.time()))
+            # The deferral delay passes.
+            entry["next_attempt_at"] = 0
+            completion._save_state(capture.directory, state)
+    assert (entry["status"], entry["attempts"], entry["outcomes"]) == ("retry", 0, [])
+    # Two quick deferrals, then the slow cadence with no limit.
+    assert delays[:2] == [completion.DEFER_SECONDS] * 2
+    assert set(delays[2:]) == {completion.SLOW_DEFER_SECONDS}
+    assert completion.load_extraction(capture) == {"facts": []}
+    # Every rerun of the attempt appends to its one log.
+    assert [log.name for log in (capture.directory / "logs").iterdir()] == [capture.key + "-1.log"]
 
+    count, age = completion.deferred_captures()
+    assert count == 1 and age is not None and 0 <= age < 60
+    monkeypatch.setattr(models, "auto_detect", lambda: (_ for _ in ()).throw(RuntimeError("synthetic: no backend")))
+    cli._run_status(argparse.Namespace())
+    assert "Deferred captures: 1 waiting on busy maintenance, oldest for 0h 0m" in capsys.readouterr().out
 
 
 def test_collection_removes_unused_extractions_but_not_a_save_in_progress(env):

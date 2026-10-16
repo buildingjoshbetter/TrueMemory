@@ -46,9 +46,12 @@ INGESTED_SHARD_KEYS = 128
 # per live capture.
 MAX_EXTRACTION_BYTES = 256 * 1024
 # Attempts given back because maintenance stayed busy for a worker's whole
-# wait (MAINTENANCE_WAIT_SECONDS each); past this they count like any other.
+# wait (MAINTENANCE_WAIT_SECONDS each) are never spent: the first
+# MAX_DEFERRALS come back after DEFER_SECONDS, later ones after
+# SLOW_DEFER_SECONDS, for as long as maintenance stays busy.
 MAX_DEFERRALS = 24
 DEFER_SECONDS = 60
+SLOW_DEFER_SECONDS = 1800
 _KEY = re.compile(r"[0-9a-f]{64}")
 _COUNTS = ("facts_extracted", "facts_stored", "facts_updated", "facts_skipped_gate", "facts_skipped_dedup")
 # Admission refusals that clear once retained captures settle and are released.
@@ -1092,10 +1095,13 @@ def load_extraction(capture: Capture) -> dict | None:
 def defer_attempt(capture: Capture) -> bool:
     """Give this worker's running attempt back without spending it.
 
-    Busy maintenance says nothing about the capture, so up to MAX_DEFERRALS
-    attempts are returned to the queue uncounted. No outcome is recorded, so
-    outcomes stay bounded by MAX_ATTEMPTS. False leaves the attempt to the
-    worker's claim, which spends it.
+    Busy maintenance says nothing about the capture, so the attempt always
+    returns to the queue uncounted, and the capture with its kept extraction
+    waits as long as maintenance does: after DEFER_SECONDS for the first
+    MAX_DEFERRALS deferrals, then after SLOW_DEFER_SECONDS. No outcome is
+    recorded, so outcomes stay bounded by MAX_ATTEMPTS. ``deferred_since``
+    marks a capture whose latest attempt ended this way (see
+    deferred_captures). False means the attempt is not this worker's.
     """
     with _lock(capture.directory / "state.lock"):
         state = _state(capture.directory)
@@ -1104,12 +1110,37 @@ def defer_attempt(capture: Capture) -> bool:
                 or not 1 <= entry["attempts"] <= MAX_ATTEMPTS):
             return False
         deferred = entry.get("deferred", 0)
-        if type(deferred) is not int or not 0 <= deferred < MAX_DEFERRALS:
-            return False
+        deferred = deferred if type(deferred) is int and deferred >= 0 else MAX_DEFERRALS
+        since = entry.get("deferred_since")
+        now = time.time()
         entry.update(deferred=deferred + 1, attempts=entry["attempts"] - 1, status="retry", worker_pid=0,
-                     next_attempt_at=time.time() + DEFER_SECONDS)
+                     deferred_since=since if type(since) in (int, float) else now,
+                     next_attempt_at=now + (DEFER_SECONDS if deferred < MAX_DEFERRALS else SLOW_DEFER_SECONDS))
         _save_state(capture.directory, state)
     return True
+
+
+def deferred_captures(root: Path | None = None) -> tuple[int, float | None]:
+    """Captures waiting out busy maintenance in every account, and the oldest one's age in seconds."""
+    base = _base(root)
+    if not base.is_dir():
+        return 0, None
+    with os.scandir(base) as entries:
+        accounts = [Path(entry.path) for entry in entries
+                    if _KEY.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False)]
+    count, oldest = 0, None
+    for account in accounts:
+        try:
+            captures = _state(account)["captures"]
+        except OSError:
+            continue
+        for entry in captures.values():
+            since = entry.get("deferred_since") if type(entry) is dict else None
+            if (type(since) in (int, float) and entry.get("released") is not True
+                    and entry.get("status") not in ("exhausted", "superseded")):
+                count += 1
+                oldest = since if oldest is None else min(oldest, since)
+    return count, None if oldest is None else max(0.0, time.time() - oldest)
 
 
 def _outcome(entry: dict, category: str, details: dict | None = None, *, terminal: bool = False,
@@ -1120,6 +1151,8 @@ def _outcome(entry: dict, category: str, details: dict | None = None, *, termina
     entry["status"] = "exhausted" if terminal or attempt >= MAX_ATTEMPTS else "retry"
     entry["worker_pid"] = 0
     entry["next_attempt_at"] = time.time() + (min(300, 2 ** min(attempt, 9)) if delay is None else delay)
+    # The attempt reached an outcome, so it is no longer waiting on maintenance.
+    entry.pop("deferred_since", None)
     outcome = {"attempt": attempt, "category": category, "observed_at": time.time()}
     if details is not None:
         if len(_json(details)) > 8192:
@@ -1360,11 +1393,11 @@ def dispatch(capture: Capture, threshold: float = 0.30) -> int:
                        "--user", meta["user_id"], "--db", meta["database"], "--session", meta["session_id"],
                        "--transcript-host", meta["host"], "--threshold", str(threshold)]
             try:
-                # A deferred attempt number is reused; its earlier log stays.
-                deferred = entry.get("deferred", 0)
-                log_path = directory / "logs" / (capture.key + "-" + str(attempt)
-                                                 + ("-" + str(deferred) if deferred else "") + ".log")
-                fd = _open_private(log_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                log_path = directory / "logs" / (capture.key + "-" + str(attempt) + ".log")
+                # A deferred attempt runs again under its number and appends to its log,
+                # so however long maintenance lasts there is one log per attempt.
+                fd = _open_private(log_path, os.O_CREAT | os.O_WRONLY
+                                   | (os.O_APPEND if entry.get("deferred") else os.O_EXCL))
                 with os.fdopen(fd, "wb") as output:
                     process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT,
                                                stdin=subprocess.DEVNULL, **spawn_kwargs())

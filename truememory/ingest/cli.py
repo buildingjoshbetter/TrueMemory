@@ -361,7 +361,8 @@ def _defer_for_maintenance(args, capture, error: BaseException) -> None:
     except OSError as failure:
         log.warning("Extracted facts could not be kept for the next attempt (%s)", type(failure).__name__)
     try:
-        # A refused deferral leaves the attempt to the claim, which spends it.
+        # Busy maintenance never spends the attempt; only an attempt that is
+        # not this worker's is refused.
         deferred = defer_attempt(capture)
     except OSError as failure:
         log.warning("The attempt could not be given back (%s)", type(failure).__name__)
@@ -1229,7 +1230,19 @@ def _run_status(args):
     except Exception as e:
         print(f"  [WARN] Cannot access memory database: {e}")
 
-    # 5. Trace and log directories
+    # 5. Captures waiting out busy maintenance keep their extracted facts.
+    try:
+        from truememory.ingest.completion import deferred_captures
+        count, age = deferred_captures()
+        if count:
+            oldest = f", oldest for {int(age // 3600)}h {int(age % 3600 // 60)}m" if age is not None else ""
+            print(f"  [WARN] Deferred captures: {count} waiting on busy maintenance{oldest}")
+        else:
+            print("  [OK] Deferred captures: none")
+    except OSError as e:
+        print(f"  [WARN] Cannot read deferred captures: {e}")
+
+    # 6. Trace and log directories
     trace_dir = Path.home() / ".truememory" / "traces"
     log_dir = Path.home() / ".truememory" / "logs"
     if trace_dir.exists():
