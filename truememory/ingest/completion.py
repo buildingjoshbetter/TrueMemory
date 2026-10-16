@@ -41,6 +41,14 @@ MAX_RECEIPTS = 4 * MAX_CAPTURES
 # Keys of pruned receipts: 256 shards of this many keys, at most 32,768 keys
 # in about 2.1 MB; a shard drops its oldest key first.
 INGESTED_SHARD_KEYS = 128
+# A completed extraction kept while another process's maintenance blocks
+# storage, so the next attempt never repeats the provider calls. At most one
+# per live capture.
+MAX_EXTRACTION_BYTES = 256 * 1024
+# Attempts given back because maintenance stayed busy for a worker's whole
+# wait (MAINTENANCE_WAIT_SECONDS each); past this they count like any other.
+MAX_DEFERRALS = 24
+DEFER_SECONDS = 60
 _KEY = re.compile(r"[0-9a-f]{64}")
 _COUNTS = ("facts_extracted", "facts_stored", "facts_updated", "facts_skipped_gate", "facts_skipped_dedup")
 # Admission refusals that clear once retained captures settle and are released.
@@ -671,6 +679,16 @@ def _discard(directory: Path, captures: dict, forgotten: list[str] | tuple[str, 
                 and _claim_free(directory, key)):
             with contextlib.suppress(OSError):
                 (directory / "captures" / name).unlink()
+    extracted = directory / "extracted"
+    if extracted.is_dir():
+        with os.scandir(extracted) as entries:
+            names = [entry.name for entry in islice(entries, 2 * MAX_CAPTURES)]
+        for name in names:
+            key = name.split(".", 1)[0]
+            # An interrupted save leaves a temporary that no live key will read.
+            if not (_KEY.fullmatch(key) and name == key + ".json" and key in live):
+                with contextlib.suppress(OSError):
+                    (extracted / name).unlink()
     incoming = directory / "incoming"
     if incoming.is_dir():
         # Copies stream outside state.lock; only an hour-old partial is abandoned.
@@ -958,6 +976,9 @@ def _save_settled(capture: Capture, state: dict) -> None:
         entry["released"] = True
         entry.setdefault("settled_at", time.time())
     _save_state(capture.directory, state)
+    if settled:
+        with contextlib.suppress(OSError):
+            (capture.directory / "extracted" / (capture.key + ".json")).unlink()
     if settled and not _referenced(capture):
         # The receipt or the recorded outcomes are the retained evidence.
         with contextlib.suppress(OSError):
@@ -1027,6 +1048,65 @@ def _certifies(value: object, capture: Capture) -> bool:
     reconstructed = SimpleNamespace(**proof["counts"], coverage=proof.get("coverage"),
                                     trace=[{"action": action} for action in proof["actions"]])
     return strict_complete(reconstructed, capture)
+
+
+def save_extraction(capture: Capture, snapshot: dict) -> bool:
+    """Keep a completed extraction for this capture's next attempt; False if too large."""
+    payload = _json({"version": 1, "capture_key": capture.key, "snapshot": snapshot})
+    if len(payload) > MAX_EXTRACTION_BYTES:
+        return False
+    directory = capture.directory / "extracted"
+    _private_directory(directory)
+    temporary = directory / (capture.key + "." + uuid.uuid4().hex + ".tmp")
+    fd = _open_private(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, directory / (capture.key + ".json"))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise
+    return True
+
+
+def load_extraction(capture: Capture) -> dict | None:
+    """The extraction an earlier attempt kept for exactly this capture, if any."""
+    path = capture.directory / "extracted" / (capture.key + ".json")
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(_read_private(path, MAX_EXTRACTION_BYTES))
+    except (OSError, ValueError):
+        return None
+    if type(value) is not dict or value.get("version") != 1 or value.get("capture_key") != capture.key:
+        return None
+    return value.get("snapshot") if type(value.get("snapshot")) is dict else None
+
+
+def defer_attempt(capture: Capture) -> bool:
+    """Give this worker's running attempt back without spending it.
+
+    Busy maintenance says nothing about the capture, so up to MAX_DEFERRALS
+    attempts are returned to the queue uncounted. No outcome is recorded, so
+    outcomes stay bounded by MAX_ATTEMPTS. False leaves the attempt to the
+    worker's claim, which spends it.
+    """
+    with _lock(capture.directory / "state.lock"):
+        state = _state(capture.directory)
+        entry = state["captures"].get(capture.key)
+        if (entry is None or entry["status"] != "running" or entry["worker_pid"] != os.getpid()
+                or not 1 <= entry["attempts"] <= MAX_ATTEMPTS):
+            return False
+        deferred = entry.get("deferred", 0)
+        if type(deferred) is not int or not 0 <= deferred < MAX_DEFERRALS:
+            return False
+        entry.update(deferred=deferred + 1, attempts=entry["attempts"] - 1, status="retry", worker_pid=0,
+                     next_attempt_at=time.time() + DEFER_SECONDS)
+        _save_state(capture.directory, state)
+    return True
 
 
 def _outcome(entry: dict, category: str, details: dict | None = None, *, terminal: bool = False,
@@ -1277,7 +1357,10 @@ def dispatch(capture: Capture, threshold: float = 0.30) -> int:
                        "--user", meta["user_id"], "--db", meta["database"], "--session", meta["session_id"],
                        "--transcript-host", meta["host"], "--threshold", str(threshold)]
             try:
-                log_path = directory / "logs" / (capture.key + "-" + str(attempt) + ".log")
+                # A deferred attempt number is reused; its earlier log stays.
+                deferred = entry.get("deferred", 0)
+                log_path = directory / "logs" / (capture.key + "-" + str(attempt)
+                                                 + ("-" + str(deferred) if deferred else "") + ".log")
                 fd = _open_private(log_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 with os.fdopen(fd, "wb") as output:
                     process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT,

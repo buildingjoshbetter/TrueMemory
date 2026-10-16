@@ -28,6 +28,7 @@ import datetime
 import json
 import logging
 import os
+import random
 import re
 import sqlite3
 import time
@@ -337,6 +338,66 @@ def _set_busy_timeout(memory, timeout_ms: int | None = None) -> None:
         log.debug("Could not set busy_timeout: %s", e)
 
 
+# A background worker waits this long, in jittered steps, for another
+# process's maintenance to finish before it gives its attempt back.
+MAINTENANCE_WAIT_SECONDS = 600.0
+
+
+class _MaintenanceWait:
+    """Bounded exponential backoff with jitter; the last pause ends at the deadline."""
+
+    def __init__(self, budget: float) -> None:
+        self.deadline = time.monotonic() + budget
+        self.delay = 1.0
+
+    def pause(self, error: BaseException) -> None:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise error
+        delay = min(remaining, self.delay * random.uniform(0.5, 1.5))
+        log.info("Maintenance is running for this database; retrying storage in %.0fs", delay)
+        time.sleep(delay)
+        self.delay = min(self.delay * 2, 30.0)
+
+
+def _extraction_snapshot(facts: list[ExtractedFact], coverage: dict | None) -> dict | None:
+    """Completed extraction bound to the parsed bytes, so a retry can skip the provider."""
+    if coverage is None or coverage.get("extractor_status") != "complete" or not coverage.get("source_version"):
+        return None
+    return {"source_version": {name: coverage["source_version"][name] for name in ("sha256", "byte_count")},
+            "coverage": {name: coverage[name] for name in ("extractor_status", "extractor_calls",
+                                                           "extractor_errors", "extractor_chunks") if name in coverage},
+            "facts": [{"content": fact.content, "category": fact.category, "confidence": fact.confidence,
+                       "source_role": fact.source_role, "source_spans": [list(span) for span in fact.source_spans]}
+                      for fact in facts]}
+
+
+def _restored_facts(snapshot: object, coverage: dict) -> list[ExtractedFact] | None:
+    """Facts from a snapshot of exactly these bytes, or None to extract again."""
+    try:
+        version = coverage["source_version"]
+        if (type(snapshot) is not dict or not version
+                or snapshot["source_version"] != {"sha256": version["sha256"], "byte_count": version["byte_count"]}
+                or snapshot["coverage"].get("extractor_status") != "complete"
+                or snapshot["coverage"].get("extractor_calls") != 1):
+            return None
+        facts = []
+        for item in snapshot["facts"]:
+            fact = ExtractedFact(content=item["content"], category=item["category"],
+                                 confidence=item["confidence"], source_role=item["source_role"])
+            if not all(type(value) is str for value in (fact.content, fact.category, fact.confidence, fact.source_role)):
+                return None
+            spans = tuple((start, end) for start, end in item["source_spans"])
+            if not all(type(value) is int and value >= 0 for span in spans for value in span):
+                return None
+            if spans:
+                fact.source_spans = spans
+            facts.append(fact)
+        return facts
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
 @dataclass
 class IngestionResult:
     """Complete result of a pipeline run."""
@@ -443,6 +504,8 @@ class IngestionPipeline:
         *,
         require_complete: bool = False,
         byte_limit: int | None = None,
+        maintenance_wait: float = 0.0,
+        extracted: dict | None = None,
     ) -> IngestionResult:
         """
         Ingest a full conversation transcript.
@@ -454,6 +517,13 @@ class IngestionPipeline:
             transcript_path: Path to the transcript file.
             session_id: Optional session identifier for metadata.
             byte_limit: Ingest only this prefix of an append-only source.
+            maintenance_wait: Seconds a background worker waits for another
+                process's maintenance before storing; hooks pass 0 and fail fast.
+            extracted: A completed extraction of these exact bytes from an
+                earlier attempt, used instead of calling the provider again.
+
+        A MaintenanceBusyError that escapes carries ``extraction``, the
+        completed extraction (or None), so the caller can keep it.
 
         Returns:
             IngestionResult with full statistics and decision trace.
@@ -511,7 +581,14 @@ class IngestionPipeline:
 
         # 2. Extract facts
         log.info("Extracting facts from %d messages (%d chars)", len(messages), len(conversation))
-        if self.llm_config:
+        restored = _restored_facts(extracted, result.coverage) if require_complete and extracted is not None else None
+        if restored is not None:
+            # An earlier attempt extracted these bytes and could not store them.
+            facts = restored
+            result.coverage.update(extracted["coverage"])
+            result.coverage["extraction_reused"] = True
+            log.info("Reusing %d facts extracted by an earlier attempt", len(facts))
+        elif self.llm_config:
             if require_complete:
                 from truememory.ingest.extractor import extract_facts_outcome
                 extracted = extract_facts_outcome(conversation, self.llm_config)
@@ -535,10 +612,53 @@ class IngestionPipeline:
             return result
 
         # 3-5. Process each fact through gate and dedup
+        wait = _MaintenanceWait(maintenance_wait) if maintenance_wait > 0 else None
+        try:
+            self._process_facts(facts, result, context, session_id, wait)
+        except self._maintenance_busy() as error:
+            error.extraction = _extraction_snapshot(facts, result.coverage) if require_complete else None
+            raise
+
+        result.elapsed_seconds = round(time.time() - start, 2)
+        log.info(
+            "Ingestion complete: %d extracted, %d stored, %d updated, %d skipped (gate=%d, dedup=%d) in %.1fs",
+            result.facts_extracted, result.facts_stored, result.facts_updated,
+            result.facts_skipped_gate + result.facts_skipped_dedup,
+            result.facts_skipped_gate, result.facts_skipped_dedup,
+            result.elapsed_seconds,
+        )
+        return result
+
+    @staticmethod
+    def _maintenance_busy() -> type[BaseException] | tuple[()]:
+        # Resolved when an error is handled: only a loaded maintenance module
+        # can have raised it, and the common path imports nothing more.
+        import sys
+        return getattr(sys.modules.get("truememory.maintenance"), "MaintenanceBusyError", ())
+
+    @contextlib.contextmanager
+    def _fact_operation(self, wait: _MaintenanceWait | None) -> Iterator[None]:
+        """Admit one fact, waiting out another process's maintenance before any work."""
+        from truememory.tier_switch.runtime import fact_operation
+        while True:
+            started = False
+            try:
+                with fact_operation(self.memory):
+                    started = True
+                    yield
+                return
+            except self._maintenance_busy() as error:
+                # Only an admission refused before the fact's gate, dedup or
+                # storage ran is retried; nothing of this fact happened yet.
+                if started or wait is None:
+                    raise
+                wait.pause(error)
+
+    def _process_facts(self, facts: list[ExtractedFact], result: IngestionResult, context: object,
+                       session_id: str, wait: _MaintenanceWait | None) -> None:
         with _invalidate_recall_after_batch(result):
             for fact in facts:
-                from truememory.tier_switch.runtime import fact_operation
-                with fact_operation(self.memory):
+                with self._fact_operation(wait):
                     trace_entry = {
                         "fact": fact.content,
                         "category": fact.category,
@@ -667,16 +787,6 @@ class IngestionPipeline:
                                 log.debug("Dedup skipped: %s — %s", _safe_log(fact.content[:50]), dedup.reason)
 
                     result.trace.append(trace_entry)
-
-        result.elapsed_seconds = round(time.time() - start, 2)
-        log.info(
-            "Ingestion complete: %d extracted, %d stored, %d updated, %d skipped (gate=%d, dedup=%d) in %.1fs",
-            result.facts_extracted, result.facts_stored, result.facts_updated,
-            result.facts_skipped_gate + result.facts_skipped_dedup,
-            result.facts_skipped_gate, result.facts_skipped_dedup,
-            result.elapsed_seconds,
-        )
-        return result
 
     def ingest_text(self, text: str, session_id: str = "") -> IngestionResult:
         """

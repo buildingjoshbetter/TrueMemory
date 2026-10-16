@@ -466,6 +466,49 @@ def clear_backlog_processing(session_id: str, backlog_dir: Path | None = None) -
         return False
 
 
+def _requeue_claim(claim: Path, data: dict, reason: str) -> None:
+    """Return a claim to the queue as ``.json``, counting the attempt it used."""
+    attempts = data.get("attempts", 0)
+    if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
+        attempts = 0
+    data["attempts"] = attempts + 1
+    data["requeued"] = reason
+    data.pop("claimed_pid", None)
+    _atomic_write_text(claim, json.dumps(data))
+    target = claim.with_suffix(".json")
+    if target.exists():
+        # A newer pointer already queues this session.
+        claim.unlink()
+    else:
+        os.replace(claim, target)
+
+
+def release_backlog_processing(session_id: str, reason: str, backlog_dir: Path | None = None) -> bool:
+    """Give this worker's own claim back to the queue instead of leaving it to go stale.
+
+    Only a claim recording this process (or, for a Windows venv launcher,
+    its parent) is released. Returns True if the claim was requeued.
+    """
+    if not session_id or session_id == "unknown":
+        return False
+    safe_id = _safe_session_id(session_id)
+    if not safe_id:
+        return False
+    claim = (backlog_dir or BACKLOG_DIR) / f"{safe_id}.processing"
+    try:
+        data = json.loads(claim.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    owner = data.get("claimed_pid") if isinstance(data, dict) else None
+    if type(owner) is not int or owner <= 0 or owner not in (os.getpid(), os.getppid()):
+        return False
+    try:
+        _requeue_claim(claim, data, reason)
+    except OSError:
+        return False
+    return True
+
+
 def _quarantine_marker(path: Path) -> None:
     """Move a corrupt backlog marker aside to ``.corrupt`` (issue #644 / M-14).
 
