@@ -1404,13 +1404,15 @@ def drain(user_id: str = "", db_path: str | None = None, host: str = "claude") -
             log.warning("Completion drain retained nonterminal work (%s)", type(error).__name__)
 
 
-def adopt_legacy_pointer(pointer: Path, scope: tuple[str, str | None, str] | None = None) -> Capture | None:
+def adopt_legacy_pointer(pointer: Path, scope: tuple[str, str | None, str] | None = None, *,
+                         claimants: tuple[int, ...] = ()) -> Capture | None:
     """Admit one legacy pointer's current source bytes, then retire the pointer.
 
     Completion owns retries once the bytes are admitted, so a pointer is never
     replayed. ``scope`` limits adoption to one account and host; without it the
     pointer's own validated scope is used. None retains the pointer (another
     scope, a live claim or an unstable read); ValueError marks it invalid.
+    ``claimants`` names the caller's own process ids, whose claims are free.
     """
     if pointer.suffix not in (".json", ".processing"):
         return None
@@ -1463,7 +1465,8 @@ def adopt_legacy_pointer(pointer: Path, scope: tuple[str, str | None, str] | Non
         pid = value.get("claimed_pid", 0)
         if type(pid) is not int or pid < 0:
             raise ValueError("legacy pointer claim is invalid")
-        if pointer.suffix == ".processing" and (not pid or pid_is_alive(pid)):
+        # A claim is free once its worker is gone, or when the caller is that worker.
+        if pointer.suffix == ".processing" and (not pid or (pid not in claimants and pid_is_alive(pid))):
             return None
         transcript, session = source
         # A removed transcript can never be admitted; retire its pointer too.

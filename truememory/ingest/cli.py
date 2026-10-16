@@ -201,12 +201,15 @@ def _run_ingest(args):
         else:
             capture = admit_capture(args.transcript, args.session, args.user, args.db, host)
             attempt = reserve_inline_attempt(capture)
-        if not attempt:
-            return
-        args.transcript = str(capture.path)
-        with worker_claim(capture, attempt) as allowed:
-            if allowed:
-                return _execute_ingest(args, capture)
+        try:
+            if not attempt:
+                return
+            args.transcript = str(capture.path)
+            with worker_claim(capture, attempt) as allowed:
+                if allowed:
+                    return _execute_ingest(args, capture)
+        finally:
+            _finish_backlog_claims(args, host)
     except OSError as error:
         logging.getLogger(__name__).warning("Automatic ingestion retained nonterminal work (%s)", type(error).__name__)
         raise SystemExit(5) from error
@@ -370,6 +373,38 @@ def _defer_for_maintenance(args, capture, error: BaseException) -> None:
     raise SystemExit(5)
 
 
+def _finish_backlog_claims(args, host: str) -> None:
+    """Leave no dead claim behind, however this worker exits.
+
+    Completion holds this session's bytes once they are admitted, so the
+    session's own backlog claim (this worker's, or one whose worker is gone)
+    is adopted and retired. A claim already returned to the queue, or held by
+    another live worker, stays. Claims whose workers died elsewhere return to
+    the queue within minutes.
+    """
+    from truememory.ingest.completion import adopt_legacy_pointer, dispatch
+    from truememory.ingest.hooks._shared import _safe_session_id, cleanup_stale_processing
+    log = logging.getLogger(__name__)
+    backlog = Path(os.environ.get("TRUEMEMORY_BACKLOG_DIR", str(Path.home() / ".truememory" / "backlog")))
+    if not backlog.is_dir():
+        return
+    safe = _safe_session_id(getattr(args, "session", ""))
+    claim = backlog / (safe + ".processing")
+    if safe and claim.exists():
+        try:
+            # A Windows venv launcher is the recorded pid and this interpreter's parent.
+            adopted = adopt_legacy_pointer(claim, (args.user, args.db, host), claimants=(os.getpid(), os.getppid()))
+            if adopted is not None:
+                # Bytes appended after this worker's capture are queued, not lost.
+                dispatch(adopted)
+        except (OSError, ValueError, TypeError) as error:
+            log.warning("Backlog claim retained (%s)", type(error).__name__)
+    try:
+        cleanup_stale_processing(backlog)
+    except OSError as error:
+        log.warning("Stale backlog claims retained (%s)", type(error).__name__)
+
+
 def _clear_legacy_processing(args) -> bool:
     """Explicit legacy utility; automatic completion never uses this path."""
     from truememory.ingest.hooks._shared import clear_backlog_processing
@@ -390,11 +425,6 @@ def _cascade_next(host: str = "claude", *, automatic: bool = False,
     """
     if automatic:
         from truememory.ingest.completion import convert_legacy_pointers
-        from truememory.ingest.hooks._shared import cleanup_stale_processing
-        backlog = Path(os.environ.get("TRUEMEMORY_BACKLOG_DIR", str(Path.home() / ".truememory" / "backlog")))
-        if backlog.is_dir():
-            # A worker that died returns its claim within minutes, not at the next session.
-            cleanup_stale_processing(backlog)
         convert_legacy_pointers(user_id, db_path, host)
         return
     import subprocess as _sp

@@ -278,23 +278,34 @@ def test_collection_removes_unused_extractions_but_not_a_save_in_progress(env):
     assert completion.load_extraction(capture) == {"facts": []}
 
 
-def test_a_dead_workers_claim_returns_within_minutes_from_the_cascade(env):
-    # Pre-fix: a claim waited 30 minutes after its worker died, and the
-    # automatic cascade only adopted claims of its own account.
+def test_a_finished_worker_leaves_no_dead_claim_behind(env):
+    # Pre-fix: a worker that completed its session left its own claim, which
+    # outlived it with a dead pid (seen live for about 15 hours), and claims of
+    # other dead workers waited 30 minutes for a session start.
     from truememory.ingest import cli
-    five_minutes_ago = time.time() - 300
     session, path = _session(env)
-    # Another account's claim: this cascade cannot adopt it, only requeue it.
-    other = env.backlog / f"{session}.processing"
+    own = _claim(env, session, path, os.getpid())
+    five_minutes_ago = time.time() - 300
+    other_session, other_path = _session(env)
+    # Another account's claim: this worker cannot adopt it, only requeue it.
+    other = env.backlog / f"{other_session}.processing"
     _shared._atomic_write_text(other, json.dumps({
-        "transcript_path": str(path), "transcript_host": "claude", "session_id": session, "user_id": "other",
-        "db_path": "", "claimed_pid": _dead_pid()}))
+        "transcript_path": str(other_path), "transcript_host": "claude", "session_id": other_session,
+        "user_id": "other", "db_path": "", "claimed_pid": _dead_pid()}))
     os.utime(other, (five_minutes_ago, five_minutes_ago))
-    cli._cascade_next("claude", automatic=True, user_id="", db_path=str(env.database))
+    cli._run_ingest(_args(env, session, path))
+    assert _stored(env) == list(env.facts)
+    assert not own.exists() and not own.with_suffix(".json").exists()
     assert not other.exists()
     queued = json.loads(other.with_suffix(".json").read_text(encoding="utf-8"))
     assert queued["attempts"] == 1 and queued["requeued"] == "worker_lost"
 
+    # A later worker for the completed session finds the receipt and retires
+    # the claim a crashed predecessor left, without extracting again.
+    crashed = _claim(env, session, path, _dead_pid())
+    cli._run_ingest(_args(env, session, path))
+    assert not crashed.exists() and not crashed.with_suffix(".json").exists()
+    assert len(env.extracted) == 1 and env.spawned == []
 
 
 def test_the_mcp_drainer_recovers_a_dead_claim_with_nothing_queued(env, monkeypatch):
