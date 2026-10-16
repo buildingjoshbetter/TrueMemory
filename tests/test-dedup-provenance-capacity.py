@@ -189,3 +189,31 @@ def test_an_oversized_citation_is_truncated_not_failed():
     with pytest.raises(provenance.ProvenanceCapacityError):
         # A skip never rewrites citations to make room.
         provenance.merge_metadata(existing, incoming)
+
+
+def test_a_replayed_elided_citation_is_counted_once():
+    # Pre-fix: a replayed citation whose id had been elided was added again,
+    # pushed out one more middle citation and was counted twice.
+    def citation(index: int) -> dict:
+        return {"id": f"{index:064x}", "gate": {"payload": "g" * 1300}, "scope": {
+            "kind": "extraction_input_scope", "source_time": {
+                "status": "known", "start": f"2026-01-{1 + index % 28:02d}T00:00:00+00:00",
+                "end": f"2026-01-{1 + index % 28:02d}T00:00:00+00:00", "unknown_count": 0}}}
+
+    def incoming(item: dict) -> dict:
+        return {provenance.NAMESPACE: {"version": 1, "ingested_at": "synthetic", "last_ingested_at": "synthetic",
+                                       "timestamp_semantics": "source_scope_end", "citations": [item]}}
+
+    metadata: dict = {}
+    for index in range(30):
+        metadata, _ = provenance.merge_metadata(metadata, incoming(citation(index)), elide=True)
+    namespace = metadata[provenance.NAMESPACE]
+    kept = [item["id"] for item in namespace["citations"]]
+    assert citation(1)["id"] not in kept and len(kept) + namespace["elided_citations"]["count"] == 30
+    for elide in (True, False):
+        replayed, changed = provenance.merge_metadata(metadata, incoming(citation(1)), elide=elide)
+        assert not changed and replayed == metadata
+    # A citation never seen before is still added and elides one more.
+    metadata, changed = provenance.merge_metadata(metadata, incoming(citation(30)), elide=True)
+    namespace = metadata[provenance.NAMESPACE]
+    assert changed and len(namespace["citations"]) + namespace["elided_citations"]["count"] == 31

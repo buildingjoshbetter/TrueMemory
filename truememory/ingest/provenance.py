@@ -15,6 +15,10 @@ NAMESPACE = "truememory_ingest"
 MAX_CITATIONS = 64
 MAX_NAMESPACE_BYTES = 32768
 MAX_SESSION_BYTES = 256
+# The last _RECENT_IDS elided citation ids are remembered as 64-bit digests
+# (_RECENT_ID_CHARS hex characters), about 2.4 KB at most.
+_RECENT_ID_CHARS = 16
+_RECENT_IDS = 128
 _MAX_SCORER_BYTES = 1024 * 1024
 
 
@@ -188,20 +192,40 @@ def _window(items: list[object]) -> dict[str, object]:
 def _elision(record: object) -> dict[str, object] | None:
     if record is None:
         return None
+    recent = record.get("recent_ids", []) if isinstance(record, dict) else None
     if (not isinstance(record, dict) or type(record.get("count")) is not int or record["count"] < 1
             or not isinstance(record.get("first_id"), str) or not isinstance(record.get("last_id"), str)
-            or not isinstance(record.get("scope"), dict)):
+            or not isinstance(record.get("scope"), dict)
+            or not isinstance(recent, list) or len(recent) > _RECENT_IDS
+            or not all(isinstance(value, str) and len(value) == _RECENT_ID_CHARS for value in recent)):
         raise ProvenanceError("elided citation record is invalid")
     return record
 
 
+def _recently_elided(record: dict[str, object] | None) -> set[str]:
+    return set(record.get("recent_ids", ())) if record else set()
+
+
+def _recent_id(citation_id: str) -> str:
+    # Hashed, so ids that share a prefix never stand in for each other.
+    return hashlib.sha256(citation_id.encode("utf-8")).hexdigest()[:_RECENT_ID_CHARS]
+
+
 def _elided(previous: dict[str, object] | None, dropped: list[dict]) -> dict[str, object] | None:
-    """Count, first and last ids, and one window covering every elided citation."""
+    """Count, first and last ids, recent ids and one window covering every elided citation.
+
+    ``recent_ids`` keeps 64-bit digests of the last _RECENT_IDS elided ids,
+    so a replayed citation that was elided is recognized instead of being
+    added, elided and counted again. The count is exact unless a citation is
+    replayed after more than _RECENT_IDS later elisions of the same memory.
+    """
     if not dropped:
         return previous
+    recent = [*(previous.get("recent_ids", []) if previous else []), *(_recent_id(item["id"]) for item in dropped)]
     return {"count": (previous["count"] if previous else 0) + len(dropped),
             "first_id": previous["first_id"] if previous else dropped[0]["id"],
             "last_id": dropped[-1]["id"],
+            "recent_ids": recent[-_RECENT_IDS:],
             "scope": {"kind": "extraction_input_scope",
                       "source_time": _window(([previous] if previous else []) + dropped)}}
 
@@ -316,18 +340,21 @@ def merge_metadata(existing: object, incoming: dict[str, object], *,
     old_citations, new_citations = previous["citations"], new["citations"]
     if any(not isinstance(citation, dict) or not isinstance(citation.get("id"), str) for citation in old_citations + new_citations):
         raise ProvenanceError("source citation identity is invalid")
+    current = _elision(previous.get("elided_citations"))
     seen = {citation["id"] for citation in old_citations}
-    added = [citation for citation in new_citations if citation["id"] not in seen]
+    # A replayed citation that was already elided is not added (or counted) again.
+    added = [citation for citation in new_citations
+             if citation["id"] not in seen and _recent_id(citation["id"]) not in _recently_elided(current)]
     if not added:
         return dict(existing), False
     namespace = {**previous, "citations": [*old_citations, *added], "last_ingested_at": new["last_ingested_at"]}
     incoming_elided = _elision(new.get("elided_citations"))
     if incoming_elided is not None:
         # Spans the incoming fact already elided stay counted.
-        current = _elision(previous.get("elided_citations"))
         namespace["elided_citations"] = incoming_elided if current is None else {
             "count": current["count"] + incoming_elided["count"], "first_id": current["first_id"],
             "last_id": incoming_elided["last_id"],
+            "recent_ids": [*current.get("recent_ids", []), *incoming_elided.get("recent_ids", [])][-_RECENT_IDS:],
             "scope": {"kind": "extraction_input_scope", "source_time": _window([current, incoming_elided])}}
     if elide:
         namespace = _fit(namespace, len(added))
