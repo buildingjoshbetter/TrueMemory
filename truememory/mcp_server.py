@@ -1897,6 +1897,24 @@ def _preload_models():
     t2.start()
 
 
+def _open_store_for_maintenance() -> None:
+    """Open the store in the background at startup, without models.
+
+    Local mode opens it in _preload_models. In shared mode the models live in
+    the model server, so a session that called no TrueMemory tool never
+    opened its Memory, and this long-lived process scheduled no maintenance
+    pass or vector backfill seed. The open is SQL only (models "none"); its
+    maintenance wake schedules that work.
+    """
+    def open_store() -> None:
+        try:
+            _get_memory()._engine._ensure_connection()
+        except Exception:
+            log.debug("Startup store open failed; the first tool call opens it", exc_info=True)
+
+    threading.Thread(target=open_store, daemon=True, name="truememory-store-open").start()
+
+
 # ---------------------------------------------------------------------------
 # Background backlog drainer
 # ---------------------------------------------------------------------------
@@ -2436,6 +2454,7 @@ def main():
                 "Shared model server unavailable; inference will retry it. "
                 "Inspect ~/.truememory/model_server.stderr if this persists."
             )
+        _open_store_for_maintenance()
 
     # Start background backlog drainer — processes queued session
     # transcripts every 60s while the MCP server is alive, respecting
