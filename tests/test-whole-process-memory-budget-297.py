@@ -594,6 +594,36 @@ class CooperativeBorrowControls(unittest.TestCase):
                     session.charge(key("after close"), known_bytes=1)
             self.assertEqual(registry.snapshot()["owner_count"], 0)
 
+    def test_fresh_owner_is_retired_when_a_swapped_session_fails(self) -> None:
+        # Pre-fix: a session that moved to a fresh cooperative owner and then raised
+        # left that owner live, so later cooperative work borrowed it.
+        registry = budget.ProcessRegistry(usage_reader=lambda: 100)
+        with patch.object(budget, "get_process_registry", return_value=registry):
+            last = registry.register_owner(1000, kind="local_reranker")
+
+            class Failed(Exception):
+                pass
+
+            caught = None
+            try:
+                with budget.cooperative_scope() as session:
+                    session.charge(key("before release"), known_bytes=10)
+                    last.close()
+                    session.charge(key("after release"), known_bytes=20)
+                    raise Failed()
+            except Failed as error:
+                caught = error
+            # While the exception keeps the leases alive, nothing is borrowable.
+            self.assertIsNone(registry.active_owner())
+            with budget.cooperative_scope() as later:
+                self.assertIsNone(later)
+            # The test frame's own names would keep the session's leases alive.
+            del caught, session
+            import gc
+            gc.collect()
+            self.assertEqual(registry.snapshot()["owner_count"], 0)
+            self.assertEqual(registry.snapshot()["reserved_known_bytes"], 0)
+
     def test_encode_survives_a_collection_that_retires_its_borrowed_owner(self) -> None:
         # Pre-fix, in the merged suite: a reranker released by an earlier caller
         # lingered as cyclic garbage. A later encode borrowed its owner, the MPS

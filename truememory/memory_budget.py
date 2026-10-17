@@ -873,6 +873,10 @@ class AllocationSession:
     def defer_to_exception(self, error: BaseException) -> None:
         # The exception already owns its traceback; the ticket must follow that lifetime.
         error.__dict__.setdefault("_truememory_allocation_sessions", []).append(self)
+        # A replacement owner exists only for this session. Retire it now so later
+        # cooperative work cannot borrow it while the exception keeps the leases alive.
+        if self._fresh is not None:
+            self._fresh.close()
 
     def release(self, label: str) -> None:
         """Return one finished stage's reservation before the session closes."""
