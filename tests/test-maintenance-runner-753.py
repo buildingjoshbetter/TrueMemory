@@ -789,6 +789,71 @@ class TestRunnerContention(RunnerFixture):
         MAINTENANCE.run_layers(self.conn, (self.spec("summaries", compute=change),), force=True)
         self.assertAlmostEqual(sys.getswitchinterval(), 0.003)  # A change made meanwhile is kept.
 
+    def test_the_build_switch_interval_is_held_until_every_build_ends_on_every_path(self) -> None:
+        # Round v8: nested and overlapping builds share one count, so none
+        # restores the interval early; it comes back on every exit path, and
+        # only a thread entering or leaving a build ever sets it.
+        saved = sys.getswitchinterval()
+        self.addCleanup(sys.setswitchinterval, saved)
+        sys.setswitchinterval(0.005)
+        fast = MAINTENANCE._BUILD_SWITCH_INTERVAL
+        builders, setters = set(), []
+
+        def record(value: float) -> None:
+            setters.append(threading.current_thread())
+            sys.setswitchinterval(value)
+
+        def lowered() -> bool:
+            return abs(sys.getswitchinterval() - fast) < 1e-9
+
+        def build():
+            builders.add(threading.current_thread())
+            return MAINTENANCE._responsive_build()
+
+        with patch.object(MAINTENANCE, "setswitchinterval", record):
+            with build():  # Nested in one thread.
+                with build():
+                    self.assertTrue(lowered())
+                self.assertTrue(lowered())
+            self.assertAlmostEqual(sys.getswitchinterval(), 0.005)
+
+            def explode(conn: sqlite3.Connection) -> None:
+                builders.add(threading.current_thread())
+                self.assertTrue(lowered())
+                raise ValueError("synthetic builder fault")
+
+            self.add(1)
+            (result,) = MAINTENANCE.run_layers(self.conn, (self.spec("summaries", compute=explode),))
+            self.assertEqual(result.outcome, "failed")
+            self.assertAlmostEqual(sys.getswitchinterval(), 0.005)
+
+            entered, leave = threading.Event(), threading.Event()
+
+            def overlapping() -> None:
+                with build():
+                    entered.set()
+                    leave.wait(5)
+
+            other = threading.Thread(target=overlapping)
+            with build():  # Overlapping builds in two threads; the first to enter leaves first.
+                other.start()
+                self.assertTrue(entered.wait(5))
+            self.assertTrue(lowered())
+            observer = threading.Thread(target=lambda: None)  # A thread outside any build.
+            observer.start()
+            observer.join(5)
+            leave.set()
+            other.join(5)
+            self.assertAlmostEqual(sys.getswitchinterval(), 0.005)
+
+            sys.setswitchinterval(0.0002)  # Already faster: never raised.
+            with build():
+                self.assertAlmostEqual(sys.getswitchinterval(), 0.0002)
+            self.assertAlmostEqual(sys.getswitchinterval(), 0.0002)
+        self.assertEqual(len(setters), 6, setters)
+        self.assertLessEqual(set(setters), builders)
+        self.assertNotIn(observer, setters)
+
     def test_a_failed_layer_logs_one_warning_naming_it(self) -> None:
         self.add(30)
         def explode(conn: sqlite3.Connection) -> None:
