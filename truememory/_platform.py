@@ -58,6 +58,14 @@ def process_birth(pid: int) -> float | None:
         raise OSError("Cannot verify model-server launch ownership") from error
 
 
+def same_process(pid: int, born: float) -> bool:
+    """Whether *pid* still names the process born at *born*; unverifiable counts as the same."""
+    try:
+        return process_birth(pid) == born
+    except OSError:
+        return True
+
+
 def read_start_claim(path: Path) -> dict | None:
     """Read a small launch claim. Invalid generations are never authorized."""
     try:

@@ -1852,6 +1852,10 @@ def _backlog_drainer() -> None:
         try:
             _reap_children()
             if _BACKLOG_DIR.exists():
+                from truememory.ingest.hooks._shared import cleanup_stale_processing
+                # Every tick, so a dead worker's claim returns within minutes
+                # even when no queued marker would otherwise start a drain.
+                cleanup_stale_processing(_BACKLOG_DIR)
                 markers = sorted(_BACKLOG_DIR.glob("*.json"))
                 backlog_count = len(markers)
                 if markers:

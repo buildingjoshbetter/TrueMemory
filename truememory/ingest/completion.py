@@ -41,6 +41,17 @@ MAX_RECEIPTS = 4 * MAX_CAPTURES
 # Keys of pruned receipts: 256 shards of this many keys, at most 32,768 keys
 # in about 2.1 MB; a shard drops its oldest key first.
 INGESTED_SHARD_KEYS = 128
+# A completed extraction kept while another process's maintenance blocks
+# storage, so the next attempt never repeats the provider calls. At most one
+# per live capture.
+MAX_EXTRACTION_BYTES = 256 * 1024
+# Attempts given back because maintenance stayed busy for a worker's whole
+# wait (MAINTENANCE_WAIT_SECONDS each) are never spent: the first
+# MAX_DEFERRALS come back after DEFER_SECONDS, later ones after
+# SLOW_DEFER_SECONDS, for as long as maintenance stays busy.
+MAX_DEFERRALS = 24
+DEFER_SECONDS = 60
+SLOW_DEFER_SECONDS = 1800
 _KEY = re.compile(r"[0-9a-f]{64}")
 _COUNTS = ("facts_extracted", "facts_stored", "facts_updated", "facts_skipped_gate", "facts_skipped_dedup")
 # Admission refusals that clear once retained captures settle and are released.
@@ -671,6 +682,19 @@ def _discard(directory: Path, captures: dict, forgotten: list[str] | tuple[str, 
                 and _claim_free(directory, key)):
             with contextlib.suppress(OSError):
                 (directory / "captures" / name).unlink()
+    extracted = directory / "extracted"
+    if extracted.is_dir():
+        with os.scandir(extracted) as entries:
+            names = [entry.name for entry in islice(entries, 2 * MAX_CAPTURES)]
+        cutoff = time.time() - 3600
+        for name in names:
+            key = name.split(".", 1)[0]
+            if _KEY.fullmatch(key) and name == key + ".json" and key in live:
+                continue
+            with contextlib.suppress(OSError):
+                # A worker saves outside state.lock; only an hour-old temporary is abandoned.
+                if not name.endswith(".tmp") or (extracted / name).lstat().st_mtime < cutoff:
+                    (extracted / name).unlink()
     incoming = directory / "incoming"
     if incoming.is_dir():
         # Copies stream outside state.lock; only an hour-old partial is abandoned.
@@ -958,6 +982,9 @@ def _save_settled(capture: Capture, state: dict) -> None:
         entry["released"] = True
         entry.setdefault("settled_at", time.time())
     _save_state(capture.directory, state)
+    if settled:
+        with contextlib.suppress(OSError):
+            (capture.directory / "extracted" / (capture.key + ".json")).unlink()
     if settled and not _referenced(capture):
         # The receipt or the recorded outcomes are the retained evidence.
         with contextlib.suppress(OSError):
@@ -1029,6 +1056,93 @@ def _certifies(value: object, capture: Capture) -> bool:
     return strict_complete(reconstructed, capture)
 
 
+def save_extraction(capture: Capture, snapshot: dict) -> bool:
+    """Keep a completed extraction for this capture's next attempt; False if too large."""
+    payload = _json({"version": 1, "capture_key": capture.key, "snapshot": snapshot})
+    if len(payload) > MAX_EXTRACTION_BYTES:
+        return False
+    directory = capture.directory / "extracted"
+    _private_directory(directory)
+    temporary = directory / (capture.key + "." + uuid.uuid4().hex + ".tmp")
+    fd = _open_private(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, directory / (capture.key + ".json"))
+    except BaseException:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise
+    return True
+
+
+def load_extraction(capture: Capture) -> dict | None:
+    """The extraction an earlier attempt kept for exactly this capture, if any."""
+    path = capture.directory / "extracted" / (capture.key + ".json")
+    if not path.exists():
+        return None
+    try:
+        value = json.loads(_read_private(path, MAX_EXTRACTION_BYTES))
+    except (OSError, ValueError):
+        return None
+    if type(value) is not dict or value.get("version") != 1 or value.get("capture_key") != capture.key:
+        return None
+    return value.get("snapshot") if type(value.get("snapshot")) is dict else None
+
+
+def defer_attempt(capture: Capture) -> bool:
+    """Give this worker's running attempt back without spending it.
+
+    Busy maintenance says nothing about the capture, so the attempt always
+    returns to the queue uncounted, and the capture with its kept extraction
+    waits as long as maintenance does: after DEFER_SECONDS for the first
+    MAX_DEFERRALS deferrals, then after SLOW_DEFER_SECONDS. No outcome is
+    recorded, so outcomes stay bounded by MAX_ATTEMPTS. ``deferred_since``
+    marks a capture whose latest attempt ended this way (see
+    deferred_captures). False means the attempt is not this worker's.
+    """
+    with _lock(capture.directory / "state.lock"):
+        state = _state(capture.directory)
+        entry = state["captures"].get(capture.key)
+        if (entry is None or entry["status"] != "running" or entry["worker_pid"] != os.getpid()
+                or not 1 <= entry["attempts"] <= MAX_ATTEMPTS):
+            return False
+        deferred = entry.get("deferred", 0)
+        deferred = deferred if type(deferred) is int and deferred >= 0 else MAX_DEFERRALS
+        since = entry.get("deferred_since")
+        now = time.time()
+        entry.update(deferred=deferred + 1, attempts=entry["attempts"] - 1, status="retry", worker_pid=0,
+                     deferred_since=since if type(since) in (int, float) else now,
+                     next_attempt_at=now + (DEFER_SECONDS if deferred < MAX_DEFERRALS else SLOW_DEFER_SECONDS))
+        _save_state(capture.directory, state)
+    return True
+
+
+def deferred_captures(root: Path | None = None) -> tuple[int, float | None]:
+    """Captures waiting out busy maintenance in every account, and the oldest one's age in seconds."""
+    base = _base(root)
+    if not base.is_dir():
+        return 0, None
+    with os.scandir(base) as entries:
+        accounts = [Path(entry.path) for entry in entries
+                    if _KEY.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False)]
+    count, oldest = 0, None
+    for account in accounts:
+        try:
+            captures = _state(account)["captures"]
+        except OSError:
+            continue
+        for entry in captures.values():
+            since = entry.get("deferred_since") if type(entry) is dict else None
+            if (type(since) in (int, float) and entry.get("released") is not True
+                    and entry.get("status") not in ("exhausted", "superseded")):
+                count += 1
+                oldest = since if oldest is None else min(oldest, since)
+    return count, None if oldest is None else max(0.0, time.time() - oldest)
+
+
 def _outcome(entry: dict, category: str, details: dict | None = None, *, terminal: bool = False,
              delay: float | None = None) -> None:
     attempt = entry.get("attempts", 0)
@@ -1037,6 +1151,8 @@ def _outcome(entry: dict, category: str, details: dict | None = None, *, termina
     entry["status"] = "exhausted" if terminal or attempt >= MAX_ATTEMPTS else "retry"
     entry["worker_pid"] = 0
     entry["next_attempt_at"] = time.time() + (min(300, 2 ** min(attempt, 9)) if delay is None else delay)
+    # The attempt reached an outcome, so it is no longer waiting on maintenance.
+    entry.pop("deferred_since", None)
     outcome = {"attempt": attempt, "category": category, "observed_at": time.time()}
     if details is not None:
         if len(_json(details)) > 8192:
@@ -1278,7 +1394,10 @@ def dispatch(capture: Capture, threshold: float = 0.30) -> int:
                        "--transcript-host", meta["host"], "--threshold", str(threshold)]
             try:
                 log_path = directory / "logs" / (capture.key + "-" + str(attempt) + ".log")
-                fd = _open_private(log_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                # A deferred attempt runs again under its number and appends to its log,
+                # so however long maintenance lasts there is one log per attempt.
+                fd = _open_private(log_path, os.O_CREAT | os.O_WRONLY
+                                   | (os.O_APPEND if entry.get("deferred") else os.O_EXCL))
                 with os.fdopen(fd, "wb") as output:
                     process = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT,
                                                stdin=subprocess.DEVNULL, **spawn_kwargs())
@@ -1318,13 +1437,15 @@ def drain(user_id: str = "", db_path: str | None = None, host: str = "claude") -
             log.warning("Completion drain retained nonterminal work (%s)", type(error).__name__)
 
 
-def adopt_legacy_pointer(pointer: Path, scope: tuple[str, str | None, str] | None = None) -> Capture | None:
+def adopt_legacy_pointer(pointer: Path, scope: tuple[str, str | None, str] | None = None, *,
+                         claimants: tuple[int, ...] = ()) -> Capture | None:
     """Admit one legacy pointer's current source bytes, then retire the pointer.
 
     Completion owns retries once the bytes are admitted, so a pointer is never
     replayed. ``scope`` limits adoption to one account and host; without it the
     pointer's own validated scope is used. None retains the pointer (another
     scope, a live claim or an unstable read); ValueError marks it invalid.
+    ``claimants`` names the caller's own process ids, whose claims are free.
     """
     if pointer.suffix not in (".json", ".processing"):
         return None
@@ -1377,7 +1498,13 @@ def adopt_legacy_pointer(pointer: Path, scope: tuple[str, str | None, str] | Non
         pid = value.get("claimed_pid", 0)
         if type(pid) is not int or pid < 0:
             raise ValueError("legacy pointer claim is invalid")
-        if pointer.suffix == ".processing" and (not pid or pid_is_alive(pid)):
+        # A claim is free once its worker is gone, or when the caller is that worker.
+        alive = bool(pid) and pid not in claimants and pid_is_alive(pid)
+        if alive and type(value.get("claimed_born")) in (int, float):
+            # A pid now held by a process born at another time is not the claimant.
+            from truememory._platform import same_process
+            alive = same_process(pid, value["claimed_born"])
+        if pointer.suffix == ".processing" and (not pid or alive):
             return None
         transcript, session = source
         # A removed transcript can never be admitted; retire its pointer too.
