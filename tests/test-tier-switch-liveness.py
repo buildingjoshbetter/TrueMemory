@@ -1060,6 +1060,10 @@ class ActivationEdgeCases(unittest.TestCase):
             import subprocess
             seed(20)
             stub_models(delay=0.02)
+            # The serving add must not load the real cached embedder: a cold
+            # load (4.7-6.8 s) inside the 5 s window made this a coin flip.
+            import sentence_transformers
+            sentence_transformers.SentenceTransformer = lambda *args, **kwargs: FakeEncoder()
             from truememory.engine import TrueMemoryEngine
             from truememory.tier_switch.manager import RebuildManager
             engine = TrueMemoryEngine(DB); engine.get_all(limit=1); drain()
