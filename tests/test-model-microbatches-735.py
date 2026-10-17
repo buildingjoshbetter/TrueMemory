@@ -613,7 +613,9 @@ def load_order_runtime() -> dict:
                "_preflight_rerank_result", "_publish_embed_state", "_retire_stale_fast_encoder",
                "_check_process_memory", "_check_serving_embed_model", "_serving_embed_response",
                "_serving_reranker_name", "_check_serving_reranker", "_memory_stage", "_release_stage",
-               "_release_fast_clone", "_drop_redundant_fast_encoder_locked", "_collect_models"}
+               "_release_fast_clone", "_drop_redundant_fast_encoder_locked", "_collect_models",
+               "_before_inference_locked", "_release_idle_rerankers_locked", "_parked_reranker_table",
+               "_repromote_embed_locked", "_embed_repromote_due"}
     body = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
     for node in ast.parse(path.read_text(encoding="utf-8")).body:
         if isinstance(node, ast.FunctionDef) and node.name in functions:
@@ -669,6 +671,7 @@ class TestQwenGlobalOrder(unittest.TestCase):
         server._throttler = None
         server._inflight = 0
         server._sticky_cpu = set()
+        server._reranker, server._reranker_name = None, None
         server.loads = 0
 
         def load(_tier: str, deadline: object = None) -> OrderModel:
