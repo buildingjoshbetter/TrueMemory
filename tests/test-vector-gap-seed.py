@@ -179,3 +179,27 @@ def test_seed_scans_in_chunks_and_stops(legacy_store: Path, monkeypatch) -> None
             assert vector_search.seed_backfill_cursor(conn, "vec_messages", write_lock=Lock()) is None  # Cursor exists.
     finally:
         conn.close()
+
+
+def test_open_requests_maintenance_before_the_seed_takes_the_writer(legacy_store: Path, monkeypatch) -> None:
+    # The seed thread takes the writer at once; a wake after it only tries the
+    # writer, finds it busy and is dropped (at MCP startup, the only wake).
+    events = []
+    monkeypatch.setattr(maintenance.MaintenanceCoordinator, "request_layers",
+                        lambda self, **kwargs: events.append("wake") or False)
+    real = TrueMemoryEngine._schedule_backfill
+
+    def schedule(self, *, seed_gap: bool = False) -> None:
+        events.append("seed" if seed_gap else "pass")
+        real(self, seed_gap=seed_gap)
+
+    monkeypatch.setattr(TrueMemoryEngine, "_schedule_backfill", schedule)
+    memory = Memory(path=legacy_store)
+    try:
+        memory._engine._ensure_connection()  # The open's maintenance wake.
+        _join_backfill(memory)
+        assert memory._engine._maintenance_pending_reason != "foreground_busy"
+    finally:
+        memory.close()
+    assert events[:2] == ["wake", "seed"]
+    assert _cursor(legacy_store) == str(GAPS.start)

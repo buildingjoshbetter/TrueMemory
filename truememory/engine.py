@@ -1317,50 +1317,54 @@ class TrueMemoryEngine:
         operation = current_operation(self.conn) if self.conn is not None else None
         if operation is not None and getattr(operation, "_defer_maintenance", False):
             return
-        if not getattr(self, "_backfill_gap_checked", True):
-            self._schedule_backfill(seed_gap=True)
-        if (not self._has_consolidation and not getattr(self, "_has_style_vec", False)) or self.conn is None:
-            return
-        if not self._write_lock.acquire(blocking=False):
-            self._maintenance_pending_reason = "foreground_busy"
-            return
-        coordinator = None
-        eligible = ()
-        style_eligible = False
         try:
-            if self.conn is None:
+            if (not self._has_consolidation and not getattr(self, "_has_style_vec", False)) or self.conn is None:
                 return
-            if self.conn.in_transaction:
-                self._maintenance_pending_reason = "pending_caller_commit"
+            if not self._write_lock.acquire(blocking=False):
+                self._maintenance_pending_reason = "foreground_busy"
                 return
-            from truememory.maintenance import engine_layer_specs, observe_style, plan_layers
-            coordinator = self._get_maintenance_coordinator()
-            if getattr(self, "_has_style_vec", False):
-                observation = observe_style(self.conn, threshold=self._auto_consolidate_threshold)
-                style_eligible = observation.eligible
-                self._maintenance_pending_reason = observation.health["pending_reason"]
-            if self._has_consolidation:
-                eligible = plan_layers(self.conn, engine_layer_specs(self.conn, coordinator),
-                                       threshold=self._auto_consolidate_threshold)
-                if not getattr(self, "_has_style_vec", False):
-                    self._maintenance_pending_reason = "awaiting_eligibility"
-            if eligible or style_eligible:
-                self._maintenance_pending_reason = "eligible"
-        except Exception as error:
-            self._maintenance_pending_reason = type(error).__name__[:64]
-        finally:
-            self._write_lock.release()
-        if (eligible or style_eligible) and coordinator is not None:
+            coordinator = None
+            eligible = ()
+            style_eligible = False
             try:
-                initialization = ({"_initialization_receipt": self._reconnect_receipt}
-                                  if getattr(self, "_reconnect_receipt", None) is not None else {})
-                if style_eligible:
-                    coordinator.request_layers(threshold=self._auto_consolidate_threshold,
-                                               include_layers=bool(eligible), include_style=True, **initialization)
-                else:
-                    coordinator.request_layers(threshold=self._auto_consolidate_threshold, **initialization)
+                if self.conn is None:
+                    return
+                if self.conn.in_transaction:
+                    self._maintenance_pending_reason = "pending_caller_commit"
+                    return
+                from truememory.maintenance import engine_layer_specs, observe_style, plan_layers
+                coordinator = self._get_maintenance_coordinator()
+                if getattr(self, "_has_style_vec", False):
+                    observation = observe_style(self.conn, threshold=self._auto_consolidate_threshold)
+                    style_eligible = observation.eligible
+                    self._maintenance_pending_reason = observation.health["pending_reason"]
+                if self._has_consolidation:
+                    eligible = plan_layers(self.conn, engine_layer_specs(self.conn, coordinator),
+                                           threshold=self._auto_consolidate_threshold)
+                    if not getattr(self, "_has_style_vec", False):
+                        self._maintenance_pending_reason = "awaiting_eligibility"
+                if eligible or style_eligible:
+                    self._maintenance_pending_reason = "eligible"
             except Exception as error:
                 self._maintenance_pending_reason = type(error).__name__[:64]
+            finally:
+                self._write_lock.release()
+            if (eligible or style_eligible) and coordinator is not None:
+                try:
+                    initialization = ({"_initialization_receipt": self._reconnect_receipt}
+                                      if getattr(self, "_reconnect_receipt", None) is not None else {})
+                    if style_eligible:
+                        coordinator.request_layers(threshold=self._auto_consolidate_threshold,
+                                                   include_layers=bool(eligible), include_style=True, **initialization)
+                    else:
+                        coordinator.request_layers(threshold=self._auto_consolidate_threshold, **initialization)
+                except Exception as error:
+                    self._maintenance_pending_reason = type(error).__name__[:64]
+        finally:
+            # After the wake: the seed thread takes the writer at once, and the
+            # wake above only tries it, so seeding first would drop this wake.
+            if not getattr(self, "_backfill_gap_checked", True):
+                self._schedule_backfill(seed_gap=True)
 
     def _bg_consolidate(self) -> None:
         """Compatibility entry point; the coordinator owns the worker handle."""
