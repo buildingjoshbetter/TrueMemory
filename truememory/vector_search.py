@@ -2016,6 +2016,76 @@ def build_separation_vectors(
                                    separation=True)
 
 
+# Suffix of the tables a re-embed builds before it replaces the served pair.
+_REEMBED_SUFFIX = "_reembed"
+
+
+def _complete_shadow(conn: sqlite3.Connection, shadow: str, identity: tuple[str, int]):
+    """The shadow's finished build manifest for ``identity``, if no row it covers changed since."""
+    from truememory.rebuild_source import RebuildSourceChanged, load_manifest, manifest_key
+
+    manifest = load_manifest(conn, manifest_key((shadow,)))
+    if (manifest is None or not manifest.complete or manifest.source is None
+            or (manifest.model, manifest.dimension) != identity):
+        return None
+    try:
+        manifest.source.check(conn)  # Only appends since it was captured.
+    except RebuildSourceChanged:
+        return None
+    return manifest
+
+
+def reembed_served_vectors(conn: sqlite3.Connection, *, mark: tuple[str, str] | None = None) -> int:
+    """Re-embed every memory of the served pair without ever emptying it.
+
+    Each served table's replacement is built in a shadow vec0 table with the
+    same definition; build_vectors resumes a shadow that an interrupted run
+    left. Then one writer transaction replaces the served rows the shadows
+    cover, drops the shadows and writes the ``mark`` metadata row. Until then
+    searches use the old vectors, and memories added meanwhile keep the
+    vectors their add stored.
+    """
+    from truememory.rebuild_source import RebuildSourceChanged, manifest_key, rebuild_transaction
+
+    pairs = []
+    for table, builder in ((_active_vec_table(conn), build_vectors),
+                           (_active_sep_table(conn), build_separation_vectors)):
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+        if row is None or " USING " not in row[0].upper():
+            raise RuntimeError("Re-embed requires the served vector tables; initialize them first")
+        shadow = table + _REEMBED_SUFFIX
+        # Both shadows exist before either build: a build's manifest is bound
+        # to the schema version, so later DDL would restart it.
+        conn.execute(f'CREATE VIRTUAL TABLE IF NOT EXISTS main."{shadow}"'
+                     f'{row[0][row[0].upper().index(" USING "):]}')
+        pairs.append((table, shadow, builder))
+    conn.commit()
+    total = 0
+    for _, shadow, builder in pairs:
+        with _lock:
+            identity = (EMBEDDING_MODEL, _embedding_dim)
+        if _complete_shadow(conn, shadow, identity) is None:
+            total += builder(conn, table_name=shadow)
+    with _lock:
+        identity = (_model_generation, EMBEDDING_MODEL, _embedding_dim)
+    # The model fence is taken before the writer, so waiting for it holds no lock.
+    with _foreground_model_fence(identity, blocking=True), rebuild_transaction(conn, write=True):
+        for table, shadow, _ in pairs:
+            manifest = _complete_shadow(conn, shadow, identity[1:])
+            if manifest is None:
+                raise RebuildSourceChanged("Re-embed source changed before it was published; run it again")
+            if manifest.source.high_id is not None:
+                conn.execute(f'DELETE FROM main."{table}" WHERE rowid <= ?', (manifest.source.high_id,))
+                conn.execute(f'INSERT INTO main."{table}"(rowid, embedding) '
+                             f'SELECT rowid, embedding FROM main."{shadow}"')
+        for _, shadow, _ in pairs:
+            conn.execute(f'DROP TABLE main."{shadow}"')
+            conn.execute("DELETE FROM metadata WHERE key = ?", (manifest_key((shadow,)),))
+        if mark is not None:
+            conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", mark)
+    return total
+
+
 def _build_sep_text(sender: str, recipient: str, timestamp: str, content: str) -> str:
     return (
         f"{sender or '?'} to {recipient or '?'} "

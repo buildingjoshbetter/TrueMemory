@@ -913,25 +913,15 @@ class TrueMemoryEngine:
                                                 _sv.load(_conn)
                                                 _conn.enable_load_extension(False)
                                                 from truememory.vector_search import (
-                                                    build_vectors as _bv,
-                                                    build_separation_vectors as _bsv,
                                                     init_vec_table as _ivt,
+                                                    reembed_served_vectors as _reembed,
                                                 )
-                                                _conn.execute("DROP TABLE IF EXISTS vec_messages")
-                                                _conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
-                                                _conn.commit()
                                                 _ivt(_conn)
-                                                _bv(_conn)
-                                                _bsv(_conn)
-                                                # Issue #485: only set the flag AFTER
-                                                # successful re-embed so a failed
-                                                # thread allows retry on next init.
-                                                _conn.execute(
-                                                    "INSERT OR REPLACE INTO metadata "
-                                                    "(key, value) VALUES (?, ?)",
-                                                    ("qwen3_nan_fix_applied", "1"),
-                                                )
-                                                _conn.commit()
+                                                # Searches keep the old vectors until the
+                                                # rebuilt pair replaces them; an interrupted
+                                                # run resumes. Issue #485: the flag is set
+                                                # only with that replacement.
+                                                _reembed(_conn, mark=("qwen3_nan_fix_applied", "1"))
                                                 logger.warning(
                                                     "Qwen3 NaN fix: re-embedded %d vectors "
                                                     "in background", _msg_count,
