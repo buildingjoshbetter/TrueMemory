@@ -515,8 +515,9 @@ class _BackgroundRun:
     lock. BEGIN and SAVEPOINT only check: they cannot commit and may wait on
     another connection's writer, which an interrupt does not end. ROLLBACK
     never writes the database and always runs. Closing the last connection to
-    a WAL database checkpoints it, so after the fence a close skips that where
-    Python can (3.12+).
+    a WAL database checkpoints it, so after the fence a close skips that: with
+    SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE on Python 3.12+, and on 3.10/3.11 only on
+    a best-effort basis (see _close_connection).
     """
 
     def __init__(self) -> None:
@@ -572,10 +573,19 @@ class _BackgroundRun:
     def _close_connection(self, conn: "_FencedConnection") -> None:
         self._unregister(conn)
         with self._gate:
-            option = getattr(sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE", None)
-            if self._closed and option is not None:
+            if self._closed:
+                option = getattr(sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE", None)
                 try:
-                    conn.setconfig(option, True)
+                    if option is not None:
+                        conn.setconfig(option, True)
+                    else:
+                        # Python 3.10/3.11 cannot set that option. A pending
+                        # interrupt stops SQLite's close-time checkpoint
+                        # before it copies a frame (observed on SQLite 3.50.4
+                        # and 3.53.3). SQLite does not document this, so it is
+                        # best effort. A WAL already fully checkpointed is
+                        # still removed on close; the database is not written.
+                        conn.interrupt()
                 except sqlite3.Error:
                     pass  # Already closed.
             sqlite3.Connection.close(conn)

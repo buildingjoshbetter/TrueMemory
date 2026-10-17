@@ -6,6 +6,7 @@ wait to zero to reach that branch deterministically.
 """
 
 import gc
+import os
 import shutil
 import sqlite3
 import sys
@@ -16,7 +17,7 @@ import pytest
 
 from truememory import maintenance
 from truememory.engine import TrueMemoryEngine
-from truememory.storage import create_db
+from truememory.storage import configure_connection, create_db
 from truememory.tier_switch import runtime
 
 
@@ -258,6 +259,7 @@ def test_shared_worker_survives_one_close_and_stops_at_the_last(store: Path, mon
 
 @pytest.mark.parametrize("pause", ["configure_connection", "_apply_schema_migrations"])
 def test_worker_fenced_inside_create_db_closes_its_connection(store: Path, monkeypatch, pause: str) -> None:
+    """The fence lands once create_db configured its connection, or as it migrates."""
     from truememory import storage
     engine = _engine(store)
     coordinator = maintenance.get_coordinator(store)
@@ -265,15 +267,25 @@ def test_worker_fenced_inside_create_db_closes_its_connection(store: Path, monke
     opened = []
     real = getattr(storage, pause)
 
-    def paused(conn, *args):
-        if (threading.current_thread().name == "truememory-maintenance"
-                and (pause != "configure_connection" or sys._getframe(1).f_code.co_name == "create_db")):
+    def hold(conn: sqlite3.Connection) -> None:
+        if threading.current_thread().name == "truememory-maintenance":
             opened.append(conn)
             inside.set()
             assert release.wait(10)
-        return real(conn, *args)
 
-    monkeypatch.setattr(storage, pause, paused)
+    def configured(conn):
+        # After the call: with the WAL guard on, configure_connection runs
+        # statements and closes the connection itself when one is refused.
+        conn = real(conn)
+        if sys._getframe(1).f_code.co_name == "create_db":
+            hold(conn)
+        return conn
+
+    def migrating(conn, db_path):
+        hold(conn)
+        return real(conn, db_path)
+
+    monkeypatch.setattr(storage, pause, configured if pause == "configure_connection" else migrating)
     ran = []
     assert coordinator.request(lambda conn, cancel: ran.append(conn))
     worker_run = coordinator._worker_run
@@ -294,4 +306,37 @@ def test_worker_fenced_inside_create_db_closes_its_connection(store: Path, monke
     opened.clear()
     coordinator._worker_run = worker_run = None
     gc.collect()
-    assert _files(store.parent) == after_close
+    files = _files(store.parent)
+    assert files[1:] == after_close[1:]  # The database was not written.
+    if hasattr(sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE"):
+        # Without it (Python 3.10/3.11) the fenced close itself removes a WAL
+        # with no frames left to copy; see _BackgroundRun._close_connection.
+        assert files[0] == after_close[0]
+
+
+def test_fenced_close_without_setconfig_skips_the_checkpoint(tmp_path: Path, monkeypatch) -> None:
+    # Python 3.10/3.11 have no Connection.setconfig; simulate that on any interpreter.
+    monkeypatch.delattr(sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE", raising=False)
+    db = tmp_path / "synthetic.sqlite"
+    seed = sqlite3.connect(db)
+    seed.execute("PRAGMA journal_mode=WAL")
+    seed.execute("CREATE TABLE t(v)")
+    seed.commit()
+    seed.close()
+    run = maintenance._BackgroundRun()
+    conn = configure_connection(sqlite3.connect(db.as_uri() + "?mode=rw", uri=True, factory=run.connection))
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+    conn.executemany("INSERT INTO t VALUES (?)", [(i,) for i in range(100)])
+    conn.commit()
+    conn.execute("INSERT INTO t VALUES (-1)")
+    run.fence()
+    before = os.stat(db).st_mtime_ns, os.stat(db).st_size
+    conn.rollback()  # Unwinding code rolls back; that clears the fence's interrupt.
+    conn.close()
+    assert (os.stat(db).st_mtime_ns, os.stat(db).st_size) == before
+    assert Path(str(db) + "-wal").exists()
+    check = sqlite3.connect(db.as_uri() + "?mode=ro", uri=True)
+    try:
+        assert check.execute("SELECT count(*) FROM t").fetchone() == (100,)
+    finally:
+        check.close()
