@@ -1118,9 +1118,13 @@ class MaintenanceCoordinator:
         is fenced, so none writes the database after this returns. Returns
         whether every run finished within the wait. Unlike cancel(), a fresh
         open in this process may still wait for the automatic owner to leave.
+        An Engine that attached again after detach_engine cleared its record
+        (a concurrent reuse reopened it) stays counted.
         """
         self._check_process()
         with _registry_lock, self._mutex:
+            if getattr(engine, "__dict__", {}).get("_maintenance_attachments", {}).get(id(self)) is self:
+                return True
             self._attached.discard(engine)
             if self.path is None or len(self._attached):
                 return True

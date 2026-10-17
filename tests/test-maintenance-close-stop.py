@@ -340,3 +340,26 @@ def test_fenced_close_without_setconfig_skips_the_checkpoint(tmp_path: Path, mon
         assert check.execute("SELECT count(*) FROM t").fetchone() == (100,)
     finally:
         check.close()
+
+
+def test_reuse_racing_close_keeps_the_engine_attached(store: Path, monkeypatch) -> None:
+    engine = _engine(store)
+    coordinator = maintenance.get_coordinator(store)
+    real_detach = coordinator.detach
+
+    def detach_after_a_reuse(closing, **kwargs):
+        # Another thread reuses the Engine between close() clearing its record
+        # and this detach; the reopen attaches it again.
+        del coordinator.detach
+        maintenance.attach_engine(closing, coordinator)
+        return real_detach(closing, **kwargs)
+
+    coordinator.detach = detach_after_a_reuse
+    engine.close()
+    report = maintenance.MaintenanceReport((), "SKIPPED (synthetic)")
+    monkeypatch.setattr(maintenance, "run_engine_maintenance", lambda conn, owner, **kwargs: report)
+    assert coordinator.request_layers(threshold=25)
+    assert coordinator.wait(10)
+    assert coordinator.status == ("success", None)
+    maintenance.detach_engine(engine)  # Its next close is the last.
+    assert not coordinator.request_layers(threshold=25)
