@@ -7,8 +7,10 @@ direct caller captures a short database snapshot before preparing any output.
 
 from __future__ import annotations
 
+import random
 import sqlite3
 import sys
+import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -17,6 +19,60 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from truememory.tier_switch.activation import TierSelection, LegacyTierPolicy
+
+
+# A foreground write that still finds the writer busy after the busy timeout
+# tries again for at most this long in all. Under saturated writers SQLite's
+# busy handler can starve one writer past its timeout: after its first polls it
+# sleeps 100 ms between tries and loses each gap to writers that loop straight
+# back. A new attempt restarts its fast polls.
+FOREGROUND_BUSY_RETRY_SECONDS = 30.0
+_RETRY_ATTEMPT_MS = 1_000
+
+
+def _busy_error(error: sqlite3.OperationalError) -> bool:
+    code = getattr(error, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return code & 255 in {5, 6}  # SQLITE_BUSY / SQLITE_LOCKED, including extended codes.
+    return str(error) in {"database is locked", "database table is locked"}
+
+
+def begin_immediate(conn: sqlite3.Connection, *, retry_seconds: float = 0.0) -> None:
+    """BEGIN IMMEDIATE outside a transaction; on a busy writer, retry for ``retry_seconds`` in all.
+
+    Nothing has been written when BEGIN fails, so retrying cannot repeat any
+    part of a write. Retries wait with jitter between attempts, each attempt
+    with at most a one-second busy wait and never past the deadline.
+    """
+    started = time.monotonic()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        return
+    except sqlite3.OperationalError as error:
+        if retry_seconds <= 0 or conn.in_transaction or not _busy_error(error):
+            raise
+        last = error
+    previous = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    deadline = started + retry_seconds
+    attempt = 0
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise last
+            attempt += 1
+            time.sleep(min(remaining, random.uniform(0.01, 0.05) * min(attempt, 10)))
+            wait_ms = int(min(previous, _RETRY_ATTEMPT_MS, max(deadline - time.monotonic(), 0) * 1000))
+            conn.execute(f"PRAGMA busy_timeout = {wait_ms}")
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                return
+            except sqlite3.OperationalError as error:
+                if conn.in_transaction or not _busy_error(error):
+                    raise
+                last = error
+    finally:
+        conn.execute(f"PRAGMA busy_timeout = {previous}")
 
 
 class WriterSelectionChanged(RuntimeError):
@@ -155,17 +211,29 @@ def require_writer_selection(
 def writer_transaction(
     conn: sqlite3.Connection, captured: WriterCapture | None, *,
     model_id: str | None = None, dimension: int | None = None,
-    tables: tuple[str, str] | None = None,
+    tables: tuple[str, str] | None = None, retry_busy: bool = False,
 ) -> Iterator[None]:
     """Acquire the writer before comparison; preserve borrowed outer work.
 
     Own BEGIN IMMEDIATE or borrow a SAVEPOINT and upgrade via a zero-row source
     UPDATE, never a metadata write. A stale read snapshot may fail that upgrade
     for retry. Only owned work is committed. Uncertain cleanup is not retried.
+    With ``retry_busy`` an owned BEGIN that finds the writer busy past the busy
+    timeout tries again (FOREGROUND_BUSY_RETRY_SECONDS in all); a
+    borrowed one never does, since the caller's transaction is not ours to wait in.
     """
     owned = not conn.in_transaction
     guard = "tier_writer_" + uuid.uuid4().hex
-    conn.execute("BEGIN IMMEDIATE" if owned else f"SAVEPOINT {guard}")
+    if owned:
+        if retry_busy:
+            # Admission judged a caller transaction under the engine writer;
+            # such a borrowed operation must not wait here either.
+            runtime = sys.modules.get("truememory.tier_switch.runtime")
+            operation = runtime.current_operation(conn) if runtime is not None else None
+            retry_busy = not getattr(operation, "borrowed", False)
+        begin_immediate(conn, retry_seconds=FOREGROUND_BUSY_RETRY_SECONDS if retry_busy else 0.0)
+    else:
+        conn.execute(f"SAVEPOINT {guard}")
     guard_release_attempted = False
     try:
         if not owned:

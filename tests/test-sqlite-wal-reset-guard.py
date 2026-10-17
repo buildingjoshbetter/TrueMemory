@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from truememory import storage
+from truememory.tier_switch import writer
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -341,26 +342,34 @@ STRESS_WORKER = """
 import os, random, sqlite3, sys, time
 sys.path.insert(0, sys.argv[1])
 from truememory import storage
+from truememory.tier_switch import writer
 path, index, seconds, mode = sys.argv[2], int(sys.argv[3]), float(sys.argv[4]), sys.argv[5]
 r = random.Random(os.getpid())
 db = storage.configure_connection(sqlite3.connect(path, isolation_level=None, timeout=2.0))
 db.execute("PRAGMA synchronous=NORMAL")
 if mode == "plain":
     db.execute("PRAGMA wal_autocheckpoint=200")
-committed = seq = checkpoints = 0
+committed = seq = checkpoints = failed = slow = 0
+longest = 0.0
 problem = None
 stop = time.time() + seconds
 while time.time() < stop and problem is None:
     roll = 0 if mode == "saturate" else r.randrange(100)
+    started = time.monotonic()
     try:
         if roll < 70:
             seq += 1
-            db.execute("BEGIN IMMEDIATE")
+            if mode == "saturate":  # A foreground write: retries a writer still busy after the timeout.
+                writer.begin_immediate(db, retry_seconds=writer.FOREGROUND_BUSY_RETRY_SECONDS)
+            else:
+                db.execute("BEGIN IMMEDIATE")
             db.execute("INSERT INTO t(writer, seq, blob) VALUES (?, ?, randomblob(?))", (index, seq, r.randint(64, 1663)))
             db.execute("UPDATE ctr SET v=? WHERE writer=?", (seq, index))
             db.execute("UPDATE churn SET blob=randomblob(400) WHERE id IN (?, ?, ?)", tuple(r.randint(1, 300) for _ in range(3)))
             db.execute("COMMIT")
             committed = seq
+            waited = time.monotonic() - started
+            longest, slow = max(longest, waited), slow + (waited > 1.0)
             if mode == "saturate":
                 storage.checkpoint_if_due(path)  # What the engine's idle hook does after each commit.
         elif roll < 90:
@@ -377,13 +386,17 @@ while time.time() < stop and problem is None:
             db.execute("ROLLBACK")
         if "locked" not in str(error) and "busy" not in str(error):
             problem = str(error)
+        elif roll < 70:
+            failed += 1
+            seq = committed
     except sqlite3.DatabaseError as error:
         problem = str(error)
     if mode != "saturate" and r.randrange(8) == 0:
         time.sleep(r.randrange(500) / 1e6)
 autocheckpoint = db.execute("PRAGMA wal_autocheckpoint").fetchone()[0]
 db.close()
-print(committed, checkpoints, autocheckpoint, storage.wal_checkpoint_stats()["max_wal_bytes"], problem or "", sep="\t")
+print(committed, checkpoints, autocheckpoint, storage.wal_checkpoint_stats()["max_wal_bytes"], failed, round(longest, 3),
+      slow, problem or "", sep="\t")
 """
 
 
@@ -414,8 +427,9 @@ def wal_stress(directory: str, *, processes: int = 4, seconds: float = 8.0, mode
         out, err = worker.communicate(timeout=seconds + 120)
         if worker.returncode:
             raise AssertionError(err[-2000:])
-        committed, checkpoints, autocheckpoint, max_wal, problem = out.rstrip("\n").split("\t")
-        rows.append((int(committed), int(checkpoints), int(autocheckpoint), int(max_wal), problem))
+        committed, checkpoints, autocheckpoint, max_wal, failed, longest, slow, problem = out.rstrip("\n").split("\t")
+        rows.append((int(committed), int(checkpoints), int(autocheckpoint), int(max_wal), problem, int(failed),
+                     float(longest), int(slow)))
     conn = sqlite3.connect(path)
     try:
         integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
@@ -426,7 +440,9 @@ def wal_stress(directory: str, *, processes: int = 4, seconds: float = 8.0, mode
     return {"integrity": integrity, "problems": [row[4] for row in rows if row[4]],
             "lost": {i: (row[0], counters.get(i)) for i, row in enumerate(rows) if counters.get(i) != row[0]},
             "commits": sum(row[0] for row in rows), "checkpoints": sum(row[1] for row in rows),
-            "autocheckpoint": {row[2] for row in rows}, "max_wal_bytes": max(row[3] for row in rows)}
+            "autocheckpoint": {row[2] for row in rows}, "max_wal_bytes": max(row[3] for row in rows),
+            "failed_writes": sum(row[5] for row in rows), "longest_write": max(row[6] for row in rows),
+            "writes_over_1s": sum(row[7] for row in rows)}
 
 
 class GuardedCheckpointStress(unittest.TestCase):
@@ -450,6 +466,10 @@ class GuardedCheckpointStress(unittest.TestCase):
         self.assertEqual((result["integrity"], result["problems"], result["lost"]), ("ok", [], {}))
         self.assertGreater(result["commits"], 1000)
         self.assertLess(result["max_wal_bytes"], 32 * 1024 * 1024)
+        # Round v8 (review v6 L-v6-3): one writer could starve past its busy
+        # timeout (2 s here). Foreground writes retry it, so none fails.
+        self.assertEqual(result["failed_writes"], 0, result)
+        self.assertLess(result["longest_write"], writer.FOREGROUND_BUSY_RETRY_SECONDS, result)
 
 
 if __name__ == "__main__":

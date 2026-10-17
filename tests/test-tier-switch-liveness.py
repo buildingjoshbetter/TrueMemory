@@ -2205,6 +2205,59 @@ class MaintenanceUnderForegroundLoad(unittest.TestCase):
         self.assertLess(result["p95"], 0.25)
 
 
+class ForegroundWriteRetry(unittest.TestCase):
+    def test_writes_outlast_a_writer_held_past_the_busy_timeout_then_give_up(self):
+        # Round v8 (review v6 L-v6-3): under saturated writers SQLite can starve
+        # one writer past its busy timeout. A foreground write retries the busy
+        # BEGIN, nothing written yet, for at most 30 s in all, then raises.
+        (result,) = run_scenario("""
+            seed(5, group="edge")
+            import model2vec
+            model2vec.StaticModel.from_pretrained = staticmethod(lambda *args, **kwargs: FakeEncoder())
+            stub_models()
+            from truememory import engine as engine_module, storage
+            storage.DEFAULT_BUSY_TIMEOUT_MS = engine_module.DEFAULT_BUSY_TIMEOUT_MS = 200
+            from truememory.client import Memory
+            memory = Memory(DB)  # What the MCP server and the hooks store through.
+            engine = memory._engine
+            first = memory.add("synthetic warm-up", user_id="alice")
+            def held(write, seconds=1.5):
+                holder = sqlite3.connect(DB, isolation_level=None, check_same_thread=False)
+                holder.execute("BEGIN IMMEDIATE")
+                timer = threading.Timer(seconds, lambda: (holder.rollback(), holder.close()))
+                timer.start()
+                started = time.monotonic()
+                try:
+                    outcome = write()
+                except sqlite3.OperationalError as error:
+                    outcome = str(error)
+                waited = time.monotonic() - started
+                timer.join()
+                return outcome, waited
+            count = lambda: engine.conn.execute("SELECT count(*) FROM messages").fetchone()[0]
+            before = count()
+            added, add_wait = held(lambda: memory.add("synthetic stored after the wait", user_id="alice"))
+            updated, update_wait = held(lambda: memory.update(added["id"], "synthetic updated after the wait"))
+            deleted, delete_wait = held(lambda: memory.delete(first["id"]))
+            content = engine.get(added["id"])["content"]
+            stored = count() - before
+            from truememory.tier_switch import writer
+            writer.FOREGROUND_BUSY_RETRY_SECONDS = 0.5
+            outcome, gave_up = held(lambda: memory.add("synthetic given up", user_id="alice") and "stored", 2.5)
+            after = count() - before
+            memory.add("synthetic stored again", user_id="alice")
+            emit(waits=[add_wait, update_wait, delete_wait], content=content, deleted=deleted, stored=stored,
+                 outcome=outcome, gave_up=gave_up, after=after, final=count() - before)
+            engine.close()
+        """, tier="edge")
+        self.assertTrue(all(wait > 1.0 for wait in result["waits"]), result)
+        self.assertEqual((result["content"], result["deleted"]), ("synthetic updated after the wait", True))
+        self.assertEqual(result["stored"], 0)  # One added, one deleted.
+        self.assertEqual(result["outcome"], "database is locked")
+        self.assertLess(result["gave_up"], 2.0)
+        self.assertEqual((result["after"], result["final"]), (0, 1))
+
+
 class DatabaseFileAccess(unittest.TestCase):
     def test_store_and_switch_never_open_database_files_outside_sqlite(self):
         # Every Python-level open (open, os.open, shutil copies) raises an "open"

@@ -1159,6 +1159,7 @@ class TrueMemoryEngine:
             self.conn, write_selection,
             model_id=pre_identity[1] if pre_embedding is not None else None,
             dimension=pre_identity[2] if pre_embedding is not None else None,
+            retry_busy=True,
         ):
             if self._has_style_vec:
                 from truememory.maintenance import _capture_style_append, _publish_style_append
@@ -1329,7 +1330,7 @@ class TrueMemoryEngine:
         self._ensure_connection()
         from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
         write_selection = capture_writer_selection(self.conn)
-        with self._write_lock, writer_transaction(self.conn, write_selection):
+        with self._write_lock, writer_transaction(self.conn, write_selection, retry_busy=True):
             deleted = delete_message(self.conn, memory_id, commit=False)
         if deleted:
             self._maybe_auto_consolidate()
@@ -1357,7 +1358,7 @@ class TrueMemoryEngine:
         from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
         write_selection = capture_writer_selection(self.conn)
 
-        with self._write_lock, writer_transaction(self.conn, write_selection):
+        with self._write_lock, writer_transaction(self.conn, write_selection, retry_busy=True):
             if user_id is not None:
                 # Get message IDs and episode IDs for this user before deleting
                 msg_ids = [
@@ -1710,6 +1711,7 @@ class TrueMemoryEngine:
                     self.conn, write_selection,
                     model_id=pre_identity[1] if pre_embedding is not None or pre_sep_embedding is not None else None,
                     dimension=pre_identity[2] if pre_embedding is not None or pre_sep_embedding is not None else None,
+                    retry_busy=True,
                 ):
                     if _expected_source is not None:
                         require_source(_expected_source)
