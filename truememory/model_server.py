@@ -1474,18 +1474,21 @@ class ModelServer:
             log.info("Released idle rerankers: %s", ", ".join(released))
         return released
 
-    def _before_inference_locked(self, deadline: _RequestDeadline, *, embedding: bool) -> None:
+    def _before_inference_locked(
+        self, deadline: _RequestDeadline, *, swap_embedding: bool = False, reranking: bool = False,
+    ) -> None:
         """Caller owns the inference and state locks before its first piece.
 
         Idle rerankers are released and a deferred MPS cache emptied here, so
-        continuous batches do not hold them back; a due embedding swap to MPS
-        runs before the batch's first piece.
+        continuous batches do not hold them back. An embed batch first swaps a
+        due CPU embedding model to MPS; a single query never pays that load
+        and leaves it to the next batch or retirer tick.
         """
         now = time.monotonic()
-        if not embedding:
+        if reranking:
             self._reranker_last_used = now  # this request is using the current reranker
         self._release_idle_rerankers_locked(now, owns_inference=True)
-        if embedding:
+        if swap_embedding:
             self._repromote_embed_locked(deadline)
 
     def _construction_slot(self, charged: int, deadline: _RequestDeadline | None):
@@ -2134,7 +2137,8 @@ class ModelServer:
                                     if enrolled:
                                         self._reserve_result_assembly((len(texts), target.dimension))
                                 deadline.check()
-                                self._before_inference_locked(deadline, embedding=True)
+                                self._before_inference_locked(
+                                    deadline, swap_embedding=len(texts) > self._FAST_LANE_MAX_TEXTS)
                                 model = (self._get_embed_model(tier, deadline=deadline) if target is None
                                          else self._get_prepared_embed_model(target, deadline))
                                 self._check_serving_embed_model(model, expected_target)
@@ -2263,7 +2267,7 @@ class ModelServer:
                                 deadline.check()
                                 reranker = self._get_reranker(model_name, deadline=deadline)
                                 self._check_serving_reranker(reranker, expected_name)
-                                self._before_inference_locked(deadline, embedding=False)
+                                self._before_inference_locked(deadline, reranking=True)
                                 order = self._rerank_global_order(reranker, pairs, limit, deadline)
                                 if order is not None:
                                     recovery_name = self._reranker_name
