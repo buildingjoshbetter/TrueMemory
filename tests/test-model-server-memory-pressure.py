@@ -230,8 +230,9 @@ def test_single_text_waits_for_bookkeeping_instead_of_cloning(plain, monkeypatch
 
 
 @pytest.mark.parametrize("platform, physical_gib, expected_gib", [
-    ("linux", 4, 2), ("linux", 8, 3), ("linux", 12, 3), ("linux", 16, 4), ("linux", 64, 8),
-    ("darwin", 4, 2), ("darwin", 8, 4), ("darwin", 12, 4), ("darwin", 16, 4), ("darwin", 64, 8),
+    ("linux", 4, 2), ("linux", 8, 3), ("linux", 12, 3), ("linux", 16, 4), ("linux", 32, 8), ("linux", 64, 8),
+    ("darwin", 4, 2), ("darwin", 8, 4), ("darwin", 12, 4), ("darwin", 16, 4), ("darwin", 18, 4.5),
+    ("darwin", 24, 6), ("darwin", 32, 6), ("darwin", 64, 6), ("darwin", 128, 6),
 ])
 def test_small_hosts_keep_room_for_base_tier_models(monkeypatch, platform, physical_gib, expected_gib):
     from truememory import memory_budget
@@ -239,8 +240,8 @@ def test_small_hosts_keep_room_for_base_tier_models(monkeypatch, platform, physi
     monkeypatch.setattr(ms, "psutil", sensor)
     monkeypatch.setitem(sys.modules, "psutil", sensor)
     monkeypatch.setattr(sys, "platform", platform)
-    assert ms._automatic_rss_budget_bytes() == expected_gib * 1024 ** 3
-    assert memory_budget.automatic_budget_bytes() == expected_gib * 1024 ** 3
+    assert ms._automatic_rss_budget_bytes() == int(expected_gib * 1024 ** 3)
+    assert memory_budget.automatic_budget_bytes() == int(expected_gib * 1024 ** 3)
 
 
 class HalfPrecisionModel:

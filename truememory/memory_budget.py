@@ -729,9 +729,10 @@ def automatic_budget_bytes() -> int:
         raise MemoryAdmissionRefused("Local physical-memory sensor invalid")
     budget = physical // 4
     if budget:
-        # Same small-host floor as the model server (float32 Qwen on macOS CPU).
-        floor = (4 if sys.platform == "darwin" else 3) * 1024**3
-        budget = min(8 * 1024**3, max(budget, min(physical // 2, floor)))
+        # Same small-host floor and ceiling as the model server (float32 Qwen on macOS CPU).
+        darwin = sys.platform == "darwin"
+        floor = (4 if darwin else 3) * 1024**3
+        budget = min((6 if darwin else 8) * 1024**3, max(budget, min(physical // 2, floor)))
     if not budget:
         raise MemoryAdmissionRefused("Local automatic budget is not positive")
     return budget

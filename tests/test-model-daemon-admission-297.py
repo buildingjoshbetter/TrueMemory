@@ -81,7 +81,7 @@ class DaemonAdmissionControls(unittest.TestCase):
 
     def test_macos_small_hosts_keep_room_for_float32_cpu_models(self) -> None:
         self.module.sys = types.SimpleNamespace(platform="darwin")
-        for physical_gib, expected_gib in [(4, 2), (8, 4), (12, 4), (16, 4), (32, 8)]:
+        for physical_gib, expected_gib in [(4, 2), (8, 4), (12, 4), (16, 4), (24, 6), (32, 6), (64, 6)]:
             with self.subTest(physical_gib=physical_gib):
                 self.physical.return_value = types.SimpleNamespace(total=physical_gib * GIB)
                 self.assertEqual(self.automatic()._max_rss_bytes, expected_gib * GIB)
