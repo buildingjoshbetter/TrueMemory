@@ -130,6 +130,46 @@ def test_interrupted_reembed_keeps_served_vectors_and_resumes(store: Path, monke
         conn.close()
 
 
+
+def test_interrupted_swap_keeps_a_vector_for_every_memory_and_resumes(store: Path, monkeypatch) -> None:
+    served = "vec_messages_edge"
+    # Short batches; a swap in one transaction never reaches a third check.
+    monkeypatch.setattr(vector_search, "_REEMBED_SWAP_BATCH", 16, raising=False)
+    real = vector_search._complete_shadow
+    checks = []
+
+    def check(conn, shadow, identity):
+        checks.append(shadow)
+        # First the pre-build check, then one per swap batch: stop in the third batch.
+        if shadow == served + "_reembed" and checks.count(shadow) == 4:
+            raise RuntimeError("synthetic interruption")
+        return real(conn, shadow, identity)
+
+    monkeypatch.setattr(vector_search, "_complete_shadow", check)
+    with patch("truememory.vector_search.get_model", return_value=_model(NEW, [])):
+        with pytest.raises(RuntimeError, match="synthetic interruption"):
+            _reembed(store, mark=("synthetic_reembed_done", "1"))
+    vectors = _served(store, served)
+    assert sorted(vectors) == list(range(1, MEMORIES + 1))  # Every memory still has a vector.
+    assert all(np.allclose(vectors[mid], NEW if mid < 32 else OLD) for mid in vectors)
+
+    monkeypatch.setattr(vector_search, "_complete_shadow", real)
+    rerun = []
+    with patch("truememory.vector_search.get_model", return_value=_model(NEW, rerun)):
+        _reembed(store, mark=("synthetic_reembed_done", "1"))
+    assert rerun == []  # Both shadows were complete: only the swap continued.
+    for table in (served, "vec_messages_sep_edge"):
+        vectors = _served(store, table)
+        assert sorted(vectors) == list(range(1, MEMORIES + 1))
+        assert all(np.allclose(vector, NEW) for vector in vectors.values())
+    assert not {served + "_reembed", "vec_messages_sep_edge_reembed"} & _tables(store)
+    conn = sqlite3.connect(store)
+    try:
+        assert conn.execute("SELECT value FROM metadata WHERE key='synthetic_reembed_done'").fetchone() == ("1",)
+        assert conn.execute("SELECT count(*) FROM metadata WHERE key LIKE 'vec_reembed_swapped:%'").fetchone() == (0,)
+    finally:
+        conn.close()
+
 CHILD = textwrap.dedent('''
     import json, os, sqlite3, sys, threading, time
     import numpy as np

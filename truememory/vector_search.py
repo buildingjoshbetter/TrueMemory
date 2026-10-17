@@ -2018,6 +2018,12 @@ def build_separation_vectors(
 
 # Suffix of the tables a re-embed builds before it replaces the served pair.
 _REEMBED_SUFFIX = "_reembed"
+# Metadata key prefix of a shadow's swap cursor: ids below it are swapped.
+_REEMBED_PROGRESS_PREFIX = "vec_reembed_swapped:"
+# Ids one swap transaction replaces. On 100k synthetic memories one
+# transaction for the whole swap held the writer 50 s; batches of 1024 held
+# it 0.27 s (median), 1.0 s at most.
+_REEMBED_SWAP_BATCH = 1024
 
 
 def _complete_shadow(conn: sqlite3.Connection, shadow: str, identity: tuple[str, int]):
@@ -2035,17 +2041,51 @@ def _complete_shadow(conn: sqlite3.Connection, shadow: str, identity: tuple[str,
     return manifest
 
 
+def _swap_shadow(conn: sqlite3.Connection, table: str, shadow: str) -> None:
+    """Replace the served rows a complete shadow covers, _REEMBED_SWAP_BATCH ids per writer transaction.
+
+    Each memory keeps a vector throughout: the old one until its batch, the
+    new one after. The batch cursor is stored with each batch, so an
+    interrupted swap continues where it stopped.
+    """
+    from truememory.rebuild_source import RebuildSourceChanged, rebuild_transaction
+
+    progress = _REEMBED_PROGRESS_PREFIX + shadow
+    row = conn.execute("SELECT value FROM metadata WHERE key = ?", (progress,)).fetchone()
+    start = int(row[0]) if row is not None else 0
+    while True:
+        with _lock:
+            identity = (_model_generation, EMBEDDING_MODEL, _embedding_dim)
+        # The model fence is taken before the writer, so waiting for it holds no lock.
+        with _foreground_model_fence(identity, blocking=True), rebuild_transaction(conn, write=True):
+            manifest = _complete_shadow(conn, shadow, identity[1:])
+            if manifest is None:
+                raise RebuildSourceChanged("Re-embed source changed before it was published; run it again")
+            high = manifest.source.high_id
+            if high is None or start > high:
+                return
+            end = min(start + _REEMBED_SWAP_BATCH, high + 1)
+            ids = [row[0] for row in conn.execute("SELECT id FROM messages WHERE id >= ? AND id < ?", (start, end))]
+            conn.executemany(f'DELETE FROM main."{table}" WHERE rowid = ?', [(mid,) for mid in ids])
+            for mid in ids:
+                vector = conn.execute(f'SELECT embedding FROM main."{shadow}" WHERE rowid = ?', (mid,)).fetchone()
+                if vector is not None:  # None: a non-finite embedding the build skipped.
+                    conn.execute(f'INSERT INTO main."{table}"(rowid, embedding) VALUES (?, ?)', (mid, vector[0]))
+            conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", (progress, str(end)))
+        start = end
+
+
 def reembed_served_vectors(conn: sqlite3.Connection, *, mark: tuple[str, str] | None = None) -> int:
-    """Re-embed every memory of the served pair without ever emptying it.
+    """Re-embed every memory of the served pair without ever emptying it, resumably.
 
     Each served table's replacement is built in a shadow vec0 table with the
     same definition; build_vectors resumes a shadow that an interrupted run
-    left. Then one writer transaction replaces the served rows the shadows
-    cover, drops the shadows and writes the ``mark`` metadata row. Until then
-    searches use the old vectors, and memories added meanwhile keep the
-    vectors their add stored.
+    left. The served rows are then replaced in short batches (_swap_shadow),
+    and a last transaction drops the shadows and writes the ``mark``
+    metadata row. Searches use the old vectors until their batch, and
+    memories added meanwhile keep the vectors their add stored.
     """
-    from truememory.rebuild_source import RebuildSourceChanged, manifest_key, rebuild_transaction
+    from truememory.rebuild_source import manifest_key, rebuild_transaction
 
     pairs = []
     for table, builder in ((_active_vec_table(conn), build_vectors),
@@ -2065,22 +2105,17 @@ def reembed_served_vectors(conn: sqlite3.Connection, *, mark: tuple[str, str] | 
         with _lock:
             identity = (EMBEDDING_MODEL, _embedding_dim)
         if _complete_shadow(conn, shadow, identity) is None:
+            # A new generation: no batch of it was swapped yet.
+            conn.execute("DELETE FROM metadata WHERE key = ?", (_REEMBED_PROGRESS_PREFIX + shadow,))
+            conn.commit()
             total += builder(conn, table_name=shadow)
-    with _lock:
-        identity = (_model_generation, EMBEDDING_MODEL, _embedding_dim)
-    # The model fence is taken before the writer, so waiting for it holds no lock.
-    with _foreground_model_fence(identity, blocking=True), rebuild_transaction(conn, write=True):
-        for table, shadow, _ in pairs:
-            manifest = _complete_shadow(conn, shadow, identity[1:])
-            if manifest is None:
-                raise RebuildSourceChanged("Re-embed source changed before it was published; run it again")
-            if manifest.source.high_id is not None:
-                conn.execute(f'DELETE FROM main."{table}" WHERE rowid <= ?', (manifest.source.high_id,))
-                conn.execute(f'INSERT INTO main."{table}"(rowid, embedding) '
-                             f'SELECT rowid, embedding FROM main."{shadow}"')
+    for table, shadow, _ in pairs:
+        _swap_shadow(conn, table, shadow)
+    with rebuild_transaction(conn, write=True):
         for _, shadow, _ in pairs:
             conn.execute(f'DROP TABLE main."{shadow}"')
-            conn.execute("DELETE FROM metadata WHERE key = ?", (manifest_key((shadow,)),))
+            conn.execute("DELETE FROM metadata WHERE key IN (?, ?)",
+                         (manifest_key((shadow,)), _REEMBED_PROGRESS_PREFIX + shadow))
         if mark is not None:
             conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", mark)
     return total
