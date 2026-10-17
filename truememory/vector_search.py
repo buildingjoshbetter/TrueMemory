@@ -1473,13 +1473,50 @@ def _skipped_vectorless(conn: sqlite3.Connection) -> tuple[str | None, list[int]
         return None, []
 
 
-def _first_gap(conn: sqlite3.Connection, table: str, start: int, skipped: list[int]) -> int | None:
+def _first_gap(conn: sqlite3.Connection, table: str, start: int, skipped: list[int],
+               *, end: int | None = None) -> int | None:
     import json
+    bound = "" if end is None else " AND m.id < ?"
     return conn.execute(
-        f'SELECT min(m.id) FROM messages m WHERE m.id >= ? AND m.id NOT IN (SELECT value FROM json_each(?)) '
+        f'SELECT min(m.id) FROM messages m WHERE m.id >= ?{bound} AND m.id NOT IN (SELECT value FROM json_each(?)) '
         f'AND NOT EXISTS (SELECT 1 FROM main."{table}" v WHERE v.rowid = m.id)',
-        (start, json.dumps(skipped)),
+        (start, json.dumps(skipped)) if end is None else (start, end, json.dumps(skipped)),
     ).fetchone()[0]
+
+
+# Ids one seed query scans while it holds the connection: a fully covered
+# chunk costs about 25 ms on 100k memories (the whole scan 0.5 to 0.8 s).
+_SEED_CHUNK = 4096
+
+
+def seed_backfill_cursor(conn: sqlite3.Connection, table: str, *, write_lock: object,
+                         stop: threading.Event | None = None) -> int | None:
+    """Record the first memory missing from ``table`` when no cursor exists.
+
+    Releases before note_vectorless stored memories without vectors and
+    without a cursor, so no backfill pass ever reached them. The scan holds
+    ``write_lock`` for one _SEED_CHUNK of ids at a time; ``stop`` ends it
+    between chunks. Returns the id recorded, or None.
+    """
+    from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
+
+    with write_lock:
+        if backfill_pending(conn):
+            return None
+        _, skipped = _skipped_vectorless(conn)
+        high = conn.execute("SELECT max(id) FROM messages").fetchone()[0]
+    start = 0
+    while high is not None and start <= high:
+        if stop is not None and stop.is_set():
+            return None
+        with write_lock:
+            gap = _first_gap(conn, table, start, skipped, end=start + _SEED_CHUNK)
+        if gap is not None:
+            with write_lock, writer_transaction(conn, capture_writer_selection(conn)):
+                note_vectorless(conn, gap)  # Keeps a lower cursor noted meanwhile.
+            return gap
+        start += _SEED_CHUNK
+    return None
 
 
 def vector_coverage(conn: sqlite3.Connection, tables: tuple[str, str]) -> dict:

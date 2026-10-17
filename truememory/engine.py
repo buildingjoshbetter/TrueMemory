@@ -401,6 +401,7 @@ class TrueMemoryEngine:
         self._backfill_stop = threading.Event()
         self._backfill_local = threading.local()  # Marks the backfill thread, which never reopens.
         self._auto_maintenance = auto_maintenance
+        self._backfill_gap_checked = False  # Legacy vector gaps are seeded once per Engine.
         self._runtime_initialized = False
         self._runtime_vector_generation = None
         self._runtime_vector_connection = None
@@ -1326,6 +1327,8 @@ class TrueMemoryEngine:
         operation = current_operation(self.conn) if self.conn is not None else None
         if operation is not None and getattr(operation, "_defer_maintenance", False):
             return
+        if not getattr(self, "_backfill_gap_checked", True):
+            self._schedule_backfill(seed_gap=True)
         if (not self._has_consolidation and not getattr(self, "_has_style_vec", False)) or self.conn is None:
             return
         if not self._write_lock.acquire(blocking=False):
@@ -3413,11 +3416,14 @@ class TrueMemoryEngine:
         return admitted_call(self, lambda: engine_serving_operation(self, models="optional"), body,
                              retry_writer=True, serialize=False)
 
-    def _schedule_backfill(self) -> None:
+    def _schedule_backfill(self, *, seed_gap: bool = False) -> None:
         """Start one background backfill pass when memories still lack vectors.
 
         Called once a search has its models loaded, so a store that receives no
         new adds still closes its gaps, without adding latency to the caller.
+        With ``seed_gap`` (the first maintenance wake of this Engine) the thread
+        only records, by SQL, the first gap that older releases left without a
+        cursor; later passes and adds then fill it.
         """
         guard = getattr(self, "_backfill_guard", None)
         if (guard is None or self.conn is None or not self._has_vectors
@@ -3425,22 +3431,45 @@ class TrueMemoryEngine:
             return
         from truememory.tier_switch.runtime import current_operation
         operation = current_operation(self.conn)
-        if operation is not None and not operation.models_ready:
+        if not seed_gap and operation is not None and not operation.models_ready:
             return
         with guard:
             if self._backfill_thread is not None and self._backfill_thread.is_alive():
                 return
             self._backfill_stop.clear()  # A previous close stopped the last pass.
-            from truememory.vector_search import backfill_pending
-            try:
-                with self._write_lock:
-                    if not backfill_pending(self.conn):
-                        return
-            except sqlite3.Error:
-                return
-            self._backfill_thread = threading.Thread(
-                target=self._background_backfill, daemon=True, name="truememory-vector-backfill")
+            if seed_gap:
+                if self._backfill_gap_checked:
+                    return
+                self._backfill_gap_checked = True
+                target = self._seed_backfill_gap
+            else:
+                from truememory.vector_search import backfill_pending
+                try:
+                    with self._write_lock:
+                        if not backfill_pending(self.conn):
+                            return
+                except sqlite3.Error:
+                    return
+                target = self._background_backfill
+            self._backfill_thread = threading.Thread(target=target, daemon=True, name="truememory-vector-backfill")
             self._backfill_thread.start()
+
+    def _seed_backfill_gap(self) -> None:
+        if self._backfill_stop.is_set():
+            return
+        self._backfill_local.running = True
+        try:
+            conn = self.conn
+            if conn is None:
+                return
+            from truememory.tier_switch.runtime import serving_operation
+            from truememory.vector_search import seed_backfill_cursor
+            with serving_operation(conn, connection_lock=self._write_lock, models="none") as operation:
+                seed_backfill_cursor(conn, operation.tables[0], write_lock=self._write_lock, stop=self._backfill_stop)
+        except Exception:
+            logger.debug("Vector backfill cursor was not seeded", exc_info=True)
+        finally:
+            self._backfill_local.running = False
 
     def _background_backfill(self) -> None:
         if self._backfill_stop.is_set():
