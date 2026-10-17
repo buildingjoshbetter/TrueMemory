@@ -6,6 +6,7 @@ Embedding leases, frozen targets and rerankers are deterministic stand-ins; the
 database, journal, job marker, source fences and serving gate are real.
 """
 
+import importlib.util
 import json
 import os
 import sqlite3
@@ -2256,6 +2257,35 @@ class ForegroundWriteRetry(unittest.TestCase):
         self.assertEqual(result["outcome"], "database is locked")
         self.assertLess(result["gave_up"], 2.0)
         self.assertEqual((result["after"], result["final"]), (0, 1))
+
+
+@unittest.skipUnless(importlib.util.find_spec("hdbscan"), "needs the clustering extra")
+class SmallStoreClustering(unittest.TestCase):
+    def test_tiny_stores_publish_no_clusters_instead_of_failing(self):
+        # Round v8: HDBSCAN raises ValueError ("k must be less than or equal to
+        # the number of training points") when a store has too few vectors for
+        # min_samples (hdbscan 0.8.42: one), so the clusters layer ended failed.
+        for count in (1, 3):
+            with self.subTest(memories=count):
+                (result,) = run_scenario(f"""
+                    seed({count}, group="edge")
+                    import model2vec
+                    model2vec.StaticModel.from_pretrained = staticmethod(lambda *args, **kwargs: FakeEncoder())
+                    stub_models()
+                    from truememory.engine import TrueMemoryEngine
+                    engine = TrueMemoryEngine(DB)
+                    report = engine.consolidate()
+                    conn = sqlite3.connect(DB)
+                    row = conn.execute("SELECT outcome, error_category, output_count FROM maintenance_layers "
+                                       "WHERE layer='clusters'").fetchone()
+                    noise = conn.execute("SELECT count(*), sum(noise) FROM message_clusters").fetchone()
+                    conn.close()
+                    engine.close()
+                    emit(clusters=report["cluster_messages"], row=row, noise=noise)
+                """, tier="edge")
+                self.assertTrue(result["clusters"].startswith("0 clusters in "), result)
+                self.assertEqual(result["row"], ["success_empty", None, 0])
+                self.assertEqual(result["noise"], [count, count])
 
 
 class DatabaseFileAccess(unittest.TestCase):

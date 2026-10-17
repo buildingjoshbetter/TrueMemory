@@ -324,7 +324,17 @@ def cluster_messages(
             metric="euclidean",  # on normalized vectors ≈ cosine
             cluster_selection_method=cluster_selection_method,
         )
-        labels = clusterer.fit_predict(normed)
+        try:
+            labels = clusterer.fit_predict(normed)
+        except ValueError:
+            if len(msg_ids) > min_samples:
+                raise
+            # No point can have min_samples neighbours, so none is a core point
+            # and all are noise until the store grows. HDBSCAN raises instead
+            # ("k must be less than or equal to the number of training
+            # points"): hdbscan 0.8.42 on one vector, builds that do not clamp
+            # min_samples to the input on up to min_samples vectors.
+            labels = [-1] * len(msg_ids)
         if len(labels) != len(msg_ids):
             raise ValueError("Clustering returned an incomplete assignment set")
 
