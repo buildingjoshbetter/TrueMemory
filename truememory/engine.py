@@ -81,6 +81,10 @@ _SQLITE_IN_CHUNK = 500
 MAX_CONTENT_LENGTH = 50_000
 
 
+class EngineClosedError(RuntimeError):
+    """A background thread found its Engine closed; it does not reopen one."""
+
+
 def _resolve_vec_tables(conn: sqlite3.Connection) -> tuple[str, str]:
     """Resolve the active tier's (vec, sep) table names for delete/update.
 
@@ -362,6 +366,11 @@ class TrueMemoryEngine:
         L5  Consolidation       (summaries + contradiction resolution + predictive coding)
     """
 
+    # Guards every Engine's maintenance attachments (a leaf lock).
+    _attachment_lock = threading.Lock()
+    # Names the Engine whose own background thread this is; it never reopens it.
+    _background_thread = threading.local()
+
     # ──────────────────────────────────────────────────────────────────────
     # Lifecycle
     # ──────────────────────────────────────────────────────────────────────
@@ -423,6 +432,35 @@ class TrueMemoryEngine:
         self._maintenance_coordinator = None
         self._maintenance_handle = None
         self._maintenance_pending_reason = "not_connected"
+        self._maintenance_attachments: dict = {}
+        try:
+            self._attach_maintenance()
+        except Exception:
+            # Same failure surfaces, categorized, on the first maintenance wake.
+            logger.debug("Maintenance attachment deferred", exc_info=True)
+
+    def _attach_maintenance(self, coordinator: MaintenanceCoordinator | None = None) -> None:
+        """Count this Engine as having its database open in this process."""
+        if coordinator is None:
+            if str(self.db_path) == ":memory:":
+                return
+            from truememory.maintenance import get_coordinator
+            coordinator = get_coordinator(self.db_path)
+        with TrueMemoryEngine._attachment_lock:
+            attachments = self.__dict__.setdefault("_maintenance_attachments", {})
+            if attachments.get(id(coordinator)) is not coordinator:
+                coordinator.attach(self)
+                attachments[id(coordinator)] = coordinator
+
+    def _detach_maintenance(self) -> None:
+        with TrueMemoryEngine._attachment_lock:
+            attachments = list(self.__dict__.get("_maintenance_attachments", {}).values())
+            self.__dict__["_maintenance_attachments"] = {}
+        for coordinator in attachments:
+            try:
+                coordinator.detach(self)
+            except RuntimeError:
+                pass  # Inherited across fork: this process runs no worker for it.
 
     # ──────────────────────────────────────────────────────────────────────
     # Auto-connect (production API)
@@ -457,6 +495,10 @@ class TrueMemoryEngine:
                 reason = replacement_reason()
                 if reason is None:
                     return
+                if getattr(TrueMemoryEngine._background_thread, "engine", None) is self:
+                    # Checked under the writer that close() holds to clear self.conn.
+                    raise EngineClosedError("A background pass does not reopen its Engine")
+            self._attach_maintenance()
             path = self.db_path if str(self.db_path) == ":memory:" else self.db_path.resolve()
             if reason != "missing" and getattr(self, "_reconnect_receipt", None) is not None:
                 replacement = self._reopen_initialized_connection(path, receipt=self._reconnect_receipt)
@@ -920,13 +962,22 @@ class TrueMemoryEngine:
                                     _db = self.db_path
                                     if str(_db) != ":memory:":
                                         self._nan_migration_in_progress = True
-                                        def _bg_wrapper(db_path):
+                                        from truememory.maintenance import get_coordinator
+                                        # Taken while this Engine is attached; see background_writes.
+                                        _coordinator = get_coordinator(_db)
+                                        def _bg_wrapper(db_path, coordinator):
+                                            from truememory.maintenance import MaintenanceClosedError, background_writes
                                             try:
-                                                _bg_reembed(db_path)
+                                                # Opens only the existing store; the last
+                                                # Engine.close() stops this run.
+                                                with background_writes(coordinator):
+                                                    _bg_reembed(db_path)
+                                            except MaintenanceClosedError:
+                                                logger.debug("Qwen3 NaN re-embed skipped: the database was closed")
                                             finally:
                                                 self._nan_migration_in_progress = False
                                         _t = threading.Thread(
-                                            target=_bg_wrapper, args=(_db,),
+                                            target=_bg_wrapper, args=(_db, _coordinator),
                                             daemon=True,
                                         )
                                         _t.start()
@@ -1266,6 +1317,7 @@ class TrueMemoryEngine:
             coordinator.refresh_capabilities()
             self._maintenance_coordinator = coordinator
             self._maintenance_handle = self.conn
+        self._attach_maintenance(coordinator)
         return coordinator
 
     def _maybe_auto_consolidate(self) -> None:
@@ -1869,6 +1921,7 @@ class TrueMemoryEngine:
                 candidate.close()
                 raise
 
+        self._attach_maintenance()
         self.conn = open_serving_connection(self.db_path, open_existing)
 
         from truememory.tier_switch.runtime import serving_operation
@@ -3392,10 +3445,13 @@ class TrueMemoryEngine:
     def _background_backfill(self) -> None:
         if self._backfill_stop.is_set():
             return
+        TrueMemoryEngine._background_thread.engine = self
         try:
             self.backfill_vectors(stop=self._backfill_stop)
         except Exception:
             logger.debug("Background vector backfill pass did not complete", exc_info=True)
+        finally:
+            TrueMemoryEngine._background_thread.engine = None
 
     def stop_background_backfill(self, timeout: float = 1.0) -> None:
         """Stop the background pass between encode calls or rows, waiting briefly.
@@ -3411,7 +3467,12 @@ class TrueMemoryEngine:
             thread.join(timeout=timeout)
 
     def close(self):
-        """Detach this engine; a shared worker retains its own connection."""
+        """Close this engine's connection and detach it from the database.
+
+        A worker shared with another open Engine in this process keeps its own
+        connection. Closing the last one stops this process's background
+        writes to the database first (MaintenanceCoordinator.detach).
+        """
         stop = getattr(self, "stop_background_backfill", None)  # Absent on synthetic engines.
         if stop is not None:
             stop()
@@ -3430,6 +3491,7 @@ class TrueMemoryEngine:
             self._runtime_vector_generation = None
             self._runtime_vector_connection = None
             self._reconnect_receipt = None
+        self._detach_maintenance()
 
     def __enter__(self):
         return self

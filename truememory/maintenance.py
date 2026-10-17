@@ -31,6 +31,7 @@ from truememory.storage import (
     _maintenance_trigger_definitions, _messages_have_rowid_id,
     _prepare_style_maintenance, _style_output_tracking_ready, create_db,
     begin_layer_publication, pop_layer_publication, push_layer_publication,
+    existing_connect_options, existing_database_opens,
 )
 
 
@@ -43,6 +44,10 @@ class MaintenanceUnavailableError(RuntimeError):
 
 class MaintenanceBusyError(RuntimeError):
     """Another operation owns maintenance for this database."""
+
+
+class MaintenanceClosedError(RuntimeError):
+    """Every Engine in this process closed the database; background work may not touch it."""
 
 
 class LayerUnavailableError(MaintenanceUnavailableError):
@@ -184,7 +189,7 @@ def _automatic_admission_locked(path: Path) -> _AutomaticAdmission | None:
         if (origin is not None and origin.coordinator() is coordinator
                 and origin.process_id == os.getpid() == coordinator._pid
                 and origin.path == path and _held_paths.get(path) == origin.descriptor
-                and coordinator._active and not coordinator._cancel.is_set()
+                and coordinator._active and (not coordinator._cancel.is_set() or coordinator._detaching)
                 and not origin.cancelled.is_set() and not origin.released.is_set()):
             return origin
     finally:
@@ -488,6 +493,172 @@ class MaintenanceRequest(NamedTuple):
                                include_style=self.include_style or older.include_style)
 
 
+# The last Engine.close() for a database waits this long for its background
+# runs to stop at a phase boundary. A cancelled pass on a small store ends well
+# inside it, and so does a publication waiting for the writer
+# (_PUBLISH_BUSY_TIMEOUT_MS). A longer build is fenced instead
+# (_BackgroundRun.fence), so a close never waits for one: in the worst case one
+# more in-flight SQLite call, or another connection's writer lock that call
+# already waits on (DEFAULT_BUSY_TIMEOUT_MS).
+_CLOSE_WAIT_SECONDS = 2.0
+# While fencing, interrupt the in-flight statement this often until it returns.
+_FENCE_INTERRUPT_SECONDS = 0.05
+_STATEMENT_KEYWORD = re.compile(r"\s*([A-Za-z]+)")
+
+
+class _BackgroundRun:
+    """One background thread's connections; once fenced, none of them runs a statement.
+
+    Each statement runs under the gate after checking the fence, so fence()
+    returns only when no statement is executing, and none starts afterwards.
+    BEGIN and SAVEPOINT only check: they cannot commit and may wait on another
+    connection's writer, which an interrupt does not end. ROLLBACK never
+    writes the database and always runs. Closing the last connection to a WAL
+    database checkpoints it, so after the fence a close skips that where
+    Python can (3.12+).
+    """
+
+    def __init__(self) -> None:
+        self._gate = threading.RLock()
+        self._closed = False
+        self._connections: list[sqlite3.Connection] = []
+        self._connections_lock = threading.Lock()
+        self.finished = threading.Event()
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def connection(self, *args: object, **kwargs: object) -> "_FencedConnection":
+        """sqlite3.connect factory for this run's connections."""
+        return _FencedConnection(*args, run=self, **kwargs)
+
+    @contextmanager
+    def statement(self, sql: object = None) -> Iterator[None]:
+        match = _STATEMENT_KEYWORD.match(sql) if isinstance(sql, str) else None
+        keyword = match.group(1).upper() if match else None
+        if keyword == "ROLLBACK":
+            yield
+            return
+        self._gate.acquire()
+        held = True
+        try:
+            if self._closed:
+                raise MaintenanceClosedError("The database was closed in this process")
+            if keyword in {"BEGIN", "SAVEPOINT"}:
+                self._gate.release()
+                held = False
+            yield
+        finally:
+            if held:
+                self._gate.release()
+
+    def call(self, function: Callable[[], object]) -> None:
+        """Run a write outside the run's connections as one statement; skip it once fenced."""
+        with self._gate:
+            if not self._closed:
+                function()
+
+    def _register(self, conn: sqlite3.Connection) -> None:
+        with self._connections_lock:
+            self._connections.append(conn)
+
+    def _unregister(self, conn: sqlite3.Connection) -> None:
+        with self._connections_lock:
+            if conn in self._connections:
+                self._connections.remove(conn)
+
+    def _close_connection(self, conn: "_FencedConnection") -> None:
+        self._unregister(conn)
+        with self._gate:
+            option = getattr(sqlite3, "SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE", None)
+            if self._closed and option is not None:
+                try:
+                    conn.setconfig(option, True)
+                except sqlite3.Error:
+                    pass  # Already closed.
+            sqlite3.Connection.close(conn)
+
+    def fence(self) -> None:
+        """Return once no statement of this run executes; refuse every later one."""
+        self._closed = True
+        while True:
+            with self._connections_lock:
+                for conn in self._connections:
+                    try:
+                        conn.interrupt()
+                    except sqlite3.ProgrammingError:
+                        pass  # Closed by its thread meanwhile.
+            if self._gate.acquire(timeout=_FENCE_INTERRUPT_SECONDS):
+                self._gate.release()
+                return
+
+
+class _FencedCursor(sqlite3.Cursor):
+    def execute(self, sql, parameters=(), /):
+        with self.connection._run.statement(sql):
+            return super().execute(sql, parameters)
+
+    def executemany(self, sql, seq_of_parameters, /):
+        with self.connection._run.statement(sql):
+            return super().executemany(sql, seq_of_parameters)
+
+    def executescript(self, sql_script, /):
+        with self.connection._run.statement():
+            return super().executescript(sql_script)
+
+
+class _FencedConnection(sqlite3.Connection):
+    """A background run's connection: no statement once the run is fenced.
+
+    sqlite3 commits from C on ``with conn:`` and runs Connection.execute on a
+    plain cursor, so every entry point is routed through the run here.
+    """
+
+    def __init__(self, *args: object, run: _BackgroundRun, **kwargs: object) -> None:
+        with run.statement():
+            super().__init__(*args, **kwargs)
+        self._run = run
+        run._register(self)
+
+    def cursor(self, factory=_FencedCursor):
+        if not (isinstance(factory, type) and issubclass(factory, _FencedCursor)):
+            raise TypeError("Background connections use fenced cursors")
+        return super().cursor(factory)
+
+    def execute(self, sql, parameters=(), /):
+        return self.cursor().execute(sql, parameters)
+
+    def executemany(self, sql, seq_of_parameters, /):
+        return self.cursor().executemany(sql, seq_of_parameters)
+
+    def executescript(self, sql_script, /):
+        return self.cursor().executescript(sql_script)
+
+    def commit(self) -> None:
+        with self._run.statement():
+            super().commit()
+
+    def backup(self, *args, **kwargs):
+        with self._run.statement():
+            return super().backup(*args, **kwargs)
+
+    if hasattr(sqlite3.Connection, "blobopen"):
+        def blobopen(self, *args, **kwargs):
+            with self._run.statement():
+                return super().blobopen(*args, **kwargs)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if exc_type is None:
+            self.commit()
+        else:
+            self.rollback()
+        return False
+
+    def close(self) -> None:
+        self._run._close_connection(self)
+
+
 class MaintenanceCoordinator:
     """One worker per canonical file, with ownership lasting through teardown."""
 
@@ -515,6 +686,13 @@ class MaintenanceCoordinator:
         self._active_initialization: tuple | None = None
         self._automatic_initialization = False
         self._admission_owner: _AutomaticAdmission | None = None
+        # Engines in this process with this database open. The last to detach
+        # stops the worker run and every other background run.
+        self._attached: weakref.WeakSet = weakref.WeakSet()
+        self._worker_run: _BackgroundRun | None = None
+        self._background_runs: set[_BackgroundRun] = set()
+        self._unattached = False  # The last attached Engine detached.
+        self._detaching = False  # Its detach is stopping the current run.
 
     def _check_process(self) -> None:
         if self._pid != os.getpid():
@@ -609,6 +787,8 @@ class MaintenanceCoordinator:
         self._active = True
         self._done.clear()
         self._cancel.clear()
+        self._detaching = False
+        self._worker_run = _BackgroundRun()
         self._status = "starting"
         self._error_category = None
         self._active_initialization = None
@@ -617,7 +797,11 @@ class MaintenanceCoordinator:
 
     def request_layers(self, *, threshold: int = 25, include_layers: bool = True,
                        include_style: bool = False, _initialization_receipt: tuple | None = None) -> bool:
-        """Coalesce a real foreground wake; no callback captures its engine."""
+        """Coalesce a real foreground wake; no callback captures its engine.
+
+        Refused after the last Engine detached until another attaches, so a
+        wake racing that close() starts nothing.
+        """
         self._check_process()
         if type(threshold) is not int or threshold < 1:
             raise ValueError("Maintenance threshold must be a positive integer")
@@ -628,6 +812,8 @@ class MaintenanceCoordinator:
             if self.path is None:
                 self._pending_initialization = None
                 self._status = "pending_in_memory"
+                return False
+            if self._unattached:
                 return False
             if self._active and self._cancel.is_set():
                 self._pending_initialization = None
@@ -681,13 +867,16 @@ class MaintenanceCoordinator:
             if self.path is None:
                 self._status = "pending_in_memory"
                 return False
-            if self._active:
+            if self._active or self._unattached:
                 return False
             self._reserve_locked()
         return self._launch(work)
 
     def _launch(self, work: Callable, pending: MaintenanceRequest | None = None, *, style_only: bool = False,
                 _initialization_receipt: tuple | None = None) -> bool:
+        with self._mutex:
+            worker_run = self._worker_run or _BackgroundRun()
+
         def busy() -> None:
             # Registry -> coordinator ordering closes the release/admission
             # race. No coordinator-mutex holder acquires the registry lock.
@@ -705,6 +894,7 @@ class MaintenanceCoordinator:
                 if self._pending is not None and self.path in _held_paths:
                     _owner_waiters[self.path] = (_held_paths[self.path], self._pending[0], self)
                 self._done.set()
+            worker_run.finished.set()
 
         fd = None
         handoff = None
@@ -733,9 +923,9 @@ class MaintenanceCoordinator:
                     worker_fd = handoff.pop("fd", None)
                 if worker_fd is not None:
                     if style_only:
-                        self._run(worker_fd, work, style_only=True)
+                        self._run(worker_fd, work, worker_run, style_only=True)
                     else:
-                        self._run(worker_fd, work)
+                        self._run(worker_fd, work, worker_run)
 
             worker = threading.Thread(target=run, daemon=True, name="truememory-maintenance")
             with self._mutex:
@@ -787,6 +977,7 @@ class MaintenanceCoordinator:
                 successor = self._take_pending_locked()
                 if successor is None:
                     self._done.set()
+            worker_run.finished.set()
             if successor is not None:
                 try:
                     self._launch_layers(successor)
@@ -794,7 +985,9 @@ class MaintenanceCoordinator:
                     pass
             raise
 
-    def _run(self, fd: int, work: Callable[[sqlite3.Connection, threading.Event], None], *, style_only: bool = False) -> None:
+    def _run(self, fd: int, work: Callable[[sqlite3.Connection, threading.Event], None],
+             run: _BackgroundRun | None = None, *, style_only: bool = False) -> None:
+        run = run or _BackgroundRun()
         conn = None
         outcome = "cancelled"
         error_category = None
@@ -802,7 +995,9 @@ class MaintenanceCoordinator:
         token = None
         try:
             token = self._begin_observation()
-            with _bind_owner(self.path):
+            # The worker's opens connect only to an existing file, and only
+            # through this run, which the last Engine.close() can fence.
+            with _bind_owner(self.path), existing_database_opens(run.connection):
                 try:
                     if not self._cancel.is_set():
                         if style_only:
@@ -824,13 +1019,15 @@ class MaintenanceCoordinator:
                     finally:
                         conn = None
                     from truememory.storage import checkpoint_if_due
-                    checkpoint_if_due(self.path)
+                    run.call(lambda: checkpoint_if_due(self.path))
         except BaseException as error:
             # Thread boundary: expose only a category, never source-bearing
             # exception text or a traceback through threading.excepthook.
             if isinstance(error, _StyleOpenRejected):
                 report = MaintenanceReport((), "SKIPPED (style-only)", error.result)
                 outcome, error_category = maintenance_report_status(report, self._cancel)
+            elif run.closed:
+                outcome, error_category, report = "cancelled", None, None
             else:
                 outcome = "cancelled" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "failed"
                 error_category = type(error).__name__[:64]
@@ -852,6 +1049,7 @@ class MaintenanceCoordinator:
                 pending = self._take_pending_locked()
                 if pending is None:
                     self._done.set()
+            run.finished.set()
             if pending is not None:
                 try:
                     self._launch_layers(pending)
@@ -869,6 +1067,7 @@ class MaintenanceCoordinator:
             self._active_initialization = self._pending_initialization = self._reserved_initialization = None
             self._automatic_initialization = False
             self._cancel.set()
+            self._detaching = False
             waiter = _owner_waiters.get(self.path)
             if waiter is not None and waiter[2] is self:
                 del _owner_waiters[self.path]
@@ -877,6 +1076,72 @@ class MaintenanceCoordinator:
         """Wait for this worker if requested; report whether teardown completed."""
         self._check_process()
         return self._done.wait(timeout)
+
+    def attach(self, engine: object) -> None:
+        """Count an Engine that has this database open in this process."""
+        self._check_process()
+        with self._mutex:
+            self._attached.add(engine)
+            self._unattached = False
+
+    def detach(self, engine: object, *, timeout: float | None = None) -> bool:
+        """Uncount an Engine; the last one stops this process's background writes.
+
+        While another Engine has the database open, the shared worker keeps
+        running with its own connection. After the last, the worker and every
+        other background run stop at their next phase boundary, waited for up
+        to ``timeout`` (default _CLOSE_WAIT_SECONDS). A run still going then
+        is fenced, so none writes the database after this returns. Returns
+        whether every run finished within the wait. Unlike cancel(), a fresh
+        open in this process may still wait for the automatic owner to leave.
+        """
+        self._check_process()
+        with _registry_lock, self._mutex:
+            self._attached.discard(engine)
+            if self.path is None or len(self._attached):
+                return True
+            self._pending = None
+            self._active_initialization = self._pending_initialization = self._reserved_initialization = None
+            self._automatic_initialization = False
+            self._cancel.set()
+            self._unattached = self._detaching = True
+            waiter = _owner_waiters.get(self.path)
+            if waiter is not None and waiter[2] is self:
+                del _owner_waiters[self.path]
+            runs = list(self._background_runs)
+            if self._active and self._worker_run is not None:
+                runs.append(self._worker_run)
+        deadline = time.monotonic() + (_CLOSE_WAIT_SECONDS if timeout is None else timeout)
+        finished = True
+        for run in runs:
+            if not run.finished.wait(max(0.0, deadline - time.monotonic())):
+                run.fence()
+                finished = False
+        return finished
+
+
+@contextmanager
+def background_writes(coordinator: MaintenanceCoordinator) -> Iterator[_BackgroundRun]:
+    """Run a background thread's database work as a run the last Engine.close() stops.
+
+    Take the coordinator while the spawning Engine is attached: one fetched
+    later may be a fresh object that never saw the close. Opens inside
+    connect only to an existing file. Refused after the last Engine in this
+    process detached, until another attaches.
+    """
+    coordinator._check_process()
+    run = _BackgroundRun()
+    with coordinator._mutex:
+        if coordinator._unattached:
+            raise MaintenanceClosedError("The database was closed in this process")
+        coordinator._background_runs.add(run)
+    try:
+        with existing_database_opens(run.connection):
+            yield run
+    finally:
+        with coordinator._mutex:
+            coordinator._background_runs.discard(run)
+        run.finished.set()
 
 
 def get_coordinator(db_path: str | os.PathLike[str]) -> MaintenanceCoordinator:
@@ -1986,7 +2251,7 @@ def _open_style_database(path: Path, cancel: threading.Event | None = None) -> s
     progress = False
     try:
         from truememory.storage import configure_connection
-        conn = configure_connection(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True))
+        conn = configure_connection(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, **existing_connect_options()))
         conn.row_factory = None
         for sql in (f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}", "PRAGMA foreign_keys=ON",
                     "PRAGMA synchronous=NORMAL", "PRAGMA cache_size=-64000", "PRAGMA mmap_size=268435456"):

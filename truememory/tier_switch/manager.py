@@ -66,21 +66,24 @@ def _get_db_path() -> Path:
     return Path(os.environ.get("TRUEMEMORY_DB_PATH") or os.environ.get("TRUEMEMORY_DB") or _TRUEMEMORY_DIR / "memories.db")
 
 
-def _open_db(db_path: Path | None = None, *, initialize: bool = False) -> sqlite3.Connection:
-    """Validate existing journal storage before any connection or schema writes."""
+def _open_db(db_path: Path | None = None, *, initialize: bool = False, create: bool = True) -> sqlite3.Connection:
+    """Validate existing journal storage before any connection or schema writes.
+
+    ``create=False`` initializes only a store that already has a schema.
+    """
     from truememory.storage import configure_connection
     from truememory.storage import DEFAULT_BUSY_TIMEOUT_MS, _validate_db_path
     from truememory.tier_switch.activation import read_activation_state
 
     path = Path(_validate_db_path(db_path or _get_db_path()))
-    conn = configure_connection(sqlite3.connect(path, check_same_thread=False) if initialize else
+    conn = configure_connection(sqlite3.connect(path, check_same_thread=False) if initialize and create else
                      sqlite3.connect(path.absolute().as_uri() + "?mode=rw", uri=True, check_same_thread=False))
     try:
         objects = conn.execute(
             "SELECT 1 FROM main.sqlite_master WHERE name NOT LIKE 'sqlite_%' LIMIT 1",
         ).fetchone()
         if objects is None:
-            if not initialize:
+            if not initialize or not create:
                 raise TierSwitchUnsupportedError("Database has not been initialized")
             conn.close()
             from truememory.storage import create_db
@@ -202,7 +205,9 @@ class RebuildManager:
                     return 0
                 if job_lock is None:
                     job_lock = self._acquire_job_lock(path)
-                conn = _open_db(path, initialize=True)
+                # The bootstrap proved a populated store. The background staging
+                # thread runs this too, and must not recreate a store deleted since.
+                conn = _open_db(path, initialize=True, create=False)
                 prepared = self._prepare_job(conn, target_tier, force, backup_path=backup_path, job_lock=job_lock)
                 conn.close()
                 conn = None

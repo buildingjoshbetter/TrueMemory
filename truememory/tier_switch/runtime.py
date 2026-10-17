@@ -1274,8 +1274,9 @@ def _open_serving_connection_at_path(
     with maintenance_owner(path):
         if not path.exists():
             return legacy_factory(path)
-        from truememory.storage import configure_connection
-        conn = configure_connection(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, check_same_thread=False))
+        from truememory.storage import configure_connection, existing_connect_options
+        conn = configure_connection(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, check_same_thread=False,
+                                                    **existing_connect_options()))
         try:
             present = conn.execute(
                 "SELECT 1 FROM main.sqlite_master WHERE name='metadata' COLLATE NOCASE"

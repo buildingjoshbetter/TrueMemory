@@ -20,7 +20,8 @@ import sqlite3
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -913,6 +914,39 @@ def configure_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
     return conn
 
 
+_existing_opens = threading.local()
+
+
+@contextmanager
+def existing_database_opens(factory: Callable[..., sqlite3.Connection] | None = None) -> Iterator[None]:
+    """Make this thread's database opens fail on a missing file instead of creating it.
+
+    For background threads, whose store already exists: a store deleted
+    under them must stay deleted. create_db, its pre-migration backup source
+    and the serving and style openers honor it. ``factory`` (a
+    sqlite3.Connection subclass) builds those connections.
+    """
+    previous = getattr(_existing_opens, "scope", None)
+    _existing_opens.scope = (factory,)
+    try:
+        yield
+    finally:
+        _existing_opens.scope = previous
+
+
+def existing_connect_options() -> dict:
+    """Extra sqlite3.connect options inside existing_database_opens, else none."""
+    scope = getattr(_existing_opens, "scope", None)
+    return {} if scope is None or scope[0] is None else {"factory": scope[0]}
+
+
+def _connect_target(db_path: str | Path) -> tuple[str, dict]:
+    """sqlite3.connect arguments that create a missing file only outside existing_database_opens."""
+    if getattr(_existing_opens, "scope", None) is None or str(db_path) == ":memory:":
+        return str(db_path), {}
+    return Path(str(db_path)).absolute().as_uri() + "?mode=rw", {"uri": True, **existing_connect_options()}
+
+
 def wal_checkpoint_stats() -> dict:
     with _wal_lock:
         return dict(_wal_stats, affected=WAL_RESET_GUARD, sqlite_version=sqlite3.sqlite_version)
@@ -1016,7 +1050,8 @@ def _backup_database(db_path: Path) -> Path | None:
     # restore is a single `cp backup db` with no sibling files.
     src = dst = None
     try:
-        src = configure_connection(sqlite3.connect(str(db_path)))
+        target, options = _connect_target(db_path)
+        src = configure_connection(sqlite3.connect(target, **options))
         dst = sqlite3.connect(str(backup))
         with dst:
             src.backup(dst)
@@ -1213,7 +1248,8 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
     # misleading raw error on the first WAL write.
     _check_dir_writable(db_path)
 
-    conn = configure_connection(sqlite3.connect(str(db_path), check_same_thread=False))
+    target, options = _connect_target(db_path)
+    conn = configure_connection(sqlite3.connect(target, check_same_thread=False, **options))
     # S1-2 (#688): the DB file holds every stored memory (PII). Restrict it to
     # owner-only so it isn't world-readable on a multi-user host. No-op on
     # Windows (POSIX modes don't apply) and for :memory:.

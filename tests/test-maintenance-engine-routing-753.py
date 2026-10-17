@@ -183,10 +183,13 @@ class RoutingFixture(ADAPTERS["AdapterFixture"]):
 
 
 class TestCoordinatorHandoff(RoutingFixture):
-    def test_local_owner_retains_one_pending_wake_after_last_engine_close(self) -> None:
+    def test_local_owner_retains_one_pending_wake_after_engine_close_while_another_is_open(self) -> None:
         path = self.path.with_name("synthetic-detached.sqlite")
         engine = self.engine_module.TrueMemoryEngine(path)
         engine.conn, engine.ready = STORAGE.create_db(path), True
+        # The wake is shared: another Engine still has the database open.
+        other = self.engine_module.TrueMemoryEngine(path)
+        self.addCleanup(other.close)
         coordinator = engine._get_maintenance_coordinator()
         reference, engine_reference = weakref.ref(coordinator), weakref.ref(engine)
         entered, release = threading.Event(), threading.Event()
@@ -218,6 +221,30 @@ class TestCoordinatorHandoff(RoutingFixture):
                 if reference() is not None:
                     self.assertTrue(reference().wait(3))
         self.assertEqual(observed, [37])
+
+    def test_last_engine_close_drops_pending_wake_behind_local_owner(self) -> None:
+        path = self.path.with_name("synthetic-last-close.sqlite")
+        engine = self.engine_module.TrueMemoryEngine(path)
+        engine.conn, engine.ready = STORAGE.create_db(path), True
+        coordinator = engine._get_maintenance_coordinator()
+        observed = []
+
+        def work(conn, owner, **kwargs):
+            observed.append(kwargs["threshold"])
+            return self.fake_report()
+
+        with patch.object(MAINTENANCE, "run_engine_maintenance", work):
+            with MAINTENANCE.maintenance_owner(path):
+                coordinator.request_layers(threshold=31)
+                self.assertEqual(len(MAINTENANCE._owner_waiters), 1)
+                engine.close()
+                # No Engine has the database open: nothing may write it later.
+                self.assertEqual(MAINTENANCE._owner_waiters, {})
+                self.assertFalse(coordinator.request_layers(threshold=37))
+            # The owner's release notified the coordinator synchronously.
+            self.assertTrue(coordinator.wait(0))
+        self.assertEqual(observed, [])
+        self.assertFalse(coordinator.snapshot()["active"])
 
     def test_cancel_releases_local_waiter_and_admission_cannot_restore_it(self) -> None:
         original = MAINTENANCE._acquire_owner
