@@ -262,6 +262,23 @@ def test_the_next_batch_swaps_before_its_first_piece(server):
     assert builds.encodes[encodes:] == ["mps"] and "embed" not in instance._sticky_cpu
 
 
+def test_a_single_query_never_pays_the_swap(server):
+    """A contended query that falls through to the main model still skips the MPS load."""
+    instance, builds = server
+    _degrade_with_clone(instance, builds)
+    instance._embed_cpu_since -= instance._embed_repromote_after()
+    batch = Batch(instance)
+    results = []
+    query = threading.Thread(target=lambda: results.append(_embed(instance, ["synthetic hook query"])))
+    query.start()
+    time.sleep(0.2)  # the query is waiting briefly for the main model
+    batch.end()
+    query.join(5)
+    assert results and results[0]["ok"] and builds.encodes[-1] == "cpu"
+    assert "embed" in instance._sticky_cpu and builds.devices == ["mps", "cpu"]
+    assert _embed(instance, ["a", "b"])["ok"] and builds.encodes[-1] == "mps"
+
+
 def test_a_running_batch_defers_the_retirer_to_its_next_request(server):
     instance, builds = server
     _degrade_with_clone(instance, builds)
