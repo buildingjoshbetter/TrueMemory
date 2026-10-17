@@ -81,10 +81,6 @@ _SQLITE_IN_CHUNK = 500
 MAX_CONTENT_LENGTH = 50_000
 
 
-class EngineClosedError(RuntimeError):
-    """A background thread found its Engine closed; it does not reopen one."""
-
-
 def _resolve_vec_tables(conn: sqlite3.Connection) -> tuple[str, str]:
     """Resolve the active tier's (vec, sep) table names for delete/update.
 
@@ -366,11 +362,6 @@ class TrueMemoryEngine:
         L5  Consolidation       (summaries + contradiction resolution + predictive coding)
     """
 
-    # Guards every Engine's maintenance attachments (a leaf lock).
-    _attachment_lock = threading.Lock()
-    # Names the Engine whose own background thread this is; it never reopens it.
-    _background_thread = threading.local()
-
     # ──────────────────────────────────────────────────────────────────────
     # Lifecycle
     # ──────────────────────────────────────────────────────────────────────
@@ -401,6 +392,7 @@ class TrueMemoryEngine:
         self._backfill_guard = threading.Lock()
         self._backfill_thread: threading.Thread | None = None
         self._backfill_stop = threading.Event()
+        self._backfill_local = threading.local()  # Marks the backfill thread, which never reopens.
         self._runtime_initialized = False
         self._runtime_vector_generation = None
         self._runtime_vector_connection = None
@@ -441,26 +433,16 @@ class TrueMemoryEngine:
 
     def _attach_maintenance(self, coordinator: MaintenanceCoordinator | None = None) -> None:
         """Count this Engine as having its database open in this process."""
+        from truememory.maintenance import attach_engine, get_coordinator
         if coordinator is None:
             if str(self.db_path) == ":memory:":
                 return
-            from truememory.maintenance import get_coordinator
             coordinator = get_coordinator(self.db_path)
-        with TrueMemoryEngine._attachment_lock:
-            attachments = self.__dict__.setdefault("_maintenance_attachments", {})
-            if attachments.get(id(coordinator)) is not coordinator:
-                coordinator.attach(self)
-                attachments[id(coordinator)] = coordinator
+        attach_engine(self, coordinator)
 
     def _detach_maintenance(self) -> None:
-        with TrueMemoryEngine._attachment_lock:
-            attachments = list(self.__dict__.get("_maintenance_attachments", {}).values())
-            self.__dict__["_maintenance_attachments"] = {}
-        for coordinator in attachments:
-            try:
-                coordinator.detach(self)
-            except RuntimeError:
-                pass  # Inherited across fork: this process runs no worker for it.
+        from truememory.maintenance import detach_engine
+        detach_engine(self)
 
     # ──────────────────────────────────────────────────────────────────────
     # Auto-connect (production API)
@@ -495,10 +477,12 @@ class TrueMemoryEngine:
                 reason = replacement_reason()
                 if reason is None:
                     return
-                if getattr(TrueMemoryEngine._background_thread, "engine", None) is self:
+                if getattr(getattr(self, "_backfill_local", None), "running", False):
                     # Checked under the writer that close() holds to clear self.conn.
                     raise EngineClosedError("A background pass does not reopen its Engine")
-            self._attach_maintenance()
+            attach = getattr(self, "_attach_maintenance", None)  # Absent on synthetic engines.
+            if attach is not None:
+                attach()
             path = self.db_path if str(self.db_path) == ":memory:" else self.db_path.resolve()
             if reason != "missing" and getattr(self, "_reconnect_receipt", None) is not None:
                 replacement = self._reopen_initialized_connection(path, receipt=self._reconnect_receipt)
@@ -1317,7 +1301,9 @@ class TrueMemoryEngine:
             coordinator.refresh_capabilities()
             self._maintenance_coordinator = coordinator
             self._maintenance_handle = self.conn
-        self._attach_maintenance(coordinator)
+        attach = getattr(self, "_attach_maintenance", None)  # Absent on synthetic engines.
+        if attach is not None:
+            attach(coordinator)
         return coordinator
 
     def _maybe_auto_consolidate(self) -> None:
@@ -1921,7 +1907,6 @@ class TrueMemoryEngine:
                 candidate.close()
                 raise
 
-        self._attach_maintenance()
         self.conn = open_serving_connection(self.db_path, open_existing)
 
         from truememory.tier_switch.runtime import serving_operation
@@ -3445,13 +3430,13 @@ class TrueMemoryEngine:
     def _background_backfill(self) -> None:
         if self._backfill_stop.is_set():
             return
-        TrueMemoryEngine._background_thread.engine = self
+        self._backfill_local.running = True
         try:
             self.backfill_vectors(stop=self._backfill_stop)
         except Exception:
             logger.debug("Background vector backfill pass did not complete", exc_info=True)
         finally:
-            TrueMemoryEngine._background_thread.engine = None
+            self._backfill_local.running = False
 
     def stop_background_backfill(self, timeout: float = 1.0) -> None:
         """Stop the background pass between encode calls or rows, waiting briefly.
@@ -3491,7 +3476,9 @@ class TrueMemoryEngine:
             self._runtime_vector_generation = None
             self._runtime_vector_connection = None
             self._reconnect_receipt = None
-        self._detach_maintenance()
+        detach = getattr(self, "_detach_maintenance", None)  # Absent on synthetic engines.
+        if detach is not None:
+            detach()
 
     def __enter__(self):
         return self
@@ -3503,3 +3490,7 @@ class TrueMemoryEngine:
         status = "ready" if self.ready else "not ready"
         msg_count = self.stats.get("message_count", "?")
         return f"<TrueMemoryEngine db={self.db_path.name} msgs={msg_count} {status}>"
+
+
+class EngineClosedError(RuntimeError):
+    """A background thread found its Engine closed; it does not reopen one."""

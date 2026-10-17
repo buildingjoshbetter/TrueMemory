@@ -40,6 +40,13 @@ def definitions(path: str, names: set[str], namespace: dict, *, methods: bool = 
                      **namespace}
         # Lock release goes through the fixture's own os.close stub.
         namespace.setdefault("release_file_lock", lambda fd, stub=namespace: stub["os"].close(fd))
+    if path == "maintenance.py" and "MaintenanceCoordinator" in names:
+        # Each worker run and its fenced connections; opens are not existing-only here.
+        names = names | {"MaintenanceClosedError", "_BackgroundRun", "_FencedCursor", "_FencedConnection",
+                         "_CLOSE_WAIT_SECONDS", "_FENCE_INTERRUPT_SECONDS", "_STATEMENT_KEYWORD"}
+        namespace = {"re": __import__("re"), "time": time, "sqlite3": sqlite3,
+                     "contextmanager": contextlib.contextmanager,
+                     "existing_database_opens": lambda factory=None: contextlib.nullcontext(), **namespace}
     tree = ast.parse((ROOT / "truememory" / path).read_text(encoding="utf-8"))
     if methods:
         cls = next(node for node in tree.body if isinstance(node, ast.ClassDef))
@@ -545,7 +552,7 @@ class TestPublicBoundaries(unittest.TestCase):
         # they never go through the legacy schema factory.
         self.modules["storage"] = types.SimpleNamespace(
             DEFAULT_BUSY_TIMEOUT_MS=10000, _apply_schema_migrations=lambda conn, path: migrated.append((conn, path)),
-            configure_connection=lambda conn: conn)
+            configure_connection=lambda conn: conn, existing_connect_options=dict)
         # This synthetic store has no native vec0 pair; journal coherence is
         # covered by the liveness suite on real create_db databases.
         coherence = []

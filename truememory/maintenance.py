@@ -511,15 +511,16 @@ class _BackgroundRun:
 
     Each statement runs under the gate after checking the fence, so fence()
     returns only when no statement is executing, and none starts afterwards.
-    BEGIN and SAVEPOINT only check: they cannot commit and may wait on another
-    connection's writer, which an interrupt does not end. ROLLBACK never
-    writes the database and always runs. Closing the last connection to a WAL
-    database checkpoints it, so after the fence a close skips that where
+    Statements never nest (no Python SQL callbacks), so the gate is a plain
+    lock. BEGIN and SAVEPOINT only check: they cannot commit and may wait on
+    another connection's writer, which an interrupt does not end. ROLLBACK
+    never writes the database and always runs. Closing the last connection to
+    a WAL database checkpoints it, so after the fence a close skips that where
     Python can (3.12+).
     """
 
     def __init__(self) -> None:
-        self._gate = threading.RLock()
+        self._gate = threading.Lock()
         self._closed = False
         self._connections: list[sqlite3.Connection] = []
         self._connections_lock = threading.Lock()
@@ -554,7 +555,7 @@ class _BackgroundRun:
                 self._gate.release()
 
     def call(self, function: Callable[[], object]) -> None:
-        """Run a write outside the run's connections as one statement; skip it once fenced."""
+        """Run a write that uses none of the run's connections as one statement; skip it once fenced."""
         with self._gate:
             if not self._closed:
                 function()
@@ -1118,6 +1119,27 @@ class MaintenanceCoordinator:
                 run.fence()
                 finished = False
         return finished
+
+
+def attach_engine(engine: object, coordinator: MaintenanceCoordinator) -> None:
+    """Record that ``engine`` has the coordinator's database open (idempotent)."""
+    with _registry_lock:
+        attachments = engine.__dict__.setdefault("_maintenance_attachments", {})
+        if attachments.get(id(coordinator)) is not coordinator:
+            coordinator.attach(engine)
+            attachments[id(coordinator)] = coordinator
+
+
+def detach_engine(engine: object) -> None:
+    """Detach ``engine`` everywhere; the last Engine stops background writes (see detach)."""
+    with _registry_lock:
+        attachments = list(engine.__dict__.get("_maintenance_attachments", {}).values())
+        engine.__dict__["_maintenance_attachments"] = {}
+    for coordinator in attachments:
+        try:
+            coordinator.detach(engine)
+        except RuntimeError:
+            pass  # Inherited across fork: this process runs no worker for it.
 
 
 @contextmanager
