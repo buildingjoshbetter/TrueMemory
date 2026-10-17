@@ -323,6 +323,9 @@ def test_compact_snapshot_inlines_session_id_and_timestamp(tmp_path, monkeypatch
     captured_calls = []
 
     class FakeMemory:
+        def __init__(self, path=None, **kwargs):
+            pass
+
         def add(self, content, user_id=None, **kwargs):
             captured_calls.append({"content": content, "user_id": user_id, "kwargs": kwargs})
             return {"id": 1}
