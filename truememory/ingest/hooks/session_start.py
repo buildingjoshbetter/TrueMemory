@@ -868,9 +868,10 @@ def _count_directives(memory, user_id: str = "") -> int:
     """Total stored directives in scope (cheap COUNT on idx_messages_directive)."""
     try:
         scope_sql, params = _directive_scope_sql(user_id)
-        row = memory._engine.conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE directive = 1" + scope_sql, params
-        ).fetchone()
+        with memory._engine._write_lock:  # The backfill thread shares this connection.
+            row = memory._engine.conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE directive = 1" + scope_sql, params
+            ).fetchone()
         return int(row[0]) if row else 0
     except Exception:
         log.warning("Failed to count directives", exc_info=True)
@@ -894,7 +895,8 @@ def _load_directives(memory, user_id: str = "") -> list[dict]:
         # truncation is detectable) then re-sort ascending for stable display.
         query += " ORDER BY id DESC LIMIT ?"
         params.append(DIRECTIVE_LIMIT + 1)
-        rows = memory._engine.conn.execute(query, params).fetchall()
+        with memory._engine._write_lock:
+            rows = memory._engine.conn.execute(query, params).fetchall()
         if len(rows) > DIRECTIVE_LIMIT:
             log.warning(
                 "Directive injection capped at %d (more are stored). Prune "

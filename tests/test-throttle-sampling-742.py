@@ -185,15 +185,28 @@ class TestThrottleSampling(unittest.TestCase):
         self.assertEqual(self.observe.call_count, 116)
         self.assertLessEqual(max(self.clock.sleeps), 0.05 + 16 * 0.02)
 
-    def test_unsupported_channels_are_visible_and_no_telemetry_cannot_enable_ramp(self) -> None:
+    def test_explicitly_unsupported_channels_are_visible_and_ramp_on_pacing(self) -> None:
+        # Linux/Windows hosts have no applicable channel. Pinning them at one
+        # message per commit made large rebuilds exceed the job deadline.
         self.warmup_before_first_sample()
         unsupported = {channel: {"status": "unsupported", "required": False} for channel in readings()}
-        for seconds in (0, 10, 20, 140):
-            size, metrics = self.sample_at(seconds, unsupported)
-            self.assertEqual(size, 1)
-            self.assertEqual(metrics["good_streak"], 0)
+        sizes = [self.sample_at(seconds, unsupported)[0] for seconds in range(0, 150, 10)]
+        self.assertEqual(sizes[:2], [1, 1])
+        self.assertEqual(sizes[-1], 5)
+        self.assertEqual(sizes, sorted(sizes))
+        metrics = self.sample_at(150, unsupported)[1]
         self.assertEqual(set(metrics["sensor_status"].values()), {"unsupported"})
         self.assertIsNone(metrics["thermal_limit"])
+
+    def test_unknown_required_channels_still_cannot_enable_ramp(self) -> None:
+        self.warmup_before_first_sample()
+        unknown = {channel: {"status": "unknown"} for channel in readings()}
+        for seconds in (0, 10, 20, 140):
+            size, metrics = self.sample_at(seconds, unknown)
+            self.assertEqual(size, 1)
+            self.assertEqual(metrics["good_streak"], 0)
+        partly = dict(unknown, mps_level={"status": "unsupported", "required": False})
+        self.assertEqual(self.sample_at(150, partly)[0], 1)
 
     def test_cpu_can_use_real_thermal_evidence_without_probing_mps(self) -> None:
         throttler = self.throttler_module.DynamicThrottler("cpu")

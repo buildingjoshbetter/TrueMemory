@@ -17,6 +17,8 @@ import json
 import logging
 import os
 import sqlite3
+import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -654,6 +656,39 @@ def _initialize_maintenance_tracking(conn: sqlite3.Connection) -> None:
 DEFAULT_BUSY_TIMEOUT_MS = 10_000
 
 
+# The maintenance runner builds a layer in a read snapshot and registers a hook
+# here for the builder's connection. A builder calls begin_layer_publication
+# right before its first write, outside any savepoint of its own: the runner then
+# trades the snapshot for SQLite's writer, so the compute never holds the lock.
+_layer_publication = threading.local()
+
+
+def push_layer_publication(conn: sqlite3.Connection, hook: Callable[[bool], int]) -> None:
+    hooks = _layer_publication.__dict__.setdefault("hooks", [])
+    hooks.append((conn, hook))
+
+
+def pop_layer_publication(conn: sqlite3.Connection) -> None:
+    hooks = _layer_publication.__dict__.get("hooks", [])
+    if not hooks or hooks[-1][0] is not conn:
+        raise RuntimeError("Layer publication hooks are unbalanced")
+    hooks.pop()
+
+
+def begin_layer_publication(conn: sqlite3.Connection, *, appends: bool = True) -> int | None:
+    """Take the writer for a runner-built layer; None outside such a build.
+
+    Inside a build, returns the highest message id the build's snapshot could
+    see. With ``appends`` the runner accepts messages appended since the
+    snapshot (their ids are all higher), so a builder's own source check must
+    compare only ids up to this watermark. Without it any change defers.
+    """
+    for connection, hook in reversed(getattr(_layer_publication, "hooks", ())):
+        if connection is conn:
+            return hook(appends)
+    return None
+
+
 class DatabaseOpenError(sqlite3.DatabaseError):
     """Raised by :func:`create_db` with an actionable, user-facing message.
 
@@ -815,6 +850,149 @@ def newest_backup(db_path: str | Path) -> Path | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# SQLite WAL-reset bug guard
+# ---------------------------------------------------------------------------
+# SQLite 3.7.0 through 3.51.2 (fixed in 3.51.3, backported to 3.50.7 and
+# 3.44.6) can lose committed pages when a checkpoint starts while another
+# connection's commit restarts the WAL: the checkpoint misses the restart and
+# marks the new frames as already copied (https://sqlite.org/wal.html).
+#
+# A WAL restart only happens in a writer holding SQLite's WAL write lock. On an
+# affected build no TrueMemory connection checkpoints automatically; a
+# checkpoint runs only while a sibling connection holds that lock through
+# BEGIN IMMEDIATE, so no writer in any process can restart the WAL during it.
+# Closing the last connection still checkpoints; SQLite does that only after
+# taking an EXCLUSIVE lock on the database file, which every open connection
+# blocks, so no writer can exist then.
+
+# Guarded connections set journal_size_limit=0, so the writer that restarts the
+# WAL after a complete checkpoint truncates it to what it has just written: the
+# file size is the WAL's current length. From SQLite's default autocheckpoint
+# size (1000 pages of 4 KiB) a commit tries a checkpoint at most every 0.2 s;
+# past 16 MiB on every commit, since writers keep winning the lock; past the
+# 64 MiB cap the committing writer waits up to a second for it.
+_WAL_LIMIT_BYTES = 4 * 1024 * 1024
+_WAL_INTERVAL_SECONDS = 0.2
+_WAL_HOLD_SECONDS = 0.05
+_WAL_FORCE_BYTES = 4 * _WAL_LIMIT_BYTES
+_WAL_CAP_BYTES = 16 * _WAL_LIMIT_BYTES
+_WAL_CAP_HOLD_SECONDS = 1.0
+
+
+def wal_reset_affected(version: tuple[int, int, int] | None = None) -> bool:
+    version = sqlite3.sqlite_version_info if version is None else version
+    if version >= (3, 51, 3):
+        return False
+    return not ((3, 50, 7) <= version < (3, 51, 0) or (3, 44, 6) <= version < (3, 45, 0))
+
+
+# TRUEMEMORY_WAL_GUARD=force exercises the guarded path on a fixed build (tests).
+WAL_RESET_GUARD = wal_reset_affected() or os.environ.get("TRUEMEMORY_WAL_GUARD") == "force"
+
+_wal_lock = threading.Lock()
+_wal_running: set[str] = set()
+_wal_stats = {"checkpoints": 0, "skipped_busy": 0, "failed": 0, "max_wal_bytes": 0}
+_wal_last_attempt: dict[str, float] = {}
+
+
+def configure_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
+    """Wrap every TrueMemory sqlite3.connect: no automatic checkpoints on affected builds.
+
+    Applied before any other statement; closes the connection if it fails.
+    The audit event lets the test suite check that no writer skipped this.
+    """
+    if WAL_RESET_GUARD:
+        try:
+            conn.execute("PRAGMA wal_autocheckpoint=0")
+            conn.execute("PRAGMA journal_size_limit=0")
+        except BaseException:
+            conn.close()
+            raise
+    sys.audit("truememory.configure_connection", conn)
+    return conn
+
+
+def wal_checkpoint_stats() -> dict:
+    with _wal_lock:
+        return dict(_wal_stats, affected=WAL_RESET_GUARD, sqlite_version=sqlite3.sqlite_version)
+
+
+def checkpoint_if_due(path: str | os.PathLike[str] | None, *, hold_wait: float = _WAL_HOLD_SECONDS) -> bool | None:
+    """Checkpoint a WAL past the limit (rate-limited below 16 MiB). Call it outside any transaction.
+
+    Returns None when nothing was due, else whether the checkpoint ran. It
+    never raises: a skipped checkpoint is retried after a later commit. Only
+    os.stat touches the files: opening and closing a database, WAL or -shm
+    file in this process would drop every POSIX lock SQLite holds on it.
+    """
+    if not WAL_RESET_GUARD or path is None or str(path) == ":memory:":
+        return None
+    try:
+        size = os.stat(f"{path}-wal").st_size
+    except OSError:
+        return None
+    key, now = str(path), time.monotonic()
+    with _wal_lock:
+        _wal_stats["max_wal_bytes"] = max(_wal_stats["max_wal_bytes"], size)
+        if size < _WAL_LIMIT_BYTES or (size < _WAL_FORCE_BYTES and now - _wal_last_attempt.get(
+                key, -_WAL_INTERVAL_SECONDS) < _WAL_INTERVAL_SECONDS):
+            return None
+        _wal_last_attempt[key] = now
+    if size >= _WAL_CAP_BYTES:
+        hold_wait = max(hold_wait, _WAL_CAP_HOLD_SECONDS)
+    try:
+        return protected_checkpoint(path, hold_wait=hold_wait)
+    except Exception:
+        with _wal_lock:
+            _wal_stats["failed"] += 1
+        log.debug("Protected WAL checkpoint failed", exc_info=True)
+        return False
+
+
+def protected_checkpoint(path: str | os.PathLike[str], *, hold_wait: float = _WAL_HOLD_SECONDS) -> bool:
+    """Copy the WAL into the database while holding the WAL write lock elsewhere.
+
+    The holder takes the write lock without waiting longer than ``hold_wait``
+    and the checkpoint is skipped when a writer has it. Both connections are
+    private to this call and run in autocommit mode.
+    """
+    key = str(Path(path).absolute())
+    with _wal_lock:
+        if key in _wal_running:
+            return False
+        _wal_running.add(key)
+    try:
+        uri = Path(key).as_uri() + "?mode=rw"
+        holder = sqlite3.connect(uri, uri=True, timeout=hold_wait, isolation_level=None)
+        try:
+            holder.execute("PRAGMA wal_autocheckpoint=0")
+            try:
+                holder.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError:  # A writer has the lock; a later commit retries.
+                with _wal_lock:
+                    _wal_stats["skipped_busy"] += 1
+                return False
+            try:
+                checkpointer = sqlite3.connect(uri, uri=True, timeout=0, isolation_level=None)
+                try:
+                    if checkpointer.in_transaction:
+                        raise RuntimeError("Checkpoint connection opened inside a transaction")
+                    checkpointer.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+                finally:
+                    checkpointer.close()
+            finally:
+                holder.execute("ROLLBACK")
+        finally:
+            holder.close()
+        with _wal_lock:
+            _wal_stats["checkpoints"] += 1
+        return True
+    finally:
+        with _wal_lock:
+            _wal_running.discard(key)
+
+
 def _backup_database(db_path: Path) -> Path | None:
     """Create a complete backup of the database including WAL/SHM files.
 
@@ -838,7 +1016,7 @@ def _backup_database(db_path: Path) -> Path | None:
     # restore is a single `cp backup db` with no sibling files.
     src = dst = None
     try:
-        src = sqlite3.connect(str(db_path))
+        src = configure_connection(sqlite3.connect(str(db_path)))
         dst = sqlite3.connect(str(backup))
         with dst:
             src.backup(dst)
@@ -1035,7 +1213,7 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
     # misleading raw error on the first WAL write.
     _check_dir_writable(db_path)
 
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn = configure_connection(sqlite3.connect(str(db_path), check_same_thread=False))
     # S1-2 (#688): the DB file holds every stored memory (PII). Restrict it to
     # owner-only so it isn't world-readable on a multi-user host. No-op on
     # Windows (POSIX modes don't apply) and for :memory:.
@@ -1098,16 +1276,27 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
             ) from e
         raise DatabaseOpenError(_integrity_message(db_path, str(e))) from e
 
-    _migrate_messages_schema(conn, db_path)
-    conn.executescript(_SCHEMA_SQL)
     try:
-        _migrate_messages_fts_trigger(conn)
-        _initialize_maintenance_tracking(conn)
-        _initialize_dunbar_ownership(conn)
-        _initialize_style_accumulator_schema(conn)
+        _apply_schema_migrations(conn, db_path)
     except sqlite3.Error:
         conn.close()
         raise
+    return conn
+
+
+def _apply_schema_migrations(conn: sqlite3.Connection, db_path: str | Path) -> None:
+    """Idempotent schema upgrades shared by create_db and controlled opens.
+
+    A database with a committed tier selection is opened without create_db,
+    so its upgrades must not depend on that path. Each step is a no-op once
+    applied; callers own maintenance (schema decisions) for the database.
+    """
+    _migrate_messages_schema(conn, db_path)
+    conn.executescript(_SCHEMA_SQL)
+    _migrate_messages_fts_trigger(conn)
+    _initialize_maintenance_tracking(conn)
+    _initialize_dunbar_ownership(conn)
+    _initialize_style_accumulator_schema(conn)
     # The directive index lives outside _SCHEMA_SQL on purpose: if a legacy
     # DB's migration could not add messages.directive (e.g. a rolled-back
     # ALTER), an unconditional CREATE INDEX inside executescript would turn a
@@ -1140,7 +1329,6 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
         log.debug("fact_timeline status migration skipped", exc_info=True)
 
     conn.commit()
-    return conn
 
 
 # ---------------------------------------------------------------------------

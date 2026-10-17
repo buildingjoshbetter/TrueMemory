@@ -20,6 +20,8 @@ CLUSTERS = runpy.run_path(str(TESTS / "test-cluster-publication-749.py"))
 class OuterClusterFixture(unittest.TestCase):
     def setUp(self) -> None:
         self.module, self.vector, self.boundary = CLUSTERS["load_clustering"]()
+        # The builder must reach the runner's publication hook in this storage copy.
+        self.module.begin_layer_publication = STORAGE.begin_layer_publication
         directory = tempfile.TemporaryDirectory(prefix="synthetic-outer-clusters-")
         self.addCleanup(directory.cleanup)
         self.path = Path(directory.name) / "synthetic.sqlite"

@@ -66,7 +66,7 @@ class TestMCPServing(unittest.TestCase):
         self.memory = Memory()
 
         @contextmanager
-        def serving_operation(conn, *, connection_lock=None, reranker_id=None, _defer_maintenance=False):
+        def serving_operation(conn, *, connection_lock=None, reranker_id=None, _defer_maintenance=False, models="required"):
             owner.events.append(("admit", conn, reranker_id))
             with owner.gate.operation_lease(("synthetic-generation",)) as lease:
                 def fork_child():

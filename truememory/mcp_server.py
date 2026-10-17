@@ -74,6 +74,9 @@ _config_write_lock = CONFIG_WRITE_LOCK
 # read-modify-write and clobber another writer's API key. The companion lockfile
 # (config.json.lock) is held with fcntl/msvcrt for the duration of each write.
 _CONFIG_LOCK_PATH = _TRUEMEMORY_DIR / "config.json.lock"
+# truememory_configure waits this long for another process's maintenance pass
+# before staging the switch in a background thread (tools run on the event loop).
+_MCP_STAGING_SECONDS = 2.0
 
 
 class _config_file_lock(ConfigFileLock):
@@ -957,7 +960,8 @@ def _search_operation(*, reranker_id: str | None = None) -> Iterator[tuple[Memor
     from truememory.tier_switch.runtime import engine_serving_operation
 
     memory = _get_memory()
-    with engine_serving_operation(memory._engine, reranker_override=reranker_id) as operation:
+    # Optional models: without them search degrades to keyword results, as legacy does.
+    with engine_serving_operation(memory._engine, reranker_override=reranker_id, models="optional") as operation:
         yield memory, operation
 
 
@@ -1096,7 +1100,8 @@ def truememory_directives(user_id: str = "") -> str:
         query += " AND sender = ?"
         params.append(user_id)
     query += " ORDER BY id"
-    rows = m._engine.conn.execute(query, params).fetchall()
+    with m._engine._write_lock:
+        rows = m._engine.conn.execute(query, params).fetchall()
     results = []
     for row in rows:
         results.append({
@@ -1352,7 +1357,7 @@ def truememory_configure(
             "max" = every exchange evaluated regardless of depth.
             Empty string = no change (preserves current setting).
     """
-    global _config_cache, _memory
+    global _config_cache, _memory, _background_staging
     tier = tier.lower().strip()
     if tier not in ("edge", "base", "pro", "custom"):
         return json.dumps({"error": "tier must be 'edge', 'base', 'pro', or 'custom'"})
@@ -1464,13 +1469,17 @@ def truememory_configure(
     rebuild_action: str | None = None
     rebuild_status_id: int = 0
     switch_status = "configured"
+    previous_staging = _staging_report()
     from truememory.tier_switch.manager import RebuildManager
     from truememory.tier_switch.cache import get_transition_action
     manager = RebuildManager.get_instance()
     rebuild_action = get_transition_action(old_tier, tier)
+    switch_options = {"target_tier": tier, "db_path": Path(_DB_PATH), "config_path": _CONFIG_PATH,
+                      "config_lock_path": _CONFIG_LOCK_PATH}
     try:
-        rebuild_status_id = manager.start_rebuild(target_tier=tier, db_path=Path(_DB_PATH),
-                                                  config_path=_CONFIG_PATH, config_lock_path=_CONFIG_LOCK_PATH)
+        # This tool runs on the MCP event loop: wait only briefly for another
+        # process's maintenance pass, then stage the switch in the background.
+        rebuild_status_id = manager.start_rebuild(**switch_options, staging_seconds=_MCP_STAGING_SECONDS)
         if rebuild_status_id:
             switch_status = "building"
         elif manager._last_outcome == "activation_pending":
@@ -1478,12 +1487,21 @@ def truememory_configure(
         elif manager._last_outcome == "preparing":
             switch_status = "preparing"
     except Exception as error:
-        rebuild_error = type(error).__name__ + ": " + str(error)
-        switch_status = "activation_pending" if manager._last_outcome == "activation_pending" else "switch_failed"
-        log.exception("truememory_configure tier activation did not complete")
+        if type(error).__name__ == "MaintenanceBusyError":
+            _stage_switch_in_background(manager, switch_options)
+            switch_status = "pending"
+        else:
+            rebuild_error = type(error).__name__ + ": " + str(error)
+            switch_status = "activation_pending" if manager._last_outcome == "activation_pending" else "switch_failed"
+            log.exception("truememory_configure tier activation did not complete")
     finally:
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        if switch_status != "pending":
+            # This request supersedes a finished background attempt.
+            with _background_staging_lock:
+                if _background_staging is not None and _background_staging["state"] != "staging":
+                    _background_staging = None
         # Existing users of the object retain their reference and serving lease.
         # A subsequent request must reopen and reconcile the committed journal.
         with _memory_lock:
@@ -1517,6 +1535,13 @@ def truememory_configure(
         result["status_id"] = rebuild_status_id
     elif switch_status == "preparing":
         result["note"] = "Tier preparation is in progress; no rebuild status ID has been allocated yet."
+    elif switch_status == "pending":
+        result["note"] = (
+            f"Another TrueMemory process is running maintenance. The switch to {tier} starts in the "
+            "background as soon as it finishes (within about a minute); check truememory_status() for progress."
+        )
+    if previous_staging is not None and previous_staging["state"] == "failed":
+        result["previous_background_staging"] = previous_staging
     if rebuild_error is not None:
         result["rebuild_error"] = rebuild_error
         result["warning"] = (
@@ -1594,6 +1619,42 @@ def truememory_configure(
     return json.dumps(result, indent=2)
 
 
+# The last tier switch staged in the background after a busy first attempt:
+# requested tier, state (staging, started or failed) and, after a failure, when
+# and why. truememory_status reports it, and so does the next configure call.
+_background_staging: dict | None = None
+_background_staging_lock = threading.Lock()
+
+
+def _staging_report() -> dict | None:
+    with _background_staging_lock:
+        return None if _background_staging is None else dict(_background_staging)
+
+
+def _stage_switch_in_background(manager: object, options: dict) -> None:
+    """Wait the full staging window off the event loop, then start the switch."""
+    global _background_staging
+    record = {"requested_tier": options["target_tier"], "state": "staging",
+              "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    with _background_staging_lock:
+        _background_staging = record
+
+    def stage() -> None:
+        try:
+            status_id = manager.start_rebuild(**options)
+        except Exception as error:
+            outcome = {"state": "failed", "failed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                       "error": type(error).__name__ + ": " + str(error),
+                       "note": "The tier switch did not start. Call truememory_configure again to retry."}
+            log.exception("Background tier switch staging did not complete")
+        else:
+            outcome = {"state": "started", "status_id": status_id or None,
+                       "outcome": getattr(manager, "_last_outcome", None)}
+        with _background_staging_lock:
+            record.update(outcome)
+    threading.Thread(target=stage, daemon=True, name="truememory-switch-staging").start()
+
+
 @mcp.tool()
 @_tracked("tool_status")
 def truememory_status(status_id: int = 0) -> str:
@@ -1601,11 +1662,17 @@ def truememory_status(status_id: int = 0) -> str:
 
     Returns a JSON object with:
       - ``rebuild``: tier-switch re-embedding progress (if any).
+      - ``switch_staging``: a switch that truememory_configure staged in the
+        background because maintenance was busy, and whether it started or
+        failed (with the time and the reason).
       - ``degradation``: per-subsystem health — model server, reranker,
         HyDE LLM, encoding gate, sqlite-vec, and clustering. Clustering
         includes availability, freshness, coverage and the last attempt.
         Every status is ``ok`` or ``degraded``; clustering's separate state
         distinguishes ``unknown``, ``pending`` and ``deferred`` readiness.
+      - ``sqlite_version`` and ``sqlite_wal_reset_affected``: whether this
+        SQLite build has the WAL-reset bug, and ``sqlite_wal_checkpoints``,
+        this process's guarded checkpoints, busy skips and largest WAL seen.
 
     When everything is healthy every subsystem shows ``"ok"``.
     When a component silently degrades (reranker OOM, HyDE outage,
@@ -1626,9 +1693,30 @@ def truememory_status(status_id: int = 0) -> str:
         result["rebuild"] = manager.get_status(status_id)
     except Exception as e:
         result["rebuild"] = {"error": f"{type(e).__name__}: {e}"}
+    staging = _staging_report()
+    if staging is not None:
+        # A switch staged in the background has no rebuild row until it starts.
+        result["switch_staging"] = staging
 
     # Degradation section (issue #592).
     result["degradation"] = _build_health_payload()
+
+    # Memories stored without vectors (models were down), and a selected tier
+    # whose certified model no longer matches its settings; only an open store.
+    memory = _memory
+    for key, report in (("vector_coverage", "get_vector_coverage"), ("tier_identity", "get_tier_identity")):
+        try:
+            result[key] = None if memory is None else getattr(memory._engine, report)()
+        except Exception as e:
+            result[key] = {"status": "unavailable", "error": type(e).__name__}
+
+    # SQLite builds before 3.51.3 can corrupt a WAL database under concurrent
+    # writers and checkpoints; TrueMemory then checkpoints only under a write lock.
+    from truememory.storage import wal_checkpoint_stats, wal_reset_affected
+    wal = wal_checkpoint_stats()
+    result["sqlite_version"] = wal.pop("sqlite_version")
+    result["sqlite_wal_reset_affected"] = wal_reset_affected()
+    result["sqlite_wal_checkpoints"] = wal
 
     return json.dumps(result, indent=2, default=str)
 
@@ -1654,7 +1742,8 @@ def truememory_entity_profile(entity: str) -> str:
 
     try:
         from truememory.personality import get_entity_profile
-        profile = get_entity_profile(m._engine.conn, entity)
+        with m._engine._write_lock:
+            profile = get_entity_profile(m._engine.conn, entity)
         if profile:
             return json.dumps(profile, indent=2, default=str)
         return json.dumps({"error": f"No profile found for '{entity}'"})
@@ -2377,7 +2466,7 @@ def main():
         global _memory
         if _memory is not None:
             try:
-                _memory._engine.conn.close()
+                _memory._engine.close()  # Stops the backfill, then closes under the engine's locks.
             except Exception:
                 pass
         os._exit(0)

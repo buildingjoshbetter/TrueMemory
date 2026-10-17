@@ -99,6 +99,8 @@ def load_engine(modules: dict) -> types.ModuleType:
         "__file__": str(ROOT / "truememory/engine.py"), "Path": Path, "sqlite3": sqlite3,
         "threading": threading, "time": time, "os": os, "warnings": warnings,
         "engine_operation": lambda function: function,
+        "engine_fallback_operation": lambda function: function,
+        "engine_source_operation": lambda function: function,
         "engine_handle_operation": runtime.engine_handle_operation,
         "logger": logging.getLogger("synthetic-routing"), "MAX_CONTENT_LENGTH": 50_000,
         "_env_int": lambda name, default, **kwargs: default})

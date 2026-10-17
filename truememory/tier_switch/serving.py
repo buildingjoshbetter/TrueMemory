@@ -19,6 +19,9 @@ from dataclasses import dataclass
 
 SelectionKey = tuple[str, ...]
 _CANCEL_POLL_SECONDS = 0.05
+# Default bound for an unrelated operation waiting out another admitted key
+# (for example a reranker override); callers may pass a tighter deadline.
+_KEY_WAIT_SECONDS = 30.0
 
 
 class ServingLeaseError(RuntimeError):
@@ -171,6 +174,7 @@ class ServingGate:
         self._retired_children: weakref.WeakSet[ChildReservation] = weakref.WeakSet()
         self._writers: dict[object, threading.Thread] = {}
         self._waiting_writers: deque[object] = deque()
+        self._waiting_keys: deque[tuple[object, SelectionKey]] = deque()
 
     def _check_process(self) -> None:
         if os.getpid() != self._pid:
@@ -223,12 +227,28 @@ class ServingGate:
             thread = threading.current_thread()
             return self._thread_reader(thread) is not None or self._writer_thread() is thread
 
-    def _check_key(self, key: SelectionKey) -> None:
+    def _admitted_key(self) -> SelectionKey | None:
         current = next((reader.key for reader in self._readers.values()), None)
         if current is None:
             current = next((child.key for child in self._children.values()), None)
+        return current
+
+    def _check_key(self, key: SelectionKey) -> None:
+        current = self._admitted_key()
         if current is not None and current != key:
             raise ServingLeaseError("Serving selection differs from an admitted operation")
+
+    def _key_blocked(self, key: SelectionKey, ticket: tuple[object, SelectionKey] | None) -> bool:
+        """Another key is admitted, or an earlier waiter for another key goes first."""
+        current = self._admitted_key()
+        if current is not None and current != key:
+            return True
+        for queued in self._waiting_keys:
+            if queued is ticket:
+                return False
+            if queued[1] != key:
+                return True
+        return False
 
     def _owned_reader(self, lease: OperationLease) -> _Reader:
         if type(lease) is not OperationLease or getattr(lease, "_gate", None) is not self:
@@ -283,21 +303,43 @@ class ServingGate:
         if parent is not None:
             control = _combine(parent.control, control)
         entered = False
+        ticket = None
         try:
             with self._locked(control, blocking=blocking):
                 entered = True
                 while True:
                     _check(control)
-                    self._check_key(key)
+                    if parent is not None or not blocking:
+                        # Nested reads cannot wait on their own parent's key.
+                        self._check_key(key)
+                    elif self._key_blocked(key, ticket):
+                        # A different selection or reranker key is admitted: wait
+                        # (FIFO by key, bounded) instead of failing this operation.
+                        if ticket is None:
+                            ticket = (object(), key)
+                            self._waiting_keys.append(ticket)
+                            if control.deadline is None:
+                                control = _combine(control, _control(_KEY_WAIT_SECONDS, None, None))
+                        self._condition.wait(_wait_seconds(control))
+                        continue
                     writer = self._writer_thread()
                     if writer is thread or (writer is None and (parent is not None or not self._waiting_writers)):
                         self._register_reader(lease, _Reader(thread, key, control, writer is thread or bool(parent and parent.writer_owned)))
+                        if ticket is not None:
+                            self._waiting_keys.remove(ticket)
+                            ticket = None
+                            self._condition.notify_all()
                         break
                     if not blocking:
                         raise ServingLeaseError("Serving admission is busy")
                     self._condition.wait(_wait_seconds(control))
             yield lease
         finally:
+            if ticket is not None:
+                with self._locked():
+                    if ticket in self._waiting_keys:
+                        self._waiting_keys.remove(ticket)
+                    self._condition.notify_all()
             if entered:
                 self._release_reader(lease)
 

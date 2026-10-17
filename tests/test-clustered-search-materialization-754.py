@@ -233,6 +233,9 @@ def load_clustering() -> tuple[types.ModuleType, types.SimpleNamespace]:
             return memory_budget
         if name == "truememory.mps_utils":
             return types.SimpleNamespace(encode_with_model_ownership=encode)
+        if name == "truememory.storage":
+            # Outside a maintenance build the publication hook does nothing.
+            return types.SimpleNamespace(begin_layer_publication=lambda conn, **options: None)
         if name == "truememory" or name.startswith("truememory."):
             raise AssertionError("unexpected application import")
         return builtins.__import__(name, globals, locals, fromlist, level)

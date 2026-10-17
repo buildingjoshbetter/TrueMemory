@@ -376,9 +376,13 @@ class TestRuntimeBridge(unittest.TestCase):
     def test_engine_and_hybrid_outer_boundaries_are_present(self) -> None:
         engine = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
         klass = next(node for node in engine.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
-        for name in ("search", "search_agentic", "search_vectors_raw", "add", "update", "delete", "delete_all"):
+        boundaries = {"search": "engine_fallback_operation", "search_agentic": "engine_fallback_operation",
+                      "search_vectors_raw": "engine_fallback_operation", "update": "engine_operation",
+                      "add": "engine_fallback_operation", "delete": "engine_source_operation",
+                      "delete_all": "engine_source_operation"}
+        for name, boundary in boundaries.items():
             node = next(node for node in klass.body if isinstance(node, ast.FunctionDef) and node.name == name)
-            self.assertIn("engine_operation", [ast.unparse(value) for value in node.decorator_list])
+            self.assertIn(boundary, [ast.unparse(value) for value in node.decorator_list])
         hybrid = ast.parse((ROOT / "truememory/hybrid.py").read_text(encoding="utf-8"))
         function = next(node for node in hybrid.body if isinstance(node, ast.FunctionDef) and node.name == "search_hybrid")
         self.assertIn("database_operation", [ast.unparse(value) for value in function.decorator_list])
@@ -449,7 +453,7 @@ class TestRuntimeBridge(unittest.TestCase):
                 self.fail("Nested control must reach the forked child")
         child.close()
 
-    def test_actual_selected_engine_init_reconciles_before_validation_and_keeps_schedule(self) -> None:
+    def test_actual_selected_engine_init_validates_without_model_projection_and_keeps_schedule(self) -> None:
         selected = self.select()
         tree = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
         source = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
@@ -458,8 +462,10 @@ class TestRuntimeBridge(unittest.TestCase):
         }]
         calls = []
         def validate(conn):
+            # Connection initialization is SQL-only: vector operations project models.
             self.assertEqual(self.api.current_operation(conn).selection, selected)
-            self.assertEqual(self.api.runtime_acknowledgement(), self.api.selection_key(selected))
+            self.assertFalse(self.api.current_operation(conn).models_ready)
+            self.assertIsNone(self.api.runtime_acknowledgement())
             calls.append("validate")
         def imports(name, globals=None, locals=None, fromlist=(), level=0):
             if name == "sqlite_vec":
@@ -637,6 +643,51 @@ class TestRuntimeBridge(unittest.TestCase):
         self.assertEqual(failures, [])
         conn.rollback()
         self.assertEqual(conn.execute("SELECT value FROM synthetic").fetchall(), [])
+
+    def test_admission_never_reads_a_connection_another_thread_owns(self) -> None:
+        # A writer in sqlite3_step holds SQLite's connection mutex through its busy
+        # wait; in_transaction waits for that mutex with the GIL held, so the
+        # process froze until the wait failed with "database is locked".
+        api = self.api
+        owned, release = threading.Event(), threading.Event()
+        foreign_reads, failures = [], []
+        class Connection:
+            @property
+            def in_transaction(self):
+                holder = lock._owner
+                if holder is not None and holder[0] != threading.get_ident():
+                    foreign_reads.append(threading.current_thread().name)
+                return False
+        class Engine:
+            pass
+        engine = Engine()
+        engine.conn = conn = Connection()
+        lock = api.ConnectionWriteLock(engine)
+        def holder():
+            try:
+                with lock:
+                    owned.set()
+                    if not release.wait(2):
+                        raise AssertionError("Synthetic holder release timed out")
+            except BaseException as exc:
+                failures.append(exc)
+        thread = threading.Thread(target=holder)
+        thread.start()
+        try:
+            self.assertTrue(owned.wait(2))
+            with self.assertRaises(api.serving.ServingLeaseTimeout):
+                with api._connection_read(conn, lock, api.time.monotonic() + 0.2, None):
+                    self.fail("The writer is owned by another thread")
+            with api._connection_read(conn, threading.Lock(), None, None, transaction_owner=lock):
+                pass
+        finally:
+            release.set()
+            thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(foreign_reads, [])
+        with api._connection_read(conn, threading.Lock(), None, None, transaction_owner=lock):
+            self.assertFalse(lock.locked())
 
     def test_connection_probe_error_preserves_handle_under_both_locks(self) -> None:
         tree = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))

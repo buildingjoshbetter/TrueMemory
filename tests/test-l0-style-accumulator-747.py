@@ -720,7 +720,7 @@ class StyleAccumulatorTests(unittest.TestCase):
         tree = ast.parse((ROOT / "truememory/engine.py").read_text(encoding="utf-8"))
         engine_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TrueMemoryEngine")
         add = next(node for node in engine_class.body if isinstance(node, ast.FunctionDef) and node.name == "add")
-        namespace = {"engine_operation": lambda function: function, "__builtins__": dict(vars(builtins), __import__=safe_import), "MAX_CONTENT_LENGTH": 50000,
+        namespace = {"engine_operation": lambda function: function, "engine_fallback_operation": lambda function: function, "engine_source_operation": lambda function: function, "__builtins__": dict(vars(builtins), __import__=safe_import), "MAX_CONTENT_LENGTH": 50000,
                      "insert_message": STORAGE.insert_message, "_update_style_vec": STYLE.update_entity_style_vector_incremental,
                      "logger": logging.getLogger("synthetic_style_engine")}
         validator = next(node for node in tree.body

@@ -545,6 +545,56 @@ class TestServingGate(unittest.TestCase):
                     self.fail("Inherited reservation joined")
         child.close()
 
+    def test_other_key_waits_fifo_instead_of_failing_unrelated_operations(self) -> None:
+        # A reranker override (search_deep) and ordinary operations carry
+        # different keys; neither may fail the other while it runs.
+        other = ("synthetic-database", "synthetic-override")
+        held, release_held = threading.Event(), self.event()
+        order = []
+        def holder():
+            with self.gate.operation_lease(KEY):
+                held.set()
+                self.reached(release_held)
+        def override():
+            with self.gate.operation_lease(other):
+                order.append("override")
+        def ordinary():
+            with self.gate.operation_lease(KEY):
+                order.append("ordinary")
+        holder_done = self.start("holder", holder)
+        self.reached(held)
+        override_done = self.start("override", override)
+        self.reached(self.waiting["override"])
+        ordinary_done = self.start("ordinary", ordinary)
+        self.reached(self.waiting["ordinary"])
+        self.assertEqual(order, [])
+        release_held.set()
+        for done in (holder_done, override_done, ordinary_done):
+            self.reached(done)
+        self.assertEqual(order, ["override", "ordinary"])
+        self.assertFalse(self.gate._waiting_keys)
+        self.assert_idle()
+
+    def test_other_key_wait_is_bounded_and_leaves_no_ticket(self) -> None:
+        held, release_held = threading.Event(), self.event()
+        def holder():
+            with self.gate.operation_lease(KEY):
+                held.set()
+                self.reached(release_held)
+        done = self.start("holder", holder)
+        self.reached(held)
+        with self.assertRaises(self.api.ServingLeaseTimeout):
+            with self.gate.operation_lease(("synthetic-database", "synthetic-override"), timeout=0.2):
+                self.fail("A different key was admitted while another key is held")
+        with patch.object(self.api, "_KEY_WAIT_SECONDS", 0.2):
+            with self.assertRaises(self.api.ServingLeaseTimeout):
+                with self.gate.operation_lease(("synthetic-database", "synthetic-override")):
+                    self.fail("An unbounded caller waited past the default key bound")
+        self.assertFalse(self.gate._waiting_keys)
+        release_held.set()
+        self.reached(done)
+        self.assert_idle()
+
     def test_keys_are_inert_bounded_exact_types_and_never_disclosed(self) -> None:
         class Hostile(str):
             def __eq__(self, other):

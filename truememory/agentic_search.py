@@ -131,7 +131,11 @@ Generate 2-3 alternative search queries that might find the missing information.
 Return ONLY the queries, one per line, no numbering or explanation:"""
 
     try:
-        response = llm_fn(prompt)
+        import sys
+        from contextlib import nullcontext
+        runtime = sys.modules.get("truememory.tier_switch.runtime")
+        with runtime.released_connection_locks() if runtime is not None else nullcontext():
+            response = llm_fn(prompt)
         lines = [
             line.strip().strip('"').strip("'").strip("-").strip()
             for line in response.strip().split("\n")

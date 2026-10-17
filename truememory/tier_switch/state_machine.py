@@ -37,11 +37,16 @@ class ThrottlerStateMachine:
 
     @staticmethod
     def all_required_channels_ok(readings: dict) -> bool:
-        """Unsupported channels are explicit; no evidence must not enable ramping."""
-        required = [readings.get(channel, {}) for channel in
-                    ("mps_level", "growth_rate", "thermal")
-                    if readings.get(channel, {}).get("required", True)]
-        return bool(required) and all(reading.get("status") == "ok" for reading in required)
+        """Required channels must be healthy; unknown evidence never ramps.
+
+        A channel is optional only when it is explicitly unsupported on this
+        host (Linux/Windows CPU and CUDA have no MPS or pmset telemetry). With
+        every channel unsupported, batch growth relies on pacing and the OOM
+        backoff, instead of pinning the rebuild at one message per commit.
+        """
+        channels = [readings.get(channel, {}) for channel in ("mps_level", "growth_rate", "thermal")]
+        return all(reading.get("status") == "ok" if reading.get("required", True)
+                   else reading.get("status") == "unsupported" for reading in channels)
 
     def on_batch_complete(self):
         """Call after every batch. Increments batch counter."""

@@ -39,6 +39,7 @@ from truememory._platform import (
     pid_is_alive,
     process_birth,
     read_start_claim,
+    release_file_lock,
     spawn_kwargs,
     try_file_lock,
 )
@@ -399,7 +400,7 @@ def _start_server(wait_timeout: float | None = None) -> bool:
                                          "launcher": {"pid": os.getpid(), "born": born}, "child": None}
                                 _write_start_claim(claim)
                         finally:
-                            os.close(bind)
+                            release_file_lock(bind)
                         # Release bind ownership BEFORE launching the child.
                         if claim is not None:
                             child = None
@@ -436,7 +437,7 @@ def _start_server(wait_timeout: float | None = None) -> bool:
                                 START_STATE_PATH.unlink(missing_ok=True)
                                 raise
                 finally:
-                    os.close(gate)
+                    release_file_lock(gate)
             time.sleep(min(0.05, _remaining(deadline)))
     except ProtocolMismatchError:
         raise

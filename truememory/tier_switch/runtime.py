@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from functools import wraps
 from typing import TYPE_CHECKING, ParamSpec, TypeVar
@@ -32,19 +32,46 @@ class TierRuntimeError(RuntimeError):
     """The process cannot safely serve the captured database selection."""
 
 
-class ConnectionWriteLock:
-    """Identify Engine-owned SQL without claiming ownership of caller SQL."""
+class AdmissionSelectionChanged(TierRuntimeError):
+    """The selection changed while this admission waited; nothing ran yet."""
 
-    def __init__(self, engine: object) -> None:
+    def __init__(self, message: str, *, borrowed: bool) -> None:
+        super().__init__(message)
+        self.borrowed = borrowed  # Read under the engine writer, unlike a later in_transaction.
+
+
+class SelectedModelsUnavailable(RuntimeError):
+    """This admission runs without its tier's models; callers degrade (FTS only).
+
+    Deliberately not a serving rejection: search steps fall back exactly as a
+    legacy embedding failure does.
+    """
+
+
+class ConnectionWriteLock:
+    """Identify Engine-owned SQL without claiming ownership of caller SQL.
+
+    Every statement on the Engine's connection runs under it: sqlite3 shares
+    cached statements per connection, and two threads stepping one corrupt it.
+    Re-entrant, so a public body that holds it can run nested Engine paths.
+    """
+
+    def __init__(self, engine: object, *, on_idle: Callable[[], None] | None = None) -> None:
         import weakref
         self._engine = weakref.ref(engine)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._owner: tuple[int, object, bool] | None = None
+        self._depth = 0
+        # Called after the outermost release when no transaction is open.
+        self._on_idle = on_idle
 
     def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
         acquired = self._lock.acquire(blocking, timeout)
         if not acquired:
             return False
+        if self._depth:  # Re-entered by the owning thread.
+            self._depth += 1
+            return True
         try:
             engine = self._engine()
             conn = None if engine is None else engine.conn
@@ -55,10 +82,17 @@ class ConnectionWriteLock:
                     raise
                 borrowed = False
             self._owner = (threading.get_ident(), conn, borrowed)
+            self._depth = 1
+            self.held_by_this_thread().append(self)
         except BaseException:
             self._lock.release()
             raise
         return True
+
+    def holder_borrowed(self) -> bool:
+        """Another thread holds this lock while a caller's transaction is open."""
+        owner = self._owner
+        return owner is not None and owner[0] != threading.get_ident() and owner[2]
 
     def owns_other_transaction(self, conn: sqlite3.Connection) -> bool:
         owner = self._owner
@@ -73,11 +107,34 @@ class ConnectionWriteLock:
         owner = self._owner
         if owner is None or owner[0] != threading.get_ident():
             raise RuntimeError("Only the Engine writer owner can release its lock")
-        self._owner = None
+        self._depth -= 1
+        idle = False
+        if not self._depth:
+            self._owner = None
+            held = self.held_by_this_thread()
+            if self in held:
+                held.remove(self)
+            if self._on_idle is not None:
+                try:  # Read while still owning the connection (never another thread's step).
+                    idle = owner[1] is not None and not owner[1].in_transaction
+                except sqlite3.ProgrammingError:
+                    idle = False
         self._lock.release()
+        if idle:
+            self._on_idle()
 
     def locked(self) -> bool:
-        return self._lock.locked()
+        return self._owner is not None
+
+    _held = threading.local()
+
+    @classmethod
+    def held_by_this_thread(cls) -> list:
+        """The engine locks the current thread holds, outermost first."""
+        held = getattr(cls._held, "locks", None)
+        if held is None:
+            held = cls._held.locks = []
+        return held
 
     def __enter__(self) -> ConnectionWriteLock:
         self.acquire()
@@ -87,16 +144,59 @@ class ConnectionWriteLock:
         self.release()
 
 
+@contextmanager
+def released_connection_locks() -> Iterator[None]:
+    """Let other threads use this thread's engine connections during model or LLM work.
+
+    A public body holds its engine's connection lock; encoding a query,
+    reranking or an LLM call can take seconds and needs no SQL. Locks whose
+    connection has a transaction open stay held: that work must not see
+    another thread's statements. Callers have no cursor mid-iteration.
+    """
+    released = []
+    for lock in list(ConnectionWriteLock.held_by_this_thread()):
+        owner = lock._owner
+        if owner is None or owner[0] != threading.get_ident():
+            continue
+        try:  # This thread owns the lock, so reading the connection is safe.
+            busy = owner[1] is not None and owner[1].in_transaction
+        except sqlite3.ProgrammingError:
+            busy = False
+        if busy:
+            continue
+        depth = lock._depth
+        for _ in range(depth):
+            lock.release()
+        released.append((lock, depth))
+    try:
+        yield
+    finally:
+        for lock, depth in reversed(released):
+            for _ in range(depth):
+                lock.acquire()
+
+
 _local = threading.local()
 _acknowledged: tuple[str, ...] | None = None
 _pid = os.getpid()
+# The database whose selection or policy the process-global projection serves.
+# Only that database's legacy admission (its journal was retired or restored)
+# resets it to the configured tier. Another legacy store is served from its own
+# recorded identity: without touching the projection when it needs no models
+# or shares the loaded embedding space, otherwise by reloading (logged once).
+_projected_database: tuple[str, object] | None = None
+_foreign_reload_logged = False
+# Last model identity refusal from a projection, for status reports.
+_last_identity_error: str | None = None
+_OWNER_POLL_SECONDS = 0.05
 
 
 def _after_fork() -> None:
-    global _local, _acknowledged, _pid
+    global _local, _acknowledged, _pid, _projected_database
     _local = threading.local()
     _acknowledged = None
     _pid = os.getpid()
+    _projected_database = None
 
 
 if hasattr(os, "register_at_fork"):
@@ -208,6 +308,138 @@ def apply_runtime_policy(result: TierSelection | LegacyTierPolicy, *, deadline: 
             _acknowledged = key
 
 
+def reset_legacy_runtime(tier: str, *, deadline: float | None = None,
+                         cancelled: threading.Event | None = None) -> None:
+    """Drop a controlled projection; legacy serving re-resolves lazily.
+
+    Used when a database's journal is gone (rolled back or retired) while this
+    process still holds its frozen target or policy tier.
+    """
+    global _acknowledged, _projected_database
+    bounded = time.monotonic() + serving._KEY_WAIT_SECONDS if deadline is None else deadline
+    with serving.exclusive_activation(deadline=bounded, cancelled=cancelled):
+        _acknowledged = _projected_database = None
+        vector, reranker = _modules()
+        vector.set_embedding_model(tier)
+        reranker.set_active_tier(tier)
+        _pin_process_tier(tier)
+
+
+def note_projected_database(conn: sqlite3.Connection) -> None:
+    """Record which database the process projection now serves (after a switch)."""
+    global _projected_database
+    _projected_database = _database_identity(conn)
+
+
+def _pin_process_tier(tier: str) -> None:
+    """Keep a pinned process tier equal to the legacy tier this process serves.
+
+    The MCP server pins TRUEMEMORY_EMBED_MODEL at startup and legacy
+    resolution reads it first. Controlled serving never consults it, so it is
+    only updated when legacy serving resumes.
+    """
+    if os.environ.get("TRUEMEMORY_EMBED_MODEL", "").strip():
+        os.environ["TRUEMEMORY_EMBED_MODEL"] = tier
+
+
+@dataclass(frozen=True)
+class _ForeignStore:
+    tier: str
+    model_id: str
+    dimension: int
+    tables: tuple[str, str]
+    shared: bool  # Same embedding space as the loaded projection.
+
+
+def _foreign_store(conn: sqlite3.Connection) -> _ForeignStore:
+    """Plan for a legacy store other than the one this process's projection serves.
+
+    The store's recorded embed_model/embed_dim and the registry pair for that
+    group decide; a store without a recorded embedder adopts the loaded one,
+    as legacy serving always did. An identity no tier provides is refused.
+    """
+    from truememory.embedding_target import EmbeddingTarget
+    from truememory.tier_switch.projection import _guard, _paths, _read_config
+
+    vector, _ = _modules()
+    loaded = (vector.EMBEDDING_MODEL, vector._embedding_dim)
+    refused = "This store's recorded embedding model is not available to this process"
+    try:
+        metadata = dict(conn.execute(
+            "SELECT key, value FROM main.metadata WHERE key IN ('embed_model','embed_dim')"))
+        if "embed_model" in metadata:
+            model = metadata["embed_model"]
+            dimension = int(metadata["embed_dim"]) if "embed_dim" in metadata else vector.get_embedding_dim(model)
+        else:
+            model, dimension = loaded
+        try:
+            configured = _guard(_read_config(_paths(None, None)[0])).tier
+        except Exception:
+            configured = "edge"
+        target = None
+        for tier in dict.fromkeys((configured, "edge", "base", "pro")):
+            try:
+                candidate = EmbeddingTarget.capture(tier)
+            except ValueError:
+                continue
+            if (candidate.model_id, candidate.dimension) == (model, dimension):
+                target = candidate
+                break
+        if target is None:
+            raise TierRuntimeError(refused)
+        row = conn.execute("SELECT vec_table, sep_table, embedding_dim FROM main.vector_cache_registry "
+                           "WHERE tier_group=?", (target.tier_group,)).fetchone()
+    except TierRuntimeError:
+        raise
+    except Exception as error:
+        raise TierRuntimeError(refused) from error
+    generic = ("vec_messages", "vec_messages_sep")
+    tables = generic if row is None else (row[0], row[1])
+    if tables not in (target.tables, generic) or (row is not None and row[2] not in (None, target.dimension)):
+        raise TierRuntimeError("Legacy database requires explicit coherent runtime selection")
+    return _ForeignStore(target.tier, target.model_id, target.dimension, tables, (model, dimension) == loaded)
+
+
+def _note_foreign_reload(plan: _ForeignStore) -> None:
+    global _foreign_reload_logged
+    if not _foreign_reload_logged:
+        _foreign_reload_logged = True
+        import logging
+        logging.getLogger(__name__).info(
+            "Serving a store with another embedding model (%s) in this process; models reload "
+            "whenever calls alternate between it and the tier-controlled store", plan.model_id)
+
+
+def _legacy_reset_tier(conn: sqlite3.Connection) -> str:
+    """The store's configured tier, verified against its legacy pair and metadata.
+
+    config.json is the store's shared truth; this process's env may still pin
+    the tier it started with. A tier whose registry pair or embedder metadata
+    disagrees would serve stale vectors, so it is refused instead.
+    """
+    from truememory.embedding_target import EmbeddingTarget
+    from truememory.tier_switch.projection import _guard, _paths, _read_config
+
+    refused = "Legacy database requires explicit coherent runtime selection"
+    try:
+        tier = _guard(_read_config(_paths(None, None)[0])).tier
+        target = EmbeddingTarget.capture(tier)
+        row = conn.execute("SELECT vec_table, sep_table, embedding_dim FROM main.vector_cache_registry "
+                           "WHERE tier_group=?", (target.tier_group,)).fetchone()
+        populated = conn.execute("SELECT 1 FROM main.messages LIMIT 1").fetchone() is not None
+        metadata = dict(conn.execute("SELECT key, value FROM main.metadata WHERE key IN ('embed_model','embed_dim')"))
+    except Exception as error:
+        raise TierRuntimeError(refused) from error
+    generic = ("vec_messages", "vec_messages_sep")
+    tables = generic if row is None else (row[0], row[1])
+    if tables not in (target.tables, generic) or (row is not None and row[2] not in (None, target.dimension)):
+        raise TierRuntimeError(refused)
+    if (populated or tier != "edge") and metadata != {"embed_model": target.model_id,
+                                                      "embed_dim": str(target.dimension)}:
+        raise TierRuntimeError(refused)
+    return tier
+
+
 def _prepare_legacy_policy(policy: LegacyTierPolicy, effective: str, *, deadline: float | None,
                            cancelled: threading.Event | None) -> None:
     global _acknowledged, _pid
@@ -292,6 +524,12 @@ class ServingOperation:
     policy: LegacyTierPolicy | None = None
     _connection_lock: object | None = field(default=None, repr=False, compare=False)
     _defer_maintenance: bool = field(default=False, repr=False, compare=False)
+    # False only for controlled admissions that did not (or could not) project
+    # the selected models: SQL-only bodies may run, model use is refused.
+    models_ready: bool = field(default=True, compare=False)
+    # A legacy store served beside another store's projection: it attaches to
+    # its own stable pair and never initializes from the loaded model.
+    foreign: bool = field(default=False, compare=False)
 
     def fork_child(self) -> RuntimeChild:
         if current_operation(self._connection) is not self:
@@ -323,7 +561,7 @@ class RuntimeChild:
                                          original.reranker_id, original.key, connection, lease, original._database,
                                          original.borrowed, original.policy,
                                          original._connection_lock if connection is original._connection else None,
-                                         original._defer_maintenance)
+                                         original._defer_maintenance, original.models_ready, original.foreign)
             lease.check_admission()
             with _bound(operation):
                 yield operation
@@ -379,16 +617,36 @@ def _connection_read(
         _check(deadline, cancelled)
         yield
         return
-    acquired = False
-    try:
+    def in_transaction() -> bool:
         try:
-            borrowed = conn is not None and conn.in_transaction
+            return conn is not None and conn.in_transaction
         except sqlite3.ProgrammingError as exc:
             if not allow_closed or str(exc) != "Cannot operate on a closed database.":
                 raise
-            borrowed = False
+            return False
+
+    acquired = False
+    try:
         owner = lock if transaction_owner is None else transaction_owner
-        if (borrowed and not (
+        if isinstance(owner, ConnectionWriteLock):
+            # Read the connection only while owning its writer: a thread inside
+            # sqlite3_step (a busy wait lasts up to the timeout) holds SQLite's
+            # connection mutex, and in_transaction waits for that mutex with the
+            # GIL held, freezing every thread, including the one that must commit.
+            if not owner.acquire(blocking=False):
+                borrowed = owner.holder_borrowed()
+            elif lock is owner:
+                acquired, borrowed = True, False
+            else:
+                try:
+                    borrowed = in_transaction()
+                finally:
+                    owner.release()
+        else:
+            borrowed = in_transaction()
+        if acquired:
+            pass
+        elif (borrowed and not (
                 isinstance(owner, ConnectionWriteLock) and owner.owns_other_transaction(conn))):
             _check(deadline, cancelled)
             acquired = lock.acquire(blocking=False)
@@ -412,9 +670,20 @@ def _connection_read(
 def serving_operation(
     conn: sqlite3.Connection, *, deadline: float | None = None,
     cancelled: threading.Event | None = None, connection_lock: object | None = None,
-    reranker_id: str | None = None, _defer_maintenance: bool = False,
+    reranker_id: str | None = None, _defer_maintenance: bool = False, models: str = "required",
+    _foreign_reload: bool = True,
 ) -> Iterator[ServingOperation]:
+    """Admit one public operation on a captured database selection.
+
+    ``models`` applies to controlled databases only: "required" projects the
+    selected embedding and reranker before admission, "none" never does (SQL-
+    only bodies such as get/delete), and "optional" projects when possible and
+    otherwise admits with models_ready=False (FTS-only add).
+    """
+    global _projected_database
     serving._control(None, deadline, cancelled)
+    if models not in _MODEL_MODES:
+        raise TierRuntimeError("Unsupported model admission mode")
     if reranker_id is not None:
         _reranker_id(reranker_id)
     current = current_operation(conn)
@@ -431,36 +700,75 @@ def serving_operation(
         selection = _read_selection(conn)
         policy = _read_policy(conn) if selection is None else None
         borrowed = conn.in_transaction
+    ready, foreign = True, None
     if selection is not None:
         effective = selection.reranker_id if reranker_id is None else reranker_id
         if not _ready(selection, effective):
-            if borrowed:
+            if borrowed and models != "none":
+                # A caller transaction cannot wait for model loading; never
+                # silently store or search without the vectors it could have.
                 raise TierRuntimeError("Runtime reconciliation requires a clean connection")
-            apply_frozen_selection(selection, deadline=deadline, cancelled=cancelled, reranker_id=effective)
+            ready = not borrowed and models != "none" and _project(
+                models, lambda: apply_frozen_selection(selection, deadline=deadline, cancelled=cancelled,
+                                                       reranker_id=effective))
         key = selection_key(selection, effective)
     elif policy is not None:
         effective = policy.reranker_id if reranker_id is None else reranker_id
         if not _policy_ready(policy, effective):
-            if borrowed:
+            if borrowed and models != "none":
                 raise TierRuntimeError("Policy reconciliation requires a clean connection")
-            _prepare_legacy_policy(policy, effective, deadline=deadline, cancelled=cancelled)
+            ready = not borrowed and models != "none" and _project(
+                models, lambda: _prepare_legacy_policy(policy, effective, deadline=deadline, cancelled=cancelled))
         key = policy_key(policy, effective)
     else:
-        vector, _ = _modules()
-        if vector._frozen_embedding_target is not None or getattr(vector, "_runtime_policy_tier", None) is not None:
-            raise TierRuntimeError("Legacy database requires explicit coherent runtime selection")
-        if reranker_id is not None:
+        vector, reranker = _modules()
+        home = _projected_database
+        if (home is not None or vector._frozen_embedding_target is not None
+                or getattr(vector, "_runtime_policy_tier", None) is not None):
+            with _connection_read(conn, connection_lock, deadline, cancelled):
+                # The controlled store reaching here lost its selection (retired
+                # elsewhere, or rolled back); any other store is foreign to it.
+                if home not in (None, _database_identity(conn)):
+                    foreign = _foreign_store(conn)
+            if foreign is not None and (models == "none" or not _foreign_reload or (
+                    foreign.shared and reranker_id in (None, reranker.get_current_reranker_name()))):
+                pass  # Served beside whatever is loaded, which stays as it is.
+            else:
+                if borrowed:
+                    raise TierRuntimeError("Legacy database requires explicit coherent runtime selection")
+                if foreign is None:
+                    with _connection_read(conn, connection_lock, deadline, cancelled):
+                        tier = _legacy_reset_tier(conn)
+                else:
+                    _note_foreign_reload(foreign)
+                    tier = foreign.tier
+                try:
+                    reset_legacy_runtime(tier, deadline=deadline, cancelled=cancelled)
+                except serving.ServingLeaseError as error:
+                    raise TierRuntimeError("Legacy database requires explicit coherent runtime selection") from error
+                if foreign is not None:
+                    # Still the controlled store's process: later stores stay foreign.
+                    _projected_database, foreign = home, None
+        if foreign is not None:
+            effective = (reranker.get_current_reranker_name() if foreign.shared else reranker_id) or "unloaded"
+            key = ("legacy", foreign.model_id, str(foreign.dimension), foreign.tier, effective)
+            ready = foreign.shared
+        if foreign is None and reranker_id is not None:
             _, reranker = _modules()
             if reranker._model is None or reranker._model_name != reranker_id:
                 if borrowed:
                     raise TierRuntimeError("Reranker loading requires a clean connection")
-                with serving.exclusive_activation(deadline=deadline, cancelled=cancelled):
+                # Swapping the shared reranker drains every reader; never wait
+                # unboundedly behind a long one (for example a maintenance run).
+                bounded = time.monotonic() + serving._KEY_WAIT_SECONDS if deadline is None else deadline
+                with serving.exclusive_activation(deadline=bounded, cancelled=cancelled):
                     try:
                         reranker.get_reranker(model_name=reranker_id, deadline=deadline, cancelled=cancelled)
                     except Exception as error:
                         # Legacy retrieval already reports optional reranker unavailability.
                         raise_if_serving_rejection(error)
-        key = _legacy_key(reranker_id)
+        if foreign is None:
+            key = _legacy_key(reranker_id)
     with serving.operation_lease(key, deadline=deadline, cancelled=cancelled, blocking=not borrowed) as lease:
         # A competing process can commit selection while this thread waits.
         # Refuse rather than loop through unbounded native reconciliation.
@@ -468,30 +776,123 @@ def serving_operation(
             observed = _read_selection(conn)
             observed_policy = _read_policy(conn) if observed is None else None
             vector, reranker = _modules()
-            tables = (selection.tables if selection is not None else policy.tables if policy is not None else
-                      (vector._active_vec_table(conn), vector._active_sep_table(conn)))
+            if selection is not None or policy is not None:
+                tables = selection.tables if selection is not None else policy.tables
+            elif foreign is not None:
+                tables = foreign.tables
+                if _foreign_store(conn) != foreign:
+                    raise AdmissionSelectionChanged("Store or loaded model changed during admission",
+                                                    borrowed=borrowed)
+            else:
+                tables = (vector._active_vec_table(conn), vector._active_sep_table(conn))
             database = _database_identity(conn)
         if _authority_key(observed, observed_policy) != _authority_key(selection, policy):
-            raise TierRuntimeError("Database selection changed during runtime admission")
+            raise AdmissionSelectionChanged("Database selection changed during runtime admission", borrowed=borrowed)
         vector, reranker = _modules()
         if selection is not None:
-            if not _ready(selection, effective):
-                raise TierRuntimeError("Process selection changed during runtime admission")
+            if ready and not _ready(selection, effective):
+                raise AdmissionSelectionChanged("Process selection changed during runtime admission", borrowed=borrowed)
             tables, tier, effective = selection.tables, selection.target.tier, effective
         elif policy is not None:
-            if not _policy_ready(policy, effective):
-                raise TierRuntimeError("Process policy changed during runtime admission")
+            if ready and not _policy_ready(policy, effective):
+                raise AdmissionSelectionChanged("Process policy changed during runtime admission", borrowed=borrowed)
             tables, tier = policy.tables, policy.target.tier
+        elif foreign is not None:
+            tier = foreign.tier
         else:
             if key != _legacy_key(reranker_id):
-                raise TierRuntimeError("Legacy runtime changed during admission")
+                raise AdmissionSelectionChanged("Legacy runtime changed during admission", borrowed=borrowed)
             tier = vector.resolve_tier()
             effective = reranker.get_current_reranker_name() if reranker_id is None else reranker_id
         operation = ServingOperation(selection, tables, tier, effective, key, conn, lease,
-                                     database, borrowed, policy, connection_lock, _defer_maintenance)
+                                     database, borrowed, policy, connection_lock, _defer_maintenance, ready,
+                                     foreign is not None)
         lease.check_admission()
+        if ready and (selection is not None or policy is not None):
+            _projected_database = database
         with _bound(operation):
             yield operation
+
+
+_MODEL_MODES = frozenset({"required", "optional", "none"})
+
+
+def _project(models: str, projection: Callable[[], None]) -> bool:
+    """Run model projection; only optional admission survives a model fault."""
+    global _last_identity_error
+    try:
+        projection()
+        _last_identity_error = None
+        return True
+    except (TierRuntimeError, serving.ServingLeaseError, serving.ServingLeaseTimeout):
+        raise
+    except Exception as error:
+        if _identity_error(error):
+            _last_identity_error = f"{type(error).__name__}: {str(error)[:300]}"
+        if models == "required" or _identity_error(error):
+            raise
+        import logging
+        logging.getLogger(__name__).warning(
+            "Selected tier models are unavailable; admitting without vector work", exc_info=True)
+        return False
+
+
+def _identity_error(error: BaseException) -> bool:
+    """A loaded model that is not the certified target is never mere unavailability."""
+    classes = []
+    for module_name, attribute in (("truememory.embedding_target", "EmbeddingTargetError"),
+                                   ("truememory.model_client", "ServingIdentityMismatchError")):
+        value = getattr(sys.modules.get(module_name), attribute, None)
+        if isinstance(value, type) and issubclass(value, BaseException):
+            classes.append(value)
+    return isinstance(error, tuple(classes))
+
+
+def tier_identity_report(conn: sqlite3.Connection, connection_lock: object | None = None) -> dict | None:
+    """Name why a selected tier's certified model no longer matches its configuration.
+
+    None for a legacy store. The selected identity is what the store's vectors
+    and this process's models were certified with; the configured identity is
+    what the tier settings resolve to now.
+    """
+    from truememory.embedding_target import EmbeddingTarget
+
+    with _connection_read(conn, connection_lock, None, None):
+        state = read_activation_state(conn)
+    result = state.selection or state.legacy_policy
+    if result is None:
+        return None
+
+    def identity(target: EmbeddingTarget) -> dict:
+        return {"tier": target.tier, "model_id": target.model_id, "dimension": target.dimension}
+
+    selected = result.target
+    report: dict = {"status": "ok", "selected": identity(selected)}
+    try:
+        configured = EmbeddingTarget.capture(selected.tier)
+        problem = None if configured == selected else "Configured model differs from the certified selection"
+    except ValueError as error:  # EmbeddingTargetError, or an unresolvable custom tier.
+        configured, problem = None, f"{type(error).__name__}: {str(error)[:300]}"
+    report["configured"] = None if configured is None else identity(configured)
+    if problem is None and _last_identity_error is None:
+        return report
+    if selected.tier == "custom":
+        settings = (f"set TRUEMEMORY_CUSTOM_EMBED_MODEL={selected.model_id} and "
+                    f"TRUEMEMORY_CUSTOM_EMBED_DIM={selected.dimension} again")
+    else:
+        settings = "restore this release's built-in model settings for the tier"
+    report.update(
+        status="degraded", error="EmbeddingTargetError", detail=problem or _last_identity_error,
+        remedy=(f"Searches and adds are refused until the identities match: {settings}, or switch tiers "
+                f"(truememory_configure) to re-embed every memory with the configured model."))
+    return report
+
+
+def require_admitted_models() -> None:
+    """Refuse model use inside a controlled admission whose models did not load."""
+    operation = getattr(_local, "operation", None)
+    if operation is not None and not operation.models_ready:
+        raise SelectedModelsUnavailable("Selected tier models are unavailable for this operation")
 
 
 def require_model_load_allowed() -> None:
@@ -575,7 +976,16 @@ def open_engine_for_operation(engine: object) -> None:
                 raise failure
             if not retry_allowed(failure):
                 raise failure
-            wait_for_automatic_owner(failure, deadline=deadline)
+            try:
+                wait_for_automatic_owner(failure, deadline=deadline)
+            except MaintenanceBusyError:
+                # Besides automatic owners, only a certified tier activation commit
+                # (in any process) grants a bounded wait; other owners still refuse.
+                from truememory.tier_switch.job import tier_activation_in_progress
+                if (getattr(failure, "_automatic_owner", None) is not None
+                        or str(engine.db_path) == ":memory:" or not tier_activation_in_progress(engine.db_path)):
+                    raise
+                time.sleep(min(_OWNER_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
             outside_admission()
             if not retry_allowed(failure):
                 raise failure
@@ -623,24 +1033,28 @@ def _legacy_initialization_is_local(conn: sqlite3.Connection, operation: Serving
 @contextmanager
 def engine_serving_operation(
     engine: object, *, reranker_override: str | None = None,
-    _suppress_maintenance: bool = False,
+    _suppress_maintenance: bool = False, models: str = "required",
 ) -> Iterator[ServingOperation]:
     """Finish cold initialization before capturing tables for the public body."""
-    open_engine_for_operation(engine)
-    parent = current_operation(engine.conn)
+    parent = current_operation(engine.conn) if engine.conn is not None else None
+    if parent is None:
+        open_engine_for_operation(engine)  # A nested admission reuses its parent's open handle.
+        parent = current_operation(engine.conn)
     owns_scope = parent is None
     cold = not (getattr(engine, "_runtime_initialized", True) or getattr(engine, "ready", False))
     initialized = False
     try:
         if cold:
             with serving_operation(engine.conn, connection_lock=engine._write_lock,
-                                   reranker_id=reranker_override, _defer_maintenance=owns_scope) as preparing:
+                                   reranker_id=reranker_override, _defer_maintenance=owns_scope,
+                                   models=models) as preparing:
                 engine._initialize_connection(_suppress_maintenance=True, _preparing=owns_scope)
                 initialized = True
                 if parent is not None and current_operation(engine.conn) is not preparing:
                     raise TierRuntimeError("Initialization changed the captured serving operation")
         with serving_operation(engine.conn, connection_lock=engine._write_lock,
-                               reranker_id=reranker_override, _defer_maintenance=owns_scope) as operation:
+                               reranker_id=reranker_override, _defer_maintenance=owns_scope,
+                               models=models) as operation:
             yield operation
     finally:
         if owns_scope and not _suppress_maintenance and (initialized or not cold):
@@ -652,11 +1066,15 @@ def engine_serving_operation(
 
 def engine_handle_operation(function: Callable[P, R]) -> Callable[P, R]:
     """Pin a handle-only operation without vector initialization or scheduling."""
+    @contextmanager
+    def admit(engine: object) -> Iterator[ServingOperation]:
+        open_engine_for_operation(engine)
+        with serving_operation(engine.conn, connection_lock=engine._write_lock) as operation:
+            yield operation
+
     @wraps(function)
     def wrapped(engine: object, *args: object, **kwargs: object) -> R:
-        open_engine_for_operation(engine)
-        with serving_operation(engine.conn, connection_lock=engine._write_lock):
-            return function(engine, *args, **kwargs)
+        return admitted_call(engine, lambda: admit(engine), lambda: function(engine, *args, **kwargs))
     return wrapped
 
 
@@ -664,9 +1082,75 @@ def engine_operation(function: Callable[P, R]) -> Callable[P, R]:
     """Initialize before pinning the public call's immutable table selection."""
     @wraps(function)
     def wrapped(engine: object, *args: object, **kwargs: object) -> R:
-        with engine_serving_operation(engine):
-            return function(engine, *args, **kwargs)
+        return admitted_call(engine, lambda: engine_serving_operation(engine, models="required"),
+                             lambda: function(engine, *args, **kwargs))
     return wrapped
+
+
+def engine_source_operation(function: Callable[P, R]) -> Callable[P, R]:
+    """Admit a source-only operation without selected-model readiness."""
+    @wraps(function)
+    def wrapped(engine: object, *args: object, **kwargs: object) -> R:
+        return admitted_call(engine, lambda: engine_serving_operation(engine, models="none"),
+                             lambda: function(engine, *args, **kwargs))
+    return wrapped
+
+
+def engine_fallback_operation(function: Callable[P, R]) -> Callable[P, R]:
+    """Admit with selected models when they load, otherwise without them.
+
+    A tier activation committing between admission and the writer rolls the
+    first attempt back; a top-level call is retried once under the new selection.
+    """
+    @wraps(function)
+    def wrapped(engine: object, *args: object, **kwargs: object) -> R:
+        return admitted_call(engine, lambda: engine_serving_operation(engine, models="optional"),
+                             lambda: function(engine, *args, **kwargs), retry_writer=True)
+    return wrapped
+
+
+def admitted_call(engine: object, admit: Callable[[], AbstractContextManager[object]], body: Callable[[], R], *,
+                  retry_writer: bool = False, serialize: bool = True) -> R:
+    """Retry a top-level call once when a selection change refused it before any effect.
+
+    Admission refusals happen before the body runs; a writer refusal rolled
+    back the body's transaction. Nested calls and caller transactions refuse.
+    The body runs under the Engine's connection lock (after admission, never
+    while waiting for one) unless it serializes its own statements.
+    """
+    lock = getattr(engine, "_write_lock", None) if serialize else None
+    if not isinstance(lock, ConnectionWriteLock):
+        lock = None  # Nested calls re-enter it; no other lock can serialize them.
+
+    def run() -> R:
+        if lock is None:
+            return body()
+        with lock:
+            return body()
+
+    nested = current_runtime_operation() is not None
+    started = borrowed = False
+    try:
+        with admit() as operation:
+            started, borrowed = True, operation.borrowed
+            return run()
+    except Exception as error:
+        # A caller transaction is judged as admission recorded it: on a shared
+        # connection a live in_transaction may be another thread's read.
+        if not started and isinstance(error, AdmissionSelectionChanged):
+            retry = not error.borrowed
+        else:
+            retry = started and retry_writer and not borrowed and _selection_changed(error)
+        if nested or not retry:
+            raise
+    with admit():
+        return run()
+
+
+def _selection_changed(error: BaseException) -> bool:
+    writer = sys.modules.get("truememory.tier_switch.writer")
+    changed = getattr(writer, "WriterSelectionChanged", None)
+    return changed is not None and (isinstance(error, changed) or isinstance(error.__cause__, changed))
 
 
 def raise_if_serving_rejection(error: BaseException) -> None:
@@ -715,12 +1199,16 @@ def maintenance_serving_operation(
     conn: sqlite3.Connection, *, cancelled: threading.Event | None = None,
     deadline: float | None = None, connection_lock: object | None = None,
 ) -> Iterator[bool]:
-    """Called only under maintenance ownership; controlled derived vectors defer."""
+    """Called only under maintenance ownership; controlled derived vectors defer.
+
+    So do a foreign store's in another embedding space: background maintenance
+    never reloads this process's models.
+    """
     serving._control(None, deadline, cancelled)
     _check(deadline, cancelled)
     current = current_operation(conn)
     if current is not None:
-        if current.selection is not None or current.policy is not None:
+        if current.selection is not None or current.policy is not None or not current.models_ready:
             yield False
             return
     else:
@@ -729,8 +1217,9 @@ def maintenance_serving_operation(
         if controlled:
             yield False
             return
-    with serving_operation(conn, cancelled=cancelled, deadline=deadline, connection_lock=connection_lock):
-        yield True
+    with serving_operation(conn, cancelled=cancelled, deadline=deadline, connection_lock=connection_lock,
+                           _foreign_reload=False) as operation:
+        yield operation.models_ready
 
 
 @contextmanager
@@ -785,7 +1274,8 @@ def _open_serving_connection_at_path(
     with maintenance_owner(path):
         if not path.exists():
             return legacy_factory(path)
-        conn = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, check_same_thread=False)
+        from truememory.storage import configure_connection
+        conn = configure_connection(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, check_same_thread=False))
         try:
             present = conn.execute(
                 "SELECT 1 FROM main.sqlite_master WHERE name='metadata' COLLATE NOCASE"
@@ -798,12 +1288,117 @@ def _open_serving_connection_at_path(
                 for sql in (f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}", "PRAGMA foreign_keys=ON",
                             "PRAGMA synchronous=NORMAL", "PRAGMA cache_size=-64000", "PRAGMA mmap_size=268435456"):
                     conn.execute(sql)
-                return conn
+                if reconcile_controlled_database(conn, path):
+                    return conn
+                # The journal was retired: open through the ordinary legacy path.
         except BaseException:
             conn.close()
             raise
         conn.close()
         return legacy_factory(path)
+
+
+def reconcile_controlled_database(conn: sqlite3.Connection, path: os.PathLike[str]) -> bool:
+    """Upgrade and validate a controlled database under the caller's maintenance.
+
+    Runs the idempotent create_db migrations (controlled opens skip create_db),
+    retires a journal whose selected pair another binary changed, and mirrors an
+    unacknowledged selection into the default config left by a crash. Returns
+    whether the database is still controlled.
+    """
+    import logging
+    from pathlib import Path
+    from truememory.storage import _apply_schema_migrations
+    from truememory.tier_switch.activation import retire_incoherent_activation
+    _apply_schema_migrations(conn, path)
+    if retire_incoherent_activation(conn):
+        logging.getLogger(__name__).warning(
+            "Tier selection no longer matches its vector pair (changed by another release); "
+            "serving the configured legacy tier")
+        return False
+    if _is_default_store(path):
+        if reconcile_config_tier(conn):
+            return False
+        _mirror_unacknowledged_selection(conn, Path(path))
+    return True
+
+
+def _is_default_store(path: os.PathLike[str]) -> bool:
+    """Only the store the shared config describes (RebuildManager's default) mirrors it."""
+    from pathlib import Path
+    default = Path(os.environ.get("TRUEMEMORY_DB_PATH") or os.environ.get("TRUEMEMORY_DB")
+                   or Path.home() / ".truememory" / "memories.db").expanduser()
+    return Path(path).resolve() == default.resolve()
+
+
+def reconcile_config_tier(conn: sqlite3.Connection, *, config_path: os.PathLike[str] | None = None,
+                          lock_path: os.PathLike[str] | None = None) -> bool:
+    """Resolve an acknowledged journal whose same-generation config names another tier.
+
+    An older release (or a hand edit) changed config.json without touching the
+    journal. In the same embedding space the config is the newer request: the
+    journal is retired (True) and legacy serving follows the config. Otherwise
+    no rebuild happened, so the journal stays authoritative and the config is
+    written back to it. Caller owns maintenance.
+    """
+    import logging
+    from truememory.embedding_target import EmbeddingTarget, EmbeddingTargetError
+    from truememory.tier_switch.activation import retire_same_space_activation
+    from truememory.tier_switch.projection import (
+        CONFIG_WRITE_LOCK, ConfigFileLock, _guard, _paths, _read_config, _write_config,
+    )
+
+    state = read_activation_state(conn)
+    result = state.selection or state.legacy_policy
+    if result is None or not result.config_acknowledged:
+        return False
+    config_path, lock_path = _paths(config_path, lock_path)
+    with ConfigFileLock(lock_path, strict=True), CONFIG_WRITE_LOCK:
+        config = _read_config(config_path)
+        guard = _guard(config)
+        if guard.generation != result.generation or guard.tier == result.target.tier:
+            return False
+        try:
+            requested = EmbeddingTarget.capture(guard.tier)
+        except (EmbeddingTargetError, ValueError):
+            requested = None
+        if requested is not None and requested.identity == result.target.identity:
+            retired = retire_same_space_activation(conn, generation=result.generation)
+            if retired:
+                logging.getLogger(__name__).warning(
+                    "Config selects tier %s in the same embedding space; serving it instead of %s",
+                    guard.tier, result.target.tier)
+            return retired
+        config["tier"] = result.target.tier
+        _write_config(config_path, config)
+        logging.getLogger(__name__).warning(
+            "Config named tier %s without a rebuild; restored the selected tier %s", guard.tier, result.target.tier)
+        return False
+
+
+def _mirror_unacknowledged_selection(conn: sqlite3.Connection, path: os.PathLike[str]) -> None:
+    import logging
+
+    state = read_activation_state(conn)
+    result = state.selection or state.legacy_policy
+    expected = getattr(state.intent, "expected_config", None)
+    if result is None or result.config_acknowledged or expected is None:
+        return
+    from truememory.tier_switch.activation import (
+        LegacyTierPolicy, TierActivationError, acknowledge_config, acknowledge_policy_config,
+    )
+    from truememory.tier_switch.job import tier_job_alive
+    from truememory.tier_switch.projection import ConfigProjectionConflict, mirror_activation
+    if tier_job_alive(path):
+        return  # A live job finishes its own projection.
+    try:
+        mirror_activation(result, expected_config=expected)
+        if type(result) is LegacyTierPolicy:
+            acknowledge_policy_config(conn, generation=result.generation)
+        else:
+            acknowledge_config(conn, generation=result.generation)
+    except (ConfigProjectionConflict, TierActivationError, OSError):
+        logging.getLogger(__name__).warning("Committed tier selection still awaits its config mirror", exc_info=True)
 
 
 @contextmanager

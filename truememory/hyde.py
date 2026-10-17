@@ -79,7 +79,11 @@ def generate_hypothetical_doc(
         prompt = HYDE_PROMPT_CONVERSATION.format(query=query)
 
     try:
-        result = llm_fn(prompt)
+        import sys
+        from contextlib import nullcontext
+        runtime = sys.modules.get("truememory.tier_switch.runtime")
+        with runtime.released_connection_locks() if runtime is not None else nullcontext():
+            result = llm_fn(prompt)
         if result and len(result.strip()) > 10:
             return result.strip()
     except Exception as e:
