@@ -414,6 +414,12 @@ class ProcessRegistry:
             raise StaleBudgetOwner("Owner has retired")
         return record
 
+    def _retired(self, owner: BudgetOwner) -> bool:
+        """Whether an owner of this registry is closing or gone (not inherited or foreign)."""
+        with self._lock:
+            record = self._owners.get(owner.token)
+            return record is None or record.closing or record.handle() is not owner
+
     def _ceiling(self) -> int:
         ceiling = 0
         for record in self._owners.values():
@@ -758,10 +764,13 @@ def _resolved_plan(key: ProfileKey, known_bytes: int, retained_bytes: int) -> Al
 
 
 class AllocationSession:
-    def __init__(self, owner: BudgetOwner) -> None:
+    def __init__(self, owner: BudgetOwner, *, borrowed: bool = False) -> None:
         self.owner = owner
         self._leases: dict[str, BudgetLease] = {}
         self._closed = False
+        # A borrowed owner belongs to some model and retires with it.
+        self._borrowed = borrowed
+        self._fresh: BudgetOwner | None = None
 
     def charge(
         self, key: ProfileKey, *, known_bytes: int = 0, retained_bytes: int = 0,
@@ -779,11 +788,27 @@ class AllocationSession:
         label = group or key.stage
         lease = self._leases.get(label)
         if lease is None:
-            lease = self.owner.reserve(plan, deadline=deadline)
+            lease = self._reserve(plan, deadline)
             self._leases[label] = lease
         else:
             lease.grow(plan, deadline=deadline)
         return lease
+
+    def _reserve(self, plan: AllocationPlan, deadline: Callable[[], None] | None) -> BudgetLease:
+        try:
+            return self.owner.reserve(plan, deadline=deadline)
+        except StaleBudgetOwner:
+            # The model whose owner this session borrowed was released or
+            # collected mid-operation. New work moves to a live owner; leases
+            # already taken stay with the retiring one until they close.
+            if not self._borrowed or not self.owner.registry._retired(self.owner):
+                raise
+        registry = self.owner.registry
+        replacement = registry.active_owner()
+        if replacement is None:
+            replacement = self._fresh = registry.register_owner(automatic_budget_bytes(), kind="cooperative")
+        self.owner = replacement
+        return self.owner.reserve(plan, deadline=deadline)
 
     def retain_buffer(self, value: object, *, deadline: Callable[[], None] | None = None) -> None:
         candidate = value
@@ -862,6 +887,8 @@ class AllocationSession:
         leases, self._leases = self._leases, {}
         for lease in leases.values():
             lease.close()
+        if self._fresh is not None:
+            self._fresh.close()
 
 
 def current_session() -> AllocationSession | None:
@@ -875,12 +902,12 @@ def cooperative_scope() -> Iterator[AllocationSession | None]:
     if session is not None:
         yield session
         return
-    with allocation_scope(get_process_registry().active_owner()) as session:
+    with allocation_scope(get_process_registry().active_owner(), borrowed=True) as session:
         yield session
 
 
 @contextmanager
-def allocation_scope(owner: BudgetOwner | None) -> Iterator[AllocationSession | None]:
+def allocation_scope(owner: BudgetOwner | None, *, borrowed: bool = False) -> Iterator[AllocationSession | None]:
     if owner is None:
         yield None
         return
@@ -890,7 +917,7 @@ def allocation_scope(owner: BudgetOwner | None) -> Iterator[AllocationSession | 
     if stack and stack[-1].owner is owner:
         yield stack[-1]
         return
-    session = AllocationSession(owner)
+    session = AllocationSession(owner, borrowed=borrowed)
     stack.append(session)
     failed = False
     try:
