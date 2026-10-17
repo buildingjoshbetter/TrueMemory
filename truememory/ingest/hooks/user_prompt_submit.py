@@ -481,7 +481,7 @@ def _try_per_exchange_store(prompt: str, session_id: str, user_id: str, db_path:
     # was also never closed (leak). Both are fixed here.
     try:
         from truememory.client import Memory
-        with Memory(path=db_path or None) as m:
+        with Memory(path=db_path or None, auto_maintenance=False) as m:
             # Novelty check: quick search to avoid dupes.
             # Score-space contract (issue #632): a score is only a true
             # absolute cosine similarity when its result is tagged
@@ -597,7 +597,7 @@ def _try_proactive_recall(
         except Exception:
             pass
         from truememory.client import Memory
-        with Memory(path=db_path or None) as m:
+        with Memory(path=db_path or None, auto_maintenance=False) as m:
             # Issue #652 (M-47): proactive recall only injects ranked content,
             # not cross-encoder scores, so skip the reranker on the hot path.
             results = m.search(
@@ -656,7 +656,7 @@ def _try_auto_recall(prompt: str, user_id: str, db_path: str, session_id: str = 
         except Exception:
             pass
         from truememory.client import Memory
-        with Memory(path=db_path or None) as m:
+        with Memory(path=db_path or None, auto_maintenance=False) as m:
             # Issue #652 (M-47): auto-recall injection needs ranked content,
             # not cross-encoder scores — skip the reranker.
             results = m.search(

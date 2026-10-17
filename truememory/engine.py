@@ -367,11 +367,18 @@ class TrueMemoryEngine:
     # ──────────────────────────────────────────────────────────────────────
 
     def __init__(self, db_path: str | Path = None,
-                 alpha_surprise: float | None = None):
+                 alpha_surprise: float | None = None, *, auto_maintenance: bool = True):
         """Initialize engine with an optional database path.
 
         If *db_path* is omitted the database defaults to
         ``<project_root>/truememory.db``.
+
+        :param auto_maintenance: Start background work from this Engine:
+            maintenance passes, the vector backfill and the Qwen3 NaN
+            re-embed. A process that exits right after its call, such as a
+            hook, passes False: it would only start work that its close()
+            or exit cuts off. A long-lived process (the MCP server, the
+            ingest pipeline) does that work.
 
         :param alpha_surprise: Optional override for the MEMORIST-L5
             surprise rerank boost coefficient. When set, takes priority
@@ -393,6 +400,7 @@ class TrueMemoryEngine:
         self._backfill_thread: threading.Thread | None = None
         self._backfill_stop = threading.Event()
         self._backfill_local = threading.local()  # Marks the backfill thread, which never reopens.
+        self._auto_maintenance = auto_maintenance
         self._runtime_initialized = False
         self._runtime_vector_generation = None
         self._runtime_vector_connection = None
@@ -944,7 +952,10 @@ class TrueMemoryEngine:
                                                     raise_if_serving_rejection(_serving_error)
                                                     pass
                                     _db = self.db_path
-                                    if str(_db) != ":memory:":
+                                    if str(_db) != ":memory:" and not getattr(self, "_auto_maintenance", True):
+                                        # The flag stays unset: a long-lived process re-embeds.
+                                        logger.debug("Qwen3 NaN re-embed left to a process with auto maintenance")
+                                    elif str(_db) != ":memory:":
                                         self._nan_migration_in_progress = True
                                         from truememory.maintenance import get_coordinator
                                         # Taken while this Engine is attached; see background_writes.
@@ -1308,6 +1319,9 @@ class TrueMemoryEngine:
 
     def _maybe_auto_consolidate(self) -> None:
         """Probe fixed metadata without waiting on foreground or model work."""
+        if not getattr(self, "_auto_maintenance", True):
+            self._maintenance_pending_reason = "auto_maintenance_off"
+            return
         from truememory.tier_switch.runtime import current_operation
         operation = current_operation(self.conn) if self.conn is not None else None
         if operation is not None and getattr(operation, "_defer_maintenance", False):
@@ -3406,7 +3420,8 @@ class TrueMemoryEngine:
         new adds still closes its gaps, without adding latency to the caller.
         """
         guard = getattr(self, "_backfill_guard", None)
-        if guard is None or self.conn is None or not self._has_vectors:
+        if (guard is None or self.conn is None or not self._has_vectors
+                or not getattr(self, "_auto_maintenance", True)):
             return
         from truememory.tier_switch.runtime import current_operation
         operation = current_operation(self.conn)

@@ -53,12 +53,19 @@ class Memory:
               resolves to the ``TRUEMEMORY_ALPHA_SURPRISE`` env var
               (or 0.2). Set explicitly to ``0`` to disable.
               See MEMORIST-L5 research for rationale.
+        auto_maintenance: Start background work (maintenance passes, the
+              vector backfill, the Qwen3 NaN re-embed) from this instance.
+              Pass ``False`` in a process that exits right after its call,
+              such as a hook; a long-lived process (the MCP server, the
+              ingest pipeline) runs it instead.
     """
 
     def __init__(
         self,
         path: str | Path | None = None,
         alpha_surprise: float | None = None,
+        *,
+        auto_maintenance: bool = True,
     ):
         if path is None:
             path = _DEFAULT_DB
@@ -66,6 +73,7 @@ class Memory:
         self._engine = TrueMemoryEngine(
             db_path=db_path,
             alpha_surprise=alpha_surprise,
+            auto_maintenance=auto_maintenance,
         )
 
     # ------------------------------------------------------------------

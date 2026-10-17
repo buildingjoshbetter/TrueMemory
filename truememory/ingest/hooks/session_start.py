@@ -1010,7 +1010,7 @@ def recall_memories(
         pass
 
     db = db_path or None
-    memory = Memory(path=db) if db else Memory()
+    memory = Memory(path=db, auto_maintenance=False) if db else Memory(auto_maintenance=False)
 
     # Load directives first — these are always injected (cheap SQL query,
     # not cached since they change infrequently and the query is fast).
