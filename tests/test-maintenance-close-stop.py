@@ -5,8 +5,10 @@ a sleep. A run that outlives the close wait is fenced, so these tests set the
 wait to zero to reach that branch deterministically.
 """
 
+import gc
 import shutil
 import sqlite3
+import sys
 import threading
 from pathlib import Path
 
@@ -30,6 +32,15 @@ def _rows(path: Path) -> int:
         return conn.execute("SELECT count(*) FROM messages").fetchone()[0]
     finally:
         conn.close()
+
+
+def _files(directory: Path) -> tuple:
+    """File names plus the database's size and mtime, by stat only.
+
+    Opening a database file in this process would drop SQLite's POSIX locks.
+    """
+    database = next(path for path in directory.iterdir() if path.suffix == ".sqlite")
+    return sorted(path.name for path in directory.iterdir()), database.stat().st_size, database.stat().st_mtime_ns
 
 
 def _blocked_worker(coordinator: maintenance.MaintenanceCoordinator, outcome: dict) -> threading.Event:
@@ -243,3 +254,44 @@ def test_shared_worker_survives_one_close_and_stops_at_the_last(store: Path, mon
     assert _rows(store) == 1
     # Nothing starts after the last close until an Engine opens the database again.
     assert not coordinator.request_layers(threshold=25)
+
+
+@pytest.mark.parametrize("pause", ["configure_connection", "_apply_schema_migrations"])
+def test_worker_fenced_inside_create_db_closes_its_connection(store: Path, monkeypatch, pause: str) -> None:
+    from truememory import storage
+    engine = _engine(store)
+    coordinator = maintenance.get_coordinator(store)
+    inside, release = threading.Event(), threading.Event()
+    opened = []
+    real = getattr(storage, pause)
+
+    def paused(conn, *args):
+        if (threading.current_thread().name == "truememory-maintenance"
+                and (pause != "configure_connection" or sys._getframe(1).f_code.co_name == "create_db")):
+            opened.append(conn)
+            inside.set()
+            assert release.wait(10)
+        return real(conn, *args)
+
+    monkeypatch.setattr(storage, pause, paused)
+    ran = []
+    assert coordinator.request(lambda conn, cancel: ran.append(conn))
+    worker_run = coordinator._worker_run
+    assert inside.wait(10)
+    monkeypatch.setattr(maintenance, "_CLOSE_WAIT_SECONDS", 0.0, raising=False)
+    engine.close()
+    after_close = _files(store.parent)
+    release.set()
+    assert coordinator.wait(10)
+    assert ran == []
+    assert coordinator.status == ("cancelled", None)
+    # create_db failed on a refusal, not a sqlite3 error; its connection is closed anyway.
+    assert worker_run._connections == []
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].total_changes
+    # A connection left open would close when collected, checkpointing and
+    # removing -wal/-shm after close() returned.
+    opened.clear()
+    coordinator._worker_run = worker_run = None
+    gc.collect()
+    assert _files(store.parent) == after_close

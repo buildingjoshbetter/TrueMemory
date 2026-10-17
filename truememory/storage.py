@@ -1311,10 +1311,18 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
                 "TrueMemory processes (hooks, MCP server, CLI) and retry."
             ) from e
         raise DatabaseOpenError(_integrity_message(db_path, str(e))) from e
+    except BaseException:
+        # Not only sqlite errors: a fenced background connection refuses
+        # statements with MaintenanceClosedError.
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
 
     try:
         _apply_schema_migrations(conn, db_path)
-    except sqlite3.Error:
+    except BaseException:
         conn.close()
         raise
     return conn

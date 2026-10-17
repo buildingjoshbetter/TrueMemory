@@ -580,6 +580,18 @@ class _BackgroundRun:
                     pass  # Already closed.
             sqlite3.Connection.close(conn)
 
+    def close_connections(self) -> None:
+        """Close the run's connections still open when it ends.
+
+        An opener that fails on a refused statement (MaintenanceClosedError is
+        not a sqlite3 error) may leave its connection open. Collected later,
+        it would close without the fenced close and checkpoint the database.
+        """
+        with self._connections_lock:
+            remaining = list(self._connections)
+        for conn in remaining:
+            self._close_connection(conn)
+
     def fence(self) -> None:
         """Return once no statement of this run executes; refuse every later one."""
         self._closed = True
@@ -1019,6 +1031,7 @@ class MaintenanceCoordinator:
                             conn.close()
                     finally:
                         conn = None
+                        run.close_connections()
                     from truememory.storage import checkpoint_if_due
                     run.call(lambda: checkpoint_if_due(self.path))
         except BaseException as error:
@@ -1161,9 +1174,12 @@ def background_writes(coordinator: MaintenanceCoordinator) -> Iterator[_Backgrou
         with existing_database_opens(run.connection):
             yield run
     finally:
-        with coordinator._mutex:
-            coordinator._background_runs.discard(run)
-        run.finished.set()
+        try:
+            run.close_connections()
+        finally:
+            with coordinator._mutex:
+                coordinator._background_runs.discard(run)
+            run.finished.set()
 
 
 def get_coordinator(db_path: str | os.PathLike[str]) -> MaintenanceCoordinator:
