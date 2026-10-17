@@ -365,6 +365,26 @@ class SharedModelOwnership(unittest.TestCase):
         self.assertIsNotNone(fd)
         os.close(fd)
 
+    def test_superseded_generation_unlocks_the_bind_lock_before_closing(self) -> None:
+        # Windows releases a msvcrt lock on close only at an unspecified later time;
+        # every bind-lock release goes through release_file_lock (unlock, then close).
+        module, server = self.make_server()
+        self.client._write_start_claim({"generation": "b" * 32,
+            "launcher": {"pid": os.getpid(), "born": float(os.getpid())}, "child": None})
+        os.environ[module._MODEL_SERVER_GENERATION_ENV] = "a" * 32
+        fd = server._acquire_bind_lock()
+        server._lock_fd = fd
+        released = []
+        original = module.release_file_lock
+        module.release_file_lock = lambda value: (released.append(value), original(value))
+        try:
+            with self.assertRaisesRegex(RuntimeError, "superseded"):
+                server._validate_launch_generation_locked()
+        finally:
+            module.release_file_lock = original
+        self.assertEqual(released, [fd])
+        server._cleanup()
+
     def test_shutdown_retains_bind_owner_while_admitted_native_work_drains(self) -> None:
         module, server = self.make_server()
         module._USE_UNIX = True  # socketpair is the synthetic authenticated transport.
