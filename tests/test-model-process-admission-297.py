@@ -477,7 +477,8 @@ class TestProcessAdmission(unittest.TestCase):
                     self.assertFalse(self.server._fast_lock.locked())
                     self.assertEqual(self.server._inflight, 0)
 
-    def test_sensor_expiry_after_construction_cannot_publish_or_infer(self) -> None:
+    def test_sensor_expiry_after_construction_keeps_the_model_but_cannot_infer(self) -> None:
+        # The deadline belongs to the request; a finished load stays cached for the next one.
         for op, count, fast in (("embed", 1, False), ("embed", 3, False),
                                 ("rerank", 3, False), ("embed", 1, True)):
             with self.subTest(op=op, count=count, fast=fast):
@@ -506,11 +507,22 @@ class TestProcessAdmission(unittest.TestCase):
                 self.assertIn("deadline", response["error"])
                 self.assertEqual(len(self.builds), 1)
                 self.assertEqual(self.calls, [])
-                self.assertIsNone(self.refs[-1]())
-                self.assertIsNone(self.server._fast_encoder)
-                if not fast:
-                    self.assertIsNone(self.server._embed_state)
-                    self.assertIsNone(self.server._reranker)
+                built = self.refs[-1]()
+                self.assertIsNotNone(built)
+                if fast:
+                    self.assertIs(self.server._fast_encoder, built)
+                elif op == "embed":
+                    self.assertIs(self.server._embed_state.model, built)
+                else:
+                    self.assertIs(self.server._reranker, built)
+                built = None
+                self.sensor.side_effect = self.measure
+                if fast:
+                    with self.server._inference_lock:
+                        self.assertTrue(self.request(op, count)["ok"])
+                else:
+                    self.assertTrue(self.request(op, count)["ok"])
+                self.assertEqual(len(self.builds), 1)
 
     def test_embed_transfer_sensor_expiry_invalidates_failed_accelerator(self) -> None:
         for count in (1, 3):

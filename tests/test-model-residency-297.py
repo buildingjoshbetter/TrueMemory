@@ -223,9 +223,11 @@ class TestModelResidency(unittest.TestCase):
         self.assertEqual(self.request("rerank")["scores"].data, [31.0, 31.0])
         self.assertIs(self.server._reranker, old())
         self.assertEqual(self.builds, [("rank-a", "cpu"), ("rank-b", "cpu")])
-        # Released after the idle period, then loaded again on demand.
+        # Released after the idle period, the current one too, then loaded again on demand.
         self.assertTrue(self.server._retire_parked_rerankers(
             now=self.ms.time.monotonic() + self.server._PARKED_RERANKER_IDLE_SECONDS))
+        self.assertIsNone(self.server._reranker)
+        self.build_hook = lambda identity, device: None
         self.assertEqual(self.request("rerank", name="rank-b")["scores"].data, [32.0, 32.0])
         self.assertEqual(self.builds[-1], ("rank-b", "cpu"))
 

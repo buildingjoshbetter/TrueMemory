@@ -190,58 +190,189 @@ def test_a_clone_in_use_during_recovery_is_released_when_its_query_ends(server):
 
 # --- 2. embedding sticky CPU recovers -------------------------------------------------
 
-def test_embedding_returns_to_mps_after_a_quiet_backoff(server, monkeypatch):
+def test_embedding_returns_to_mps_after_its_backoff(server):
     instance, builds = server
     _degrade_with_clone(instance, builds)
     since = instance._embed_cpu_since
     assert instance._embed_repromote_after() == 600
-    instance._last_activity = time.time() - 3600
     assert instance._repromote_embed(now=since + 599) is False
     cpu_main = weakref.ref(instance._embed_state.model)
     assert instance._repromote_embed(now=since + 600) is True
-    assert "embed" not in instance._sticky_cpu and instance._embed_state is None
+    assert "embed" not in instance._sticky_cpu
+    assert instance._embed_state.model.device == "mps" and builds.devices == ["mps", "cpu", "mps"]
     assert cpu_main() is None, "The float32 CPU copy must be released"
+    assert instance._fast_encoder is None
     assert _embed(instance, ["after"])["ok"]
-    assert builds.devices[-1] == "mps" and instance._embed_state.model.device == "mps"
+    assert builds.devices == ["mps", "cpu", "mps"], "The swap already loaded the MPS copy"
+    assert builds.encodes[-1] == "mps"
 
 
 def test_repeat_ooms_double_the_backoff(server):
     instance, builds = server
     _degrade_with_clone(instance, builds)
-    instance._last_activity = time.time() - 3600
     assert instance._repromote_embed(now=instance._embed_cpu_since + 600)
-    assert _embed(instance, ["reload"])["ok"]
     builds.oom = True
     assert _embed(instance, ["a", "b"])["ok"]
     builds.oom = False
     assert instance._embed_ooms == 2 and instance._embed_repromote_after() == 1200
-    instance._last_activity = time.time() - 3600
     assert instance._repromote_embed(now=instance._embed_cpu_since + 1199) is False
     assert instance._repromote_embed(now=instance._embed_cpu_since + 1200) is True
     instance._embed_ooms = 40
     assert instance._embed_repromote_after() == 600 * instance._EMBED_REPROMOTE_MAX_FACTOR
 
 
-def test_recent_work_or_a_running_batch_defers_the_return(server):
+def test_steady_hook_traffic_does_not_hold_the_return_back(server, monkeypatch):
+    """Hook queries arrive every few seconds in a working session; here every 50 ms."""
+    instance, builds = server
+    _degrade_with_clone(instance, builds)
+    monkeypatch.setattr(instance, "_PARKED_RERANKER_IDLE_SECONDS", 4)  # a retirer tick every second
+    instance._embed_cpu_since -= instance._embed_repromote_after()
+    stop = threading.Event()
+    served = []
+
+    def hooks() -> None:
+        while not stop.is_set():
+            served.append(_embed(instance, ["synthetic hook query"])["ok"])
+            time.sleep(0.05)
+
+    traffic = threading.Thread(target=hooks)
+    retirer = threading.Thread(target=instance._idle_retirer)
+    traffic.start()
+    retirer.start()
+    try:
+        ends = time.monotonic() + 5
+        while "embed" in instance._sticky_cpu and time.monotonic() < ends:
+            time.sleep(0.05)
+    finally:
+        stop.set()
+        traffic.join(5)
+        instance._stopped.set()
+        retirer.join(5)
+    assert "embed" not in instance._sticky_cpu, "Steady traffic kept embedding on CPU"
+    assert instance._embed_state.model.device == "mps"
+    assert len(served) > 5 and all(served)
+
+
+def test_the_next_batch_swaps_before_its_first_piece(server):
+    instance, builds = server
+    _degrade_with_clone(instance, builds)
+    instance._embed_cpu_since -= instance._embed_repromote_after()
+    encodes = len(builds.encodes)
+    assert _embed(instance, ["a", "b"])["ok"]
+    assert builds.encodes[encodes:] == ["mps"] and "embed" not in instance._sticky_cpu
+
+
+def test_a_running_batch_defers_the_retirer_to_its_next_request(server):
     instance, builds = server
     _degrade_with_clone(instance, builds)
     later = instance._embed_cpu_since + 10_000
-    instance._last_activity = time.time()
-    assert instance._repromote_embed(now=later) is False
-    instance._last_activity = time.time() - 3600
     batch = Batch(instance)
     try:
         assert instance._repromote_embed(now=later) is False
+        assert "embed" in instance._sticky_cpu
     finally:
         batch.end()
     assert instance._repromote_embed(now=later) is True
+
+
+def test_single_queries_are_served_while_the_mps_copy_loads(server, monkeypatch):
+    instance, builds = server
+    _degrade_with_clone(instance, builds)
+    cpu_main = weakref.ref(instance._embed_state.model)
+    loading, finish = threading.Event(), threading.Event()
+
+    def slow_build(model_id: str, device: str | None) -> Model:
+        if device == "mps":
+            loading.set()
+            assert finish.wait(10)
+        return builds(model_id, device)
+
+    monkeypatch.setattr(instance, "_build_embed_model", slow_build)
+    results = []
+    swap = threading.Thread(target=lambda: results.append(
+        instance._repromote_embed(now=instance._embed_cpu_since + 600)))
+    swap.start()
+    try:
+        assert loading.wait(5)
+        started = time.monotonic()
+        responses = [_contended(instance, deadline=2) for _ in range(3)]
+        assert all(response["ok"] for response in responses), "Single queries were busy during the swap"
+        assert time.monotonic() - started < 2.0
+        assert builds.encodes[-3:] == ["cpu"] * 3 and builds.devices == ["mps", "cpu"], "A clone was built"
+    finally:
+        finish.set()
+        swap.join(10)
+    assert results == [True]
+    assert instance._fast_encoder is None and cpu_main() is None
+    assert instance._embed_state.model.device == "mps"
+
+
+def test_without_rss_room_the_swap_waits_for_a_later_request(server, monkeypatch):
+    instance, builds = server
+    _degrade_with_clone(instance, builds)
+    rss = FakeRSS(3500 * MIB)
+    monkeypatch.setattr(ms, "psutil", rss)
+    instance._max_rss_bytes = 4096 * MIB  # 596 MiB of room; the MPS load stages 1.2 GB on CPU
+    later = instance._embed_cpu_since + 600
+    assert instance._repromote_embed(now=later) is False
+    assert "embed" in instance._sticky_cpu and builds.devices == ["mps", "cpu"]
+    assert instance._fast_encoder is None
+    rss.rss = 2048 * MIB
+    assert instance._repromote_embed(now=later) is True
+    assert instance._embed_state.model.device == "mps"
+
+
+def test_a_failed_mps_load_keeps_cpu_and_restarts_the_backoff(server, monkeypatch):
+    instance, builds = server
+    _degrade_with_clone(instance, builds)
+    cpu_main = instance._embed_state.model
+
+    def oom_build(model_id: str, device: str | None) -> Model:
+        if device == "mps":
+            raise RuntimeError("MPS backend out of memory (MPS allocated: 3.9 GiB, max allowed: 4.0 GiB)")
+        return builds(model_id, device)
+
+    monkeypatch.setattr(instance, "_build_embed_model", oom_build)
+    before = time.monotonic()
+    assert instance._repromote_embed(now=instance._embed_cpu_since + 600) is False
+    assert instance._embed_state.model is cpu_main and cpu_main.device == "cpu"
+    assert "embed" in instance._sticky_cpu and instance._embed_ooms == 2
+    assert instance._embed_cpu_since >= before and instance._fast_encoder is None
+    assert builds.devices == ["mps", "cpu"], "A failed MPS load must not build a second CPU copy"
+    # No room on MPS at all: the same, without counting an OOM.
+    monkeypatch.setattr(instance, "_build_embed_model", builds)
+    monkeypatch.setattr(mps_utils, "mps_free_bytes", lambda: 100 * MIB, raising=False)
+    assert instance._repromote_embed(now=instance._embed_cpu_since + 1200) is False
+    assert instance._embed_state.model is cpu_main and instance._embed_ooms == 2
+    assert builds.devices == ["mps", "cpu"] and instance._fast_encoder is None
+    cpu_main = None
+    batch = Batch(instance)
+    try:
+        with pytest.raises(ms._ProcessMemoryRefused, match="long batch"):
+            _contended(instance, deadline=0.5)  # the lent model went back with the failed swap
+    finally:
+        batch.end()
+
+
+def test_a_load_that_finishes_after_its_deadline_is_kept(server, monkeypatch):
+    instance, builds = server
+
+    def slow_build(model_id: str, device: str | None) -> Model:
+        time.sleep(0.3)
+        return builds(model_id, device)
+
+    monkeypatch.setattr(instance, "_build_embed_model", slow_build)
+    with pytest.raises(ms._RequestDeadlineExceeded):
+        instance._handle_fast_embed(["cold start"], "qwen3_256", ms._RequestDeadline(time.monotonic() + 0.1))
+    assert instance._embed_state is not None and builds.devices == ["mps"]
+    assert _embed(instance, ["next hook"])["ok"]
+    assert builds.devices == ["mps"], "The finished load was discarded with its request"
 
 
 def test_explicit_cpu_device_is_never_repromoted(server, monkeypatch):
     instance, builds = server
     _degrade_with_clone(instance, builds)
     monkeypatch.setenv("TRUEMEMORY_DEVICE", "cpu")
-    instance._last_activity = time.time() - 3600
     assert instance._repromote_embed(now=instance._embed_cpu_since + 10 ** 6) is False
     assert "embed" in instance._sticky_cpu
 

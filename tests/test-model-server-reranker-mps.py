@@ -1,7 +1,9 @@
 """Rerankers are admitted against the MPS budget; one model's OOM never moves the others."""
 from __future__ import annotations
 
+import gc
 import sys
+import threading
 import time
 import types
 import weakref
@@ -179,3 +181,97 @@ def test_idle_parked_reranker_is_evicted_only_when_that_makes_room(mps_host, mon
     entry = None
     assert _rerank(server, "synthetic/medium")["ok"] is True
     assert server._reranker.device == "mps" and modernbert() is None
+
+
+# --- idle release does not wait for batches on other models ----------------------------
+
+class _Batch:
+    """An ingest batch that holds the main inference lock throughout."""
+
+    def __init__(self, server: ms.ModelServer) -> None:
+        self.release = threading.Event()
+        held = threading.Event()
+
+        def run() -> None:
+            with server._inference_lock:
+                held.set()
+                self.release.wait(10)
+
+        self.thread = threading.Thread(target=run)
+        self.thread.start()
+        assert held.wait(5)
+
+    def end(self) -> None:
+        self.release.set()
+        self.thread.join(5)
+
+
+def _age_parked(server: ms.ModelServer, name: str, seconds: float) -> None:
+    model, device, since = server._parked_rerankers[name]
+    server._parked_rerankers[name] = (model, device, since - seconds)
+
+
+def test_parked_reranker_is_released_while_a_batch_holds_inference(mps_host, monkeypatch):
+    server, mps, built, _embed = mps_host
+    flushes = []
+    monkeypatch.setattr(mps_utils, "flush_mps_cache", lambda: (gc.collect(), flushes.append(1)))
+    assert _rerank(server, MODERNBERT)["ok"] is True
+    assert _rerank(server, MINILM)["ok"] is True
+    parked = weakref.ref(server._parked_rerankers[MODERNBERT][0])
+    _age_parked(server, MODERNBERT, server._PARKED_RERANKER_IDLE_SECONDS)
+    flushes.clear()
+    batch = _Batch(server)
+    try:
+        assert server._retire_parked_rerankers() is True
+        assert parked() is None and MODERNBERT not in server._parked_rerankers
+        assert mps.allocated() == SIZES["embed"] + SIZES[MINILM]
+        # Emptying the MPS cache now could race the batch's MPS work.
+        assert flushes == [] and server._mps_flush_pending is True
+        assert server._reranker_name == MINILM
+    finally:
+        batch.end()
+    # The next tick that owns inference empties the cache once.
+    assert server._retire_parked_rerankers() is False
+    assert flushes == [1] and server._mps_flush_pending is False
+
+
+def test_current_reranker_is_released_after_the_idle_period(mps_host, monkeypatch):
+    server, mps, built, _embed = mps_host
+    flushes = []
+    monkeypatch.setattr(mps_utils, "flush_mps_cache", lambda: (gc.collect(), flushes.append(1)))
+    assert _rerank(server, MODERNBERT)["ok"] is True
+    assert _rerank(server, BGE)["ok"] is True  # a deep search leaves bge-reranker-v2-m3 current
+    current = weakref.ref(server._reranker)
+    assert server._reranker_device == "cpu"
+    later = server._reranker_last_used + server._RERANKER_IDLE_SECONDS
+    flushes.clear()
+    batch = _Batch(server)
+    try:
+        assert server._retire_parked_rerankers(now=later - 1) is False
+        assert server._reranker is current()
+        assert server._retire_parked_rerankers(now=later) is True
+        assert server._reranker is None and server._reranker_name is None and current() is None
+        assert server._parked_rerankers == {}
+        # ModernBERT, parked on MPS, went too; its cache waits for inference ownership.
+        assert mps.allocated() == SIZES["embed"] and flushes == []
+    finally:
+        batch.end()
+    assert _rerank(server, BGE)["ok"] is True
+    assert built[-1][0] == BGE and len(built) == 3
+    assert flushes == [1] and server._mps_flush_pending is False
+
+
+def test_a_request_releases_idle_rerankers_before_its_first_piece(mps_host, monkeypatch):
+    """Batches hold the state lock across their pieces, so each request start releases too."""
+    server, mps, built, _embed = mps_host
+    flushes = []
+    monkeypatch.setattr(mps_utils, "flush_mps_cache", lambda: (gc.collect(), flushes.append(1)))
+    assert _rerank(server, MODERNBERT)["ok"] is True
+    assert _rerank(server, MINILM)["ok"] is True
+    parked = weakref.ref(server._parked_rerankers[MODERNBERT][0])
+    _age_parked(server, MODERNBERT, server._PARKED_RERANKER_IDLE_SECONDS)
+    flushes.clear()
+    assert _rerank(server, MINILM)["ok"] is True
+    assert parked() is None and server._parked_rerankers == {}
+    assert flushes == [1], "The request owns inference, so it empties the cache itself"
+
