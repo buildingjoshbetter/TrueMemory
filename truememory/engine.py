@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from truememory.maintenance import LayerResult, MaintenanceCoordinator
+    from truememory.maintenance import LayerResult, MaintenanceCoordinator, _BackgroundRun
 
 # ───────────────────────────────────────────────────────────────────────────
 # Core modules (always available)
@@ -399,7 +399,7 @@ class TrueMemoryEngine:
         self._backfill_guard = threading.Lock()
         self._backfill_thread: threading.Thread | None = None
         self._backfill_stop = threading.Event()
-        self._backfill_local = threading.local()  # Marks the backfill thread, which never reopens.
+        self._backfill_run: _BackgroundRun | None = None  # The backfill thread's connections.
         self._auto_maintenance = auto_maintenance
         self._backfill_gap_checked = False  # Legacy vector gaps are seeded once per Engine.
         self._runtime_initialized = False
@@ -486,9 +486,6 @@ class TrueMemoryEngine:
                 reason = replacement_reason()
                 if reason is None:
                     return
-                if getattr(getattr(self, "_backfill_local", None), "running", False):
-                    # Checked under the writer that close() holds to clear self.conn.
-                    raise EngineClosedError("A background pass does not reopen its Engine")
             attach = getattr(self, "_attach_maintenance", None)  # Absent on synthetic engines.
             if attach is not None:
                 attach()
@@ -1361,8 +1358,7 @@ class TrueMemoryEngine:
                 except Exception as error:
                     self._maintenance_pending_reason = type(error).__name__[:64]
         finally:
-            # After the wake: the seed thread takes the writer at once, and the
-            # wake above only tries it, so seeding first would drop this wake.
+            # After the wake, which it must not delay or contend with.
             if not getattr(self, "_backfill_gap_checked", True):
                 self._schedule_backfill(seed_gap=True)
 
@@ -3417,11 +3413,12 @@ class TrueMemoryEngine:
         new adds still closes its gaps, without adding latency to the caller.
         With ``seed_gap`` (the first maintenance wake of this Engine) the thread
         only records, by SQL, the first gap that older releases left without a
-        cursor; later passes and adds then fill it.
+        cursor; later passes and adds then fill it. Either runs on a connection
+        of its own (_open_background_connection), so an in-memory store has none.
         """
         guard = getattr(self, "_backfill_guard", None)
         if (guard is None or self.conn is None or not self._has_vectors
-                or not getattr(self, "_auto_maintenance", True)):
+                or not getattr(self, "_auto_maintenance", True) or str(self.db_path) == ":memory:"):
             return
         from truememory.tier_switch.runtime import current_operation
         operation = current_operation(self.conn)
@@ -3445,49 +3442,82 @@ class TrueMemoryEngine:
                 except sqlite3.Error:
                     return
                 target = self._background_backfill
-            self._backfill_thread = threading.Thread(target=target, daemon=True, name="truememory-vector-backfill")
+            from truememory.maintenance import _BackgroundRun, get_coordinator
+            # Taken while this Engine is attached; see background_writes.
+            coordinator, self._backfill_run = get_coordinator(self.db_path), _BackgroundRun()
+            self._backfill_thread = threading.Thread(target=target, args=(coordinator, self._backfill_run),
+                                                     daemon=True, name="truememory-vector-backfill")
             self._backfill_thread.start()
 
-    def _seed_backfill_gap(self) -> None:
+    def _open_background_connection(self, coordinator: MaintenanceCoordinator) -> sqlite3.Connection:
+        """Open this store for the backfill thread, inside its background_writes run.
+
+        Never the Engine's connection: callers may use or close that one
+        directly, and closing a connection under another thread's running
+        statement crashes the process. This one only its run's fence stops.
+        """
+        import sqlite_vec
+        from truememory.storage import configure_connection, existing_connect_options
+        conn = configure_connection(sqlite3.connect(coordinator.path.as_uri() + "?mode=rw", uri=True,
+                                                    **existing_connect_options()))
+        try:
+            for sql in (f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}", "PRAGMA foreign_keys=ON",
+                        "PRAGMA synchronous=NORMAL"):
+                conn.execute(sql)
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+        except BaseException:
+            conn.close()
+            raise
+        return conn
+
+    def _seed_backfill_gap(self, coordinator: MaintenanceCoordinator, run: _BackgroundRun) -> None:
         if self._backfill_stop.is_set():
             return
-        self._backfill_local.running = True
         try:
-            conn = self.conn
-            if conn is None:
-                return
+            from contextlib import closing, nullcontext
+            from truememory.maintenance import background_writes
             from truememory.tier_switch.runtime import serving_operation
             from truememory.vector_search import seed_backfill_cursor
-            with serving_operation(conn, connection_lock=self._write_lock, models="none") as operation:
-                seed_backfill_cursor(conn, operation.tables[0], write_lock=self._write_lock, stop=self._backfill_stop)
+            with background_writes(coordinator, run), closing(self._open_background_connection(coordinator)) as conn:
+                with serving_operation(conn, models="none") as operation:
+                    # The connection is this thread's alone: no lock to share.
+                    seed_backfill_cursor(conn, operation.tables[0], write_lock=nullcontext(),
+                                         stop=self._backfill_stop)
         except Exception:
             logger.debug("Vector backfill cursor was not seeded", exc_info=True)
-        finally:
-            self._backfill_local.running = False
 
-    def _background_backfill(self) -> None:
+    def _background_backfill(self, coordinator: MaintenanceCoordinator, run: _BackgroundRun) -> None:
         if self._backfill_stop.is_set():
             return
-        self._backfill_local.running = True
         try:
-            self.backfill_vectors(stop=self._backfill_stop)
+            from contextlib import closing, nullcontext
+            from truememory.maintenance import background_writes
+            from truememory.tier_switch.runtime import serving_operation
+            from truememory.vector_search import backfill_missing_vectors
+            with background_writes(coordinator, run), closing(self._open_background_connection(coordinator)) as conn:
+                # Admitted like add: optional models, and without them no pass.
+                with serving_operation(conn, models="optional"):
+                    backfill_missing_vectors(conn, write_lock=nullcontext(), stop=self._backfill_stop)
         except Exception:
             logger.debug("Background vector backfill pass did not complete", exc_info=True)
-        finally:
-            self._backfill_local.running = False
 
     def stop_background_backfill(self, timeout: float = 1.0) -> None:
         """Stop the background pass between encode calls or rows, waiting briefly.
 
-        A pass inside one encode call finishes that call, then writes nothing.
+        A pass inside one encode call finishes that call, but its connection is
+        fenced: it runs no statement after this returns.
         """
         stop = getattr(self, "_backfill_stop", None)
         if stop is None:
             return
         stop.set()
-        thread = self._backfill_thread
+        thread, run = self._backfill_thread, getattr(self, "_backfill_run", None)
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=timeout)
+            if thread.is_alive() and run is not None:
+                run.fence()
 
     def close(self):
         """Close this engine's connection and detach it from the database.
@@ -3528,7 +3558,3 @@ class TrueMemoryEngine:
         status = "ready" if self.ready else "not ready"
         msg_count = self.stats.get("message_count", "?")
         return f"<TrueMemoryEngine db={self.db_path.name} msgs={msg_count} {status}>"
-
-
-class EngineClosedError(RuntimeError):
-    """A background thread found its Engine closed; it does not reopen one."""

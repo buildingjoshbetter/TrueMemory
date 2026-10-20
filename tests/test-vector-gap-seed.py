@@ -8,8 +8,13 @@ deterministic mock encoder.
 """
 
 import hashlib
+import json
 import sqlite3
+import subprocess
+import sys
+import textwrap
 import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -181,9 +186,9 @@ def test_seed_scans_in_chunks_and_stops(legacy_store: Path, monkeypatch) -> None
         conn.close()
 
 
-def test_open_requests_maintenance_before_the_seed_takes_the_writer(legacy_store: Path, monkeypatch) -> None:
-    # The seed thread takes the writer at once; a wake after it only tries the
-    # writer, finds it busy and is dropped (at MCP startup, the only wake).
+def test_open_requests_maintenance_before_the_seed_starts(legacy_store: Path, monkeypatch) -> None:
+    # A seed started first once took the Engine's writer, so the open's wake
+    # found it busy and was dropped (at MCP startup, the only wake).
     events = []
     monkeypatch.setattr(maintenance.MaintenanceCoordinator, "request_layers",
                         lambda self, **kwargs: events.append("wake") or False)
@@ -203,3 +208,126 @@ def test_open_requests_maintenance_before_the_seed_takes_the_writer(legacy_store
         memory.close()
     assert events[:2] == ["wake", "seed"]
     assert _cursor(legacy_store) == str(GAPS.start)
+
+
+def test_background_work_runs_no_statement_on_the_engine_connection(legacy_store: Path) -> None:
+    # Callers may use and close engine.conn directly (test_issue_650 and the
+    # #684 reconnect tests do); a close under another thread's statement crashes.
+    statements = []
+    memory = Memory(path=legacy_store)
+    engine = memory._engine
+    try:
+        engine._open_connection_handle()
+        engine.conn.set_trace_callback(lambda sql: statements.append(threading.current_thread().name))
+        engine._ensure_connection()  # The open's wake seeds the cursor.
+        _join_backfill(memory)
+        assert _cursor(legacy_store) == str(GAPS.start)
+        memory.search("project alpha", user_id="u1", limit=3, _skip_reranker=True)  # And starts a pass.
+        _join_backfill(memory)
+        assert _vectorless(legacy_store) < len(GAPS)
+    finally:
+        memory.close()
+    assert statements and "truememory-vector-backfill" not in statements
+
+
+DIRECT_CLOSE = textwrap.dedent('''
+    import hashlib, json, sqlite3, sys, threading, time
+    from unittest.mock import MagicMock, patch
+    import numpy as np
+    from truememory import maintenance, vector_search
+    from truememory.client import Memory
+
+    mode, db = sys.argv[1], sys.argv[2]
+    reached, closed, armed = threading.Event(), threading.Event(), threading.Event()
+
+    def encode(texts, **kwargs):
+        vectors = [np.random.RandomState(int(hashlib.md5(text.encode()).hexdigest()[:8], 16)).rand(256)
+                   for text in texts]
+        return np.array([vector / np.linalg.norm(vector) for vector in vectors], dtype=np.float32)
+
+    def background():
+        return armed.is_set() and threading.current_thread().name == "truememory-vector-backfill"
+
+    def progress():
+        # Work on the Engine's connection: hold one statement inside sqlite3_step.
+        if background() and not reached.is_set():
+            reached.set()
+            time.sleep(1.0)
+        return 0
+
+    def held(real):
+        # Work on a connection of its own: hold it until engine.conn is closed.
+        def call(*args, **kwargs):
+            if background() and not reached.is_set():
+                reached.set()
+                assert closed.wait(30)
+            return real(*args, **kwargs)
+        return call
+
+    vector_search.seed_backfill_cursor = held(vector_search.seed_backfill_cursor)
+    vector_search.backfill_missing_vectors = held(vector_search.backfill_missing_vectors)
+    model = MagicMock()
+    model.encode = encode
+    with patch("truememory.vector_search.get_model", return_value=model), \\
+            patch.object(maintenance.MaintenanceCoordinator, "request_layers", lambda self, **kwargs: False):
+        memory = Memory(path=db)
+        engine = memory._engine
+        engine._open_connection_handle()
+        engine.conn.set_progress_handler(progress, 50)
+        if mode == "seed":
+            armed.set()
+        engine._ensure_connection()  # The open's wake starts the seed.
+        if mode == "pass":
+            engine._backfill_thread.join(30)
+            armed.set()
+            memory.search("project alpha", user_id="u1", limit=3, _skip_reranker=True)
+        thread = engine._backfill_thread
+        assert reached.wait(30)
+        time.sleep(0.1)
+        engine.conn.close()  # Directly, with no Engine lock.
+        closed.set()
+        thread.join(30)
+        memory.close()
+    conn = sqlite3.connect(db)
+    cursor = conn.execute("SELECT value FROM metadata WHERE key = 'vector_backfill_from'").fetchone()
+    print(json.dumps({"alive": thread.is_alive(), "cursor": cursor and cursor[0]}))
+''')
+
+
+@pytest.mark.parametrize(("mode", "cursor"), [("seed", str(GAPS.start)), ("pass", str(GAPS.start + 32))])
+def test_direct_close_during_background_work_does_not_crash(legacy_store: Path, tmp_path: Path,
+                                                            mode: str, cursor: str) -> None:
+    # A child process: the crash this guards against is a segmentation fault.
+    script = tmp_path / "child.py"
+    script.write_text(DIRECT_CLOSE, encoding="utf-8")
+    result = subprocess.run([sys.executable, str(script), mode, str(legacy_store)],
+                            capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr[-2000:]
+    # The seed recorded the first gap; one pass of 32 then moved the cursor past it.
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {"alive": False, "cursor": cursor}
+
+
+def test_close_fences_a_seed_without_the_last_close_wait(legacy_store: Path, monkeypatch) -> None:
+    entered, release, seen = threading.Event(), threading.Event(), []
+    real = vector_search.seed_backfill_cursor
+
+    def seed(conn, table, **kwargs):
+        seen.append(conn)
+        entered.set()
+        assert release.wait(10)
+        return real(conn, table, **kwargs)
+
+    monkeypatch.setattr(vector_search, "seed_backfill_cursor", seed)
+    memory = Memory(path=legacy_store)
+    memory._engine._ensure_connection()
+    assert entered.wait(10)
+    thread = memory._engine._backfill_thread
+    started = time.monotonic()
+    memory.close()
+    closed = time.monotonic() - started
+    release.set()
+    thread.join(10)
+    assert isinstance(seen[0], maintenance._FencedConnection)
+    # Its own close fences it after the 1 s join; detach does not wait 2 s more.
+    assert closed < 1.5
+    assert _cursor(legacy_store) is None  # Its write after close() was refused.

@@ -201,16 +201,19 @@ def test_background_backfill_never_reopens_a_closed_engine(store: Path, monkeypa
     engine = _engine(store)
     engine.ready = True
     entered, release = threading.Event(), threading.Event()
-    real_open = runtime.open_engine_for_operation
+    real_open = engine._open_background_connection
 
-    def paused_open(target):
+    def paused_open(coordinator):
         entered.set()
         assert release.wait(10)
-        return real_open(target)
+        return real_open(coordinator)
 
-    monkeypatch.setattr(runtime, "open_engine_for_operation", paused_open)
-    # The backfill thread's body, past its stop check when close() runs.
-    backfill = threading.Thread(target=engine._background_backfill, name="synthetic-backfill")
+    monkeypatch.setattr(engine, "_open_background_connection", paused_open)
+    monkeypatch.setattr(maintenance, "_CLOSE_WAIT_SECONDS", 0.0, raising=False)
+    # The backfill thread's body, past its stop check when close() runs. It
+    # opens a connection of its own, never the Engine's.
+    backfill = threading.Thread(target=engine._background_backfill, name="synthetic-backfill",
+                                args=(maintenance.get_coordinator(store), maintenance._BackgroundRun()))
     backfill.start()
     assert entered.wait(10)
     engine.close()

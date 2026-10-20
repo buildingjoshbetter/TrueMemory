@@ -1114,10 +1114,11 @@ class MaintenanceCoordinator:
         While another Engine has the database open, the shared worker keeps
         running with its own connection. After the last, the worker and every
         other background run stop at their next phase boundary, waited for up
-        to ``timeout`` (default _CLOSE_WAIT_SECONDS). A run still going then
-        is fenced, so none writes the database after this returns. Returns
-        whether every run finished within the wait. Unlike cancel(), a fresh
-        open in this process may still wait for the automatic owner to leave.
+        to ``timeout`` (default _CLOSE_WAIT_SECONDS). A run still going then,
+        or fenced already, is fenced, so none writes the database after this
+        returns. Returns whether every run finished within the wait. Unlike
+        cancel(), a fresh open in this process may still wait for the
+        automatic owner to leave.
         An Engine that attached again after detach_engine cleared its record
         (a concurrent reuse reopened it) stays counted.
         """
@@ -1142,7 +1143,8 @@ class MaintenanceCoordinator:
         deadline = time.monotonic() + (_CLOSE_WAIT_SECONDS if timeout is None else timeout)
         finished = True
         for run in runs:
-            if not run.finished.wait(max(0.0, deadline - time.monotonic())):
+            # A run fenced already runs no statement: fence() only waits out its last one.
+            if run.closed or not run.finished.wait(max(0.0, deadline - time.monotonic())):
                 run.fence()
                 finished = False
         return finished
@@ -1170,16 +1172,18 @@ def detach_engine(engine: object) -> None:
 
 
 @contextmanager
-def background_writes(coordinator: MaintenanceCoordinator) -> Iterator[_BackgroundRun]:
+def background_writes(coordinator: MaintenanceCoordinator,
+                      run: _BackgroundRun | None = None) -> Iterator[_BackgroundRun]:
     """Run a background thread's database work as a run the last Engine.close() stops.
 
     Take the coordinator while the spawning Engine is attached: one fetched
     later may be a fresh object that never saw the close. Opens inside
     connect only to an existing file. Refused after the last Engine in this
-    process detached, until another attaches.
+    process detached, until another attaches. Pass ``run`` when its spawner
+    also fences it (Engine.stop_background_backfill).
     """
     coordinator._check_process()
-    run = _BackgroundRun()
+    run = _BackgroundRun() if run is None else run
     with coordinator._mutex:
         if coordinator._unattached:
             raise MaintenanceClosedError("The database was closed in this process")
