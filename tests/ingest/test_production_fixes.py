@@ -221,16 +221,21 @@ def test_pipeline_sets_busy_timeout_on_memory():
     with tempfile.TemporaryDirectory() as tmp:
         db_path = Path(tmp) / "busytimeout.db"
         pipeline = IngestionPipeline(db_path=str(db_path), gate_threshold=0.30)
-        engine = getattr(pipeline.memory, "_engine", None)
-        assert engine is not None, "Memory._engine not available for inspection"
-        # Force a connection
-        if hasattr(engine, "_ensure_connection"):
-            engine._ensure_connection()
-        conn = getattr(engine, "conn", None)
-        assert conn is not None, "engine.conn not available"
+        try:
+            engine = getattr(pipeline.memory, "_engine", None)
+            assert engine is not None, "Memory._engine not available for inspection"
+            # Force a connection
+            if hasattr(engine, "_ensure_connection"):
+                engine._ensure_connection()
+            conn = getattr(engine, "conn", None)
+            assert conn is not None, "engine.conn not available"
 
-        cursor = conn.execute("PRAGMA busy_timeout")
-        row = cursor.fetchone()
+            cursor = conn.execute("PRAGMA busy_timeout")
+            row = cursor.fetchone()
+        finally:
+            # Opening schedules background work in the store directory; close
+            # stops it before the temporary directory is removed.
+            pipeline.memory.close()
         # sqlite returns the current busy_timeout in ms
         timeout_value = row[0] if row else None
         assert timeout_value is not None
