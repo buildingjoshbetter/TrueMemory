@@ -1426,13 +1426,14 @@ def _validate_foreground_vector_target(
 @contextmanager
 def _foreground_vector_publication(
     conn: sqlite3.Connection, identity: tuple[int, str, int], message_id: int,
-    *, selection=None,
+    *, selection=None, retry_busy: bool = False,
 ) -> Iterator[tuple[str, str]]:
     from truememory.tier_switch.writer import WriterSelectionChanged, writer_transaction
 
     with _foreground_model_fence(identity, blocking=not conn.in_transaction):
         try:
-            with writer_transaction(conn, selection, model_id=identity[1], dimension=identity[2]):
+            with writer_transaction(conn, selection, model_id=identity[1], dimension=identity[2],
+                                    retry_busy=retry_busy):
                 yield _validate_foreground_vector_target(conn, identity, message_id, selection=selection)
         except WriterSelectionChanged as exc:
             raise VectorPublicationChanged(str(exc)) from exc

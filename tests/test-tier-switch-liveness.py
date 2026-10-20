@@ -2404,6 +2404,56 @@ class ForegroundWriteRetry(unittest.TestCase):
         self.assertLess(result["gave_up"], 2.0)
         self.assertEqual((result["after"], result["final"]), (0, 1))
 
+    def test_an_update_publishes_its_vector_past_a_writer_busy_after_the_source_commit(self):
+        # Review v7 L-v7-2: update commits the source, then publishes the new
+        # vector in a second transaction whose BEGIN was not retried. A writer
+        # busy past the timeout there left the old vector behind a successful
+        # update, and backfill never replaces an existing vector.
+        (result,) = run_scenario("""
+            seed(5, group="edge")
+            import model2vec
+            model2vec.StaticModel.from_pretrained = staticmethod(lambda *args, **kwargs: FakeEncoder())
+            stub_models()
+            import numpy as np
+            from truememory import engine as engine_module, storage, vector_search
+            storage.DEFAULT_BUSY_TIMEOUT_MS = engine_module.DEFAULT_BUSY_TIMEOUT_MS = 200
+            engine = engine_module.TrueMemoryEngine(DB)
+            memory_id = engine.add("synthetic original text", sender="alice")["id"]
+            publication = vector_search._foreground_vector_publication
+            holders = []
+            @contextmanager
+            def busy_after_commit(conn, *args, **kwargs):
+                if not conn.in_transaction:  # The post-commit publication, not the SEP one inside the source write.
+                    holder = sqlite3.connect(DB, isolation_level=None, check_same_thread=False)
+                    holder.execute("BEGIN IMMEDIATE")
+                    timer = threading.Timer(1.0, lambda: (holder.rollback(), holder.close()))
+                    timer.start()
+                    holders.append(timer)
+                with publication(conn, *args, **kwargs) as tables:
+                    yield tables
+            vector_search._foreground_vector_publication = busy_after_commit
+            started = time.monotonic()
+            updated = engine.update(memory_id, "synthetic updated text")
+            waited = time.monotonic() - started
+            vector_search._foreground_vector_publication = publication
+            for timer in holders:
+                timer.join()
+            with engine._write_lock:
+                stored = np.frombuffer(engine.conn.execute(
+                    f"SELECT embedding FROM {vector_search._active_vec_table(engine.conn)} WHERE rowid=?", (memory_id,)
+                ).fetchone()[0], dtype=np.float32)
+            def cosine(text):
+                wanted = FakeEncoder().encode([text])[0]
+                return float(np.dot(stored, wanted) / (np.linalg.norm(stored) * np.linalg.norm(wanted)))
+            emit(content=updated["content"], holders=len(holders), waited=waited,
+                 new=cosine("synthetic updated text"), old=cosine("synthetic original text"))
+            engine.close()
+        """, tier="edge")
+        self.assertEqual((result["content"], result["holders"]), ("synthetic updated text", 1))
+        self.assertGreater(result["new"], 0.999, result)
+        self.assertLess(result["old"], 0.5, result)
+        self.assertGreater(result["waited"], 0.5)
+
 
 @unittest.skipUnless(importlib.util.find_spec("hdbscan"), "needs the clustering extra")
 class SmallStoreClustering(unittest.TestCase):

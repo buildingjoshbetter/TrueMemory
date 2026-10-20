@@ -1738,8 +1738,11 @@ class TrueMemoryEngine:
                     from truememory.vector_search import VectorPublicationChanged, _foreground_vector_publication
                     try:
                         from truememory.vector_search import serialize_f32, _write_foreground_embedder_metadata_no_commit
+                        # The source is committed: a busy writer here would leave
+                        # the old vector behind a successful update, and backfill
+                        # only fills missing vectors.
                         with _foreground_vector_publication(
-                            self.conn, pre_identity, memory_id, selection=write_selection,
+                            self.conn, pre_identity, memory_id, selection=write_selection, retry_busy=True,
                         ) as (vec_tbl, sep_tbl):
                             try:
                                 self.conn.execute(f"DELETE FROM {vec_tbl} WHERE rowid = ?", (memory_id,))
