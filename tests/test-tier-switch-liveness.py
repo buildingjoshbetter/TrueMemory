@@ -2352,6 +2352,73 @@ class SnapshotPublicationOverForegroundAdds(unittest.TestCase):
         self.assertEqual(result["model_row"], result["rewrite_row"])
 
 
+# An edge engine with a 200 ms busy timeout, a writer held by another
+# connection (hold), and a hook that runs code once inside the first busy-retry
+# wait, after that wait let go of its locks (in_backoff).
+BUSY_RETRY_ENGINE = """
+seed(5, group="edge")
+import model2vec
+model2vec.StaticModel.from_pretrained = staticmethod(lambda *args, **kwargs: FakeEncoder())
+stub_models()
+import numpy as np
+from truememory import engine as engine_module, storage, vector_search
+from truememory.tier_switch import writer
+storage.DEFAULT_BUSY_TIMEOUT_MS = engine_module.DEFAULT_BUSY_TIMEOUT_MS = 200
+engine = engine_module.TrueMemoryEngine(DB)
+timers = []
+def hold(seconds):
+    holder = sqlite3.connect(DB, isolation_level=None, check_same_thread=False)
+    holder.execute("BEGIN IMMEDIATE")
+    once = threading.Lock()
+    def release():
+        if once.acquire(blocking=False):
+            holder.rollback(); holder.close()
+    timer = threading.Timer(seconds, release)
+    timer.start()
+    timers.append(timer)
+    return release
+def join_timers():
+    for timer in timers:
+        timer.join()
+    timers.clear()
+def in_thread(function, timeout=10):
+    out = {}
+    def run():
+        try:
+            out["value"] = function()
+        except Exception as error:
+            out["error"] = f"{type(error).__name__}: {error}"
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join(timeout)
+    out["finished"] = not thread.is_alive()
+    return out
+def in_backoff(action):
+    real, calls = getattr(writer, "_released_for_backoff", None), []
+    @contextmanager
+    def hooked(runtime, release):
+        with real(runtime, release):
+            if not calls:
+                calls.append(True)
+                action()
+            yield
+    writer._released_for_backoff = hooked
+    return calls
+def similarity(memory_id, text):
+    with engine._write_lock:
+        stored = np.frombuffer(engine.conn.execute(
+            f"SELECT embedding FROM {vector_search._active_vec_table(engine.conn)} WHERE rowid=?", (memory_id,)
+        ).fetchone()[0], dtype=np.float32)
+    wanted = FakeEncoder().encode([text])[0]
+    return float(np.dot(stored, wanted) / (np.linalg.norm(stored) * np.linalg.norm(wanted)))
+def fence_free():
+    if not vector_search._lock.acquire(blocking=False):
+        return False
+    vector_search._lock.release()
+    return True
+"""
+
+
 class ForegroundWriteRetry(unittest.TestCase):
     def test_writes_outlast_a_writer_held_past_the_busy_timeout_then_give_up(self):
         # Round v8 (review v6 L-v6-3): under saturated writers SQLite can starve
@@ -2453,6 +2520,272 @@ class ForegroundWriteRetry(unittest.TestCase):
         self.assertGreater(result["new"], 0.999, result)
         self.assertLess(result["old"], 0.5, result)
         self.assertGreater(result["waited"], 0.5)
+
+    def test_a_busy_retry_lets_same_process_reads_and_the_model_fence_through(self):
+        # Review v7 L-v7-1: the retry looped inside the engine lock and the model
+        # fence, so for up to 30 s no other thread of the process could read or
+        # take the model. Each wait between attempts now lets go of both.
+        (result,) = run_scenario(steps(BUSY_RETRY_ENGINE, """
+            first = engine.add("synthetic warm-up", sender="alice")["id"]
+            spare = engine.add("synthetic spare", sender="alice")["id"]
+            engine.add("synthetic fact from bob", sender="bob")
+            publication = vector_search._foreground_vector_publication
+            @contextmanager
+            def busy_after_commit(conn, *args, **kwargs):
+                if not conn.in_transaction:  # The post-commit publication.
+                    hold(2.0)
+                with publication(conn, *args, **kwargs) as tables:
+                    yield tables
+            def measure(write, held=True):
+                stop, reads, fences = threading.Event(), [], []
+                def reader():
+                    while not stop.is_set():
+                        started = time.monotonic(); engine.get(first); reads.append(time.monotonic() - started)
+                        time.sleep(0.02)
+                def fencer():
+                    while not stop.is_set():
+                        started = time.monotonic()
+                        if vector_search._lock.acquire(timeout=30):
+                            vector_search._lock.release()
+                        fences.append(time.monotonic() - started)
+                        time.sleep(0.02)
+                threads = [threading.Thread(target=reader), threading.Thread(target=fencer)]
+                if held:
+                    hold(2.0)
+                for thread in threads:
+                    thread.start()
+                started = time.monotonic()
+                value = write()
+                waited = time.monotonic() - started
+                stop.set()
+                for thread in threads:
+                    thread.join()
+                join_timers()
+                return {"waited": round(waited, 2), "reads": len(reads), "read_max": round(max(reads), 2),
+                        "fence_max": round(max(fences), 2), "value": value}
+            results = {"add": measure(lambda: engine.add("synthetic stored after the wait", sender="alice")["id"])}
+            added = results["add"]["value"]
+            results["update"] = measure(lambda: engine.update(added, "synthetic updated after the wait")["content"])
+            vector_search._foreground_vector_publication = busy_after_commit
+            results["update_vector"] = measure(
+                lambda: engine.update(added, "synthetic published after the wait")["content"], held=False)
+            vector_search._foreground_vector_publication = publication
+            results["delete"] = measure(lambda: engine.delete(spare))
+            results["delete_all"] = measure(lambda: engine.delete_all(user_id="bob"))
+            emit(results=results, vector=similarity(added, "synthetic published after the wait"),
+                 rows=engine.conn.execute("SELECT count(*) FROM messages").fetchone()[0])
+            engine.close()
+        """), tier="edge")
+        for name, row in result["results"].items():
+            self.assertGreater(row["waited"], 1.0, (name, row))
+            self.assertGreater(row["reads"], 5, (name, row))
+            self.assertLess(row["read_max"], 1.0, (name, row))
+            self.assertLess(row["fence_max"], 1.0, (name, row))
+        self.assertEqual(result["results"]["update_vector"]["value"], "synthetic published after the wait")
+        self.assertEqual([result["results"][name]["value"] for name in ("delete", "delete_all")], [True, True])
+        self.assertGreater(result["vector"], 0.999)
+        self.assertEqual(result["rows"], 7)  # 5 seeded + 4 added - 2 deleted.
+
+    def test_an_update_publishes_no_vector_over_a_newer_write(self):
+        # Between update's source commit and its vector publication another
+        # writer can update the same memory: another connection at any time, or
+        # this engine while the busy retry waits without its lock. The older
+        # update then replaced the newer vector, and nothing repairs it.
+        (result,) = run_scenario(steps(BUSY_RETRY_ENGINE, """
+            memory_id = engine.add("synthetic original text", sender="alice")["id"]
+            other = engine_module.TrueMemoryEngine(DB)
+            other.get(memory_id)
+            publication = vector_search._foreground_vector_publication
+            newer = []
+            @contextmanager
+            def newer_write_first(conn, *args, **kwargs):
+                if conn is engine.conn and not conn.in_transaction and not newer:
+                    newer.append(in_thread(lambda: other.update(memory_id, "synthetic newer text")["content"]))
+                with publication(conn, *args, **kwargs) as tables:
+                    yield tables
+            vector_search._foreground_vector_publication = newer_write_first
+            returned = engine.update(memory_id, "synthetic older text")["content"]
+            vector_search._foreground_vector_publication = publication
+            emit(newer=newer, returned=returned, content=engine.get(memory_id)["content"],
+                 to_newer=similarity(memory_id, "synthetic newer text"),
+                 to_older=similarity(memory_id, "synthetic older text"))
+            other.close(); engine.close()
+        """), tier="edge")
+        self.assertEqual(result["newer"], [{"value": "synthetic newer text", "finished": True}])
+        self.assertEqual((result["returned"], result["content"]), ("synthetic newer text",) * 2)
+        self.assertGreater(result["to_newer"], 0.999, result)
+        self.assertLess(result["to_older"], 0.5, result)
+
+    def test_a_same_engine_update_made_during_the_wait_keeps_its_vector(self):
+        (result,) = run_scenario(steps(BUSY_RETRY_ENGINE, """
+            memory_id = engine.add("synthetic original text", sender="alice")["id"]
+            publication = vector_search._foreground_vector_publication
+            releases, newer = [], []
+            @contextmanager
+            def busy_after_commit(conn, *args, **kwargs):
+                if not conn.in_transaction and not releases:
+                    releases.append(hold(5.0))
+                with publication(conn, *args, **kwargs) as tables:
+                    yield tables
+            def newer_update():  # Frees the writer, then updates through this engine from another thread.
+                releases[0]()
+                newer.append(in_thread(lambda: engine.update(memory_id, "synthetic newer text")["content"]))
+            vector_search._foreground_vector_publication = busy_after_commit
+            calls = in_backoff(newer_update)
+            engine.update(memory_id, "synthetic older text")
+            vector_search._foreground_vector_publication = publication
+            join_timers()
+            emit(calls=len(calls), newer=newer, content=engine.get(memory_id)["content"],
+                 to_newer=similarity(memory_id, "synthetic newer text"),
+                 to_older=similarity(memory_id, "synthetic older text"))
+            engine.close()
+        """), tier="edge")
+        self.assertEqual(result["calls"], 1)
+        self.assertEqual(result["newer"], [{"value": "synthetic newer text", "finished": True}])
+        self.assertEqual(result["content"], "synthetic newer text")
+        self.assertGreater(result["to_newer"], 0.999, result)
+        self.assertLess(result["to_older"], 0.5, result)
+
+    def test_closing_the_engine_during_the_wait_fails_the_add_with_nothing_stored(self):
+        (result,) = run_scenario(steps(BUSY_RETRY_ENGINE, """
+            engine.add("synthetic warm-up", sender="alice")
+            release = hold(5.0)
+            closed = []
+            calls = in_backoff(lambda: (closed.append(in_thread(engine.close)), release()))
+            try:
+                engine.add("synthetic add closed while waiting", sender="alice")
+                outcome = "stored"
+            except Exception as error:
+                outcome = f"{type(error).__name__}: {error}"
+            join_timers()
+            check = sqlite3.connect(DB)
+            stored = check.execute(
+                "SELECT count(*) FROM messages WHERE content = 'synthetic add closed while waiting'").fetchone()[0]
+            integrity = check.execute("PRAGMA integrity_check").fetchone()[0]
+            check.close()
+            released = fence_free() and not engine._write_lock.locked()
+            reopened = engine.add("synthetic add after reopening", sender="alice")["id"] is not None
+            emit(calls=len(calls), closed=closed, outcome=outcome, stored=stored, integrity=integrity,
+                 released=released, reopened=reopened)
+            engine.close()
+        """), tier="edge")
+        self.assertEqual(result["calls"], 1)
+        self.assertEqual(result["closed"], [{"value": None, "finished": True}])
+        self.assertEqual(result["outcome"], "ProgrammingError: Cannot operate on a closed database.")
+        self.assertEqual((result["stored"], result["integrity"]), (0, "ok"))
+        self.assertTrue(result["released"] and result["reopened"], result)
+
+    def test_a_model_change_during_the_wait_refuses_the_add_with_nothing_stored(self):
+        (result,) = run_scenario(steps(BUSY_RETRY_ENGINE, """
+            engine.add("synthetic warm-up", sender="alice")
+            release = hold(5.0)
+            def change_model():
+                # A real reload drains admitted operations first; the fence's
+                # identity check on taking it back is the second line.
+                with vector_search._lock:
+                    vector_search._model_generation += 1
+                release()
+            calls = in_backoff(change_model)
+            try:
+                engine.add("synthetic add over a changed model", sender="alice")
+                outcome = "stored"
+            except Exception as error:
+                outcome = type(error).__name__
+            join_timers()
+            stored = engine.conn.execute(
+                "SELECT count(*) FROM messages WHERE content = 'synthetic add over a changed model'").fetchone()[0]
+            emit(calls=len(calls), outcome=outcome, stored=stored, fence_free=fence_free(),
+                 lock_free=not engine._write_lock.locked(), in_transaction=engine.conn.in_transaction,
+                 busy_timeout=engine.conn.execute("PRAGMA busy_timeout").fetchone()[0])
+            engine.close()
+        """), tier="edge")
+        self.assertEqual((result["calls"], result["outcome"], result["stored"]), (1, "VectorPublicationChanged", 0))
+        self.assertTrue(result["fence_free"] and result["lock_free"], result)
+        self.assertEqual((result["in_transaction"], result["busy_timeout"]), (False, 200))
+
+    def test_a_nested_caller_gets_the_engine_lock_back_and_a_caller_transaction_is_never_waited_in(self):
+        # A public call nested in an admitted operation that holds the engine
+        # lock: the wait lets go of every depth (as model work does) and the
+        # write runs with all of them held again. With a caller transaction
+        # open there is no retry, and the lock is never let go.
+        (result,) = run_scenario(steps(BUSY_RETRY_ENGINE, """
+            from truememory.tier_switch.runtime import engine_serving_operation
+            first = engine.add("synthetic warm-up", sender="alice")["id"]
+            reads, depths = [], []
+            def read_once():
+                started = time.monotonic(); engine.get(first); reads.append(round(time.monotonic() - started, 2))
+            insert = engine_module.insert_message
+            engine_module.insert_message = lambda conn, msg: depths.append(engine._write_lock._depth) or insert(conn, msg)
+            hold(1.5)
+            with engine_serving_operation(engine, models="optional"), engine._write_lock:
+                reader = threading.Timer(0.6, read_once); reader.start()
+                nested = engine.add("synthetic nested add", sender="alice")["id"]
+                kept = (engine._write_lock._depth, engine._write_lock.owned_by_current_thread())
+            reader.join(); join_timers()
+            hold(1.5)
+            with engine_serving_operation(engine, models="optional"), engine._write_lock:
+                engine.conn.execute("BEGIN")
+                engine.conn.execute("SELECT count(*) FROM messages").fetchone()
+                blocked = threading.Timer(0.1, read_once); blocked.start()
+                started = time.monotonic()
+                try:
+                    engine.add("synthetic add in a caller transaction", sender="alice")
+                    borrowed = "stored"
+                except Exception as error:
+                    borrowed = f"{type(error).__name__}: {error}"
+                borrowed_wait = time.monotonic() - started
+                time.sleep(0.3)
+                during = (len(reads), engine.conn.in_transaction)
+                engine.conn.rollback()
+            blocked.join(); join_timers()
+            engine_module.insert_message = insert
+            stored = engine.conn.execute("SELECT count(*) FROM messages WHERE content IN "
+                                         "('synthetic nested add', 'synthetic add in a caller transaction')").fetchone()[0]
+            emit(nested=nested is not None, depths=depths, kept=kept, reads=reads, borrowed=borrowed,
+                 borrowed_wait=round(borrowed_wait, 2), during=during, stored=stored, lock_free=not engine._write_lock.locked())
+            engine.close()
+        """), tier="edge")
+        self.assertEqual((result["nested"], result["kept"]), (True, [1, True]))
+        self.assertEqual(result["depths"], [3], result)  # Caller, admitted body, writer block.
+        self.assertLess(result["reads"][0], 0.5, result)  # Read inside the nested add's wait.
+        self.assertEqual(result["borrowed"], "OperationalError: database is locked", result)
+        self.assertLess(result["borrowed_wait"], 1.0, result)
+        self.assertEqual(result["during"], [1, True], result)  # The second read waited for the caller.
+        self.assertEqual((result["stored"], result["lock_free"]), (1, True))
+
+    def test_same_process_writers_share_the_retry_without_failing(self):
+        (result,) = run_scenario(steps(BUSY_RETRY_ENGINE, """
+            engine.add("synthetic warm-up", sender="alice")
+            stop = threading.Event()
+            def churn():  # Holds the writer past the busy timeout, over and over.
+                holder = sqlite3.connect(DB, isolation_level=None, check_same_thread=False, timeout=30)
+                while not stop.is_set():
+                    holder.execute("BEGIN IMMEDIATE"); time.sleep(0.4); holder.rollback(); time.sleep(0.1)
+                holder.close()
+            churner = threading.Thread(target=churn); churner.start()
+            failures, latencies = [], []
+            def write(index):
+                for n in range(4):
+                    started = time.monotonic()
+                    try:
+                        engine.add(f"synthetic writer {index} fact {n}", sender="alice")
+                        latencies.append(time.monotonic() - started)
+                    except Exception as error:
+                        failures.append(f"{type(error).__name__}: {error}")
+            writers = [threading.Thread(target=write, args=(index,)) for index in range(4)]
+            for thread in writers:
+                thread.start()
+            for thread in writers:
+                thread.join()
+            stop.set(); churner.join()
+            rows = engine.conn.execute(
+                "SELECT count(*), count(DISTINCT content) FROM messages WHERE content LIKE 'synthetic writer %'").fetchone()
+            emit(failures=failures, rows=rows, latency_max=round(max(latencies), 2))
+            engine.close()
+        """), tier="edge")
+        self.assertEqual(result["failures"], [])
+        self.assertEqual(result["rows"], [16, 16])
+        self.assertLess(result["latency_max"], 30)
 
 
 @unittest.skipUnless(importlib.util.find_spec("hdbscan"), "needs the clustering extra")

@@ -12,9 +12,10 @@ import sqlite3
 import sys
 import time
 import uuid
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -37,12 +38,18 @@ def _busy_error(error: sqlite3.OperationalError) -> bool:
     return str(error) in {"database is locked", "database table is locked"}
 
 
-def begin_immediate(conn: sqlite3.Connection, *, retry_seconds: float = 0.0) -> None:
+def begin_immediate(
+    conn: sqlite3.Connection, *, retry_seconds: float = 0.0,
+    backoff: Callable[[], AbstractContextManager[object]] | None = None,
+) -> None:
     """BEGIN IMMEDIATE outside a transaction; on a busy writer, retry for ``retry_seconds`` in all.
 
     Nothing has been written when BEGIN fails, so retrying cannot repeat any
     part of a write. Retries wait with jitter between attempts, each attempt
     with at most a one-second busy wait and never past the deadline.
+    ``backoff`` is entered around each wait. It may let go of the caller's
+    locks: the connection holds no transaction then and keeps its own busy
+    timeout, since the shorter one is set for a single attempt only.
     """
     started = time.monotonic()
     try:
@@ -52,27 +59,39 @@ def begin_immediate(conn: sqlite3.Connection, *, retry_seconds: float = 0.0) -> 
         if retry_seconds <= 0 or conn.in_transaction or not _busy_error(error):
             raise
         last = error
-    previous = conn.execute("PRAGMA busy_timeout").fetchone()[0]
     deadline = started + retry_seconds
     attempt = 0
-    try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise last
-            attempt += 1
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise last
+        attempt += 1
+        with backoff() if backoff is not None else nullcontext():
             time.sleep(min(remaining, random.uniform(0.01, 0.05) * min(attempt, 10)))
-            wait_ms = int(min(previous, _RETRY_ATTEMPT_MS, max(deadline - time.monotonic(), 0) * 1000))
-            conn.execute(f"PRAGMA busy_timeout = {wait_ms}")
-            try:
-                conn.execute("BEGIN IMMEDIATE")
-                return
-            except sqlite3.OperationalError as error:
-                if conn.in_transaction or not _busy_error(error):
-                    raise
-                last = error
-    finally:
-        conn.execute(f"PRAGMA busy_timeout = {previous}")
+        if conn.in_transaction:
+            raise last  # Opened by someone else during the wait: not ours to join.
+        previous = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        wait_ms = int(min(previous, _RETRY_ATTEMPT_MS, max(deadline - time.monotonic(), 0) * 1000))
+        conn.execute(f"PRAGMA busy_timeout = {wait_ms}")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            return
+        except sqlite3.OperationalError as error:
+            if conn.in_transaction or not _busy_error(error):
+                raise
+            last = error
+        finally:
+            conn.execute(f"PRAGMA busy_timeout = {previous}")
+
+
+@contextmanager
+def _released_for_backoff(
+    runtime: object | None, release: Callable[[], AbstractContextManager[object]] | None,
+) -> Iterator[None]:
+    # The model fence is taken after the engine lock: let go of it first, take it back last.
+    with release() if release is not None else nullcontext(), \
+            runtime.released_connection_locks() if runtime is not None else nullcontext():
+        yield
 
 
 class WriterSelectionChanged(RuntimeError):
@@ -212,6 +231,7 @@ def writer_transaction(
     conn: sqlite3.Connection, captured: WriterCapture | None, *,
     model_id: str | None = None, dimension: int | None = None,
     tables: tuple[str, str] | None = None, retry_busy: bool = False,
+    release: Callable[[], AbstractContextManager[object]] | None = None,
 ) -> Iterator[None]:
     """Acquire the writer before comparison; preserve borrowed outer work.
 
@@ -221,17 +241,22 @@ def writer_transaction(
     With ``retry_busy`` an owned BEGIN that finds the writer busy past the busy
     timeout tries again (FOREGROUND_BUSY_RETRY_SECONDS in all); a
     borrowed one never does, since the caller's transaction is not ours to wait in.
+    Between attempts it lets go of this thread's engine connection locks and of
+    ``release`` (the caller's model fence), so other threads are not held up
+    by the wait. Everything validated here is checked again on every attempt.
     """
     owned = not conn.in_transaction
     guard = "tier_writer_" + uuid.uuid4().hex
     if owned:
+        backoff = None
         if retry_busy:
             # Admission judged a caller transaction under the engine writer;
             # such a borrowed operation must not wait here either.
             runtime = sys.modules.get("truememory.tier_switch.runtime")
             operation = runtime.current_operation(conn) if runtime is not None else None
             retry_busy = not getattr(operation, "borrowed", False)
-        begin_immediate(conn, retry_seconds=FOREGROUND_BUSY_RETRY_SECONDS if retry_busy else 0.0)
+            backoff = partial(_released_for_backoff, runtime, release)
+        begin_immediate(conn, retry_seconds=FOREGROUND_BUSY_RETRY_SECONDS if retry_busy else 0.0, backoff=backoff)
     else:
         conn.execute(f"SAVEPOINT {guard}")
     guard_release_attempted = False

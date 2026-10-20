@@ -1155,11 +1155,11 @@ class TrueMemoryEngine:
         with self._write_lock, (
             _foreground_model_fence(pre_identity, blocking=not self.conn.in_transaction)
             if pre_embedding is not None else nullcontext()
-        ), writer_transaction(
+        ) as release_fence, writer_transaction(
             self.conn, write_selection,
             model_id=pre_identity[1] if pre_embedding is not None else None,
             dimension=pre_identity[2] if pre_embedding is not None else None,
-            retry_busy=True,
+            retry_busy=True, release=release_fence,
         ):
             if self._has_style_vec:
                 from truememory.maintenance import _capture_style_append, _publish_style_append
@@ -1669,6 +1669,7 @@ class TrueMemoryEngine:
 
         pre_embedding = None
         pre_sep_embedding = None
+        sep_inputs = (None, None, None)
         if self._has_vectors and (content is not None or sep_fields_changed):
             from truememory.vector_search import VectorPublicationChanged
             try:
@@ -1692,6 +1693,7 @@ class TrueMemoryEngine:
                     sep_text = _build_sep_text(sender_val, recipient_val, timestamp_val,
                                                content if content is not None else pre_source["content"])
                     pre_sep_embedding = _encode_with_mps_fallback(model, [sep_text])[0]
+                    sep_inputs = (sender_val, recipient_val, timestamp_val)
             except VectorPublicationChanged:
                 raise
             except Exception as _serving_error:
@@ -1744,28 +1746,39 @@ class TrueMemoryEngine:
                         with _foreground_vector_publication(
                             self.conn, pre_identity, memory_id, selection=write_selection, retry_busy=True,
                         ) as (vec_tbl, sep_tbl):
-                            try:
-                                self.conn.execute(f"DELETE FROM {vec_tbl} WHERE rowid = ?", (memory_id,))
-                            except Exception as _serving_error:
-                                from truememory.tier_switch.runtime import raise_if_serving_rejection
-                                raise_if_serving_rejection(_serving_error)
-                                logger.debug("Failed to delete old vector embedding for message %d", memory_id, exc_info=True)
-                            self.conn.execute(
-                                f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
-                                (memory_id, serialize_f32(pre_embedding)),
-                            )
-                            if pre_sep_embedding is not None:
+                            # Other writers can run between the source commit and here
+                            # (another connection, or this engine while the busy retry
+                            # waits without its lock): skip vectors whose text changed.
+                            current = self.conn.execute(
+                                "SELECT content IS ?, sender IS ? AND recipient IS ? AND timestamp IS ? "
+                                "FROM messages WHERE id = ?", (content, *sep_inputs, memory_id),
+                            ).fetchone()
+                            if current is None or not current[0]:
+                                logger.debug("Message %d changed after its update committed; vectors left to that write",
+                                             memory_id)
+                            else:
                                 try:
-                                    self.conn.execute(f"DELETE FROM {sep_tbl} WHERE rowid = ?", (memory_id,))
+                                    self.conn.execute(f"DELETE FROM {vec_tbl} WHERE rowid = ?", (memory_id,))
                                 except Exception as _serving_error:
                                     from truememory.tier_switch.runtime import raise_if_serving_rejection
                                     raise_if_serving_rejection(_serving_error)
-                                    logger.debug("Failed to delete old sep vector for message %d", memory_id, exc_info=True)
+                                    logger.debug("Failed to delete old vector embedding for message %d", memory_id, exc_info=True)
                                 self.conn.execute(
-                                    f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
-                                    (memory_id, serialize_f32(pre_sep_embedding)),
+                                    f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
+                                    (memory_id, serialize_f32(pre_embedding)),
                                 )
-                            _write_foreground_embedder_metadata_no_commit(self.conn, pre_identity, selection=write_selection)
+                                if pre_sep_embedding is not None and current[1]:
+                                    try:
+                                        self.conn.execute(f"DELETE FROM {sep_tbl} WHERE rowid = ?", (memory_id,))
+                                    except Exception as _serving_error:
+                                        from truememory.tier_switch.runtime import raise_if_serving_rejection
+                                        raise_if_serving_rejection(_serving_error)
+                                        logger.debug("Failed to delete old sep vector for message %d", memory_id, exc_info=True)
+                                    self.conn.execute(
+                                        f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
+                                        (memory_id, serialize_f32(pre_sep_embedding)),
+                                    )
+                                _write_foreground_embedder_metadata_no_commit(self.conn, pre_identity, selection=write_selection)
                     except VectorPublicationChanged as exc:
                         raise VectorPublicationChanged("Source update committed; retry update to publish vectors") from exc
                     except Exception as _serving_error:
