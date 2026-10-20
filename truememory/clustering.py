@@ -129,8 +129,11 @@ def _cluster_dependency_identity(conn: sqlite3.Connection, vector_search: Module
     identity.append(("metadata",))
     if "metadata" in tables:
         build_key = f"vec_build_state:{vec_table}"
+        # Values only: a same-value rewrite (0.7.6.2 rewrites both rows on every
+        # add) is no new embedding space, and the source fingerprint covers
+        # every vector byte. A timestamp would defer each build an add overlaps.
         for row in conn.execute(
-            "SELECT key, value, updated_at FROM metadata "
+            "SELECT key, value FROM metadata "
             "WHERE key IN ('embed_model', 'embed_dim', ?, ?) ORDER BY key",
             (build_key, f"vec_source_v1:{vec_table}"),
         ):

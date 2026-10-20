@@ -2210,6 +2210,148 @@ class MaintenanceUnderForegroundLoad(unittest.TestCase):
         self.assertLess(result["p95"], 0.25)
 
 
+# HDBSCAN stand-in, so the clusters layer runs without the clustering extra.
+SYNTHETIC_HDBSCAN = textwrap.dedent("""
+    import importlib.machinery, types
+    hdbscan = types.ModuleType("hdbscan")
+    hdbscan.__spec__ = importlib.machinery.ModuleSpec("hdbscan", None)
+    class HDBSCAN:
+        def __init__(self, **parameters):
+            pass
+        def fit_predict(self, values):
+            return [index % 2 for index in range(len(values))]
+    hdbscan.HDBSCAN = HDBSCAN
+    sys.modules["hdbscan"] = hdbscan
+    from truememory import maintenance
+    installed = maintenance._installed_dependency
+    maintenance._installed_dependency = lambda module, distribution: (
+        "synthetic-1" if module == "hdbscan" else installed(module, distribution))
+""")
+
+
+class SnapshotPublicationOverForegroundAdds(unittest.TestCase):
+    # Review v7 M-v7-1: the adapter suite appends with raw INSERTs, which miss
+    # what engine.add also writes. On a legacy store each add rewrote the
+    # embedder metadata with a new updated_at, which the clusters identity
+    # hashed, so a clusters build never published over an add.
+
+    def test_an_add_during_every_build_publishes_the_snapshot(self):
+        (result,) = run_scenario(SYNTHETIC_HDBSCAN + textwrap.dedent("""
+            seed(30, group="edge")
+            import model2vec
+            model2vec.StaticModel.from_pretrained = staticmethod(lambda *args, **kwargs: FakeEncoder())
+            stub_models()
+            from truememory.engine import TrueMemoryEngine
+            engine = TrueMemoryEngine(DB)
+            engine.add("synthetic warm-up", sender="alice")
+            assert engine._get_maintenance_coordinator().wait(60)
+            reader = connect()
+            keys = {spec.layer: spec.result_key for spec in maintenance.all_layer_specs(reader)}
+            layers = list(keys)
+            original = maintenance._SnapshotPublication.__call__
+            interleaved = []
+            def publish(publication, appends=True):
+                if not publication.writer and publication.layer in layers:
+                    interleaved.append(publication.layer)
+                    adder = threading.Thread(target=lambda: engine.add(
+                        f"synthetic append during {publication.layer}", sender="bob"))
+                    adder.start(); adder.join()
+                return original(publication, appends)
+            maintenance._SnapshotPublication.__call__ = publish
+            report = engine.consolidate()
+            maintenance._SnapshotPublication.__call__ = original
+            states = maintenance.read_layer_states(reader, maintenance.all_layer_specs(reader))
+            rows = {layer: [state.outcome, state.error_category,
+                            maintenance.layer_freshness(state.source, state, state.dependency)]
+                    for layer, state in states.items()}
+            appended = reader.execute("SELECT count(*) FROM messages WHERE content LIKE 'synthetic append during %'"
+                                      ).fetchone()[0]
+            reader.close()
+            engine.close()
+            emit(layers=layers, interleaved=interleaved, rows=rows, appended=appended,
+                 report={layer: report[keys[layer]] for layer in layers})
+        """), tier="edge")
+        self.assertEqual(result["interleaved"], result["layers"])
+        self.assertEqual(result["appended"], len(result["layers"]))
+        # This pass's results: a deferral keeps the earlier success row.
+        self.assertEqual({layer: value for layer, value in result["report"].items()
+                          if value.startswith(("DEFERRED", "ERROR", "UNAVAILABLE", "SKIPPED"))}, {})
+        self.assertEqual({layer: [row[0] in ("success", "success_empty"), *row[1:]]
+                          for layer, row in result["rows"].items()},
+                         {layer: [True, None, "append_pending"] for layer in result["layers"]})
+
+    def test_legacy_clusters_publish_over_adds_and_rewrites_but_not_a_model_change(self):
+        (result,) = run_scenario(SYNTHETIC_HDBSCAN + textwrap.dedent("""
+            seed(30, group="edge")
+            import model2vec
+            model2vec.StaticModel.from_pretrained = staticmethod(lambda *args, **kwargs: FakeEncoder())
+            stub_models()
+            from truememory import clustering
+            from truememory.engine import TrueMemoryEngine
+            engine = TrueMemoryEngine(DB)
+            engine.add("synthetic warm-up", sender="alice")
+            coordinator = engine._get_maintenance_coordinator()
+            assert coordinator.wait(60)
+            reader = connect()
+            revision = lambda: reader.execute("SELECT revision FROM maintenance_source_state").fetchone()[0]
+            metadata = lambda: reader.execute("SELECT key, value, updated_at FROM metadata "
+                                              "WHERE key IN ('embed_model', 'embed_dim') ORDER BY key").fetchall()
+            begin = clustering.begin_layer_publication
+            def run(change):
+                seen = []
+                def hook(conn, *args, **kwargs):
+                    if not seen:
+                        seen.append(revision())
+                        change()
+                    return begin(conn, *args, **kwargs)
+                clustering.begin_layer_publication = hook
+                try:
+                    report = engine.consolidate()["cluster_messages"]
+                finally:
+                    clustering.begin_layer_publication = begin
+                row = reader.execute("SELECT outcome, error_category, successful_revision FROM maintenance_layers "
+                                     "WHERE layer='clusters'").fetchone()
+                assert coordinator.wait(60)
+                return report, list(row), seen[0]
+            def write(sql, *parameters):
+                writer = connect()
+                writer.execute(sql, parameters)
+                writer.commit(); writer.close()
+            added = []
+            def add():
+                adder = threading.Thread(target=lambda: added.append(engine.add("synthetic append", sender="bob")["id"]))
+                adder.start(); adder.join()
+            before = metadata()
+            added_report, added_row, snapshot = run(add)
+            after, appended = metadata(), revision()
+            vector = reader.execute("SELECT count(*) FROM vec_messages_edge WHERE rowid=?", (added[0],)).fetchone()[0]
+            clustered = reader.execute("SELECT count(*) FROM message_clusters WHERE message_id=?",
+                                       (added[0],)).fetchone()[0]
+            # Same values, new timestamps: what 0.7.6.2's add and a rebuild's last write do.
+            rewrite_report, rewrite_row, _ = run(lambda: write(
+                "UPDATE metadata SET updated_at='synthetic-rewrite' WHERE key IN ('embed_model', 'embed_dim')"))
+            model = dict((key, value) for key, value, _ in before)["embed_model"]
+            model_report, model_row, _ = run(lambda: write(
+                "UPDATE metadata SET value='synthetic-other-model' WHERE key='embed_model'"))
+            write("UPDATE metadata SET value=? WHERE key='embed_model'", model)
+            reader.close()
+            engine.close()
+            emit(added_report=added_report, added_row=added_row, snapshot=snapshot, appended=appended,
+                 metadata_kept=before == after, vector=vector, clustered=clustered,
+                 rewrite_report=rewrite_report, rewrite_row=rewrite_row, model_report=model_report, model_row=model_row)
+        """), tier="edge")
+        self.assertTrue(result["added_report"].startswith("2 clusters in "), result)
+        self.assertGreater(result["appended"], result["snapshot"])
+        self.assertEqual(result["added_row"], ["success", None, result["snapshot"]])
+        self.assertTrue(result["metadata_kept"])
+        self.assertEqual((result["vector"], result["clustered"]), (1, 0))
+        self.assertTrue(result["rewrite_report"].startswith("2 clusters in "), result)
+        self.assertEqual(result["rewrite_row"], ["success", None, result["appended"]])
+        # A model change still defers the build and keeps the published clusters.
+        self.assertEqual(result["model_report"], "DEFERRED (SourceChanged)")
+        self.assertEqual(result["model_row"], result["rewrite_row"])
+
+
 class ForegroundWriteRetry(unittest.TestCase):
     def test_writes_outlast_a_writer_held_past_the_busy_timeout_then_give_up(self):
         # Round v8 (review v6 L-v6-3): under saturated writers SQLite can starve

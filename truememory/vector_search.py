@@ -905,7 +905,11 @@ def _write_foreground_embedder_metadata_no_commit(
             "SELECT typeof(value)='text' AND value=? FROM main.metadata WHERE key=?", (value, key),
         ).fetchone()
         matches.append(None if row is None else row[0])
-    if matches not in ([None, None], [1, 1]):
+    if matches == [1, 1]:
+        # Already published: a rewrite would change only updated_at, two row
+        # writes per add that readers of the metadata rows see as a change.
+        return
+    if matches != [None, None]:
         raise VectorPublicationChanged("Foreground metadata is partial or uses another embedding identity")
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     for key, value in (("embed_model", identity[1]), ("embed_dim", str(identity[2]))):
