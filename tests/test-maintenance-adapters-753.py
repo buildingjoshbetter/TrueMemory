@@ -705,14 +705,29 @@ class TestCoveragePublication(AdapterFixture):
         self.assertEqual(result.outcome, "failed")
         self.assertEqual((self.output(), self.state().successful_coverage), previous)
 
-    def test_metadata_timestamp_change_does_not_schedule_but_rejects_inflight_publication(self) -> None:
+    def test_metadata_timestamp_change_neither_schedules_nor_rejects_inflight_publication(self) -> None:
+        # A same-value rewrite of the embedder metadata is no new embedding
+        # space (d3a0a39, review v7 M-v7-1): only its value is in the identity.
+        self.add(1)
+        spec = self.spec()
+        original = spec.count_output
+
+        def touched(conn):
+            result = original(conn)
+            conn.execute("UPDATE metadata SET updated_at='synthetic-new' WHERE key='embed_model'")
+            return result
+
+        result = MAINTENANCE.run_layers(self.conn, (spec._replace(count_output=touched),))[0]
+        self.assertEqual(result.outcome, "success_empty")
+
+    def test_metadata_value_change_rejects_inflight_publication(self) -> None:
         self.add(1)
         spec = self.spec()
         original = spec.count_output
 
         def changed(conn):
             result = original(conn)
-            conn.execute("UPDATE metadata SET updated_at='synthetic-new' WHERE key='embed_model'")
+            conn.execute("UPDATE metadata SET value='synthetic-other-model' WHERE key='embed_model'")
             return result
 
         result = MAINTENANCE.run_layers(self.conn, (spec._replace(count_output=changed),))[0]
