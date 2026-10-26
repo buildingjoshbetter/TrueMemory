@@ -24,6 +24,10 @@ import sqlite_vec
 
 from truememory import maintenance, vector_search
 from truememory.client import Memory
+from tests.conftest import requires_sqlite_ext
+
+# These stores carry real vec0 tables; some interpreters cannot load extensions.
+pytestmark = requires_sqlite_ext
 
 MEMORIES = 60
 OLD, NEW = np.eye(256, dtype=np.float32)[0], np.eye(256, dtype=np.float32)[1]

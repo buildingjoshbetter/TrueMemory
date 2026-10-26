@@ -73,6 +73,9 @@ def server(monkeypatch):
     monkeypatch.delenv("TRUEMEMORY_DEVICE", raising=False)
     monkeypatch.setattr(mps_utils, "auto_detect_device", lambda: "mps")
     monkeypatch.setattr(mps_utils, "ensure_mps_memory_budget", lambda device: None)
+    # Unmeasured MPS: the host's real free MPS memory (small on CI runners)
+    # must not refuse the synthetic loads these tests drive.
+    monkeypatch.setattr(mps_utils, "mps_free_bytes", lambda: None, raising=False)
     instance = ms.ModelServer()
     instance._write_status_file = lambda: None
     instance._embed_device = lambda: "cpu" if "embed" in instance._sticky_cpu else "mps"
@@ -466,6 +469,7 @@ def test_a_refused_reload_backs_off_instead_of_retrying_per_query(monkeypatch):
     monkeypatch.setattr(ms, "psutil", rss)
     monkeypatch.setenv("TRUEMEMORY_MODEL_SERVER_MAX_RSS_MB", "3072")
     monkeypatch.setattr(mps_utils, "auto_detect_device", lambda: "mps")
+    monkeypatch.setattr(mps_utils, "mps_free_bytes", lambda: None, raising=False)
     instance = ms.ModelServer(automatic_rss_budget=True)
     instance._write_status_file = lambda: None
     builds = Builds()
