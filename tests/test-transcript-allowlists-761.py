@@ -95,6 +95,7 @@ class TranscriptAdmissionTests(unittest.TestCase):
         platform._env_int = lambda name, default, **kwargs: default
         platform.spawn_kwargs = lambda: {}
         platform.pid_is_alive = lambda pid: False
+        platform.process_birth = lambda pid: None
         packages["truememory"]._platform = platform
         packages["truememory._platform"] = platform
         core = types.ModuleType("truememory.hooks.core")

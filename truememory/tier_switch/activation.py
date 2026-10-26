@@ -636,3 +636,79 @@ def acknowledge_policy_config(conn: sqlite3.Connection, *, generation: str) -> L
         _put(conn, _INTENT, _dump(replace(state.intent, state="config_acknowledged")))
         result = replace(state.legacy_policy, config_acknowledged=True)
     return result
+
+
+def _publication_coherent(conn: sqlite3.Connection, state: ActivationState) -> bool:
+    """The writer-fence invariants of the committed selection or policy still hold."""
+    try:
+        if state.selection is not None:
+            selection = state.selection
+            _guard_pair(conn, selection.target)
+            row = conn.execute(
+                "SELECT vec_table=? AND sep_table=? AND model_name=? AND typeof(embedding_dim)='integer' "
+                "AND embedding_dim=? FROM main.vector_cache_registry WHERE tier_group=?",
+                (*selection.tables, selection.target.model_id, selection.target.dimension,
+                 selection.target.tier_group),
+            ).fetchone()
+            if row is None or row[0] != 1:
+                return False
+            for key, value in (("embed_model", selection.target.model_id), ("embed_dim", str(selection.target.dimension))):
+                row = conn.execute("SELECT typeof(value)='text' AND value=? FROM main.metadata WHERE key=?",
+                                   (value, key)).fetchone()
+                if row is None or row[0] != 1:
+                    return False
+        elif state.legacy_policy is not None:
+            _guard_legacy_policy_pair(conn, state.legacy_policy.target, state.legacy_policy.tables)
+    except TierActivationError:
+        return False
+    return True
+
+
+def retire_incoherent_activation(conn: sqlite3.Connection) -> bool:
+    """Return to legacy serving when another binary changed the selected pair.
+
+    Older releases do not read this journal. A tier switch, generic-table
+    migration or embedder metadata rewrite by one of them breaks the selection's
+    own invariants, after which every write would be refused forever. Their
+    config and registry are coherent, so legacy serving resumes from them. The
+    retired records stay under *_retired keys. Caller owns maintenance.
+    """
+    # Every controlled open checks this: decide on a read snapshot first, so a
+    # coherent journal never takes the database write lock.
+    with _transaction(conn, write=False):
+        _guard_storage(conn)
+        state = _state(conn)
+        if (state.selection is None and state.legacy_policy is None) or _publication_coherent(conn, state):
+            return False
+    with _transaction(conn, write=True):
+        _guard_storage(conn)
+        state = _state(conn)
+        if (state.selection is None and state.legacy_policy is None) or _publication_coherent(conn, state):
+            return False
+        _retire_records(conn)
+    return True
+
+
+def retire_same_space_activation(conn: sqlite3.Connection, *, generation: str) -> bool:
+    """Retire this acknowledged generation in favour of a same-space config tier.
+
+    Older releases switch Base<->Pro by rewriting config.json alone (keeping the
+    generation). That is a newer user request in the same embedding space, so
+    legacy serving of the configured tier is coherent. Caller owns maintenance.
+    """
+    with _transaction(conn, write=True):
+        _guard_storage(conn)
+        state = _state(conn)
+        result = state.selection or state.legacy_policy
+        if result is None or result.generation != generation or not result.config_acknowledged:
+            return False
+        _retire_records(conn)
+    return True
+
+
+def _retire_records(conn: sqlite3.Connection) -> None:
+    for key in (_SELECTED, _INTENT):
+        row = conn.execute("SELECT value FROM main.metadata WHERE key=?", (key,)).fetchone()
+        if row is not None:
+            _put(conn, key + "_retired", row[0])
+            conn.execute("DELETE FROM main.metadata WHERE key=?", (key,))

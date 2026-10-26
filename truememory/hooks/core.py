@@ -487,7 +487,7 @@ def recall_memories(
         return ""
 
     db = db_path or None
-    memory = Memory(path=db) if db else Memory()
+    memory = Memory(path=db, auto_maintenance=False) if db else Memory(auto_maintenance=False)
 
     queries = [
         "user preferences favorites likes dislikes",
@@ -670,7 +670,7 @@ def save_snapshot(
         return
 
     db = db_path or None
-    memory = Memory(path=db) if db else Memory()
+    memory = Memory(path=db, auto_maintenance=False) if db else Memory(auto_maintenance=False)
 
     summary_parts = [f"[session:{session_id} time:{datetime.now(timezone.utc).isoformat()}]"]
     summary_parts.append("Context snapshot from active session:")

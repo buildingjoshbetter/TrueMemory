@@ -14,6 +14,7 @@ import logging
 import os
 import sqlite3
 import sys
+import threading
 import types
 import unittest
 from contextlib import contextmanager
@@ -336,7 +337,7 @@ class LandmarkControls(unittest.TestCase):
     def test_empty_client_status_preserves_raw_overflow_and_schema_unavailable(self) -> None:
         client = load_functions("client", {"resolve_temporal_query"}, {})
         self.conn.executemany("INSERT INTO messages(content,sender,timestamp) VALUES('synthetic legacy','','2025-09-01')", [()] * 1025)
-        engine = types.SimpleNamespace(conn=self.conn, _ensure_connection=lambda: None)
+        engine = types.SimpleNamespace(conn=self.conn, _ensure_connection=lambda: None, _write_lock=threading.RLock())
         with patch.dict(sys.modules, {"truememory.temporal": TEMPORAL}):
             diagnostic = client.resolve_temporal_query(types.SimpleNamespace(_engine=engine), "What happened in January 2025?")
         self.assertEqual(diagnostic["source_interval_coverage"]["status"], "incomplete")
@@ -388,7 +389,7 @@ class LandmarkControls(unittest.TestCase):
     def test_actual_mcp_empty_envelope_exposes_source_inventory_overflow(self) -> None:
         self.conn.executemany("INSERT INTO messages(content,sender,timestamp) VALUES('synthetic legacy','','2025-09-01')", [()] * 1025)
         client = load_functions("client", {"resolve_temporal_query"}, {})
-        engine = types.SimpleNamespace(conn=self.conn, _ensure_connection=lambda: None)
+        engine = types.SimpleNamespace(conn=self.conn, _ensure_connection=lambda: None, _write_lock=threading.RLock())
         memory = types.SimpleNamespace(_engine=engine, search_deep=lambda *args, **kwargs: [])
         memory.resolve_temporal_query = lambda query, user_id=None: client.resolve_temporal_query(memory, query, user_id)
 
@@ -510,7 +511,8 @@ class BoundaryControls(unittest.TestCase):
         current = (ROOT / "truememory/temporal.py").read_text(encoding="utf-8")
         baseline_hashes = {
             "detect_temporal_intent": "2a752baf88d85db0eb61b91c087284c4e02dd3d4b89dece12bc5bf9e04ded287",
-            "detect_landmark_events": "d3bbd201a06107765f0b80448f5cec8d2dde800d54f20e84cd442c137b91fe9c",
+            # Round v7 H-v6-1 added the maintenance publication hook and its bounded source check.
+            "detect_landmark_events": "e11b7090e18e2847c647cc2249ca79ee004b7886e3588ee879aae0ede1f6b74d",
             "parse_date_reference": "8f8d13024c23b012ee9a960992060f7abf77d74939cb8000110f55f599df98ad",
         }
         for name, baseline_hash in baseline_hashes.items():
@@ -533,7 +535,7 @@ class BoundaryControls(unittest.TestCase):
         client = load_functions("client", {"resolve_temporal_query"}, {})
         connection = sqlite3.connect(":memory:")
         self.addCleanup(connection.close)
-        engine = types.SimpleNamespace(conn=connection, _ensure_connection=lambda: None)
+        engine = types.SimpleNamespace(conn=connection, _ensure_connection=lambda: None, _write_lock=threading.RLock())
         with patch.dict(sys.modules, {"truememory.temporal": TEMPORAL}):
             intent = client.resolve_temporal_query(types.SimpleNamespace(_engine=engine), "What happened in January 2025?")
         self.assertEqual(intent["source_interval_lookup_policy"]["candidate_limit"], 1024)

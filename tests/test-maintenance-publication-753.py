@@ -26,6 +26,9 @@ def load_modules() -> tuple[types.ModuleType, types.ModuleType, types.ModuleType
             isinstance(node, ast.ImportFrom)
             and node.module in {"truememory.storage", "truememory.fts_search"}
         )]
+        if modules:
+            # The maintenance publication hook is a no-op outside a runner build.
+            module.begin_layer_publication = modules[0].begin_layer_publication
         exec(compile(tree, str(path), "exec"), module.__dict__)
         modules.append(module)
     return tuple(modules)

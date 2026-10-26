@@ -33,7 +33,11 @@ _PRUNE_WALL_CLOCK_SEC = 86400  # 24 hours
 _emit_count = 0
 _last_prune_time: float = 0.0
 _conn_lock = threading.Lock()
+# Every statement on the shared connection: sqlite3 shares cached statements
+# per connection, and two threads stepping one corrupt each other.
+_statement_lock = threading.RLock()
 _conn: sqlite3.Connection | None = None
+_db_path: str | None = None
 _schema_created = False
 
 
@@ -45,7 +49,7 @@ def _resolve_db_path() -> str:
 
 def _get_connection() -> sqlite3.Connection:
     """Get or create the instrumentation DB connection (thread-safe)."""
-    global _conn, _schema_created
+    global _conn, _schema_created, _db_path
     if _conn is not None and _schema_created:
         return _conn
     with _conn_lock:
@@ -53,13 +57,15 @@ def _get_connection() -> sqlite3.Connection:
             return _conn
         db_path = _resolve_db_path()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(
+        from truememory.storage import WAL_RESET_GUARD, configure_connection
+        conn = configure_connection(sqlite3.connect(
             db_path,
             timeout=DEFAULT_BUSY_TIMEOUT_MS / 1000.0,
             check_same_thread=False,
-        )
+        ))
         conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA wal_autocheckpoint=1000")
+        if not WAL_RESET_GUARD:  # Affected builds checkpoint only through emit().
+            conn.execute("PRAGMA wal_autocheckpoint=1000")
         conn.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("""
@@ -79,6 +85,7 @@ def _get_connection() -> sqlite3.Connection:
         conn.commit()
         _conn = conn
         _schema_created = True
+        _db_path = db_path
         return conn
 
 
@@ -89,12 +96,15 @@ def emit(signal: str, data: dict | None = None) -> None:
         conn = _get_connection()
         now = time.time()
         payload = json.dumps(data or {}, default=str)
-        conn.execute(
-            "INSERT INTO telemetry (ts, signal, data) VALUES (?, ?, ?)",
-            (now, signal, payload),
-        )
-        conn.commit()
-        _prune_if_needed(conn)
+        with _statement_lock:
+            conn.execute(
+                "INSERT INTO telemetry (ts, signal, data) VALUES (?, ?, ?)",
+                (now, signal, payload),
+            )
+            conn.commit()
+            _prune_if_needed(conn)
+        from truememory.storage import checkpoint_if_due
+        checkpoint_if_due(_db_path)
     except Exception:
         dlog("emit failed for signal=%s", signal)
 
@@ -132,7 +142,8 @@ def prune_now() -> None:
     """Force an immediate prune.  Called on install()."""
     try:
         conn = _get_connection()
-        _do_prune(conn)
+        with _statement_lock:
+            _do_prune(conn)
     except Exception:
         pass
 
@@ -140,7 +151,7 @@ def prune_now() -> None:
 def close() -> None:
     """Close the instrumentation DB connection."""
     global _conn, _schema_created
-    with _conn_lock:
+    with _conn_lock, _statement_lock:
         if _conn is not None:
             try:
                 _conn.close()

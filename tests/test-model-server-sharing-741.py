@@ -67,7 +67,8 @@ def shared_namespace(root: Path) -> dict:
               "log": logging.getLogger("synthetic-sharing-741"), "_TRUEMEMORY_DIR": root,
               "_USE_UNIX": sys.platform != "win32", "_LOOPBACK_HOST": "127.0.0.1",
               "_MODEL_SERVER_GENERATION_ENV": helpers._MODEL_SERVER_GENERATION_ENV,
-              "try_file_lock": helpers.try_file_lock, "read_start_claim": helpers.read_start_claim,
+              "try_file_lock": helpers.try_file_lock, "release_file_lock": helpers.release_file_lock,
+              "read_start_claim": helpers.read_start_claim,
               "process_birth": lambda pid: float(pid), "spawn_kwargs": helpers.spawn_kwargs,
               "pid_is_alive": lambda pid: pid == os.getpid(),
               "_HEADER_FMT": ">I", "_HEADER_SIZE": 4, "_MAX_MESSAGE_SIZE": 10 * 1024 * 1024,
@@ -363,6 +364,26 @@ class SharedModelOwnership(unittest.TestCase):
         fd = self.client.try_file_lock(self.client.LOCK_PATH)
         self.assertIsNotNone(fd)
         os.close(fd)
+
+    def test_superseded_generation_unlocks_the_bind_lock_before_closing(self) -> None:
+        # Windows releases a msvcrt lock on close only at an unspecified later time;
+        # every bind-lock release goes through release_file_lock (unlock, then close).
+        module, server = self.make_server()
+        self.client._write_start_claim({"generation": "b" * 32,
+            "launcher": {"pid": os.getpid(), "born": float(os.getpid())}, "child": None})
+        os.environ[module._MODEL_SERVER_GENERATION_ENV] = "a" * 32
+        fd = server._acquire_bind_lock()
+        server._lock_fd = fd
+        released = []
+        original = module.release_file_lock
+        module.release_file_lock = lambda value: (released.append(value), original(value))
+        try:
+            with self.assertRaisesRegex(RuntimeError, "superseded"):
+                server._validate_launch_generation_locked()
+        finally:
+            module.release_file_lock = original
+        self.assertEqual(released, [fd])
+        server._cleanup()
 
     def test_shutdown_retains_bind_owner_while_admitted_native_work_drains(self) -> None:
         module, server = self.make_server()

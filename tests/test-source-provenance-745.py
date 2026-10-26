@@ -208,15 +208,25 @@ class SourceProvenanceControls(unittest.TestCase):
         self.assertFalse(self.pipeline._merge_fact_provenance(1, incoming))
         self.assertEqual(len(self.engine.writes), writes)
 
-    def test_citation_overflow_preserves_original_row_before_update(self) -> None:
+    def test_citation_overflow_elides_middle_citations_in_the_update_write(self) -> None:
+        # An update is never dropped because the citation list is full.
         metadata = self.metadata()
         scope = metadata[PROVENANCE.NAMESPACE]["citations"][0]["scope"]
         metadata[PROVENANCE.NAMESPACE]["citations"] = [{"id": f"{index:064x}", "scope": scope} for index in range(PROVENANCE.MAX_CITATIONS)]
         self.engine.add(content="Original synthetic fact", metadata=metadata)
-        original = self.engine.get(1)
-        with self.assertRaises(PROVENANCE.ProvenanceError):
-            self.pipeline._update_fact(1, "Changed", Fact("Changed"), "overflow", metadata=self.metadata("overflow"))
-        self.assertEqual(self.engine.get(1), original)
+        incoming = self.metadata("overflow")
+        self.pipeline._update_fact(1, "Changed", Fact("Changed"), "overflow", metadata=incoming)
+        row = self.engine.get(1)
+        namespace = row["metadata"][PROVENANCE.NAMESPACE]
+        ids = [citation["id"] for citation in namespace["citations"]]
+        self.assertEqual(row["content"], "Changed")
+        self.assertEqual(len(ids), PROVENANCE.MAX_CITATIONS)
+        self.assertEqual(ids[0], f"{0:064x}")
+        self.assertEqual(ids[-1], incoming[PROVENANCE.NAMESPACE]["citations"][0]["id"])
+        self.assertEqual({key: namespace["elided_citations"][key] for key in ("count", "first_id", "last_id")},
+                         {"count": 1, "first_id": f"{1:064x}", "last_id": f"{1:064x}"})
+        # Content and the new citation land in one write.
+        self.assertEqual(set(self.engine.writes[-1]), {"content", "metadata", "timestamp"})
 
     def test_byte_overflow_and_invalid_session_are_explicit_recoverable_errors(self) -> None:
         metadata = self.metadata()

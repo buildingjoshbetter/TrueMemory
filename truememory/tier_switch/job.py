@@ -11,6 +11,8 @@ import os
 import re
 import sqlite3
 import stat
+import threading
+import time
 import uuid
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
@@ -19,12 +21,142 @@ from pathlib import Path
 from typing import Literal
 
 from truememory.embedding_target import EmbeddingTarget
-from truememory.maintenance import MaintenanceUnavailableError, maintenance_owner
+from truememory.maintenance import MaintenanceUnavailableError, canonical_database_path, maintenance_handoff_pending
 from truememory.rebuild_source import read_rebuild_revision
 
 
 class TierJobIdentityError(RuntimeError):
     """The background database identity cannot be established safely."""
+
+
+class TierJobBusyError(TierJobIdentityError):
+    """Another live tier job owns this database."""
+
+
+_job_lock_registry = threading.Lock()
+_held_job_locks: dict[tuple[Path, str], "TierJobLock"] = {}
+_JOB = ".tier-job.lock"
+_ACTIVATION = ".tier-activation.lock"
+
+
+class TierJobLock:
+    """Process-owned liveness for one database's tier job; release ends it.
+
+    Unlike maintenance ownership, fresh database opens never wait for this
+    lock. A selected marker whose lock is free has no live worker anywhere.
+    """
+
+    def __init__(self, key: tuple[Path, str], descriptor: int) -> None:
+        self.path, self._key = key[0], key
+        self._descriptor: int | None = descriptor
+        self._pid = os.getpid()
+        self.thread = threading.current_thread()
+
+    def adopt(self) -> None:
+        """Hand ownership to the calling (worker) thread."""
+        self.thread = threading.current_thread()
+
+    def release(self) -> None:
+        with _job_lock_registry:
+            descriptor, self._descriptor = self._descriptor, None
+            if descriptor is None:
+                return
+            if _held_job_locks.get(self._key) is self:
+                del _held_job_locks[self._key]
+            if self._pid == os.getpid():
+                from truememory._platform import release_file_lock
+                release_file_lock(descriptor)
+
+
+def acquire_tier_job_lock(db_path: str | os.PathLike[str], *, timeout: float = 0.0,
+                          _suffix: str = _JOB) -> TierJobLock | None:
+    """Nonblocking by default; a bounded wait covers brief status probes."""
+    from truememory._platform import try_file_lock
+
+    path = canonical_database_path(db_path)
+    if path is None:
+        raise TierJobIdentityError("Tier jobs require a file database")
+    key = (path, _suffix)
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        with _job_lock_registry:
+            if key not in _held_job_locks:
+                descriptor = try_file_lock(Path(str(path) + _suffix))
+                if descriptor is not None:
+                    lock = _held_job_locks[key] = TierJobLock(key, descriptor)
+                    return lock
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.05)
+
+
+def tier_job_alive(db_path: str | os.PathLike[str]) -> bool:
+    """True while any process holds the database's tier-job lock."""
+    try:
+        lock = acquire_tier_job_lock(db_path)
+    except OSError:
+        return False  # No worker could have opened the lock file either.
+    if lock is None:
+        return True
+    lock.release()
+    return False
+
+
+def acquire_tier_activation_lock(db_path: str | os.PathLike[str], *, timeout: float) -> TierJobLock | None:
+    """Marks a short activation commit; fresh opens wait for it, not for maintenance."""
+    return acquire_tier_job_lock(db_path, timeout=timeout, _suffix=_ACTIVATION)
+
+
+def tier_activation_in_progress(db_path: str | os.PathLike[str]) -> bool:
+    try:
+        if canonical_database_path(db_path) is None:
+            return False
+        lock = acquire_tier_job_lock(db_path, _suffix=_ACTIVATION)
+    except (OSError, TypeError, ValueError):
+        return False
+    if lock is None:
+        return True
+    lock.release()
+    # An activation waiting for maintenance counts only once maintenance is
+    # free: it takes it within one poll. Behind a running owner, fail at once.
+    try:
+        return maintenance_handoff_pending(db_path)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+@contextmanager
+def tier_job_owner(db_path: str | os.PathLike[str]) -> Iterator[TierJobLock]:
+    """Reuse this thread's handed-off lock, or own one for the body."""
+    path = canonical_database_path(db_path)
+    with _job_lock_registry:
+        current = _held_job_locks.get((path, _JOB))
+    if current is not None and current.thread is threading.current_thread():
+        yield current
+        return
+    lock = acquire_tier_job_lock(db_path)
+    if lock is None:
+        raise TierJobBusyError("Another tier job is running for this database")
+    try:
+        yield lock
+    finally:
+        lock.release()
+
+
+def _after_fork() -> None:
+    global _job_lock_registry, _held_job_locks
+    for lock in _held_job_locks.values():
+        try:
+            os.close(lock._descriptor)
+        except (OSError, TypeError):
+            pass
+        lock._descriptor = None
+    _held_job_locks = {}
+    _job_lock_registry = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork)
 
 
 @dataclass(frozen=True)
@@ -53,20 +185,20 @@ class TierJob:
 
 @contextmanager
 def _observe_file(path: Path) -> Iterator[tuple[int, int]]:
-    # Use fstat on every observation, including a fresh pathname reopen.
+    # Stat the pathname on every observation; never open the file. Closing any
+    # descriptor of the database drops every POSIX lock this process's SQLite
+    # connections hold on it, and older SQLite builds (3.47 and 3.50 at least,
+    # not 3.53) then let another process's close checkpoint and delete the WAL
+    # and -shm that this process still uses: the database corrupts.
     # ctime/mtime/size can change during legitimate writes and are not identity.
-    with ExitStack() as stack:
-        try:
-            flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
-            descriptor = os.open(path, flags)
-            stack.callback(os.close, descriptor)
-            value = os.fstat(descriptor)
-            if (not stat.S_ISREG(value.st_mode) or type(value.st_dev) is not int
-                    or type(value.st_ino) is not int or value.st_dev < 0 or value.st_ino <= 0):
-                raise TierJobIdentityError("Stable database file identity is unavailable")
-        except (OSError, ValueError):
-            raise TierJobIdentityError("Database file identity is unavailable") from None
-        yield value.st_dev, value.st_ino
+    try:
+        value = os.stat(path)
+        if (not stat.S_ISREG(value.st_mode) or type(value.st_dev) is not int
+                or type(value.st_ino) is not int or value.st_dev < 0 or value.st_ino <= 0):
+            raise TierJobIdentityError("Stable database file identity is unavailable")
+    except (OSError, ValueError):
+        raise TierJobIdentityError("Database file identity is unavailable") from None
+    yield value.st_dev, value.st_ino
 
 
 def _connection_path(conn: sqlite3.Connection) -> Path:
@@ -145,16 +277,17 @@ def _close_connection(conn: sqlite3.Connection) -> None:
 def open_tier_job(job: TierJob) -> Iterator[sqlite3.Connection]:
     """Own and reopen an existing database in this worker thread, never create it.
 
-    The connection and cooperative maintenance owner both end on BaseException.
-    The descriptor conveys no caller-thread maintenance ownership.
+    The connection and tier-job liveness both end on BaseException. The job
+    does not hold maintenance ownership, so fresh opens are never refused.
     """
     with ExitStack() as stack:
         try:
-            stack.enter_context(maintenance_owner(job.database_path))
+            stack.enter_context(tier_job_owner(job.database_path))
             identity = stack.enter_context(_observe_file(job.database_path))
             if identity != job.file_identity:
                 raise TierJobIdentityError("Background database file changed before reopen")
-            conn = sqlite3.connect(job.database_path.as_uri() + "?mode=rw", uri=True)
+            from truememory.storage import configure_connection
+            conn = configure_connection(sqlite3.connect(job.database_path.as_uri() + "?mode=rw", uri=True))
             stack.callback(_close_connection, conn)
             check_tier_job(conn, job)
         except (OSError, ValueError, sqlite3.Error, MaintenanceUnavailableError):
@@ -503,3 +636,39 @@ def end_selected_tier_job(
         return True
     except (OSError, ValueError, sqlite3.Error, MaintenanceUnavailableError):
         raise TierJobSelectionError("Selected background job could not be ended") from None
+
+
+def end_abandoned_tier_job(
+    conn: sqlite3.Connection, job_id: str, *, outcome: Literal["cancelled", "failed"],
+) -> bool:
+    """End a selected marker whose worker is gone, by its exact ID only.
+
+    The caller holds this database's tier-job lock (no live worker anywhere)
+    and maintenance ownership. Unlike end_selected_tier_job, no reopened file
+    or source identity is required: a crash, a source change or an unbound
+    marker must not leave the selection permanently blocked.
+    """
+    if outcome not in {"cancelled", "failed"}:
+        raise TierJobSelectionError("Unsupported terminal selected job outcome")
+    if type(job_id) is not str or re.fullmatch(r"[0-9a-f]{32}", job_id) is None:
+        raise TierJobSelectionError("Invalid abandoned job identity")
+    try:
+        with _selection_transaction(conn, write=True):
+            if conn.execute("SELECT 1 FROM sqlite_temp_master LIMIT 1").fetchone() is not None:
+                raise TierJobSelectionError("Temporary database objects make selected job identity ambiguous")
+            if conn.execute("SELECT 1 FROM main.sqlite_master WHERE name = ? COLLATE NOCASE",
+                            (_SELECTION_TABLE,)).fetchone() is None:
+                return False
+            _selection_schema(conn)
+            row = _selection_row(conn)
+            if row is None or row[0] != job_id or row[8] != "selected":
+                return False
+            changed = conn.execute(
+                f"UPDATE main.{_SELECTION_TABLE} SET state = ? "
+                "WHERE singleton = 1 AND job_id = ? AND state = 'selected'", (outcome, job_id),
+            ).rowcount
+            if changed != 1:
+                raise TierJobSelectionError("Abandoned job changed during termination")
+        return True
+    except (OSError, ValueError, sqlite3.Error):
+        raise TierJobSelectionError("Abandoned tier job could not be ended") from None

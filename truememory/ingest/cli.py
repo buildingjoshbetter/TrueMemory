@@ -201,12 +201,15 @@ def _run_ingest(args):
         else:
             capture = admit_capture(args.transcript, args.session, args.user, args.db, host)
             attempt = reserve_inline_attempt(capture)
-        if not attempt:
-            return
-        args.transcript = str(capture.path)
-        with worker_claim(capture, attempt) as allowed:
-            if allowed:
-                return _execute_ingest(args, capture)
+        try:
+            if not attempt:
+                return
+            args.transcript = str(capture.path)
+            with worker_claim(capture, attempt) as allowed:
+                if allowed:
+                    return _execute_ingest(args, capture)
+        finally:
+            _finish_backlog_claims(args, host)
     except OSError as error:
         logging.getLogger(__name__).warning("Automatic ingestion retained nonterminal work (%s)", type(error).__name__)
         raise SystemExit(5) from error
@@ -295,6 +298,16 @@ def _execute_ingest(args, capture=None):
     # A referenced capture names its append-only source; parse exactly its prefix.
     limit = {"byte_limit": capture.metadata["byte_count"]} if (
         capture is not None and capture.metadata.get("storage") == "source_prefix") else {}
+    retry = {}
+    if capture is not None:
+        # A background worker waits out another process's maintenance, and
+        # reuses facts an earlier attempt extracted but could not store.
+        from truememory.ingest.completion import load_extraction
+        from truememory.ingest.pipeline import MAINTENANCE_WAIT_SECONDS
+        retry["maintenance_wait"] = MAINTENANCE_WAIT_SECONDS
+        prior = load_extraction(capture)
+        if prior is not None:
+            retry["extraction"] = prior
     try:
         result = ingest(
             transcript_path=args.transcript,
@@ -305,8 +318,12 @@ def _execute_ingest(args, capture=None):
             session_id=args.session,
             require_complete=True,
             **limit,
+            **retry,
         )
     except RuntimeError as e:
+        from truememory.maintenance import MaintenanceBusyError
+        if capture is not None and isinstance(e, MaintenanceBusyError):
+            _defer_for_maintenance(args, capture, e)
         # auto_detect raises RuntimeError when no LLM backend is available
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(3)
@@ -329,6 +346,64 @@ def _execute_ingest(args, capture=None):
     host = getattr(args, "transcript_host", "claude")
     drain(args.user, args.db, host)
     _cascade_next(host, automatic=True, user_id=args.user, db_path=args.db)
+
+
+def _defer_for_maintenance(args, capture, error: BaseException) -> None:
+    """Keep the extracted facts, then give back the attempt and any backlog claim."""
+    from truememory.ingest.completion import defer_attempt, save_extraction
+    from truememory.ingest.hooks._shared import release_backlog_processing
+    from truememory.ingest.pipeline import MAINTENANCE_WAIT_SECONDS
+    log = logging.getLogger(__name__)
+    snapshot = getattr(error, "extraction", None)
+    kept = deferred = False
+    try:
+        kept = snapshot is not None and save_extraction(capture, snapshot)
+    except OSError as failure:
+        log.warning("Extracted facts could not be kept for the next attempt (%s)", type(failure).__name__)
+    try:
+        # Busy maintenance never spends the attempt; only an attempt that is
+        # not this worker's is refused.
+        deferred = defer_attempt(capture)
+    except OSError as failure:
+        log.warning("The attempt could not be given back (%s)", type(failure).__name__)
+    backlog = Path(os.environ.get("TRUEMEMORY_BACKLOG_DIR", str(Path.home() / ".truememory" / "backlog")))
+    released = release_backlog_processing(args.session, "maintenance_busy", backlog)
+    log.warning("Storage deferred: maintenance kept this database busy (waited up to %ds); "
+                "extracted facts kept=%s, attempt returned=%s, backlog claim requeued=%s",
+                MAINTENANCE_WAIT_SECONDS, kept, deferred, released)
+    raise SystemExit(5)
+
+
+def _finish_backlog_claims(args, host: str) -> None:
+    """Leave no dead claim behind, however this worker exits.
+
+    Completion holds this session's bytes once they are admitted, so the
+    session's own backlog claim (this worker's, or one whose worker is gone)
+    is adopted and retired. A claim already returned to the queue, or held by
+    another live worker, stays. Claims whose workers died elsewhere return to
+    the queue within minutes.
+    """
+    from truememory.ingest.completion import adopt_legacy_pointer, dispatch
+    from truememory.ingest.hooks._shared import _safe_session_id, cleanup_stale_processing
+    log = logging.getLogger(__name__)
+    backlog = Path(os.environ.get("TRUEMEMORY_BACKLOG_DIR", str(Path.home() / ".truememory" / "backlog")))
+    if not backlog.is_dir():
+        return
+    safe = _safe_session_id(getattr(args, "session", ""))
+    claim = backlog / (safe + ".processing")
+    if safe and claim.exists():
+        try:
+            # A Windows venv launcher is the recorded pid and this interpreter's parent.
+            adopted = adopt_legacy_pointer(claim, (args.user, args.db, host), claimants=(os.getpid(), os.getppid()))
+            if adopted is not None:
+                # Bytes appended after this worker's capture are queued, not lost.
+                dispatch(adopted)
+        except (OSError, ValueError, TypeError) as error:
+            log.warning("Backlog claim retained (%s)", type(error).__name__)
+    try:
+        cleanup_stale_processing(backlog)
+    except OSError as error:
+        log.warning("Stale backlog claims retained (%s)", type(error).__name__)
 
 
 def _clear_legacy_processing(args) -> bool:
@@ -1155,7 +1230,19 @@ def _run_status(args):
     except Exception as e:
         print(f"  [WARN] Cannot access memory database: {e}")
 
-    # 5. Trace and log directories
+    # 5. Captures waiting out busy maintenance keep their extracted facts.
+    try:
+        from truememory.ingest.completion import deferred_captures
+        count, age = deferred_captures()
+        if count:
+            oldest = f", oldest for {int(age // 3600)}h {int(age % 3600 // 60)}m" if age is not None else ""
+            print(f"  [WARN] Deferred captures: {count} waiting on busy maintenance{oldest}")
+        else:
+            print("  [OK] Deferred captures: none")
+    except OSError as e:
+        print(f"  [WARN] Cannot read deferred captures: {e}")
+
+    # 6. Trace and log directories
     trace_dir = Path.home() / ".truememory" / "traces"
     log_dir = Path.home() / ".truememory" / "logs"
     if trace_dir.exists():

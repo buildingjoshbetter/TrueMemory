@@ -28,6 +28,7 @@ def load_modules() -> tuple[types.ModuleType, types.ModuleType]:
         if name == "temporal":
             module._row_to_dict = storage._row_to_dict
             module.select_message_cols = storage.select_message_cols
+            module.begin_layer_publication = storage.begin_layer_publication
         exec(compile(tree, str(path), "exec"), module.__dict__)
     return storage, temporal
 

@@ -44,6 +44,27 @@ def try_file_lock(path: Path) -> int | None:
     return fd
 
 
+def release_file_lock(fd: int) -> None:
+    """Unlock a ``try_file_lock`` descriptor, then close it.
+
+    Windows releases a msvcrt region lock on close only at an unspecified
+    later time, so the region is unlocked first; POSIX unlocks explicitly too.
+    A child after fork must close its inherited copy instead: unlocking would
+    release the parent's lock on the shared open file description.
+    """
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass  # Closing below still releases it.
+    os.close(fd)
+
+
 def process_birth(pid: int) -> float | None:
     """Identify a process incarnation without trusting a reused PID alone."""
     import psutil
@@ -56,6 +77,14 @@ def process_birth(pid: int) -> float | None:
         return None
     except psutil.AccessDenied as error:
         raise OSError("Cannot verify model-server launch ownership") from error
+
+
+def same_process(pid: int, born: float) -> bool:
+    """Whether *pid* still names the process born at *born*; unverifiable counts as the same."""
+    try:
+        return process_birth(pid) == born
+    except OSError:
+        return True
 
 
 def read_start_claim(path: Path) -> dict | None:

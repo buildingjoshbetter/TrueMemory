@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
+import threading
 
 import pytest
 
@@ -301,3 +302,107 @@ def _isolate_model_client_timeout():
         yield
     finally:
         model_client._default_request_timeout = saved
+
+
+# Opening and closing a file that a live SQLite connection in this process also
+# has open drops every POSIX lock SQLite holds on it; on SQLite 3.47/3.50 another
+# process's close then deleted the WAL still in use (GPUBox D1/D2). Product code
+# must reach the database, -wal and -shm only through SQLite. One process-wide
+# audit hook (hooks cannot be removed) records the databases this process
+# connects to and every Python-level open of them from truememory/ code; the
+# fixture below fails the test that did it.
+_connected_databases: set[str] = set()
+_database_file_opens: list[str] = []
+_PRODUCT = os.sep + "truememory" + os.sep
+
+# Every connection product code opens must pass through
+# storage.configure_connection (no automatic checkpoints on SQLite builds with
+# the WAL-reset bug) unless it never writes. A connection opened from
+# truememory/ stays pending until configure_connection's audit event names it;
+# the fixture below fails the test that left one pending.
+_unconfigured_connections: dict[int, str] = {}
+_opening_database = threading.local()
+_RAW_CONNECTIONS = {  # (module, function): writers that are not TrueMemory stores.
+    ("storage.py", "protected_checkpoint"),  # The guard's own lock holder and checkpointer.
+    ("storage.py", "_backup_database"),  # The new backup file; its only connection.
+    (os.path.join("tier_switch", "manager.py"), "backup_db"),  # Likewise.
+    (os.path.join("ingest", "cli.py"), "_preflight_writable_target"),  # PRAGMA quick_check only.
+}
+
+
+def _product_caller():
+    import sys
+    frame = sys._getframe(2)
+    while frame is not None and frame.f_code.co_filename.endswith(("conftest.py", "<frozen importlib._bootstrap>")):
+        frame = frame.f_back
+    if frame is None or _PRODUCT not in frame.f_code.co_filename or os.sep + "tests" + os.sep in frame.f_code.co_filename:
+        return None
+    return frame
+
+
+def _database_target(database: object) -> str | None:
+    try:
+        name = os.fsdecode(database)
+    except TypeError:
+        return None
+    if name.startswith("file:"):
+        from urllib.parse import unquote, urlsplit
+        parts = urlsplit(name)
+        name = unquote(parts.path) if parts.scheme == "file" else ""
+    if not name or name == ":memory:" or name.startswith(":"):
+        return None
+    return os.path.realpath(name)
+
+
+def _audit_database_files(event: str, args: tuple) -> None:
+    if event == "sqlite3.connect":
+        target = _database_target(args[0]) if args else None
+        if target is not None:
+            _connected_databases.add(target)
+        name = os.fsdecode(args[0]) if args and isinstance(args[0], (str, bytes, os.PathLike)) else ""
+        _opening_database.writable = target is not None and "mode=ro" not in name
+    elif event == "sqlite3.connect/handle" and args and getattr(_opening_database, "writable", False):
+        _opening_database.writable = False
+        frame = _product_caller()
+        if frame is not None:
+            module = frame.f_code.co_filename.rsplit(_PRODUCT, 1)[1]
+            if (module, frame.f_code.co_name) not in _RAW_CONNECTIONS:
+                _unconfigured_connections[id(args[0])] = f"{frame.f_code.co_filename}:{frame.f_lineno}"
+    elif event == "truememory.configure_connection" and args:
+        _unconfigured_connections.pop(id(args[0]), None)
+    elif event == "open" and _connected_databases and args and isinstance(args[0], (str, bytes, os.PathLike)):
+        name = os.fsdecode(args[0])
+        base = name[:-4] if name.endswith(("-wal", "-shm")) else name
+        if os.path.basename(base) not in {os.path.basename(path) for path in _connected_databases}:
+            return
+        if os.path.realpath(base) not in _connected_databases:
+            return
+        import sys
+        frame = sys._getframe(1)
+        while frame is not None and frame.f_code.co_filename.endswith(("conftest.py", "<frozen importlib._bootstrap>")):
+            frame = frame.f_back
+        if frame is not None and _PRODUCT in frame.f_code.co_filename and os.sep + "tests" + os.sep not in frame.f_code.co_filename:
+            _database_file_opens.append(f"{name} from {frame.f_code.co_filename}:{frame.f_lineno}")
+
+
+import sys as _sys  # noqa: E402
+_sys.addaudithook(_audit_database_files)
+
+
+@pytest.fixture(autouse=True)
+def _forbid_database_file_opens_outside_sqlite():
+    """Fail any test whose product code opened a connected database's files directly."""
+    _connected_databases.clear()
+    del _database_file_opens[:]
+    _unconfigured_connections.clear()
+    yield
+    found = list(_database_file_opens)
+    del _database_file_opens[:]
+    unconfigured = sorted(set(_unconfigured_connections.values()))
+    _unconfigured_connections.clear()
+    if found:
+        pytest.fail("Database files opened outside SQLite (drops this process's POSIX locks): "
+                    + "; ".join(found[:5]), pytrace=False)
+    if unconfigured:
+        pytest.fail("Database connections opened without storage.configure_connection: "
+                    + "; ".join(unconfigured[:5]), pytrace=False)

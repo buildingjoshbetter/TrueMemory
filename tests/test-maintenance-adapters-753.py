@@ -32,6 +32,7 @@ def source_modules() -> dict[str, types.ModuleType]:
         )]
         module._initialize_dunbar_ownership = STORAGE._initialize_dunbar_ownership
         module._dunbar_ownership_ready = STORAGE._dunbar_ownership_ready
+        module.begin_layer_publication = STORAGE.begin_layer_publication
         exec(compile(tree, str(path), "exec"), module.__dict__)
         modules["truememory." + name] = module
     return modules
@@ -45,6 +46,8 @@ class AdapterFixture(unittest.TestCase):
         self.conn = self.open_db()
         self.modules = source_modules()
         self.cluster, self.vector, self.native = CLUSTERS["load_clustering"]()
+        # Builders must reach the runner's publication hook in this storage copy.
+        self.cluster.begin_layer_publication = STORAGE.begin_layer_publication
         self.modules["truememory.clustering"] = self.cluster
         self.native.fit = lambda: setattr(self.native, "labels", [-1] * len(self.native.inputs[-1]))
         self.conn.execute("CREATE TABLE vec_messages_edge(embedding BLOB)")
@@ -951,6 +954,77 @@ class TestBorrowedPublication(AdapterFixture):
         self.assertEqual(self.conn.execute("SELECT content FROM messages").fetchone()[0], "synthetic team launched Cedar")
         self.assertEqual(self.state().successful_coverage, "unverified")
         self.conn.rollback()
+
+
+class TestSnapshotPublication(AdapterFixture):
+    """Round v7 H-v6-1: every builder computes in a read snapshot and publishes
+    under a short writer, so a foreground commit during a build never fails it."""
+
+    def append(self, conn: sqlite3.Connection) -> None:
+        # A message and its vector in one commit. engine.add's whole write set,
+        # embedder metadata included, is covered through a real engine by
+        # SnapshotPublicationOverForegroundAdds (test-tier-switch-liveness.py).
+        cursor = conn.execute(
+            "INSERT INTO messages(content,sender,recipient,timestamp,category) VALUES "
+            "('synthetic team moved to Birch','synthetic-primary','synthetic-contact','2026-01-02','synthetic-session')"
+        )
+        conn.execute("INSERT INTO vec_messages_edge(rowid,embedding) VALUES (?,?)", (cursor.lastrowid, struct.pack("2f", 3, 4)))
+        conn.commit()
+
+    def correct(self, conn: sqlite3.Connection) -> None:
+        conn.execute("UPDATE messages SET content='synthetic corrected source ' "
+                     "|| (SELECT revision FROM maintenance_source_state) WHERE id=1")
+        conn.commit()
+
+    def between_snapshot_and_publication(self, change):
+        other = self.open_db()
+        original = MAINTENANCE._SnapshotPublication.__call__
+        layers = []
+
+        def publish(publication, appends=True):
+            if not publication.writer:
+                layers.append(publication.layer)
+                change(other)
+            return original(publication, appends)
+
+        self.interleaved = layers
+        return patch.object(MAINTENANCE._SnapshotPublication, "__call__", publish)
+
+    def test_appends_during_every_actual_build_publish_the_snapshot(self) -> None:
+        self.add(5)
+        self.native.fit = lambda: setattr(self.native, "labels", [0, 0, -1, 1, 1])
+        with self.between_snapshot_and_publication(self.append):
+            results = MAINTENANCE.run_layers(self.conn, self.specs())
+        self.assertEqual(self.interleaved, [spec.layer for spec in self.specs()])
+        self.assertEqual([(item.layer, item.outcome == "success_empty" and item.layer == "contradictions"
+                           or item.outcome == "success") for item in results],
+                         [(spec.layer, True) for spec in self.specs()])
+        self.assertEqual(results[0].output_count, 2)
+        self.assertEqual(self.conn.execute("SELECT count(*) FROM messages").fetchone()[0], 13)
+        for spec in self.specs():
+            state = self.state(spec.layer)
+            self.assertEqual(MAINTENANCE.layer_freshness(state.source, state, state.dependency), "append_pending",
+                             spec.layer)
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_a_correction_during_every_actual_build_defers_it_and_keeps_its_output(self) -> None:
+        self.add(5)
+        self.native.fit = lambda: setattr(self.native, "labels", [0, 0, -1, 1, 1])
+        MAINTENANCE.run_layers(self.conn, self.specs())
+        before = {spec.layer: self.state(spec.layer) for spec in self.specs()}
+        clusters = self.output()
+        with self.between_snapshot_and_publication(self.correct):
+            results = MAINTENANCE.run_layers(self.conn, self.specs(), force=True)
+        self.assertEqual([(item.layer, item.outcome, item.error_category) for item in results],
+                         [(spec.layer, "deferred", "SourceChanged") for spec in self.specs()])
+        self.assertEqual(self.output(), clusters)
+        for spec in self.specs():
+            state = self.state(spec.layer)
+            self.assertEqual((state.outcome, state.successful_revision, state.attempted_revision),
+                             (before[spec.layer].outcome, before[spec.layer].successful_revision,
+                              before[spec.layer].attempted_revision), spec.layer)
+        results = MAINTENANCE.run_layers(self.conn, self.specs(), force=True)
+        self.assertTrue(all(item.outcome in {"success", "success_empty"} for item in results), results)
 
 
 if __name__ == "__main__":

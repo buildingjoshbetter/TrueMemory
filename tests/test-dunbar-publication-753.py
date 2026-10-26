@@ -25,6 +25,7 @@ def load_modules() -> tuple[types.ModuleType, types.ModuleType]:
         if modules:
             module._initialize_dunbar_ownership = modules[0]._initialize_dunbar_ownership
             module._dunbar_ownership_ready = modules[0]._dunbar_ownership_ready
+            module.begin_layer_publication = modules[0].begin_layer_publication
         exec(compile(tree, str(source), "exec"), module.__dict__)
         modules.append(module)
     return tuple(modules)

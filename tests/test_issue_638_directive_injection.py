@@ -21,6 +21,7 @@ from __future__ import annotations
 
 
 import sqlite3
+import threading
 
 from truememory.storage import (
     create_db,
@@ -263,6 +264,7 @@ class _MemoryStub:
 class _EngineStub:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
+        self._write_lock = threading.RLock()  # The hook reads under the engine's connection lock.
 
     def _ensure_connection(self) -> None:
         pass

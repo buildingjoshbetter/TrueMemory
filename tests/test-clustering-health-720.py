@@ -413,6 +413,9 @@ class TestMCPClusteringHealth(HealthFixture):
         modules = {
             "truememory.maintenance": MAINTENANCE,
             "truememory.engine": types.SimpleNamespace(get_vectors_load_error=lambda: "SyntheticVectorError"),
+            "truememory.storage": types.SimpleNamespace(
+                wal_reset_affected=lambda: False,
+                wal_checkpoint_stats=lambda: {"sqlite_version": "3.53.3", "checkpoints": 0}),
             "truememory.tier_switch.manager": types.SimpleNamespace(RebuildManager=types.SimpleNamespace(
                 get_instance=lambda: types.SimpleNamespace(get_status=lambda status_id: {"status_id": status_id}))),
         }
@@ -425,7 +428,7 @@ class TestMCPClusteringHealth(HealthFixture):
             "_encoding_gate_last_error": "SyntheticGateError", "_encoding_gate_degradation_count": 2,
             "_build_model_server_health": lambda: {"status": "ok", "running": True},
             "_load_config": lambda: {"tier": "edge"}, "__version__": "synthetic",
-            "_get_rss_mb": lambda: 0, "_MAX_RSS_MB": 0,
+            "_get_rss_mb": lambda: 0, "_MAX_RSS_MB": 0, "_staging_report": lambda: None,
         })
 
     def test_existing_health_contract_and_values_are_preserved(self) -> None:
@@ -451,6 +454,9 @@ class TestMCPClusteringHealth(HealthFixture):
         self.assertIn("clustering", result["degradation"])
         self.assertEqual(result["degradation"]["clustering"]["availability"], "unavailable")
         self.assertEqual(result["degradation"]["clustering"]["missing_dependencies"], ["hdbscan"])
+        # Status never opens the store for coverage or tier identity.
+        self.assertIsNone(result["vector_coverage"])
+        self.assertIsNone(result["tier_identity"])
         server["_get_memory"].assert_not_called()
 
     def test_stats_tool_includes_the_same_clustering_health(self) -> None:
