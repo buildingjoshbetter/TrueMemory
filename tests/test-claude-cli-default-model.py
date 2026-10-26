@@ -36,3 +36,5 @@ def test_cli_command_passes_the_model(monkeypatch) -> None:
     config = models.hydrate_config(models.LLMConfig(provider="claude_cli"))
     assert models.complete(config, "prompt") == "ok"
     assert seen["cmd"][seen["cmd"].index("--model") + 1] == "haiku"
+    # The user's MCP servers are not started for an extraction call.
+    assert "--strict-mcp-config" in seen["cmd"] and "--mcp-config" not in seen["cmd"]
