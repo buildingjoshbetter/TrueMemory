@@ -364,7 +364,6 @@ class TestClusterSourceFence(ClusterFixture):
             "vector_insert": "INSERT INTO vec_messages_edge(rowid, embedding) VALUES (6, X'0000803F00000000')",
             "stored_model": "UPDATE metadata SET value = 'synthetic-model-new' WHERE key = 'embed_model'",
             "stored_dimension": "UPDATE metadata SET value = '4' WHERE key = 'embed_dim'",
-            "stored_identity_stamp": "UPDATE metadata SET updated_at = 'new-stamp' WHERE key = 'embed_model'",
             "cache_model": "UPDATE vector_cache_registry SET model_name = 'synthetic-model-new'",
             "cache_dimension": "UPDATE vector_cache_registry SET embedding_dim = 4",
             "cache_identity_stamp": "UPDATE vector_cache_registry SET created = 2.0",
@@ -384,6 +383,19 @@ class TestClusterSourceFence(ClusterFixture):
                     self.module.cluster_messages(self.conn)
                 self.conn.commit()
                 self.assertEqual(self.output(), before)
+
+    def test_identity_stamp_only_rewrite_still_publishes(self) -> None:
+        # A same-value rewrite of the embedder metadata is no new embedding
+        # space: every legacy-store add made one (d3a0a39, review v7 M-v7-1).
+        writer = self.open_db()
+        self.seed()
+
+        def touch() -> None:
+            writer.execute("UPDATE metadata SET updated_at = 'new-stamp' WHERE key = 'embed_model'")
+            writer.commit()
+
+        self.boundary.fit = touch
+        self.assertEqual(self.module.cluster_messages(self.conn), 2)
 
     def test_active_table_change_rejects_identical_vector_bytes(self) -> None:
         writer = self.open_db()
