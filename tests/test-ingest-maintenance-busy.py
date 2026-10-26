@@ -83,6 +83,7 @@ def env(tmp_path, monkeypatch):
     os.chmod(home / ".truememory", 0o700)
     os.chmod(backlog, 0o700)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Path.home() on Windows
     monkeypatch.setenv("TRUEMEMORY_BACKLOG_DIR", str(backlog))
     monkeypatch.setenv("TRUEMEMORY_GATE_ENABLED", "0")
     monkeypatch.delenv("TRUEMEMORY_TRANSCRIPT_DIR", raising=False)

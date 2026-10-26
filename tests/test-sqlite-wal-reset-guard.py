@@ -213,7 +213,7 @@ class Openers(unittest.TestCase):
                 connections.append(namespace["readonly"](str(path)))
                 self.assertEqual(guard._unconfigured_connections, {})
                 connections.append(namespace["raw"](str(path)))
-                caught = sorted(guard._unconfigured_connections.values())
+                caught = sorted(location for location, _handle in guard._unconfigured_connections.values())
             finally:
                 guard._unconfigured_connections.clear()
                 for conn in connections:

@@ -1034,7 +1034,7 @@ class ModelServer:
                 state = self._embed_state
                 current = state is not None and self._fast_generation is state.generation
                 idle = (idle_at is not None and current and self._fast_idle_seconds > 0
-                        and idle_at - self._fast_last_used >= self._fast_idle_seconds
+                        and idle_at >= self._fast_last_used + self._fast_idle_seconds
                         and not self._inference_lock.locked())
                 # The CPU main model lent to single queries during its return
                 # to MPS is not a duplicate of itself.
@@ -1080,7 +1080,9 @@ class ModelServer:
         if since is None or "embed" not in self._sticky_cpu:
             return False
         now = time.monotonic() if now is None else now
-        if now - since < self._embed_repromote_after():
+        # Compare against the deadline, not the elapsed time: ``since + period``
+        # is the exact moment the backoff ends, with no float rounding gap.
+        if now < since + self._embed_repromote_after():
             return False
         from truememory.mps_utils import resolve_device
         return resolve_device(None) != "cpu"  # TRUEMEMORY_DEVICE=cpu keeps CPU.
@@ -1407,13 +1409,13 @@ class ModelServer:
         next inference owner. A CPU model needs no flush.
         """
         table = self._parked_reranker_table()
-        released = [name for name, entry in table.items() if now - entry[2] >= self._PARKED_RERANKER_IDLE_SECONDS]
+        released = [name for name, entry in table.items() if now >= entry[2] + self._PARKED_RERANKER_IDLE_SECONDS]
         accelerator = any(table[name][1] != "cpu" for name in released)
         for name in released:
             self._drop_parked_reranker(name)
         name = self._reranker_name
         if (self._reranker is not None and name is not None
-                and now - getattr(self, "_reranker_last_used", now) >= self._RERANKER_IDLE_SECONDS):
+                and now >= getattr(self, "_reranker_last_used", now) + self._RERANKER_IDLE_SECONDS):
             accelerator = accelerator or getattr(self, "_reranker_device", None) != "cpu"
             self._reranker = None
             self._reranker_name = None
