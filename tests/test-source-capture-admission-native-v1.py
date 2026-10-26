@@ -236,34 +236,32 @@ class SourceCaptureAdmission(unittest.TestCase):
             with self.assertRaisesRegex(self.module.CompletionError, "source_not_regular"):
                 self.capture()
 
-    def test_first_and_second_wrapper_failure_closes_raw_descriptor(self) -> None:
+    def test_source_read_failure_closes_raw_descriptor(self) -> None:
+        # Admission now streams the source from its raw descriptor (os.read in
+        # _stream); a read error must close it and surface as a capture failure.
         self.regular_source()
-        original = os.fdopen
-        for target in (1, 2):
-            with self.subTest(source_open=target):
-                count = 0
+        original = os.read
 
-                source = os.stat(self.source)
+        def failed(fd: int, size: int) -> bytes:
+            if any(fd == opened for opened, _device, _inode in self.opened):
+                raise OSError(errno.EIO, "Synthetic source read failure")
+            return original(fd, size)
 
-                def failed(fd: int, mode: str) -> io.IOBase:
-                    # Count only wrappers of the source itself: a state save
-                    # (also os.fdopen) may run first, depending on timing.
-                    nonlocal count
-                    opened = os.fstat(fd)
-                    if (opened.st_dev, opened.st_ino) == (source.st_dev, source.st_ino):
-                        count += 1
-                        if count == target:
-                            raise OSError(errno.EIO, "Synthetic wrapper failure")
-                    return original(fd, mode)
+        with self.source_descriptors(), patch.object(self.module.os, "read", failed):
+            with self.assertRaisesRegex(self.module.CompletionError, "source_capture_failed"):
+                self.capture()
 
-                with self.source_descriptors(), patch.object(self.module.os, "fdopen", failed):
-                    with self.assertRaisesRegex(self.module.CompletionError, "source_capture_failed"):
-                        self.capture()
-
-    def test_valueerror_wrapper_failure_also_closes_raw_descriptor(self) -> None:
+    def test_valueerror_during_source_read_also_closes_raw_descriptor(self) -> None:
         self.regular_source()
-        with self.source_descriptors(), patch.object(self.module.os, "fdopen", side_effect=ValueError("Synthetic wrapper failure")):
-            with self.assertRaisesRegex(ValueError, "Synthetic wrapper failure"):
+        original = os.read
+
+        def failed(fd: int, size: int) -> bytes:
+            if any(fd == opened for opened, _device, _inode in self.opened):
+                raise ValueError("Synthetic source read failure")
+            return original(fd, size)
+
+        with self.source_descriptors(), patch.object(self.module.os, "read", failed):
+            with self.assertRaisesRegex(ValueError, "Synthetic source read failure"):
                 self.capture()
 
     def test_first_and_second_fstat_failure_closes_raw_descriptor(self) -> None:

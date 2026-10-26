@@ -69,13 +69,13 @@ class ForegroundBusyRetry(unittest.TestCase):
         started = time.monotonic()
         with self.assertRaises(sqlite3.OperationalError):
             writer.begin_immediate(conn)
-        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertLess(time.monotonic() - started, 0.9)  # Below the 1 s hold a retry would wait out
         other = self.connect()
         other.execute("BEGIN")
         started = time.monotonic()
         with self.assertRaises(sqlite3.OperationalError):  # Inside a transaction: never retried.
             writer.begin_immediate(other, retry_seconds=10)
-        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertLess(time.monotonic() - started, 0.9)  # Below the 1 s hold a retry would wait out
         self.assertTrue(other.in_transaction)
         other.rollback()
         calls = []
@@ -95,7 +95,7 @@ class ForegroundBusyRetry(unittest.TestCase):
         # Review v7 L-v7-1: the backoff is where the engine lets go of its locks,
         # so other threads must find the connection exactly as they left it.
         conn = self.connect()
-        self.hold_writer(1.0)
+        self.hold_writer(3.0)  # Backoffs reach 1 s: a longer hold makes several certain
         seen = []
 
         @contextmanager
