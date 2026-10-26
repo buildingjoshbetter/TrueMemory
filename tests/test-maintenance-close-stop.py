@@ -106,6 +106,8 @@ def test_last_close_fences_a_worker_that_outlives_the_wait(store: Path, monkeypa
     assert coordinator.status == ("cancelled", None)
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="Windows cannot delete a file the blocked worker still holds open")
 def test_close_then_delete_leaves_nothing_for_a_fenced_worker_to_recreate(store: Path, monkeypatch) -> None:
     engine = _engine(store)
     coordinator = maintenance.get_coordinator(store)
