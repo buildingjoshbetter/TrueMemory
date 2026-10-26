@@ -396,7 +396,7 @@ class McpStartupCapFailure(unittest.TestCase):
 
     def startup_block(self):
         source = ROOT / "truememory" / "mcp_server.py"
-        tree = ast.parse(source.read_text())
+        tree = ast.parse(source.read_text(encoding="utf-8"))
         guarded = next(node for node in ast.walk(tree) if isinstance(node, ast.Try)
                        and any(isinstance(item, ast.Assign) and isinstance(item.value, ast.Call)
                                and getattr(item.value.func, "id", None) == "ensure_server_running"
@@ -511,7 +511,7 @@ class ReadinessWaitWithoutCensus(unittest.TestCase):
             BOOT.LinuxAdapter()._await_ready(record, value, 1001.0)
 
     def test_barrier_has_no_polling_census(self) -> None:
-        tree = ast.parse((ROOT / "truememory_memory_bootstrap.py").read_text())
+        tree = ast.parse((ROOT / "truememory_memory_bootstrap.py").read_text(encoding="utf-8"))
         adapter = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "LinuxAdapter")
         barrier = next(node for node in adapter.body if isinstance(node, ast.FunctionDef) and node.name == "barrier")
         self.assertFalse(any(isinstance(node, ast.While) for node in ast.walk(barrier)))
@@ -521,6 +521,7 @@ class ReadinessWaitWithoutCensus(unittest.TestCase):
         self.assertEqual(len(census), 1)
 
 
+@unittest.skipIf(sys.platform == "win32", "Linux-only launcher; POSIX synthetic fixtures")
 class OwnedAbandonAndRelease(unittest.TestCase):
     """F2/F5: failed or exited launches are terminated only via the pidfd and then retired."""
 
@@ -693,6 +694,7 @@ class PartialStartCleanup(unittest.TestCase):
         store.append.assert_not_called()
 
 
+@unittest.skipIf(sys.platform == "win32", "Linux-only launcher; POSIX synthetic fixtures")
 class UnitRetirement(unittest.TestCase):
     """F5/R1: only provably empty generation units are stopped, through the real readback parser."""
 
@@ -852,7 +854,7 @@ class UnitRetirement(unittest.TestCase):
         self.assertIs(handle.record.runner.stop_complete, True)
 
     def test_launch_collects_failed_services(self) -> None:
-        tree = ast.parse((ROOT / "truememory_memory_bootstrap.py").read_text())
+        tree = ast.parse((ROOT / "truememory_memory_bootstrap.py").read_text(encoding="utf-8"))
         adapter = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "LinuxAdapter")
         start = next(node for node in adapter.body if isinstance(node, ast.FunctionDef) and node.name == "start")
         launch = next(node for node in ast.walk(start) if isinstance(node, ast.List)
@@ -1628,14 +1630,17 @@ def parse_environment_file(raw: bytes) -> dict[str, str]:
     return result
 
 
+@unittest.skipIf(sys.platform == "win32", "Linux-only launcher; POSIX synthetic fixtures")
 class PidfdFallback(unittest.TestCase):
     """D1: interpreters without os.pidfd_open/signal.pidfd_send_signal use the raw syscalls."""
 
     def linux(self, machine: str = "x86_64") -> ExitStack:
-        stack = ExitStack()
-        stack.enter_context(patch.object(BOOT.sys, "platform", "linux"))
-        stack.enter_context(patch.object(BOOT.os, "uname", lambda: SimpleNamespace(machine=machine)))
-        return stack
+        # Close the stack if a later patch fails: a leaked sys.platform patch
+        # made every following test take POSIX paths on Windows.
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(BOOT.sys, "platform", "linux"))
+            stack.enter_context(patch.object(BOOT.os, "uname", lambda: SimpleNamespace(machine=machine)))
+            return stack.pop_all()
 
     def without_native(self) -> ExitStack:
         stack = ExitStack()
