@@ -1437,6 +1437,28 @@ def drain(user_id: str = "", db_path: str | None = None, host: str = "claude") -
             log.warning("Completion drain retained nonterminal work (%s)", type(error).__name__)
 
 
+def _open_pointer(pointer: Path) -> int:
+    """Open a legacy backlog pointer for reading.
+
+    POSIX pointers are private files. Hooks and older releases write them on
+    Windows without a private DACL, so there, as for transcript sources, the
+    caller's ownership check (_source_owned) decides instead.
+    """
+    if os.name != "nt":
+        return _open_private(pointer, os.O_RDONLY)
+    if pointer.is_symlink():
+        raise CompletionError("unsafe_file")
+    fd = os.open(pointer, os.O_RDONLY | _BINARY)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise CompletionError("unsafe_file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def adopt_legacy_pointer(pointer: Path, scope: tuple[str, str | None, str] | None = None, *,
                          claimants: tuple[int, ...] = ()) -> Capture | None:
     """Admit one legacy pointer's current source bytes, then retire the pointer.
@@ -1456,7 +1478,7 @@ def adopt_legacy_pointer(pointer: Path, scope: tuple[str, str | None, str] | Non
     # MCP drainers and SessionStart maintenance adopt one pointer at a time.
     with _lock(base / "legacy.lock"):
         try:
-            fd = _open_private(pointer, os.O_RDONLY)
+            fd = _open_pointer(pointer)
         except FileNotFoundError:
             return None
         with os.fdopen(fd, "rb") as handle:
@@ -1467,7 +1489,7 @@ def adopt_legacy_pointer(pointer: Path, scope: tuple[str, str | None, str] | Non
             after_stat = os.fstat(handle.fileno())
             _source_owned(after_stat, handle.fileno())
             after = _file_identity(after_stat)
-        fd = _open_private(pointer, os.O_RDONLY)
+        fd = _open_pointer(pointer)
         with os.fdopen(fd, "rb") as handle:
             path_stat = os.fstat(handle.fileno())
             _source_owned(path_stat, handle.fileno())
