@@ -180,7 +180,7 @@ def save_snapshot(
         from truememory import Memory
 
         db = db_path or None
-        memory = Memory(path=db) if db else Memory()
+        memory = Memory(path=db, auto_maintenance=False) if db else Memory(auto_maintenance=False)
         memory.add(
             content=summary,
             user_id=user_id or None,

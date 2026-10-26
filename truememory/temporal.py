@@ -30,7 +30,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
-from truememory.storage import _row_to_dict, select_message_cols
+from truememory.storage import _row_to_dict, begin_layer_publication, select_message_cols
 
 
 # ---------------------------------------------------------------------------
@@ -995,6 +995,10 @@ def _episode_transaction(conn: sqlite3.Connection) -> Iterator[None]:
 
 
 def _reconcile_episodes(conn: sqlite3.Connection, gap_hours: float) -> int:
+    return _apply_episodes(conn, *_read_episodes(conn, gap_hours))
+
+
+def _read_episodes(conn: sqlite3.Connection, gap_hours: float) -> tuple[list, list, list]:
     rows = conn.execute(
         "SELECT id, timestamp, episode_id FROM messages WHERE timestamp != '' ORDER BY timestamp"
     ).fetchall()
@@ -1004,7 +1008,10 @@ def _reconcile_episodes(conn: sqlite3.Connection, gap_hours: float) -> int:
     previous = conn.execute(
         "SELECT id, start_time, end_time, message_count, summary FROM episodes"
     ).fetchall()
-    groups = _group_episode_rows(rows, gap_hours)
+    return _group_episode_rows(rows, gap_hours), assigned, previous
+
+
+def _apply_episodes(conn: sqlite3.Connection, groups: list, assigned: list, previous: list) -> int:
     members: dict[int, set[int]] = {}
     for mid, episode_id in assigned:
         members.setdefault(episode_id, set()).add(mid)
@@ -1061,6 +1068,14 @@ def detect_episodes(conn: sqlite3.Connection, gap_hours: float = 6) -> int:
     are written. A caller transaction remains open and owns the final commit.
     """
     owned = not conn.in_transaction
+    if not owned:
+        # The caller's transaction already fixes the snapshot. Inside a
+        # maintenance build that snapshot is traded for the writer only after
+        # reading; messages appended meanwhile join an episode next time.
+        plan = _read_episodes(conn, gap_hours)
+        begin_layer_publication(conn)
+        with _episode_transaction(conn):
+            return _apply_episodes(conn, *plan)
     for attempt in range(3):
         version = conn.execute("PRAGMA data_version").fetchone()[0] if owned else None
         try:
@@ -1231,12 +1246,22 @@ def detect_landmark_events(conn):
                 )
                 break  # One event per message is enough
 
+    watermark = begin_layer_publication(conn)
     conn.execute("SAVEPOINT truememory_landmarks")
     completed = False
     try:
         # Own the writer before validating the source used for computation.
         conn.execute("DELETE FROM landmark_events WHERE 0")
-        if conn.execute(source_sql).fetchall() != rows:
+        if watermark is None:
+            changed = conn.execute(source_sql).fetchall() != rows
+        else:
+            # Messages appended since a maintenance snapshot wait for the next
+            # build. Timestamp ties have no fixed order, so compare by id.
+            current = conn.execute(
+                "SELECT id, content, sender, recipient, timestamp FROM messages "
+                "WHERE timestamp != '' AND id <= ?", (watermark,)).fetchall()
+            changed = sorted(current, key=lambda row: row[0]) != sorted(rows, key=lambda row: row[0])
+        if changed:
             raise sqlite3.OperationalError("Landmark source changed during computation; retry the operation")
         conn.execute("DELETE FROM landmark_events")
         conn.executemany(

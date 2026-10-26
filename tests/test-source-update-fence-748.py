@@ -90,7 +90,7 @@ class SourceUpdateFenceTests(unittest.TestCase):
 
         @contextlib.contextmanager
         def publication(conn: sqlite3.Connection, identity: object, memory_id: int,
-                        *, selection: object) -> Iterator[tuple[str, str]]:
+                        *, selection: object, retry_busy: bool = False) -> Iterator[tuple[str, str]]:
             if self.publication_error:
                 raise PublicationChanged("synthetic publication failure")
             with transaction(conn, selection):

@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from truememory.maintenance import LayerResult, MaintenanceCoordinator
+    from truememory.maintenance import LayerResult, MaintenanceCoordinator, _BackgroundRun
 
 # ───────────────────────────────────────────────────────────────────────────
 # Core modules (always available)
@@ -48,7 +48,9 @@ from truememory.storage import (
 from truememory.fts_search import search_fts
 from truememory._platform import _env_int
 
-from truememory.tier_switch.runtime import engine_handle_operation, engine_operation
+from truememory.tier_switch.runtime import (
+    engine_fallback_operation, engine_handle_operation, engine_operation, engine_source_operation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -365,11 +367,18 @@ class TrueMemoryEngine:
     # ──────────────────────────────────────────────────────────────────────
 
     def __init__(self, db_path: str | Path = None,
-                 alpha_surprise: float | None = None):
+                 alpha_surprise: float | None = None, *, auto_maintenance: bool = True):
         """Initialize engine with an optional database path.
 
         If *db_path* is omitted the database defaults to
         ``<project_root>/truememory.db``.
+
+        :param auto_maintenance: Start background work from this Engine:
+            maintenance passes, the vector backfill and the Qwen3 NaN
+            re-embed. A process that exits right after its call, such as a
+            hook, passes False: it would only start work that its close()
+            or exit cuts off. A long-lived process (the MCP server, the
+            ingest pipeline) does that work.
 
         :param alpha_surprise: Optional override for the MEMORIST-L5
             surprise rerank boost coefficient. When set, takes priority
@@ -382,9 +391,17 @@ class TrueMemoryEngine:
         self.conn: sqlite3.Connection | None = None
         self.ready = False
         self.stats: dict = {}
+        from truememory.storage import WAL_RESET_GUARD, checkpoint_if_due
         from truememory.tier_switch.runtime import ConnectionWriteLock
-        self._write_lock = ConnectionWriteLock(self)
+        path = self.db_path  # Not self: the lock must not keep the engine alive.
+        self._write_lock = ConnectionWriteLock(self, on_idle=(lambda: checkpoint_if_due(path)) if WAL_RESET_GUARD else None)
         self._init_lock = threading.Lock()
+        self._backfill_guard = threading.Lock()
+        self._backfill_thread: threading.Thread | None = None
+        self._backfill_stop = threading.Event()
+        self._backfill_run: _BackgroundRun | None = None  # The backfill thread's connections.
+        self._auto_maintenance = auto_maintenance
+        self._backfill_gap_checked = False  # Legacy vector gaps are seeded once per Engine.
         self._runtime_initialized = False
         self._runtime_vector_generation = None
         self._runtime_vector_connection = None
@@ -416,6 +433,25 @@ class TrueMemoryEngine:
         self._maintenance_coordinator = None
         self._maintenance_handle = None
         self._maintenance_pending_reason = "not_connected"
+        self._maintenance_attachments: dict = {}
+        try:
+            self._attach_maintenance()
+        except Exception:
+            # Same failure surfaces, categorized, on the first maintenance wake.
+            logger.debug("Maintenance attachment deferred", exc_info=True)
+
+    def _attach_maintenance(self, coordinator: MaintenanceCoordinator | None = None) -> None:
+        """Count this Engine as having its database open in this process."""
+        from truememory.maintenance import attach_engine, get_coordinator
+        if coordinator is None:
+            if str(self.db_path) == ":memory:":
+                return
+            coordinator = get_coordinator(self.db_path)
+        attach_engine(self, coordinator)
+
+    def _detach_maintenance(self) -> None:
+        from truememory.maintenance import detach_engine
+        detach_engine(self)
 
     # ──────────────────────────────────────────────────────────────────────
     # Auto-connect (production API)
@@ -450,6 +486,9 @@ class TrueMemoryEngine:
                 reason = replacement_reason()
                 if reason is None:
                     return
+            attach = getattr(self, "_attach_maintenance", None)  # Absent on synthetic engines.
+            if attach is not None:
+                attach()
             path = self.db_path if str(self.db_path) == ":memory:" else self.db_path.resolve()
             if reason != "missing" and getattr(self, "_reconnect_receipt", None) is not None:
                 replacement = self._reopen_initialized_connection(path, receipt=self._reconnect_receipt)
@@ -625,7 +664,8 @@ class TrueMemoryEngine:
         identity = (str(path), stat.st_dev, stat.st_ino)
         if identity != receipt[:3] or _HAS_VECTOR != receipt[8]:
             return None
-        candidate = sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, check_same_thread=False)
+        from truememory.storage import configure_connection
+        candidate = configure_connection(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, check_same_thread=False))
         retained = False
         try:
             # A receipt from a connection without extension loading must not
@@ -698,10 +738,15 @@ class TrueMemoryEngine:
                 candidate.close()
 
     def _ensure_connection(self, *, _suppress_maintenance: bool = False) -> None:
-        """Reconcile committed selection before any vector compatibility work."""
-        from truememory.tier_switch.runtime import engine_serving_operation
-        with engine_serving_operation(self, _suppress_maintenance=_suppress_maintenance):
-            self._initialize_connection(_suppress_maintenance=_suppress_maintenance)
+        """Initialize the connection; selected models are projected by vector operations.
+
+        Standalone callers (get, get_all, stats, directive listing) only read
+        SQL, so a controlled database never waits on native model readiness.
+        """
+        from truememory.tier_switch.runtime import admitted_call, engine_serving_operation
+        admitted_call(self, lambda: engine_serving_operation(self, _suppress_maintenance=_suppress_maintenance,
+                                                             models="none"),
+                      lambda: self._initialize_connection(_suppress_maintenance=_suppress_maintenance))
 
     def _initialize_connection(self, *, _suppress_maintenance: bool = False,
                                _preparing: bool = False) -> None:
@@ -777,7 +822,8 @@ class TrueMemoryEngine:
                         self.conn.enable_load_extension(True)
                         sqlite_vec.load(self.conn)
                         self.conn.enable_load_extension(False)
-                        local_only = not _preparing and _legacy_initialization_is_local(self.conn, operation)
+                        local_only = ((not _preparing or operation.foreign)
+                                      and _legacy_initialization_is_local(self.conn, operation))
                         # init_vec_table() runs _check_embedder_compatibility(),
                         # which raises TrueMemoryMigrationError on a dim/model
                         # mismatch. That must NOT be swallowed as a generic
@@ -786,11 +832,26 @@ class TrueMemoryEngine:
                         # add() silently fail vec INSERTs. Surface the migration
                         # guidance so the user can re-embed instead.
                         if not local_only:
-                            init_vec_table(self.conn)
+                            from truememory.maintenance import MaintenanceBusyError
+                            try:
+                                init_vec_table(self.conn)
+                            except MaintenanceBusyError:
+                                # Maintenance elsewhere (consolidation, a tier
+                                # activation) must not refuse a fresh open when the
+                                # captured pair is already stable; migrate later.
+                                try:
+                                    local_only = _legacy_initialization_is_local(self.conn, operation)
+                                except TierRuntimeError:
+                                    local_only = False
+                                if not local_only:
+                                    raise
+                        if not local_only:
                             try:
                                 from truememory.vector_search import migrate_legacy_vec_tables
                                 if _preparing and not defer_legacy_migration:
                                     migrate_legacy_vec_tables(self.conn)
+                            except MaintenanceBusyError:
+                                logger.debug("Legacy vec table migration deferred by maintenance", exc_info=True)
                             except Exception as _serving_error:
                                 from truememory.tier_switch.runtime import raise_if_serving_rejection
                                 raise_if_serving_rejection(_serving_error)
@@ -849,25 +910,15 @@ class TrueMemoryEngine:
                                                 _sv.load(_conn)
                                                 _conn.enable_load_extension(False)
                                                 from truememory.vector_search import (
-                                                    build_vectors as _bv,
-                                                    build_separation_vectors as _bsv,
                                                     init_vec_table as _ivt,
+                                                    reembed_served_vectors as _reembed,
                                                 )
-                                                _conn.execute("DROP TABLE IF EXISTS vec_messages")
-                                                _conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
-                                                _conn.commit()
                                                 _ivt(_conn)
-                                                _bv(_conn)
-                                                _bsv(_conn)
-                                                # Issue #485: only set the flag AFTER
-                                                # successful re-embed so a failed
-                                                # thread allows retry on next init.
-                                                _conn.execute(
-                                                    "INSERT OR REPLACE INTO metadata "
-                                                    "(key, value) VALUES (?, ?)",
-                                                    ("qwen3_nan_fix_applied", "1"),
-                                                )
-                                                _conn.commit()
+                                                # Searches keep the old vectors until the
+                                                # rebuilt pair replaces them; an interrupted
+                                                # run resumes. Issue #485: the flag is set
+                                                # only with that replacement.
+                                                _reembed(_conn, mark=("qwen3_nan_fix_applied", "1"))
                                                 logger.warning(
                                                     "Qwen3 NaN fix: re-embedded %d vectors "
                                                     "in background", _msg_count,
@@ -889,15 +940,27 @@ class TrueMemoryEngine:
                                                     raise_if_serving_rejection(_serving_error)
                                                     pass
                                     _db = self.db_path
-                                    if str(_db) != ":memory:":
+                                    if str(_db) != ":memory:" and not getattr(self, "_auto_maintenance", True):
+                                        # The flag stays unset: a long-lived process re-embeds.
+                                        logger.debug("Qwen3 NaN re-embed left to a process with auto maintenance")
+                                    elif str(_db) != ":memory:":
                                         self._nan_migration_in_progress = True
-                                        def _bg_wrapper(db_path):
+                                        from truememory.maintenance import get_coordinator
+                                        # Taken while this Engine is attached; see background_writes.
+                                        _coordinator = get_coordinator(_db)
+                                        def _bg_wrapper(db_path, coordinator):
+                                            from truememory.maintenance import MaintenanceClosedError, background_writes
                                             try:
-                                                _bg_reembed(db_path)
+                                                # Opens only the existing store; the last
+                                                # Engine.close() stops this run.
+                                                with background_writes(coordinator):
+                                                    _bg_reembed(db_path)
+                                            except MaintenanceClosedError:
+                                                logger.debug("Qwen3 NaN re-embed skipped: the database was closed")
                                             finally:
                                                 self._nan_migration_in_progress = False
                                         _t = threading.Thread(
-                                            target=_bg_wrapper, args=(_db,),
+                                            target=_bg_wrapper, args=(_db, _coordinator),
                                             daemon=True,
                                         )
                                         _t.start()
@@ -1050,7 +1113,7 @@ class TrueMemoryEngine:
     # ──────────────────────────────────────────────────────────────────────
 
     @_validate_add_content
-    @engine_operation
+    @engine_fallback_operation
     def add(
         self,
         content: str,
@@ -1081,10 +1144,17 @@ class TrueMemoryEngine:
 
         from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
         write_selection = capture_writer_selection(self.conn)
+        import sys
+        runtime = sys.modules.get("truememory.tier_switch.runtime")
+        operation = runtime.current_operation(self.conn) if runtime is not None else None
 
         pre_embedding = None
         pre_sep_embedding = None
-        if self._has_vectors:
+        if not getattr(operation, "models_ready", True):
+            # The selected tier's models could not load: keep the memory (FTS),
+            # exactly like a legacy embedding failure, instead of losing it.
+            logger.warning("Selected embedding model unavailable; storing memory without vectors")
+        elif self._has_vectors:
             from truememory.vector_search import VectorPublicationChanged
             try:
                 from truememory.vector_search import (
@@ -1119,10 +1189,11 @@ class TrueMemoryEngine:
         with self._write_lock, (
             _foreground_model_fence(pre_identity, blocking=not self.conn.in_transaction)
             if pre_embedding is not None else nullcontext()
-        ), writer_transaction(
+        ) as release_fence, writer_transaction(
             self.conn, write_selection,
             model_id=pre_identity[1] if pre_embedding is not None else None,
             dimension=pre_identity[2] if pre_embedding is not None else None,
+            retry_busy=True, release=release_fence,
         ):
             if self._has_style_vec:
                 from truememory.maintenance import _capture_style_append, _publish_style_append
@@ -1139,6 +1210,7 @@ class TrueMemoryEngine:
             }
             new_id = insert_message(self.conn, msg)
 
+            vector_stored = False
             if pre_embedding is not None:
                 from truememory.vector_search import VectorPublicationChanged, _validate_foreground_vector_target
                 try:
@@ -1159,12 +1231,17 @@ class TrueMemoryEngine:
                             (new_id, serialize_f32(pre_sep_embedding)),
                         )
                     _write_foreground_embedder_metadata_no_commit(self.conn, pre_identity, selection=write_selection)
+                    vector_stored = True
                 except VectorPublicationChanged:
                     raise
                 except Exception as _serving_error:
                     from truememory.tier_switch.runtime import raise_if_serving_rejection
                     raise_if_serving_rejection(_serving_error)
                     logger.warning("Failed to store embedding for message %s during add()", new_id, exc_info=True)
+            if self._has_vectors and not vector_stored:
+                # Kept FTS-only for now; a later add with working models backfills it.
+                from truememory.vector_search import note_vectorless
+                note_vectorless(self.conn, new_id)
 
             # Incrementally update entity profile.
             # Skip for directives (#637 M-08): directive content must never
@@ -1188,6 +1265,14 @@ class TrueMemoryEngine:
                 if style_result.error_category is not None:
                     logger.debug("Style append %s for message %s: %s",
                                  style_result.outcome, new_id, style_result.error_category)
+
+        if vector_stored:
+            # Never fails the committed add: a retry would duplicate the memory.
+            try:
+                from truememory.vector_search import backfill_missing_vectors
+                backfill_missing_vectors(self.conn, write_lock=self._write_lock)
+            except Exception:
+                logger.debug("Vector backfill pass did not complete", exc_info=True)
 
         self._maybe_auto_consolidate()
 
@@ -1215,62 +1300,73 @@ class TrueMemoryEngine:
             coordinator.refresh_capabilities()
             self._maintenance_coordinator = coordinator
             self._maintenance_handle = self.conn
+        attach = getattr(self, "_attach_maintenance", None)  # Absent on synthetic engines.
+        if attach is not None:
+            attach(coordinator)
         return coordinator
 
     def _maybe_auto_consolidate(self) -> None:
         """Probe fixed metadata without waiting on foreground or model work."""
+        if not getattr(self, "_auto_maintenance", True):
+            self._maintenance_pending_reason = "auto_maintenance_off"
+            return
         from truememory.tier_switch.runtime import current_operation
         operation = current_operation(self.conn) if self.conn is not None else None
         if operation is not None and getattr(operation, "_defer_maintenance", False):
             return
-        if (not self._has_consolidation and not getattr(self, "_has_style_vec", False)) or self.conn is None:
-            return
-        if not self._write_lock.acquire(blocking=False):
-            self._maintenance_pending_reason = "foreground_busy"
-            return
-        coordinator = None
-        eligible = ()
-        style_eligible = False
         try:
-            if self.conn is None:
+            if (not self._has_consolidation and not getattr(self, "_has_style_vec", False)) or self.conn is None:
                 return
-            if self.conn.in_transaction:
-                self._maintenance_pending_reason = "pending_caller_commit"
+            if not self._write_lock.acquire(blocking=False):
+                self._maintenance_pending_reason = "foreground_busy"
                 return
-            from truememory.maintenance import engine_layer_specs, observe_style, plan_layers
-            coordinator = self._get_maintenance_coordinator()
-            if getattr(self, "_has_style_vec", False):
-                observation = observe_style(self.conn, threshold=self._auto_consolidate_threshold)
-                style_eligible = observation.eligible
-                self._maintenance_pending_reason = observation.health["pending_reason"]
-            if self._has_consolidation:
-                eligible = plan_layers(self.conn, engine_layer_specs(self.conn, coordinator),
-                                       threshold=self._auto_consolidate_threshold)
-                if not getattr(self, "_has_style_vec", False):
-                    self._maintenance_pending_reason = "awaiting_eligibility"
-            if eligible or style_eligible:
-                self._maintenance_pending_reason = "eligible"
-        except Exception as error:
-            self._maintenance_pending_reason = type(error).__name__[:64]
-        finally:
-            self._write_lock.release()
-        if (eligible or style_eligible) and coordinator is not None:
+            coordinator = None
+            eligible = ()
+            style_eligible = False
             try:
-                initialization = ({"_initialization_receipt": self._reconnect_receipt}
-                                  if getattr(self, "_reconnect_receipt", None) is not None else {})
-                if style_eligible:
-                    coordinator.request_layers(threshold=self._auto_consolidate_threshold,
-                                               include_layers=bool(eligible), include_style=True, **initialization)
-                else:
-                    coordinator.request_layers(threshold=self._auto_consolidate_threshold, **initialization)
+                if self.conn is None:
+                    return
+                if self.conn.in_transaction:
+                    self._maintenance_pending_reason = "pending_caller_commit"
+                    return
+                from truememory.maintenance import engine_layer_specs, observe_style, plan_layers
+                coordinator = self._get_maintenance_coordinator()
+                if getattr(self, "_has_style_vec", False):
+                    observation = observe_style(self.conn, threshold=self._auto_consolidate_threshold)
+                    style_eligible = observation.eligible
+                    self._maintenance_pending_reason = observation.health["pending_reason"]
+                if self._has_consolidation:
+                    eligible = plan_layers(self.conn, engine_layer_specs(self.conn, coordinator),
+                                           threshold=self._auto_consolidate_threshold)
+                    if not getattr(self, "_has_style_vec", False):
+                        self._maintenance_pending_reason = "awaiting_eligibility"
+                if eligible or style_eligible:
+                    self._maintenance_pending_reason = "eligible"
             except Exception as error:
                 self._maintenance_pending_reason = type(error).__name__[:64]
+            finally:
+                self._write_lock.release()
+            if (eligible or style_eligible) and coordinator is not None:
+                try:
+                    initialization = ({"_initialization_receipt": self._reconnect_receipt}
+                                      if getattr(self, "_reconnect_receipt", None) is not None else {})
+                    if style_eligible:
+                        coordinator.request_layers(threshold=self._auto_consolidate_threshold,
+                                                   include_layers=bool(eligible), include_style=True, **initialization)
+                    else:
+                        coordinator.request_layers(threshold=self._auto_consolidate_threshold, **initialization)
+                except Exception as error:
+                    self._maintenance_pending_reason = type(error).__name__[:64]
+        finally:
+            # After the wake, which it must not delay or contend with.
+            if not getattr(self, "_backfill_gap_checked", True):
+                self._schedule_backfill(seed_gap=True)
 
     def _bg_consolidate(self) -> None:
         """Compatibility entry point; the coordinator owns the worker handle."""
         self._maybe_auto_consolidate()
 
-    @engine_operation
+    @engine_source_operation
     def delete(self, memory_id: int) -> bool:
         """Delete a memory by ID.
 
@@ -1279,14 +1375,14 @@ class TrueMemoryEngine:
         self._ensure_connection()
         from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
         write_selection = capture_writer_selection(self.conn)
-        with self._write_lock, writer_transaction(self.conn, write_selection):
+        with self._write_lock, writer_transaction(self.conn, write_selection, retry_busy=True):
             deleted = delete_message(self.conn, memory_id, commit=False)
         if deleted:
             self._maybe_auto_consolidate()
         return deleted
 
     @_validate_delete_user
-    @engine_operation
+    @engine_source_operation
     def delete_all(self, user_id: str | None = None) -> bool:
         """Delete all memories, optionally filtered by user.
 
@@ -1307,7 +1403,7 @@ class TrueMemoryEngine:
         from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
         write_selection = capture_writer_selection(self.conn)
 
-        with self._write_lock, writer_transaction(self.conn, write_selection):
+        with self._write_lock, writer_transaction(self.conn, write_selection, retry_busy=True):
             if user_id is not None:
                 # Get message IDs and episode IDs for this user before deleting
                 msg_ids = [
@@ -1618,6 +1714,7 @@ class TrueMemoryEngine:
 
         pre_embedding = None
         pre_sep_embedding = None
+        sep_inputs = (None, None, None)
         if self._has_vectors and (content is not None or sep_fields_changed):
             from truememory.vector_search import VectorPublicationChanged
             try:
@@ -1641,6 +1738,7 @@ class TrueMemoryEngine:
                     sep_text = _build_sep_text(sender_val, recipient_val, timestamp_val,
                                                content if content is not None else pre_source["content"])
                     pre_sep_embedding = _encode_with_mps_fallback(model, [sep_text])[0]
+                    sep_inputs = (sender_val, recipient_val, timestamp_val)
             except VectorPublicationChanged:
                 raise
             except Exception as _serving_error:
@@ -1660,6 +1758,7 @@ class TrueMemoryEngine:
                     self.conn, write_selection,
                     model_id=pre_identity[1] if pre_embedding is not None or pre_sep_embedding is not None else None,
                     dimension=pre_identity[2] if pre_embedding is not None or pre_sep_embedding is not None else None,
+                    retry_busy=True,
                 ):
                     if _expected_source is not None:
                         require_source(_expected_source)
@@ -1686,31 +1785,45 @@ class TrueMemoryEngine:
                     from truememory.vector_search import VectorPublicationChanged, _foreground_vector_publication
                     try:
                         from truememory.vector_search import serialize_f32, _write_foreground_embedder_metadata_no_commit
+                        # The source is committed: a busy writer here would leave
+                        # the old vector behind a successful update, and backfill
+                        # only fills missing vectors.
                         with _foreground_vector_publication(
-                            self.conn, pre_identity, memory_id, selection=write_selection,
+                            self.conn, pre_identity, memory_id, selection=write_selection, retry_busy=True,
                         ) as (vec_tbl, sep_tbl):
-                            try:
-                                self.conn.execute(f"DELETE FROM {vec_tbl} WHERE rowid = ?", (memory_id,))
-                            except Exception as _serving_error:
-                                from truememory.tier_switch.runtime import raise_if_serving_rejection
-                                raise_if_serving_rejection(_serving_error)
-                                logger.debug("Failed to delete old vector embedding for message %d", memory_id, exc_info=True)
-                            self.conn.execute(
-                                f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
-                                (memory_id, serialize_f32(pre_embedding)),
-                            )
-                            if pre_sep_embedding is not None:
+                            # Other writers can run between the source commit and here
+                            # (another connection, or this engine while the busy retry
+                            # waits without its lock): skip vectors whose text changed.
+                            current = self.conn.execute(
+                                "SELECT content IS ?, sender IS ? AND recipient IS ? AND timestamp IS ? "
+                                "FROM messages WHERE id = ?", (content, *sep_inputs, memory_id),
+                            ).fetchone()
+                            if current is None or not current[0]:
+                                logger.debug("Message %d changed after its update committed; vectors left to that write",
+                                             memory_id)
+                            else:
                                 try:
-                                    self.conn.execute(f"DELETE FROM {sep_tbl} WHERE rowid = ?", (memory_id,))
+                                    self.conn.execute(f"DELETE FROM {vec_tbl} WHERE rowid = ?", (memory_id,))
                                 except Exception as _serving_error:
                                     from truememory.tier_switch.runtime import raise_if_serving_rejection
                                     raise_if_serving_rejection(_serving_error)
-                                    logger.debug("Failed to delete old sep vector for message %d", memory_id, exc_info=True)
+                                    logger.debug("Failed to delete old vector embedding for message %d", memory_id, exc_info=True)
                                 self.conn.execute(
-                                    f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
-                                    (memory_id, serialize_f32(pre_sep_embedding)),
+                                    f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
+                                    (memory_id, serialize_f32(pre_embedding)),
                                 )
-                            _write_foreground_embedder_metadata_no_commit(self.conn, pre_identity, selection=write_selection)
+                                if pre_sep_embedding is not None and current[1]:
+                                    try:
+                                        self.conn.execute(f"DELETE FROM {sep_tbl} WHERE rowid = ?", (memory_id,))
+                                    except Exception as _serving_error:
+                                        from truememory.tier_switch.runtime import raise_if_serving_rejection
+                                        raise_if_serving_rejection(_serving_error)
+                                        logger.debug("Failed to delete old sep vector for message %d", memory_id, exc_info=True)
+                                    self.conn.execute(
+                                        f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
+                                        (memory_id, serialize_f32(pre_sep_embedding)),
+                                    )
+                                _write_foreground_embedder_metadata_no_commit(self.conn, pre_identity, selection=write_selection)
                     except VectorPublicationChanged as exc:
                         raise VectorPublicationChanged("Source update committed; retry update to publish vectors") from exc
                     except Exception as _serving_error:
@@ -1726,7 +1839,9 @@ class TrueMemoryEngine:
     def get(self, memory_id: int, *, _source_snapshot: bool = False) -> dict | None:
         """Retrieve a single memory by ID."""
         self._ensure_connection()
-        if _source_snapshot:
+        with self._write_lock:  # Statements on the shared connection never interleave.
+            if not _source_snapshot:
+                return get_message(self.conn, memory_id)
             import hashlib
             import json
             from truememory.storage import _row_to_dict, select_message_cols
@@ -1734,17 +1849,16 @@ class TrueMemoryEngine:
                 f"SELECT {select_message_cols(self.conn)} FROM messages WHERE id = ?",
                 (memory_id,),
             ).fetchone()
-            if row is None:
-                return None
-            result = _row_to_dict(row)
-            try:
-                raw_snapshot = json.dumps(list(row), ensure_ascii=True, allow_nan=False,
-                                          separators=(",", ":")).encode("utf-8")
-            except (TypeError, ValueError, UnicodeError) as exc:
-                raise sqlite3.OperationalError("Source snapshot contains unsupported stored values") from exc
-            result["_source_snapshot_sha256"] = hashlib.sha256(raw_snapshot).hexdigest()
-            return result
-        return get_message(self.conn, memory_id)
+        if row is None:
+            return None
+        result = _row_to_dict(row)
+        try:
+            raw_snapshot = json.dumps(list(row), ensure_ascii=True, allow_nan=False,
+                                      separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise sqlite3.OperationalError("Source snapshot contains unsupported stored values") from exc
+        result["_source_snapshot_sha256"] = hashlib.sha256(raw_snapshot).hexdigest()
+        return result
 
     def get_all(self, limit: int = 100, offset: int = 0, user_id: str | None = None) -> list[dict]:
         """List memories with pagination.
@@ -1759,18 +1873,18 @@ class TrueMemoryEngine:
         """
         self._ensure_connection()
         from truememory.storage import _row_to_dict, select_message_cols
-        select_cols = select_message_cols(self.conn)
-
-        if user_id:
-            rows = self.conn.execute(
-                f"SELECT {select_cols} FROM messages WHERE sender = ? ORDER BY id DESC LIMIT ? OFFSET ?",
-                (user_id, limit, offset),
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                f"SELECT {select_cols} FROM messages ORDER BY id DESC LIMIT ? OFFSET ?",
-                (limit, offset),
-            ).fetchall()
+        with self._write_lock:
+            select_cols = select_message_cols(self.conn)
+            if user_id:
+                rows = self.conn.execute(
+                    f"SELECT {select_cols} FROM messages WHERE sender = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (user_id, limit, offset),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    f"SELECT {select_cols} FROM messages ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (limit, offset),
+                ).fetchall()
 
         return [_row_to_dict(r) for r in rows]
 
@@ -1800,8 +1914,9 @@ class TrueMemoryEngine:
 
         def open_existing(path: Path) -> sqlite3.Connection:
             from truememory.storage import _validate_db_path
+            from truememory.storage import configure_connection
             uri = Path(_validate_db_path(path)).as_uri() + "?mode=rw"
-            candidate = sqlite3.connect(uri, uri=True, check_same_thread=False)
+            candidate = configure_connection(sqlite3.connect(uri, uri=True, check_same_thread=False))
             try:
                 candidate.row_factory = None
                 candidate.execute("PRAGMA journal_mode=WAL")
@@ -2270,7 +2385,7 @@ class TrueMemoryEngine:
     # Search — full 6-layer pipeline
     # ──────────────────────────────────────────────────────────────────────
 
-    @engine_operation
+    @engine_fallback_operation
     def search_vectors_raw(self, query: str, limit: int = 5) -> list[dict] | None:
         """Pure vector cosine similarity search, or None if unavailable.
 
@@ -2289,7 +2404,7 @@ class TrueMemoryEngine:
             raise_if_serving_rejection(_serving_error)
             return None
 
-    @engine_operation
+    @engine_fallback_operation
     def search(self, query: str, limit: int = 10, _skip_surprise_boost: bool = False, _skip_reranker: bool = False, _skip_salience_guard: bool = False, include_directives: bool = False, landmark_sender: str | None = None) -> list[dict]:
         """
         Main search pipeline.
@@ -2714,13 +2829,16 @@ class TrueMemoryEngine:
         # "summary_N" / None supplement ids (#630 M-01).
         cleaned.sort(key=lambda d: (-d["score"], str(d.get("id", ""))))
         selected = cleaned[:limit]
+        schedule = getattr(self, "_schedule_backfill", None)  # Absent on synthetic engines.
+        if schedule is not None:
+            schedule()
         return attach_temporal_resolution(selected, temporal_intent) if temporal_intent else selected
 
     # ──────────────────────────────────────────────────────────────────────
     # Search — agentic multi-round retrieval
     # ──────────────────────────────────────────────────────────────────────
 
-    @engine_operation
+    @engine_fallback_operation
     def search_agentic(
         self,
         query: str,
@@ -3228,14 +3346,16 @@ class TrueMemoryEngine:
 
         stats["clustering"] = self.get_clustering_health()
         stats["maintenance"]["style"] = self.get_style_health()
+        stats["vector_coverage"] = self.get_vector_coverage(seed_backfill=True)
 
         # Add live DB stats if connected.
         if self.conn:
             try:
-                stats["message_count"] = get_message_count(self.conn)
-                dc = self.conn.execute(
-                    "SELECT COUNT(*) FROM messages WHERE directive = 1"
-                ).fetchone()
+                with self._write_lock:
+                    stats["message_count"] = get_message_count(self.conn)
+                    dc = self.conn.execute(
+                        "SELECT COUNT(*) FROM messages WHERE directive = 1"
+                    ).fetchone()
                 stats["directive_count"] = dc[0] if dc else 0
             except Exception:
                 logger.debug("Failed to get message count in get_stats()", exc_info=True)
@@ -3249,8 +3369,182 @@ class TrueMemoryEngine:
 
         return stats
 
+    def get_tier_identity(self) -> dict | None:
+        """Whether the selected tier's certified model still matches its settings; never opens the store."""
+        if self.conn is None:
+            return None
+        from truememory.tier_switch.runtime import tier_identity_report
+        try:
+            return tier_identity_report(self.conn, self._write_lock)
+        except Exception as error:
+            return {"status": "unavailable", "error": type(error).__name__}
+
+    def get_vector_coverage(self, *, seed_backfill: bool = False) -> dict | None:
+        """Memories missing from the served vector pair; never opens the database.
+
+        ``seed_backfill`` records the first gap (older failures left no cursor)
+        so the next add with working models starts filling it.
+        """
+        if self.conn is None or not self._has_vectors:
+            return None
+        from truememory.tier_switch.runtime import serving_operation
+        from truememory.vector_search import note_vectorless, vector_coverage
+        try:
+            with serving_operation(self.conn, connection_lock=self._write_lock, models="none") as operation:
+                with self._write_lock:
+                    coverage = vector_coverage(self.conn, operation.tables)
+                if seed_backfill and coverage["first_vectorless_id"] is not None and coverage["backfill_from"] is None:
+                    from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
+                    try:
+                        with self._write_lock, writer_transaction(self.conn, capture_writer_selection(self.conn)):
+                            note_vectorless(self.conn, coverage["first_vectorless_id"])
+                        coverage["backfill_from"] = str(coverage["first_vectorless_id"])
+                    except Exception:
+                        logger.debug("Vector backfill cursor was not seeded", exc_info=True)
+                return coverage
+        except Exception as error:
+            return {"status": "unavailable", "error_category": type(error).__name__[:64]}
+
+    def backfill_vectors(self, budget: int = 32, *, stop: threading.Event | None = None) -> int:
+        """Embed one bounded, resumable batch of memories stored without vectors.
+
+        Admitted like add (optional models), but each statement takes the
+        connection lock itself, so encoding never blocks foreground calls.
+        """
+        from truememory.tier_switch.runtime import admitted_call, engine_serving_operation
+        from truememory.vector_search import backfill_missing_vectors
+
+        def body() -> int:
+            self._ensure_connection()
+            if not self._has_vectors:
+                return 0
+            return backfill_missing_vectors(self.conn, write_lock=self._write_lock, budget=budget, stop=stop)
+        return admitted_call(self, lambda: engine_serving_operation(self, models="optional"), body,
+                             retry_writer=True, serialize=False)
+
+    def _schedule_backfill(self, *, seed_gap: bool = False) -> None:
+        """Start one background backfill pass when memories still lack vectors.
+
+        Called once a search has its models loaded, so a store that receives no
+        new adds still closes its gaps, without adding latency to the caller.
+        With ``seed_gap`` (the first maintenance wake of this Engine) the thread
+        only records, by SQL, the first gap that older releases left without a
+        cursor; later passes and adds then fill it. Either runs on a connection
+        of its own (_open_background_connection), so an in-memory store has none.
+        """
+        guard = getattr(self, "_backfill_guard", None)
+        if (guard is None or self.conn is None or not self._has_vectors
+                or not getattr(self, "_auto_maintenance", True) or str(self.db_path) == ":memory:"):
+            return
+        from truememory.tier_switch.runtime import current_operation
+        operation = current_operation(self.conn)
+        if not seed_gap and operation is not None and not operation.models_ready:
+            return
+        with guard:
+            if self._backfill_thread is not None and self._backfill_thread.is_alive():
+                return
+            self._backfill_stop.clear()  # A previous close stopped the last pass.
+            if seed_gap:
+                if self._backfill_gap_checked:
+                    return
+                self._backfill_gap_checked = True
+                target = self._seed_backfill_gap
+            else:
+                from truememory.vector_search import backfill_pending
+                try:
+                    with self._write_lock:
+                        if not backfill_pending(self.conn):
+                            return
+                except sqlite3.Error:
+                    return
+                target = self._background_backfill
+            from truememory.maintenance import _BackgroundRun, get_coordinator
+            # Taken while this Engine is attached; see background_writes.
+            coordinator, self._backfill_run = get_coordinator(self.db_path), _BackgroundRun()
+            self._backfill_thread = threading.Thread(target=target, args=(coordinator, self._backfill_run),
+                                                     daemon=True, name="truememory-vector-backfill")
+            self._backfill_thread.start()
+
+    def _open_background_connection(self, coordinator: MaintenanceCoordinator) -> sqlite3.Connection:
+        """Open this store for the backfill thread, inside its background_writes run.
+
+        Never the Engine's connection: callers may use or close that one
+        directly, and closing a connection under another thread's running
+        statement crashes the process. This one only its run's fence stops.
+        """
+        import sqlite_vec
+        from truememory.storage import configure_connection, existing_connect_options
+        conn = configure_connection(sqlite3.connect(coordinator.path.as_uri() + "?mode=rw", uri=True,
+                                                    **existing_connect_options()))
+        try:
+            for sql in (f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}", "PRAGMA foreign_keys=ON",
+                        "PRAGMA synchronous=NORMAL"):
+                conn.execute(sql)
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+        except BaseException:
+            conn.close()
+            raise
+        return conn
+
+    def _seed_backfill_gap(self, coordinator: MaintenanceCoordinator, run: _BackgroundRun) -> None:
+        if self._backfill_stop.is_set():
+            return
+        try:
+            from contextlib import closing, nullcontext
+            from truememory.maintenance import background_writes
+            from truememory.tier_switch.runtime import serving_operation
+            from truememory.vector_search import seed_backfill_cursor
+            with background_writes(coordinator, run), closing(self._open_background_connection(coordinator)) as conn:
+                with serving_operation(conn, models="none") as operation:
+                    # The connection is this thread's alone: no lock to share.
+                    seed_backfill_cursor(conn, operation.tables[0], write_lock=nullcontext(),
+                                         stop=self._backfill_stop)
+        except Exception:
+            logger.debug("Vector backfill cursor was not seeded", exc_info=True)
+
+    def _background_backfill(self, coordinator: MaintenanceCoordinator, run: _BackgroundRun) -> None:
+        if self._backfill_stop.is_set():
+            return
+        try:
+            from contextlib import closing, nullcontext
+            from truememory.maintenance import background_writes
+            from truememory.tier_switch.runtime import serving_operation
+            from truememory.vector_search import backfill_missing_vectors
+            with background_writes(coordinator, run), closing(self._open_background_connection(coordinator)) as conn:
+                # Admitted like add: optional models, and without them no pass.
+                with serving_operation(conn, models="optional"):
+                    backfill_missing_vectors(conn, write_lock=nullcontext(), stop=self._backfill_stop)
+        except Exception:
+            logger.debug("Background vector backfill pass did not complete", exc_info=True)
+
+    def stop_background_backfill(self, timeout: float = 1.0) -> None:
+        """Stop the background pass between encode calls or rows, waiting briefly.
+
+        A pass inside one encode call finishes that call, but its connection is
+        fenced: it runs no statement after this returns.
+        """
+        stop = getattr(self, "_backfill_stop", None)
+        if stop is None:
+            return
+        stop.set()
+        thread, run = self._backfill_thread, getattr(self, "_backfill_run", None)
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=timeout)
+            if thread.is_alive() and run is not None:
+                run.fence()
+
     def close(self):
-        """Detach this engine; a shared worker retains its own connection."""
+        """Close this engine's connection and detach it from the database.
+
+        A worker shared with another open Engine in this process keeps its own
+        connection. Closing the last one stops this process's background
+        writes to the database first (MaintenanceCoordinator.detach).
+        """
+        stop = getattr(self, "stop_background_backfill", None)  # Absent on synthetic engines.
+        if stop is not None:
+            stop()
         with self._init_lock, self._write_lock:
             self._maintenance_coordinator = None
             self._maintenance_handle = None
@@ -3266,6 +3560,9 @@ class TrueMemoryEngine:
             self._runtime_vector_generation = None
             self._runtime_vector_connection = None
             self._reconnect_receipt = None
+        detach = getattr(self, "_detach_maintenance", None)  # Absent on synthetic engines.
+        if detach is not None:
+            detach()
 
     def __enter__(self):
         return self

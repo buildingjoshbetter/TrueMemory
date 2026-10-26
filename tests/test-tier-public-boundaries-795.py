@@ -36,7 +36,17 @@ def enter_context(test_case: unittest.TestCase, context: contextlib.AbstractCont
 def definitions(path: str, names: set[str], namespace: dict, *, methods: bool = False) -> types.ModuleType:
     if path == "maintenance.py" and "_acquire_owner" in names:
         names = names | {"_AutomaticAdmission", "_automatic_admission_locked"}
-        namespace = {"threading": threading, "weakref": weakref, **namespace}
+        namespace = {"threading": threading, "weakref": weakref, "_wanted_by_other_locked": lambda path: False,
+                     **namespace}
+        # Lock release goes through the fixture's own os.close stub.
+        namespace.setdefault("release_file_lock", lambda fd, stub=namespace: stub["os"].close(fd))
+    if path == "maintenance.py" and "MaintenanceCoordinator" in names:
+        # Each worker run and its fenced connections; opens are not existing-only here.
+        names = names | {"MaintenanceClosedError", "_BackgroundRun", "_FencedCursor", "_FencedConnection",
+                         "_CLOSE_WAIT_SECONDS", "_FENCE_INTERRUPT_SECONDS", "_STATEMENT_KEYWORD"}
+        namespace = {"re": __import__("re"), "time": time, "sqlite3": sqlite3,
+                     "contextmanager": contextlib.contextmanager,
+                     "existing_database_opens": lambda factory=None: contextlib.nullcontext(), **namespace}
     tree = ast.parse((ROOT / "truememory" / path).read_text(encoding="utf-8"))
     if methods:
         cls = next(node for node in tree.body if isinstance(node, ast.ClassDef))
@@ -537,7 +547,18 @@ class TestPublicBoundaries(unittest.TestCase):
     def test_existing_controlled_open_never_calls_schema_factory_and_closes_on_rejection(self) -> None:
         policy = self.seed_policy()
         factory = Mock(side_effect=AssertionError("Unexpected legacy initialization"))
-        self.modules["storage"] = types.SimpleNamespace(DEFAULT_BUSY_TIMEOUT_MS=10000)
+        migrated = []
+        # Controlled opens run the idempotent create_db upgrades (recorded here);
+        # they never go through the legacy schema factory.
+        self.modules["storage"] = types.SimpleNamespace(
+            DEFAULT_BUSY_TIMEOUT_MS=10000, _apply_schema_migrations=lambda conn, path: migrated.append((conn, path)),
+            configure_connection=lambda conn: conn, existing_connect_options=dict)
+        # This synthetic store has no native vec0 pair; journal coherence is
+        # covered by the liveness suite on real create_db databases.
+        coherence = []
+        patch.object(self.modules["tier_switch.activation"], "retire_incoherent_activation",
+                     lambda conn: coherence.append(conn) and False, create=True).start()
+        self.addCleanup(patch.stopall)
         path = Path(Path.cwd().anchor) / "synthetic" / "database.db"
         statements = []
         self.conn.set_trace_callback(statements.append)
@@ -549,6 +570,8 @@ class TestPublicBoundaries(unittest.TestCase):
         self.assertFalse(any(sql.lstrip().split(" ", 1)[0].upper() in {"INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER"}
                              for sql in statements))
         factory.assert_not_called()
+        self.assertEqual(migrated, [(self.conn, path)])
+        self.assertEqual(coherence, [self.conn])
         error = self.api.TierRuntimeError("synthetic invalid journal")
         close = Mock()
         with patch.object(Path, "exists", return_value=True), patch.object(self.api.sqlite3, "connect", return_value=self.conn), \
@@ -713,15 +736,38 @@ class TestPublicBoundaries(unittest.TestCase):
                              for sql in statements))
         self.assertFalse(self.conn.in_transaction)
 
-    def test_policy_loaded_runtime_cannot_be_inherited_by_unselected_database(self) -> None:
+    def test_policy_loaded_runtime_is_reset_not_inherited_by_unselected_database(self) -> None:
+        # A journal retired elsewhere leaves this projection behind; the legacy
+        # database is served from its configured tier, never from the policy.
         policy = self.seed_policy()
-        self.install_policy_projectors()
+        vector, reranker, _ = self.install_policy_projectors()
         self.api.apply_runtime_policy(policy)
+        resets = []
+        def set_embedding_model(tier):
+            resets.append(("embedding", tier))
+            vector.EMBEDDING_MODEL, vector._runtime_policy_tier, vector._frozen_embedding_target = "model2vec", None, None
+        def set_active_tier(tier):
+            resets.append(("reranker", tier))
+            reranker._frozen_reranker_id, reranker._active_tier = None, tier
+        vector.set_embedding_model, vector.resolve_tier = set_embedding_model, (lambda: "edge")
+        vector._active_vec_table, vector._active_sep_table = (lambda conn: "vec_messages"), (lambda conn: "vec_messages_sep")
+        reranker.set_active_tier = set_active_tier
+        reranker.get_current_reranker_name = lambda: "cross-encoder/ms-marco-MiniLM-L-6-v2"
         other = sqlite3.connect(":memory:")
         self.addCleanup(other.close)
-        with self.assertRaises(self.api.TierRuntimeError):
-            with self.api.serving_operation(other):
-                self.fail("Unselected database silently inherited another policy")
+        # An empty legacy store whose config.json names edge.
+        self.modules["tier_switch.projection"] = types.SimpleNamespace(
+            _paths=lambda config, lock: (None, None), _read_config=lambda path: {"tier": "edge"},
+            _guard=lambda config: types.SimpleNamespace(tier=config["tier"]))
+        other.executescript("CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT); "
+                            "CREATE TABLE messages(id INTEGER PRIMARY KEY); "
+                            "CREATE TABLE vector_cache_registry(tier_group TEXT PRIMARY KEY, vec_table TEXT, "
+                            "sep_table TEXT, embedding_dim INTEGER)")
+        with self.api.serving_operation(other) as operation:
+            self.assertEqual(operation.key[:4], ("legacy", "model2vec", "256", "edge"))
+            self.assertIsNone(operation.policy)
+        self.assertEqual(resets, [("embedding", "edge"), ("reranker", "edge")])
+        self.assertIsNone(self.api.runtime_acknowledgement())
 
 
     def maintenance_runner(self, *, owner=None, run_layers=None):
@@ -819,10 +865,22 @@ class TestPublicBoundaries(unittest.TestCase):
         engine = self.fixture.lifecycle_engine("_open_connection_handle")
         self.conn.execute("INSERT INTO messages(id,content) VALUES(991,'synthetic caller')")
         before = self.conn.commits, self.conn.rollbacks
-        with engine._write_lock:
+        owned, release = threading.Event(), threading.Event()
+        def holder():
+            with engine._write_lock:
+                owned.set()
+                release.wait(2)
+        thread = threading.Thread(target=holder)
+        thread.start()
+        try:
+            self.assertTrue(owned.wait(2))
             with self.assertRaises(self.api.TierRuntimeError):
                 with self.api.maintenance_serving_operation(self.conn, connection_lock=engine._write_lock):
                     self.fail("Borrowed busy admission entered maintenance")
+        finally:
+            release.set()
+            thread.join(2)
+        self.assertFalse(thread.is_alive())
         cancelled = threading.Event()
         cancelled.set()
         for controls, kind in (({"cancelled": cancelled}, self.fixture.gate.ServingLeaseCancelled),
@@ -1585,8 +1643,9 @@ class TestEngineReconnectReceipt(unittest.TestCase):
         enter_context(self, patch.object(Path, "stat", return_value=self.stat))
         enter_context(self, patch.object(Path, "mkdir"))
         enter_context(self, patch.object(Path, "chmod"))
-        self.modules["storage"] = definitions("storage.py", {"DatabaseOpenError", "_integrity_message", "_validate_db_path"},
-            self.namespace(sqlite3=sqlite3, Path=Path, os=os, newest_backup=lambda path: None))
+        self.modules["storage"] = definitions("storage.py", {"DatabaseOpenError", "_integrity_message", "_validate_db_path",
+                                                             "wal_reset_affected", "WAL_RESET_GUARD", "configure_connection"},
+            self.namespace(sqlite3=sqlite3, Path=Path, os=os, sys=sys, newest_backup=lambda path: None))
         namespace = self.namespace(sqlite3=sqlite3, Path=Path, logger=logging.getLogger("synthetic-reconnect"),
             _HAS_VECTOR=vectors, DEFAULT_BUSY_TIMEOUT_MS=3000,
             _ALL_VEC_TABLES=("vec_messages", "vec_messages_sep", "vec_messages_edge", "vec_messages_sep_edge",
@@ -1974,8 +2033,10 @@ class TestEngineReconnectReceipt(unittest.TestCase):
             with self.assertRaises(Completed):
                 module.open(engine)
         self.connect.assert_called_once_with(engine.db_path.as_uri() + "?mode=rw", uri=True, check_same_thread=False)
-        self.assertEqual(queries, ["PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=3000", "PRAGMA foreign_keys=ON",
-                                   "PRAGMA synchronous=NORMAL", "PRAGMA cache_size=-64000", "PRAGMA mmap_size=268435456"])
+        guard = (["PRAGMA wal_autocheckpoint=0", "PRAGMA journal_size_limit=0"]
+                 if self.modules["storage"].WAL_RESET_GUARD else [])
+        self.assertEqual(queries, guard + ["PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=3000", "PRAGMA foreign_keys=ON",
+                                           "PRAGMA synchronous=NORMAL", "PRAGMA cache_size=-64000", "PRAGMA mmap_size=268435456"])
         self.assertIs(engine.conn, self.conn)
         self.assertIsNone(candidate.row_factory)
 
@@ -2118,7 +2179,8 @@ class TestColdPublicInitialization(unittest.TestCase):
         self.namespace_values = self.namespace(_HAS_VECTOR=True, _HAS_HYBRID=True,
             init_vec_table=self.vector.init_vec_table, TrueMemoryMigrationError=RuntimeError,
             resolve_tier=lambda: "edge", logger=logging.getLogger("synthetic-initialization"),
-            engine_operation=self.api.engine_operation)
+            engine_operation=self.api.engine_operation, engine_fallback_operation=self.api.engine_fallback_operation,
+            engine_source_operation=self.api.engine_source_operation)
         self.methods = definitions("engine.py", {"_ensure_connection", "_initialize_connection", "_maybe_auto_consolidate",
             "_maybe_startup_consolidate", "search_vectors_raw"}, self.namespace_values, methods=True)
         self.engine = types.SimpleNamespace(conn=self.conn, ready=False, _runtime_initialized=False,
@@ -2340,6 +2402,7 @@ class TestBorrowedPublicCompatibility(unittest.TestCase):
             "add", "delete_all", "search_simple"}, self.namespace(
             _validate_add_content=validators._validate_add_content, _validate_delete_user=validators._validate_delete_user,
             engine_operation=self.api.engine_operation, engine_handle_operation=self.api.engine_handle_operation,
+            engine_fallback_operation=self.api.engine_fallback_operation, engine_source_operation=self.api.engine_source_operation,
             search_fts=fts.search_fts, sqlite3=sqlite3, _HAS_VECTOR=False, _HAS_HYBRID=False), methods=True)
         self.engine = types.SimpleNamespace(conn=self.conn, ready=False, _runtime_initialized=False,
             _write_lock=threading.Lock(), _init_lock=threading.Lock(), _has_vectors=False,

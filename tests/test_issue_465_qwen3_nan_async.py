@@ -42,8 +42,9 @@ class TestIssue465Qwen3NanAsync:
 
         start = time.monotonic()
         with patch("truememory.vector_search.get_model", return_value=mock_model):
-            Memory(path=":memory:")
+            m = Memory(path=":memory:")
         elapsed = time.monotonic() - start
+        m.close()
 
         assert elapsed < 2.0, (
             f"Fresh DB init took {elapsed:.1f}s — NaN fix likely triggered "
@@ -61,9 +62,12 @@ class TestIssue465Qwen3NanAsync:
             m.add(content="test", user_id="alice")
 
         conn = m._engine.conn
-        row = conn.execute(
-            "SELECT value FROM metadata WHERE key = 'qwen3_nan_fix_applied'"
-        ).fetchone()
+        try:
+            row = conn.execute(
+                "SELECT value FROM metadata WHERE key = 'qwen3_nan_fix_applied'"
+            ).fetchone()
+        finally:
+            m.close()
         assert row is not None, (
             "qwen3_nan_fix_applied flag not set — NaN fix will re-run"
         )
@@ -96,8 +100,12 @@ class TestIssue465Qwen3NanAsync:
             start = time.monotonic()
             with patch("truememory.vector_search.get_model", return_value=mock_model):
                 with patch("truememory.vector_search._model", None):
-                    Memory(path=str(db_path))
+                    m2 = Memory(path=str(db_path))
             elapsed = time.monotonic() - start
+            # Close both before the directory is removed: close() stops this
+            # process's background writes to the database.
+            m2.close()
+            m1.close()
 
             assert elapsed < 2.0, (
                 f"Second connection took {elapsed:.1f}s — NaN fix re-ran"

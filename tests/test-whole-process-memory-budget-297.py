@@ -554,6 +554,120 @@ class CooperativeBorrowControls(unittest.TestCase):
             self.assertEqual(registry.snapshot()["reserved_known_bytes"], 0)
         owner.close()
 
+    def test_borrowed_owner_retiring_mid_session_moves_new_work_to_a_live_owner(self) -> None:
+        # Pre-fix: once the model whose owner a cooperative session borrowed
+        # was released, every new charge raised StaleBudgetOwner("Owner is closing").
+        registry = budget.ProcessRegistry(usage_reader=lambda: 100)
+        with patch.object(budget, "get_process_registry", return_value=registry):
+            reranker = registry.register_owner(1000, kind="local_reranker")
+            embedding = registry.register_owner(2000, kind="local_embedding")
+            with budget.cooperative_scope() as session:
+                self.assertIs(session.owner, reranker)
+                before = session.charge(key("before release"), known_bytes=10)
+                reranker.close()
+                after = session.charge(key("after release"), known_bytes=20)
+                self.assertIs(after.owner, embedding)
+                # Work already charged keeps its reservation on the retiring owner.
+                self.assertIs(before.owner, reranker)
+                self.assertEqual(before.reserved_known_bytes, 10)
+                self.assertEqual(registry.snapshot()["reserved_known_bytes"], 30)
+            self.assertEqual(registry.snapshot()["reserved_known_bytes"], 0)
+            self.assertEqual(registry.snapshot()["owner_count"], 1)
+            embedding.close()
+
+            # With no live owner left, a fresh one serves the rest of the session
+            # and closes with it.
+            last = registry.register_owner(1000, kind="local_reranker")
+            with budget.cooperative_scope() as session:
+                session.charge(key("before release"), known_bytes=10)
+                last.close()
+                lease = session.charge(key("after release"), known_bytes=20)
+                self.assertIsNot(lease.owner, last)
+                self.assertEqual(registry._owners[lease.owner.token].kind, "cooperative")
+            self.assertEqual(registry.snapshot()["owner_count"], 0)
+
+            # An owner a caller scoped explicitly is never swapped.
+            explicit = registry.register_owner(1000, kind="explicit")
+            with budget.allocation_scope(explicit) as session:
+                explicit.close()
+                with self.assertRaises(budget.StaleBudgetOwner):
+                    session.charge(key("after close"), known_bytes=1)
+            self.assertEqual(registry.snapshot()["owner_count"], 0)
+
+    def test_fresh_owner_is_retired_when_a_swapped_session_fails(self) -> None:
+        # Pre-fix: a session that moved to a fresh cooperative owner and then raised
+        # left that owner live, so later cooperative work borrowed it.
+        registry = budget.ProcessRegistry(usage_reader=lambda: 100)
+        with patch.object(budget, "get_process_registry", return_value=registry):
+            last = registry.register_owner(1000, kind="local_reranker")
+
+            class Failed(Exception):
+                pass
+
+            caught = None
+            try:
+                with budget.cooperative_scope() as session:
+                    session.charge(key("before release"), known_bytes=10)
+                    last.close()
+                    session.charge(key("after release"), known_bytes=20)
+                    raise Failed()
+            except Failed as error:
+                caught = error
+            # While the exception keeps the leases alive, nothing is borrowable.
+            self.assertIsNone(registry.active_owner())
+            with budget.cooperative_scope() as later:
+                self.assertIsNone(later)
+            # The test frame's own names would keep the session's leases alive.
+            del caught, session
+            import gc
+            gc.collect()
+            self.assertEqual(registry.snapshot()["owner_count"], 0)
+            self.assertEqual(registry.snapshot()["reserved_known_bytes"], 0)
+
+    def test_encode_survives_a_collection_that_retires_its_borrowed_owner(self) -> None:
+        # Pre-fix, in the merged suite: a reranker released by an earlier caller
+        # lingered as cyclic garbage. A later encode borrowed its owner, the MPS
+        # OOM fallback's gc.collect() retired it, and retaining the result raised
+        # StaleBudgetOwner("Owner is closing").
+        import numpy as np
+        registry = budget.ProcessRegistry(usage_reader=lambda: 100)
+
+        class Released:
+            def __init__(self) -> None:
+                self.cycle = self
+
+        class OutOfMemoryOnce:
+            calls = 0
+
+            def encode(self, texts: list[str], **kwargs: object) -> object:
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("MPS backend out of memory (MPS allocated: 1.00 GiB, "
+                                       "max allowed: 1.00 GiB). Tried to allocate 256.00 MiB.")
+                return np.zeros((len(texts), 4), dtype=np.float32)
+
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            with patch.object(budget, "get_process_registry", return_value=registry):
+                released = Released()
+                budget.bind_model_owner(released, registry.register_owner(1_000_000, kind="local_reranker"))
+                del released
+                self.assertEqual(registry._owners[registry.active_owner().token].kind, "local_reranker")
+                values = budget.budgeted_encode_with_mps_fallback(
+                    OutOfMemoryOnce(), ["synthetic"], key("synthetic encode"))
+                self.assertEqual(values.shape, (1, 4))
+                # The reranker's owner is gone; only the replacement still
+                # holds the retained result, until the result is released.
+                self.assertEqual([record.kind for record in registry._owners.values()], ["cooperative"])
+        finally:
+            if enabled:
+                gc.enable()
+        del values
+        gc.collect()
+        self.assertEqual(registry.snapshot()["owner_count"], 0)
+        self.assertEqual(registry.snapshot()["reserved_known_bytes"], 0)
+
     def test_closed_borrow_refuses_before_deadline_or_reader(self) -> None:
         def forbidden() -> int:
             self.fail("Retired owner must be checked before external callbacks")

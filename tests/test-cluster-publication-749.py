@@ -263,6 +263,24 @@ class TestClusterComputation(ClusterFixture):
             self.module.cluster_messages(self.conn)
         self.assertEqual(self.output(), before)
 
+    def test_too_few_vectors_for_min_samples_publish_noise_instead_of_failing(self) -> None:
+        # Round v8: HDBSCAN raises ValueError when it cannot find min_samples
+        # neighbours, so a small store's clusters layer ended failed.
+        def too_few() -> None:
+            raise ValueError("k must be less than or equal to the number of training points")
+
+        self.boundary.fit = too_few
+        self.conn.execute("DELETE FROM vec_messages_edge WHERE rowid > 3")
+        self.conn.execute("DELETE FROM messages WHERE id > 3")
+        self.conn.commit()
+        self.assertEqual(self.module.cluster_messages(self.conn), 0)
+        self.assertEqual(self.output(), ([(1, -1, 1), (2, -1, 1), (3, -1, 1)], []))
+        self.assertFalse(self.conn.in_transaction)
+        before = self.output()
+        with self.assertRaisesRegex(ValueError, "training points"):  # Enough vectors: a real failure.
+            self.module.cluster_messages(self.conn, min_samples=2)
+        self.assertEqual(self.output(), before)
+
     def test_missing_dependency_remains_an_error_even_with_empty_vectors(self) -> None:
         self.conn.execute("DELETE FROM vec_messages_edge")
         self.conn.commit()

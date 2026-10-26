@@ -44,10 +44,11 @@ import os
 import re
 import struct
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import closing, contextmanager
+from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -274,6 +275,10 @@ def get_model():
     if configured_memory:
         from truememory.memory_budget import validate_local_policy
         validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
+    import sys
+    admitted = getattr(sys.modules.get("truememory.tier_switch.runtime"), "require_admitted_models", None)
+    if admitted is not None:
+        admitted()
     if _model is not None:
         return _model  # Fast path, no lock needed
     from truememory.tier_switch.runtime import require_model_load_allowed
@@ -902,7 +907,11 @@ def _write_foreground_embedder_metadata_no_commit(
             "SELECT typeof(value)='text' AND value=? FROM main.metadata WHERE key=?", (value, key),
         ).fetchone()
         matches.append(None if row is None else row[0])
-    if matches not in ([None, None], [1, 1]):
+    if matches == [1, 1]:
+        # Already published: a rewrite would change only updated_at, two row
+        # writes per add that readers of the metadata rows see as a change.
+        return
+    if matches != [None, None]:
         raise VectorPublicationChanged("Foreground metadata is partial or uses another embedding identity")
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     for key, value in (("embed_model", identity[1]), ("embed_dim", str(identity[2]))):
@@ -1285,8 +1294,24 @@ def _is_mps_oom(exc: Exception) -> bool:
     return is_mps_oom(exc)
 
 
+def released_connection() -> AbstractContextManager[None]:
+    """Free this thread's engine connection lock for model or LLM work (no-op without an engine).
+
+    Other threads' statements run meanwhile; a connection with a transaction
+    open stays locked (see runtime.released_connection_locks).
+    """
+    runtime = sys.modules.get("truememory.tier_switch.runtime")
+    release = getattr(runtime, "released_connection_locks", None)
+    return release() if release is not None else nullcontext()
+
+
 def _encode_with_mps_fallback(model, texts, **kwargs):
     """Encode texts with MPS OOM fallback. Thread-safe device transitions."""
+    with released_connection():
+        return _encode_unlocked(model, texts, **kwargs)
+
+
+def _encode_unlocked(model, texts, **kwargs):
     if "_LOCAL_MEMORY_POLICY" in globals():
         from truememory.memory_budget import (
             ProfileKey, budgeted_encode_with_mps_fallback, validate_local_policy,
@@ -1351,16 +1376,34 @@ class VectorPublicationChanged(RuntimeError):
 
 
 @contextmanager
-def _foreground_model_fence(identity: tuple[int, str, int], *, blocking: bool = False) -> Iterator[None]:
-    """Blocking admission is permitted only before an owned writer starts."""
+def _foreground_model_fence(
+    identity: tuple[int, str, int], *, blocking: bool = False,
+) -> Iterator[Callable[[], AbstractContextManager[None]]]:
+    """Blocking admission is permitted only before an owned writer starts.
+
+    Yields what frees the fence while that writer's busy BEGIN waits to retry
+    (writer_transaction's ``release``); it takes the fence back and checks the
+    identity again before the next attempt.
+    """
     if not _lock.acquire(blocking=blocking):
         raise VectorPublicationChanged("Embedding model is busy; retry vector publication")
     try:
         if identity != (_model_generation, EMBEDDING_MODEL, _embedding_dim):
             raise VectorPublicationChanged("Embedding model changed; retry vector publication")
-        yield
+        yield lambda: _released_model_fence(identity)
     finally:
         _lock.release()
+
+
+@contextmanager
+def _released_model_fence(identity: tuple[int, str, int]) -> Iterator[None]:
+    _lock.release()
+    try:
+        yield
+    finally:
+        _lock.acquire()  # Held again for the fence's own release.
+    if identity != (_model_generation, EMBEDDING_MODEL, _embedding_dim):
+        raise VectorPublicationChanged("Embedding model changed; retry vector publication")
 
 
 def _validate_foreground_vector_target(
@@ -1403,16 +1446,232 @@ def _validate_foreground_vector_target(
 @contextmanager
 def _foreground_vector_publication(
     conn: sqlite3.Connection, identity: tuple[int, str, int], message_id: int,
-    *, selection=None,
+    *, selection=None, retry_busy: bool = False,
 ) -> Iterator[tuple[str, str]]:
     from truememory.tier_switch.writer import WriterSelectionChanged, writer_transaction
 
-    with _foreground_model_fence(identity, blocking=not conn.in_transaction):
+    with _foreground_model_fence(identity, blocking=not conn.in_transaction) as release:
         try:
-            with writer_transaction(conn, selection, model_id=identity[1], dimension=identity[2]):
+            with writer_transaction(conn, selection, model_id=identity[1], dimension=identity[2],
+                                    retry_busy=retry_busy, release=release):
                 yield _validate_foreground_vector_target(conn, identity, message_id, selection=selection)
         except WriterSelectionChanged as exc:
             raise VectorPublicationChanged(str(exc)) from exc
+
+
+# Smallest message id that may still lack vectors in the served pair. Written
+# inside the writer that stored a memory without them; consumed by bounded
+# backfill passes, so the work survives restarts.
+_BACKFILL_KEY = "vector_backfill_from"
+# Memories whose embedding came out non-finite (an fp16 NaN, for example) under
+# one model identity. They are skipped and reported instead of stalling every
+# later pass on the same rows; a different model retries them.
+_BACKFILL_SKIPPED_KEY = "vector_backfill_skipped"
+_BACKFILL_SKIPPED_LIMIT = 1000
+
+
+def note_vectorless(conn: sqlite3.Connection, message_id: int) -> None:
+    """Record, inside the caller's writer, that a stored memory needs vectors."""
+    try:
+        conn.execute(
+            "INSERT INTO metadata(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+            "value = CAST(MIN(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)",
+            (_BACKFILL_KEY, str(int(message_id))),
+        )
+    except sqlite3.OperationalError:
+        logger.debug("Vector backfill cursor was not recorded", exc_info=True)
+
+
+def backfill_pending(conn: sqlite3.Connection) -> bool:
+    return conn.execute("SELECT 1 FROM metadata WHERE key=?", (_BACKFILL_KEY,)).fetchone() is not None
+
+
+def _skipped_vectorless(conn: sqlite3.Connection) -> tuple[str | None, list[int]]:
+    import json
+    row = conn.execute("SELECT value FROM metadata WHERE key=?", (_BACKFILL_SKIPPED_KEY,)).fetchone()
+    try:
+        value = json.loads(row[0])
+        return str(value["model"]), [int(item) for item in value["ids"]]
+    except (TypeError, ValueError, KeyError):
+        return None, []
+
+
+def _first_gap(conn: sqlite3.Connection, table: str, start: int, skipped: list[int],
+               *, end: int | None = None) -> int | None:
+    import json
+    bound = "" if end is None else " AND m.id < ?"
+    return conn.execute(
+        f'SELECT min(m.id) FROM messages m WHERE m.id >= ?{bound} AND m.id NOT IN (SELECT value FROM json_each(?)) '
+        f'AND NOT EXISTS (SELECT 1 FROM main."{table}" v WHERE v.rowid = m.id)',
+        (start, json.dumps(skipped)) if end is None else (start, end, json.dumps(skipped)),
+    ).fetchone()[0]
+
+
+# Ids one seed query scans while it holds the connection: a fully covered
+# chunk costs about 25 ms on 100k memories (the whole scan 0.5 to 0.8 s).
+_SEED_CHUNK = 4096
+
+
+def seed_backfill_cursor(conn: sqlite3.Connection, table: str, *, write_lock: object,
+                         stop: threading.Event | None = None) -> int | None:
+    """Record the first memory missing from ``table`` when no cursor exists.
+
+    Releases before note_vectorless stored memories without vectors and
+    without a cursor, so no backfill pass ever reached them. The scan holds
+    ``write_lock`` for one _SEED_CHUNK of ids at a time; ``stop`` ends it
+    between chunks. Returns the id recorded, or None.
+    """
+    from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
+
+    with write_lock:
+        if backfill_pending(conn):
+            return None
+        _, skipped = _skipped_vectorless(conn)
+        high = conn.execute("SELECT max(id) FROM messages").fetchone()[0]
+    start = 0
+    while high is not None and start <= high:
+        if stop is not None and stop.is_set():
+            return None
+        with write_lock:
+            gap = _first_gap(conn, table, start, skipped, end=start + _SEED_CHUNK)
+        if gap is not None:
+            with write_lock, writer_transaction(conn, capture_writer_selection(conn)):
+                note_vectorless(conn, gap)  # Keeps a lower cursor noted meanwhile.
+            return gap
+        start += _SEED_CHUNK
+    return None
+
+
+def vector_coverage(conn: sqlite3.Connection, tables: tuple[str, str]) -> dict:
+    """Count memories without a vector in the served completion table."""
+    import json
+    _, skipped = _skipped_vectorless(conn)
+    vectorless = conn.execute(
+        f'SELECT count(*) FROM messages m WHERE NOT EXISTS '
+        f'(SELECT 1 FROM main."{tables[0]}" v WHERE v.rowid = m.id)'
+    ).fetchone()[0]
+    unembeddable = conn.execute(
+        f'SELECT count(*) FROM messages m WHERE m.id IN (SELECT value FROM json_each(?)) AND NOT EXISTS '
+        f'(SELECT 1 FROM main."{tables[0]}" v WHERE v.rowid = m.id)', (json.dumps(skipped),)
+    ).fetchone()[0]
+    cursor = conn.execute("SELECT value FROM metadata WHERE key=?", (_BACKFILL_KEY,)).fetchone()
+    return {"table": tables[0], "vectorless": vectorless, "skipped_nonfinite": unembeddable,
+            "first_vectorless_id": _first_gap(conn, tables[0], 0, skipped),
+            "backfill_from": None if cursor is None else cursor[0]}
+
+
+def backfill_missing_vectors(conn: sqlite3.Connection, *, write_lock: object,
+                             budget: int = 32, window: int = 256, stop: threading.Event | None = None) -> int:
+    """Embed a bounded, resumable batch of memories stored without vectors.
+
+    Runs inside an admitted operation whose models are ready. One pass scans at
+    most ``window`` ids from the recorded cursor and publishes at most
+    ``budget`` missing pairs, each under the writer and model fences with the
+    source row rechecked; encoding happens outside the engine writer lock.
+    Rows whose embedding is not finite are skipped and recorded, so the cursor
+    always moves past the scanned window. ``stop`` ends the pass between encode
+    calls and rows; the cursor is then left for the next pass.
+    """
+    import json
+    import sys
+    from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
+
+    runtime = sys.modules.get("truememory.tier_switch.runtime")
+    operation = runtime.current_operation(conn) if runtime is not None else None
+    if operation is None or not operation.models_ready or operation.borrowed:
+        # A caller transaction must not absorb a batch of foreign writes. The
+        # admission recorded it; a live in_transaction may be another thread's read.
+        return 0
+    vec_table = operation.tables[0]
+    with write_lock:
+        cursor = conn.execute("SELECT value FROM metadata WHERE key=?", (_BACKFILL_KEY,)).fetchone()
+        if cursor is None:
+            return 0
+        try:
+            start = int(cursor[0])
+        except (TypeError, ValueError):
+            start = 0
+        skipped_model, skipped = _skipped_vectorless(conn)
+        rows = conn.execute(
+            "SELECT id, content, sender, recipient, timestamp FROM messages WHERE id >= ? ORDER BY id LIMIT ?",
+            (start, window),
+        ).fetchall()
+        missing = [row for row in rows
+                   if conn.execute(f'SELECT 1 FROM main."{vec_table}" WHERE rowid=?', (row[0],)).fetchone() is None]
+    with _lock:
+        model_label = f"{EMBEDDING_MODEL}:{_embedding_dim}"
+    if skipped_model != model_label:
+        skipped = []  # Another model may embed them.
+    missing = [row for row in missing if row[0] not in set(skipped)]
+    batch = missing[:budget]
+    published, nonfinite = 0, []
+    def stopped() -> bool:
+        return stop is not None and stop.is_set()
+
+    if batch:
+        if stopped():
+            return 0
+        with write_lock:
+            model, identity = _capture_rebuild_model(conn)
+        model_label = f"{identity[1]}:{identity[2]}"
+        completion = _encode_with_mps_fallback(model, [row[1] for row in batch])
+        if stopped():
+            return 0
+        separation = _encode_with_mps_fallback(model, [_build_sep_text(row[2], row[3], row[4], row[1]) for row in batch])
+        with write_lock:
+            selection = capture_writer_selection(conn)
+        for row, left, right in zip(batch, completion, separation):
+            if stopped():
+                return published
+            try:
+                blobs = serialize_f32(left), serialize_f32(right)
+            except ValueError:
+                nonfinite.append(row[0])
+                continue
+            with write_lock, _foreground_vector_publication(conn, identity, row[0], selection=selection) as tables:
+                current = conn.execute("SELECT id, content, sender, recipient, timestamp FROM messages WHERE id=?",
+                                       (row[0],)).fetchone()
+                if (current != tuple(row)
+                        or conn.execute(f'SELECT 1 FROM main."{tables[0]}" WHERE rowid=?', (row[0],)).fetchone()):
+                    continue  # Changed, deleted or published meanwhile.
+                conn.execute(f'INSERT INTO main."{tables[0]}"(rowid, embedding) VALUES (?, ?)', (row[0], blobs[0]))
+                conn.execute(f'DELETE FROM main."{tables[1]}" WHERE rowid=?', (row[0],))
+                conn.execute(f'INSERT INTO main."{tables[1]}"(rowid, embedding) VALUES (?, ?)', (row[0], blobs[1]))
+                _write_foreground_embedder_metadata_no_commit(conn, identity, selection=selection)
+                published += 1
+    if len(missing) > len(batch):
+        resume = batch[-1][0] + 1
+    elif len(rows) == window:
+        resume = rows[-1][0] + 1
+    else:
+        resume = None
+    if stopped():
+        return published
+    if nonfinite:
+        skipped = sorted(set(skipped) | set(nonfinite))[:_BACKFILL_SKIPPED_LIMIT]
+        logger.warning("Skipped %d memories whose embedding is not finite", len(nonfinite))
+    with write_lock, writer_transaction(conn, capture_writer_selection(conn)):
+        if nonfinite:
+            conn.execute("INSERT INTO metadata(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+                         "value=excluded.value",
+                         (_BACKFILL_SKIPPED_KEY, json.dumps({"model": model_label, "ids": skipped})))
+        if resume is None:
+            # Reached the end. Adds commit their row and cursor note together, so
+            # inside this writer every gap noted meanwhile is visible here.
+            resume = _first_gap(conn, vec_table, start, skipped)
+        now = conn.execute("SELECT value FROM metadata WHERE key=?", (_BACKFILL_KEY,)).fetchone()
+        if now is not None and now[0] != cursor[0]:
+            try:
+                lower = int(now[0])  # Noted or seeded meanwhile: never move past it.
+                resume = lower if resume is None else min(resume, lower)
+            except (TypeError, ValueError):
+                pass
+        if resume is None:
+            conn.execute("DELETE FROM metadata WHERE key=?", (_BACKFILL_KEY,))
+        else:
+            conn.execute("INSERT INTO metadata(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+                         "value=excluded.value", (_BACKFILL_KEY, str(resume)))
+    return published
 
 
 def _build_streamed_vectors(
@@ -1778,6 +2037,118 @@ def build_separation_vectors(
     """
     return _build_streamed_vectors(conn, messages, table_name=table_name, txn_batch=txn_batch,
                                    separation=True)
+
+
+# Suffix of the tables a re-embed builds before it replaces the served pair.
+_REEMBED_SUFFIX = "_reembed"
+# Metadata key prefix of a shadow's swap cursor: ids below it are swapped.
+_REEMBED_PROGRESS_PREFIX = "vec_reembed_swapped:"
+# Ids one swap transaction replaces. On 100k synthetic memories one
+# transaction for the whole swap held the writer 50 s; batches of 1024 held
+# it 0.27 s (median), 1.0 s at most.
+_REEMBED_SWAP_BATCH = 1024
+# Pause after each swap batch, with the writer and model fence released.
+# SQLite's busy handler sleeps up to 100 ms between retries, so back-to-back
+# batches starved writers in other processes: on 100k memories a hook add
+# waited out the whole 31 s swap and failed "database is locked". With this
+# pause 2,099 adds overlapped a 33 s swap, max 153 ms, 0 errors.
+_REEMBED_SWAP_PAUSE_SECONDS = 0.1
+
+
+def _complete_shadow(conn: sqlite3.Connection, shadow: str, identity: tuple[str, int]):
+    """The shadow's finished build manifest for ``identity``, if no row it covers changed since."""
+    from truememory.rebuild_source import RebuildSourceChanged, load_manifest, manifest_key
+
+    manifest = load_manifest(conn, manifest_key((shadow,)))
+    if (manifest is None or not manifest.complete or manifest.source is None
+            or (manifest.model, manifest.dimension) != identity):
+        return None
+    try:
+        manifest.source.check(conn)  # Only appends since it was captured.
+    except RebuildSourceChanged:
+        return None
+    return manifest
+
+
+def _swap_shadow(conn: sqlite3.Connection, table: str, shadow: str) -> None:
+    """Replace the served rows a complete shadow covers, _REEMBED_SWAP_BATCH ids per writer transaction.
+
+    Each memory keeps a vector throughout: the old one until its batch, the
+    new one after. The batch cursor is stored with each batch, so an
+    interrupted swap continues where it stopped.
+    """
+    from truememory.rebuild_source import RebuildSourceChanged, rebuild_transaction
+
+    progress = _REEMBED_PROGRESS_PREFIX + shadow
+    row = conn.execute("SELECT value FROM metadata WHERE key = ?", (progress,)).fetchone()
+    start = int(row[0]) if row is not None else 0
+    while True:
+        with _lock:
+            identity = (_model_generation, EMBEDDING_MODEL, _embedding_dim)
+        # The model fence is taken before the writer, so waiting for it holds no lock.
+        with _foreground_model_fence(identity, blocking=True), rebuild_transaction(conn, write=True):
+            manifest = _complete_shadow(conn, shadow, identity[1:])
+            if manifest is None:
+                raise RebuildSourceChanged("Re-embed source changed before it was published; run it again")
+            high = manifest.source.high_id
+            if high is None or start > high:
+                return
+            end = min(start + _REEMBED_SWAP_BATCH, high + 1)
+            ids = [row[0] for row in conn.execute("SELECT id FROM messages WHERE id >= ? AND id < ?", (start, end))]
+            conn.executemany(f'DELETE FROM main."{table}" WHERE rowid = ?', [(mid,) for mid in ids])
+            for mid in ids:
+                vector = conn.execute(f'SELECT embedding FROM main."{shadow}" WHERE rowid = ?', (mid,)).fetchone()
+                if vector is not None:  # None: a non-finite embedding the build skipped.
+                    conn.execute(f'INSERT INTO main."{table}"(rowid, embedding) VALUES (?, ?)', (mid, vector[0]))
+            conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", (progress, str(end)))
+        start = end
+        time.sleep(_REEMBED_SWAP_PAUSE_SECONDS)
+
+
+def reembed_served_vectors(conn: sqlite3.Connection, *, mark: tuple[str, str] | None = None) -> int:
+    """Re-embed every memory of the served pair without ever emptying it, resumably.
+
+    Each served table's replacement is built in a shadow vec0 table with the
+    same definition; build_vectors resumes a shadow that an interrupted run
+    left. The served rows are then replaced in short batches (_swap_shadow),
+    and a last transaction drops the shadows and writes the ``mark``
+    metadata row. Searches use the old vectors until their batch, and
+    memories added meanwhile keep the vectors their add stored.
+    """
+    from truememory.rebuild_source import manifest_key, rebuild_transaction
+
+    pairs = []
+    for table, builder in ((_active_vec_table(conn), build_vectors),
+                           (_active_sep_table(conn), build_separation_vectors)):
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+        if row is None or " USING " not in row[0].upper():
+            raise RuntimeError("Re-embed requires the served vector tables; initialize them first")
+        shadow = table + _REEMBED_SUFFIX
+        # Both shadows exist before either build: a build's manifest is bound
+        # to the schema version, so later DDL would restart it.
+        conn.execute(f'CREATE VIRTUAL TABLE IF NOT EXISTS main."{shadow}"'
+                     f'{row[0][row[0].upper().index(" USING "):]}')
+        pairs.append((table, shadow, builder))
+    conn.commit()
+    total = 0
+    for _, shadow, builder in pairs:
+        with _lock:
+            identity = (EMBEDDING_MODEL, _embedding_dim)
+        if _complete_shadow(conn, shadow, identity) is None:
+            # A new generation: no batch of it was swapped yet.
+            conn.execute("DELETE FROM metadata WHERE key = ?", (_REEMBED_PROGRESS_PREFIX + shadow,))
+            conn.commit()
+            total += builder(conn, table_name=shadow)
+    for table, shadow, _ in pairs:
+        _swap_shadow(conn, table, shadow)
+    with rebuild_transaction(conn, write=True):
+        for _, shadow, _ in pairs:
+            conn.execute(f'DROP TABLE main."{shadow}"')
+            conn.execute("DELETE FROM metadata WHERE key IN (?, ?)",
+                         (manifest_key((shadow,)), _REEMBED_PROGRESS_PREFIX + shadow))
+        if mark is not None:
+            conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", mark)
+    return total
 
 
 def _build_sep_text(sender: str, recipient: str, timestamp: str, content: str) -> str:

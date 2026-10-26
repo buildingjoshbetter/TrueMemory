@@ -29,6 +29,8 @@ All functions use only ``sqlite3`` and the Python standard library.
 import re
 import sqlite3
 
+from truememory.storage import begin_layer_publication
+
 
 # ---------------------------------------------------------------------------
 # Fact extraction helpers
@@ -329,6 +331,10 @@ def _publish_surprise_rows(
     source_rows: list[tuple],
     stored_rows: list[tuple[int, float, int, int]],
 ) -> None:
+    # A maintenance build may publish over messages appended since its
+    # snapshot; their scores wait for the next build, so compare only the
+    # snapshot's ids.
+    watermark = begin_layer_publication(conn)
     conn.execute("SAVEPOINT truememory_surprise_publish")
     try:
         _ensure_surprise_table(conn)
@@ -338,6 +344,8 @@ def _publish_surprise_rows(
         conn.execute("DELETE FROM surprise_scores WHERE 0")
         current = conn.execute(
             "SELECT id, content, timestamp FROM messages ORDER BY timestamp, id"
+        ) if watermark is None else conn.execute(
+            "SELECT id, content, timestamp FROM messages WHERE id <= ? ORDER BY timestamp, id", (watermark,)
         )
         try:
             for expected in source_rows:

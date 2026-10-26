@@ -61,7 +61,7 @@ except ImportError:
 
 from truememory._platform import (  # noqa: E402
     _LOOPBACK_HOST, _MODEL_SERVER_GENERATION_ENV, _USE_UNIX, _env_int,
-    pid_is_alive, read_start_claim, try_file_lock,
+    pid_is_alive, read_start_claim, release_file_lock, try_file_lock,
 )
 
 log = logging.getLogger(__name__)
@@ -2757,11 +2757,11 @@ class ModelServer:
         try:
             claim = read_start_claim(START_STATE_PATH)
         except OSError as error:
-            os.close(self._lock_fd)
+            release_file_lock(self._lock_fd)
             self._lock_fd = None
             raise RuntimeError("Cannot verify model-server launch generation") from error
         if claim is None or claim["generation"] != generation:
-            os.close(self._lock_fd)
+            release_file_lock(self._lock_fd)
             self._lock_fd = None
             raise RuntimeError("model-server launch was superseded; retry the request")
 
@@ -2915,7 +2915,7 @@ class ModelServer:
         # Release the bind lock (lock fd is process-owned, always safe).
         if lock_fd is not None:
             try:
-                os.close(lock_fd)
+                release_file_lock(lock_fd)
             except OSError:
                 pass
             self._lock_fd = None

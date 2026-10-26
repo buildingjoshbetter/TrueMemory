@@ -400,8 +400,8 @@ def _drain_backlog(host: str = "claude") -> None:
             # claim for cleanup_stale_processing to recover, silently dropping
             # the session. We now leave the claim in place: the ingest CLI
             # deletes it on confirmed success (clear_backlog_processing), and a
-            # dead worker leaves it so the 30-minute stale watcher restores it
-            # to .json and re-queues the session.
+            # dead worker leaves it so the stale watcher restores it to .json
+            # within minutes and re-queues the session.
             log.info("Drained backlog session: %s", data.get("session_id", "?"))
         except Exception as e:
             try:
@@ -868,9 +868,10 @@ def _count_directives(memory, user_id: str = "") -> int:
     """Total stored directives in scope (cheap COUNT on idx_messages_directive)."""
     try:
         scope_sql, params = _directive_scope_sql(user_id)
-        row = memory._engine.conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE directive = 1" + scope_sql, params
-        ).fetchone()
+        with memory._engine._write_lock:  # The backfill thread shares this connection.
+            row = memory._engine.conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE directive = 1" + scope_sql, params
+            ).fetchone()
         return int(row[0]) if row else 0
     except Exception:
         log.warning("Failed to count directives", exc_info=True)
@@ -894,7 +895,8 @@ def _load_directives(memory, user_id: str = "") -> list[dict]:
         # truncation is detectable) then re-sort ascending for stable display.
         query += " ORDER BY id DESC LIMIT ?"
         params.append(DIRECTIVE_LIMIT + 1)
-        rows = memory._engine.conn.execute(query, params).fetchall()
+        with memory._engine._write_lock:
+            rows = memory._engine.conn.execute(query, params).fetchall()
         if len(rows) > DIRECTIVE_LIMIT:
             log.warning(
                 "Directive injection capped at %d (more are stored). Prune "
@@ -1008,7 +1010,7 @@ def recall_memories(
         pass
 
     db = db_path or None
-    memory = Memory(path=db) if db else Memory()
+    memory = Memory(path=db, auto_maintenance=False) if db else Memory(auto_maintenance=False)
 
     # Load directives first — these are always injected (cheap SQL query,
     # not cached since they change infrequently and the query is fast).

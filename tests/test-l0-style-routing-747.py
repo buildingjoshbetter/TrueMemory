@@ -1017,6 +1017,7 @@ class InMemoryRouting(unittest.TestCase):
         with patch.object(Path, "exists", lambda path: True if path == engine.db_path else exists(path)), \
              patch.object(module.sqlite3, "connect", side_effect=[probe, conn]) as opened, \
              patch.object(MAINTENANCE, "try_file_lock", return_value=719), \
+             patch.object(MAINTENANCE, "release_file_lock", closed_owners.append), \
              patch.object(MAINTENANCE, "os", owner_os), \
              patch.object(engine, "_purge_legacy_entity_profile_summaries"), \
              patch.object(engine, "_maybe_auto_consolidate") as planned, \
@@ -1103,10 +1104,21 @@ class InMemoryRouting(unittest.TestCase):
 
     def test_health_does_not_connect_when_disconnected_or_foreground_busy(self) -> None:
         engine = self.engine(self.connection())
+        owned, release = threading.Event(), threading.Event()
+        def holder():  # Another thread's foreground work: the same thread would re-enter.
+            with engine._write_lock:
+                owned.set()
+                release.wait(2)
+        thread = threading.Thread(target=holder)
         with patch.object(engine, "_ensure_connection", side_effect=AssertionError), \
              patch.object(engine, "_maybe_auto_consolidate", side_effect=AssertionError):
-            with engine._write_lock:
+            thread.start()
+            try:
+                self.assertTrue(owned.wait(2))
                 self.assertEqual(engine.get_style_health()["pending_reason"], "foreground_busy")
+            finally:
+                release.set()
+                thread.join(2)
             engine.conn = None
             self.assertEqual(engine.get_style_health()["pending_reason"], "not_connected")
 

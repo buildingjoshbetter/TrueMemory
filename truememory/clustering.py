@@ -39,6 +39,7 @@ from types import ModuleType
 import numpy as np
 
 from truememory.memory_budget import LocalMemoryPolicy
+from truememory.storage import begin_layer_publication
 
 _LOCAL_MEMORY_POLICY = LocalMemoryPolicy()
 
@@ -47,6 +48,10 @@ logger = logging.getLogger(__name__)
 
 class ClusterModelBusyError(RuntimeError):
     """Model ownership is temporarily unavailable; no input version changed."""
+
+
+class ClusterSourceChangedError(RuntimeError):
+    """Messages or vectors changed while clustering computed; retry later."""
 
 
 # ---------------------------------------------------------------------------
@@ -124,8 +129,11 @@ def _cluster_dependency_identity(conn: sqlite3.Connection, vector_search: Module
     identity.append(("metadata",))
     if "metadata" in tables:
         build_key = f"vec_build_state:{vec_table}"
+        # Values only: a same-value rewrite (0.7.6.2 rewrites both rows on every
+        # add) is no new embedding space, and the source fingerprint covers
+        # every vector byte. A timestamp would defer each build an add overlaps.
         for row in conn.execute(
-            "SELECT key, value, updated_at FROM metadata "
+            "SELECT key, value FROM metadata "
             "WHERE key IN ('embed_model', 'embed_dim', ?, ?) ORDER BY key",
             (build_key, f"vec_source_v1:{vec_table}"),
         ):
@@ -173,6 +181,7 @@ def cluster_publication_guard(conn: sqlite3.Connection) -> AbstractContextManage
 
 def _cluster_source_state(
     conn: sqlite3.Connection, vector_search: ModuleType, *, collect_categories: bool = False,
+    watermark: int | None = None,
 ) -> tuple[bytes, dict[int, str | None]]:
     """Fingerprint raw inputs under the model lock and a database snapshot."""
     digest = hashlib.sha256()
@@ -202,12 +211,16 @@ def _cluster_source_state(
     vec_table = identity[0][-1]
     add(("vectors",))
     quoted_table = '"' + vec_table.replace('"', '""') + '"'
-    for row in conn.execute(f"SELECT rowid, embedding FROM {quoted_table} ORDER BY rowid"):
+    # Vector rowids are message ids, so one watermark bounds both inputs.
+    bound = "" if watermark is None else " WHERE rowid <= ?"
+    parameters = () if watermark is None else (watermark,)
+    for row in conn.execute(f"SELECT rowid, embedding FROM {quoted_table}{bound} ORDER BY rowid", parameters):
         add(tuple(row))
     add(("messages",))
     categories = {}
     for row in conn.execute(
-        "SELECT id, content, sender, recipient, timestamp, category, modality FROM messages ORDER BY id"
+        "SELECT id, content, sender, recipient, timestamp, category, modality FROM messages"
+        + bound.replace("rowid", "id") + " ORDER BY id", parameters,
     ):
         add(tuple(row))
         if collect_categories:
@@ -314,7 +327,17 @@ def cluster_messages(
             metric="euclidean",  # on normalized vectors ≈ cosine
             cluster_selection_method=cluster_selection_method,
         )
-        labels = clusterer.fit_predict(normed)
+        try:
+            labels = clusterer.fit_predict(normed)
+        except ValueError:
+            if len(msg_ids) > min_samples:
+                raise
+            # No point can have min_samples neighbours, so none is a core point
+            # and all are noise until the store grows. HDBSCAN raises instead
+            # ("k must be less than or equal to the number of training
+            # points"): hdbscan 0.8.42 on one vector, builds that do not clamp
+            # min_samples to the input on up to min_samples vectors.
+            labels = [-1] * len(msg_ids)
         if len(labels) != len(msg_ids):
             raise ValueError("Clustering returned an incomplete assignment set")
 
@@ -340,6 +363,9 @@ def cluster_messages(
         centroids.append((int(cid), _serialize_f32(centroid), len(vecs), session_range))
 
     model_lock_acquired = False
+    # A maintenance build may publish over messages appended since its
+    # snapshot; they stay unclustered until the next build.
+    watermark = begin_layer_publication(conn)
     try:
         with _cluster_transaction(conn, write=True):
             # Never hold SQLite's writer lock while waiting for native model
@@ -347,9 +373,9 @@ def cluster_messages(
             model_lock_acquired = vector_search._lock.acquire(blocking=False)
             if not model_lock_acquired:
                 raise ClusterModelBusyError("Embedding model is busy; retry clustering after model loading or tier switching")
-            current_state, _ = _cluster_source_state(conn, vector_search)
+            current_state, _ = _cluster_source_state(conn, vector_search, watermark=watermark)
             if current_state != source_state:
-                raise RuntimeError("Clustering source changed during computation; retry consolidation")
+                raise ClusterSourceChangedError("Clustering source changed during computation; retry consolidation")
             _init_cluster_tables(conn)
             conn.execute("DELETE FROM message_clusters")
             conn.execute("DELETE FROM cluster_centroids")

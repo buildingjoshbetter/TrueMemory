@@ -184,8 +184,11 @@ def hydrate_config(config: LLMConfig) -> LLMConfig:
         # Normalize to underscore form for downstream dispatch
         config.provider = "claude_cli"
         # No api_key, no base_url — the CLI handles auth and routing.
-        # Leave model empty by default so the CLI picks the user's
-        # configured default (usually Opus); callers can override.
+        # Default to Haiku: extraction runs up to 20 calls per session on the
+        # user's subscription, and the CLI default (usually Opus) exhausted
+        # it. Callers can override.
+        if not config.model:
+            config.model = "haiku"
 
     return config
 
