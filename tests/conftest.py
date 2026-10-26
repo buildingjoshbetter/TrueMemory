@@ -26,6 +26,7 @@ import os
 import sqlite3
 import sys
 import threading
+import time
 import weakref
 
 import pytest
@@ -414,9 +415,21 @@ def _forbid_database_file_opens_outside_sqlite():
     found = list(_database_file_opens)
     del _database_file_opens[:]
     # A background run fenced by a close before its connection was configured
-    # closes that connection at once; only a connection still open counts.
-    unconfigured = sorted({location for location, handle in _unconfigured_connections.values()
-                           if handle is None or _still_open(handle())})
+    # closes that connection at once; only a connection still open counts. A
+    # background connection (a weak-referenceable subclass) from an earlier
+    # test's thread may be between its connect and configure_connection right
+    # now, so it gets a short grace period; plain connections never do.
+    def pending() -> list:
+        return [(location, handle) for location, handle in list(_unconfigured_connections.values())
+                if handle is None or _still_open(handle())]
+
+    deadline = time.monotonic() + 2.0
+    while True:
+        waiting = pending()
+        if not waiting or any(handle is None for _location, handle in waiting) or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    unconfigured = sorted({location for location, _handle in pending()})
     _unconfigured_connections.clear()
     if found:
         pytest.fail("Database files opened outside SQLite (drops this process's POSIX locks): "

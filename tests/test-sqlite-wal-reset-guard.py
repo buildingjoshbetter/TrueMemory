@@ -229,9 +229,13 @@ class Openers(unittest.TestCase):
             create_db(path).close()
             for affected, expected in ((True, 0), (False, 1000)):
                 with self.subTest(affected=affected), patch.object(storage, "WAL_RESET_GUARD", affected):
-                    for name, conn in (("configure", storage.configure_connection(sqlite3.connect(path))), ("create_db", create_db(path)),
-                                       ("tier _open_db", _open_db(path)),
-                                       ("serving", open_serving_connection(path, create_db))):
+                    from tests.conftest import can_load_extensions
+                    openers = [("configure", lambda: storage.configure_connection(sqlite3.connect(path))),
+                               ("create_db", lambda: create_db(path)),
+                               ("serving", lambda: open_serving_connection(path, create_db))]
+                    if can_load_extensions:  # Tier switching refuses interpreters without sqlite-vec.
+                        openers.append(("tier _open_db", lambda: _open_db(path)))
+                    for name, conn in ((name, opener()) for name, opener in openers):
                         try:
                             self.assertEqual(conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0], expected, name)
                         finally:
