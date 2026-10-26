@@ -907,7 +907,11 @@ def _write_foreground_embedder_metadata_no_commit(
             "SELECT typeof(value)='text' AND value=? FROM main.metadata WHERE key=?", (value, key),
         ).fetchone()
         matches.append(None if row is None else row[0])
-    if matches not in ([None, None], [1, 1]):
+    if matches == [1, 1]:
+        # Already published: a rewrite would change only updated_at, two row
+        # writes per add that readers of the metadata rows see as a change.
+        return
+    if matches != [None, None]:
         raise VectorPublicationChanged("Foreground metadata is partial or uses another embedding identity")
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     for key, value in (("embed_model", identity[1]), ("embed_dim", str(identity[2]))):
@@ -1372,16 +1376,34 @@ class VectorPublicationChanged(RuntimeError):
 
 
 @contextmanager
-def _foreground_model_fence(identity: tuple[int, str, int], *, blocking: bool = False) -> Iterator[None]:
-    """Blocking admission is permitted only before an owned writer starts."""
+def _foreground_model_fence(
+    identity: tuple[int, str, int], *, blocking: bool = False,
+) -> Iterator[Callable[[], AbstractContextManager[None]]]:
+    """Blocking admission is permitted only before an owned writer starts.
+
+    Yields what frees the fence while that writer's busy BEGIN waits to retry
+    (writer_transaction's ``release``); it takes the fence back and checks the
+    identity again before the next attempt.
+    """
     if not _lock.acquire(blocking=blocking):
         raise VectorPublicationChanged("Embedding model is busy; retry vector publication")
     try:
         if identity != (_model_generation, EMBEDDING_MODEL, _embedding_dim):
             raise VectorPublicationChanged("Embedding model changed; retry vector publication")
-        yield
+        yield lambda: _released_model_fence(identity)
     finally:
         _lock.release()
+
+
+@contextmanager
+def _released_model_fence(identity: tuple[int, str, int]) -> Iterator[None]:
+    _lock.release()
+    try:
+        yield
+    finally:
+        _lock.acquire()  # Held again for the fence's own release.
+    if identity != (_model_generation, EMBEDDING_MODEL, _embedding_dim):
+        raise VectorPublicationChanged("Embedding model changed; retry vector publication")
 
 
 def _validate_foreground_vector_target(
@@ -1424,13 +1446,14 @@ def _validate_foreground_vector_target(
 @contextmanager
 def _foreground_vector_publication(
     conn: sqlite3.Connection, identity: tuple[int, str, int], message_id: int,
-    *, selection=None,
+    *, selection=None, retry_busy: bool = False,
 ) -> Iterator[tuple[str, str]]:
     from truememory.tier_switch.writer import WriterSelectionChanged, writer_transaction
 
-    with _foreground_model_fence(identity, blocking=not conn.in_transaction):
+    with _foreground_model_fence(identity, blocking=not conn.in_transaction) as release:
         try:
-            with writer_transaction(conn, selection, model_id=identity[1], dimension=identity[2]):
+            with writer_transaction(conn, selection, model_id=identity[1], dimension=identity[2],
+                                    retry_busy=retry_busy, release=release):
                 yield _validate_foreground_vector_target(conn, identity, message_id, selection=selection)
         except WriterSelectionChanged as exc:
             raise VectorPublicationChanged(str(exc)) from exc

@@ -961,7 +961,9 @@ class TestSnapshotPublication(AdapterFixture):
     under a short writer, so a foreground commit during a build never fails it."""
 
     def append(self, conn: sqlite3.Connection) -> None:
-        # The engine's add: a message and its vector in one commit.
+        # A message and its vector in one commit. engine.add's whole write set,
+        # embedder metadata included, is covered through a real engine by
+        # SnapshotPublicationOverForegroundAdds (test-tier-switch-liveness.py).
         cursor = conn.execute(
             "INSERT INTO messages(content,sender,recipient,timestamp,category) VALUES "
             "('synthetic team moved to Birch','synthetic-primary','synthetic-contact','2026-01-02','synthetic-session')"

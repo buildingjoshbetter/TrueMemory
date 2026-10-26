@@ -100,11 +100,15 @@ def load_modules():
                 "_build_state_key", "_mark_build_in_progress", "_clear_build_in_progress",
                 "_build_in_progress", "_write_embedder_metadata_no_commit", "_write_embedder_metadata",
                 "_write_foreground_embedder_metadata_no_commit",
-                "_foreground_vector_publication", "_foreground_model_fence", "_validate_foreground_vector_target",
+                "_foreground_vector_publication", "_foreground_model_fence", "_released_model_fence",
+                "_validate_foreground_vector_target",
                 "VectorPublicationChanged", "embed_single"}
     tree = ast.parse((ROOT / "truememory/vector_search.py").read_text(encoding="utf-8"))
-    body = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in selected]
-    exec(compile(ast.Module(body=body, type_ignores=[]), "actual-vector-builders", "exec"), vector.__dict__)
+    # Annotations stay unevaluated, as in the module (its typing imports are not copied).
+    body = [ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0)]
+    body.extend(node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in selected)
+    exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])), "actual-vector-builders", "exec"),
+         vector.__dict__)
     modules["vector_search"] = vector
     runtime_namespace["sys"] = types.SimpleNamespace(
         modules={"truememory." + name: module for name, module in modules.items()})

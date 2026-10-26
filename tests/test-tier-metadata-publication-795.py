@@ -52,6 +52,22 @@ class TestForegroundMetadata(unittest.TestCase):
         self.assertEqual(self.rows(), [("embed_dim", "256"), ("embed_model", "model2vec")])
         self.owner.assert_not_called()
 
+    def test_matching_publication_rewrites_nothing(self) -> None:
+        # Review v7 M-v7-1: a new updated_at on every add changed the clusters
+        # identity, so a legacy store's clusters never published over an add.
+        self.conn.executemany("INSERT INTO main.metadata(key,value,updated_at) VALUES(?,?,'synthetic-0')",
+                              [("embed_model", "model2vec"), ("embed_dim", "256")])
+        self.conn.commit()
+        with self.runtime.serving_operation(self.conn):
+            selection = self.writer.capture_writer_selection(self.conn)
+            with self.writer.writer_transaction(self.conn, selection):
+                changes = self.conn.total_changes
+                self.publish(selection)
+                self.assertEqual(self.conn.total_changes, changes)
+        self.assertEqual(self.conn.execute(
+            "SELECT key,value,updated_at FROM main.metadata WHERE key IN ('embed_model','embed_dim') ORDER BY key"
+        ).fetchall(), [("embed_dim", "256", "synthetic-0"), ("embed_model", "model2vec", "synthetic-0")])
+
     def test_unbound_and_clean_calls_refuse_without_writes(self) -> None:
         selection = self.writer.capture_writer_selection(self.conn)
         with self.assertRaises(self.source.VectorPublicationChanged):
