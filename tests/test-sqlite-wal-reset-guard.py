@@ -15,6 +15,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from truememory import storage
 from truememory.tier_switch import writer
 
@@ -253,6 +255,9 @@ class DatabaseFileAccess(unittest.TestCase):
     OPENS = {"open", "read_bytes", "read_text", "write_bytes", "write_text"}
     DATABASE_NAME = re.compile(r"\b_?(db_path|database_path|DB_PATH|db_file)\b|memories\.db|-wal\b|-shm\b")
 
+    # A whole-source AST scan: 6 s locally, 84 s to over 120 s on hosted
+    # Python 3.10 runners; it needs more than the suite's per-test default.
+    @pytest.mark.timeout(600)
     def test_no_module_copies_moves_or_opens_database_files(self):
         # Every module, every import style (import shutil as x, from shutil
         # import copy2 as y), and direct opens whose target names a database.
