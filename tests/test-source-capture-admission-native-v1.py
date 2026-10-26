@@ -243,11 +243,17 @@ class SourceCaptureAdmission(unittest.TestCase):
             with self.subTest(source_open=target):
                 count = 0
 
+                source = os.stat(self.source)
+
                 def failed(fd: int, mode: str) -> io.IOBase:
+                    # Count only wrappers of the source itself: a state save
+                    # (also os.fdopen) may run first, depending on timing.
                     nonlocal count
-                    count += 1
-                    if count == target:
-                        raise OSError(errno.EIO, "Synthetic wrapper failure")
+                    opened = os.fstat(fd)
+                    if (opened.st_dev, opened.st_ino) == (source.st_dev, source.st_ino):
+                        count += 1
+                        if count == target:
+                            raise OSError(errno.EIO, "Synthetic wrapper failure")
                     return original(fd, mode)
 
                 with self.source_descriptors(), patch.object(self.module.os, "fdopen", failed):
