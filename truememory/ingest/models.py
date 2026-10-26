@@ -464,7 +464,10 @@ def _complete_claude_cli(config: LLMConfig, prompt: str, system: str) -> str:
     full_prompt = f"{system}\n\n{prompt}" if system else prompt
 
     _claude_exe = shutil.which("claude") or "claude"
-    cmd = [_claude_exe, "-p", "--output-format", "json"]
+    # No MCP servers: extraction needs none, and starting the user's servers
+    # dominated each call (306 s measured on a busy Mac against the 120 s
+    # timeout, which failed every chunk; 4 s with --strict-mcp-config).
+    cmd = [_claude_exe, "-p", "--output-format", "json", "--strict-mcp-config"]
     if config.model:
         cmd.extend(["--model", config.model])
 
