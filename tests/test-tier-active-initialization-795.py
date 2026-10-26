@@ -32,7 +32,7 @@ class TestActiveInitialization(unittest.TestCase):
         self.closed_fds = []
         self.worker_conn = self.fixture.memory_connection()
         self.entered, self.release = threading.Event(), threading.Event()
-        thread_api = types.SimpleNamespace(Thread=threading.Thread, Lock=threading.Lock,
+        thread_api = types.SimpleNamespace(Thread=threading.Thread, Lock=threading.Lock, RLock=threading.RLock,
                                           Event=threading.Event, local=threading.local)
         names = {"MaintenanceBusyError", "MaintenanceOwnership", "MaintenanceRequest", "MaintenanceCoordinator",
                  "MaintenanceReport", "LayerResult", "_StyleOpenRejected", "_style_error_category",

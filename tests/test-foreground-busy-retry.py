@@ -110,7 +110,7 @@ class ForegroundBusyRetry(unittest.TestCase):
 
     def test_a_transaction_or_close_during_the_backoff_is_never_joined(self) -> None:
         conn = self.connect()
-        self.hold_writer(1.0)
+        first = self.hold_writer(1.0)
 
         @contextmanager
         def foreign_transaction():
@@ -126,6 +126,10 @@ class ForegroundBusyRetry(unittest.TestCase):
         conn.rollback()
         self.assertEqual(conn.execute("PRAGMA busy_timeout").fetchone()[0], 100)
 
+        # A fresh hold: on a slow host the first may already have ended, and an
+        # unopposed BEGIN would never reach the backoff that closes the connection.
+        first.join()
+        self.hold_writer(1.0)
         closing = self.connect()
 
         @contextmanager
