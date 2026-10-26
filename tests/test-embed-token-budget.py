@@ -186,6 +186,10 @@ def test_cpu_models_ignore_the_mps_allocation(monkeypatch):
     model = FakeEmbedder(EMBED_MAX_TOKENS)
     _on_mps(monkeypatch, model, allocated_mib=1500)
     model.device = "cpu"
+    # CPU pieces are sized against the process RSS budget; give it ample room
+    # so the result does not depend on how much the test process holds.
+    from truememory import memory_budget
+    monkeypatch.setattr(memory_budget, "process_rss_limit", lambda: 1 << 40)
     assert accelerator_token_budget(model, EMBED_TOKEN_BUDGET) == EMBED_TOKEN_BUDGET
 
 
