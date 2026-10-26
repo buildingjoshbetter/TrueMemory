@@ -25,10 +25,10 @@ import sqlite_vec
 from truememory import maintenance, vector_search
 from truememory.client import Memory
 from tests.conftest import requires_sqlite_ext
+from truememory.engine import TrueMemoryEngine
 
 # These stores carry real vec0 tables; some interpreters cannot load extensions.
 pytestmark = requires_sqlite_ext
-from truememory.engine import TrueMemoryEngine
 
 MEMORIES = 120
 GAPS = range(11, 81)  # 70 early ids: three bounded backfill passes.
