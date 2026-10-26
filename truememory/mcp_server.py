@@ -361,12 +361,77 @@ _memory_lock = threading.Lock()
 def _get_memory() -> Memory:
     """Lazy-init the Memory instance (thread-safe for background preloading)."""
     global _memory
-    if _memory is not None:
-        return _memory  # Fast path, no lock
-    with _memory_lock:
-        if _memory is None:
-            _memory = Memory(path=_DB_PATH)
-        return _memory
+    if _memory is None:
+        with _memory_lock:
+            if _memory is None:
+                _memory = Memory(path=_DB_PATH)
+    memory = _memory
+    engine = getattr(memory, "_engine", None)
+    if engine is not None and getattr(engine, "conn", True) is None:
+        _wait_while_maintenance_busy(_OPEN_BUSY_WAIT_SECONDS)
+    return memory
+
+
+# A fresh open refuses at once while another process runs a maintenance pass
+# (MaintenanceBusyError); hooks must stay fast, so only this long-lived server
+# waits. A pass takes seconds; a tool call waits up to this long before the
+# operation reports the busy error itself.
+_OPEN_BUSY_WAIT_SECONDS = 10.0
+_STARTUP_OPEN_WAIT_SECONDS = 300.0
+
+
+def _wait_while_maintenance_busy(budget: float) -> None:
+    """Before a first open, wait while another process owns maintenance.
+
+    Probes the maintenance lock the way maintenance itself does (a separate
+    descriptor, released at once), so the store still opens lazily inside
+    the operation. Never waits on this process's own owner.
+    """
+    from truememory import maintenance
+    from truememory._platform import release_file_lock, try_file_lock
+    path = maintenance.canonical_database_path(_DB_PATH)
+    if path is None:
+        return
+    lock = Path(str(path) + ".maintenance.lock")
+    deadline = time.monotonic() + budget
+    delay = 0.1
+    while True:
+        if path in maintenance._held_paths or not lock.exists():
+            return
+        try:
+            fd = try_file_lock(lock)
+        except OSError:
+            return
+        if fd is not None:
+            release_file_lock(fd)
+            return
+        if time.monotonic() + delay >= deadline:
+            return
+        time.sleep(delay)
+        delay = min(delay * 2, 2.0)
+
+
+def _open_waiting_for_maintenance(memory: Memory, budget: float) -> bool:
+    """Open the store, retrying while another process owns maintenance.
+
+    Best effort: any other failure, or a pass outlasting *budget*, is left to
+    the caller's own operation to report. Returns whether the store is open.
+    """
+    from truememory.maintenance import MaintenanceBusyError
+    deadline = time.monotonic() + budget
+    delay = 0.1
+    while True:
+        try:
+            memory._engine._ensure_connection()
+            return True
+        except MaintenanceBusyError:
+            if time.monotonic() + delay >= deadline:
+                return False
+            time.sleep(delay)
+            delay = min(delay * 2, 2.0)
+        except Exception:
+            log.debug("Store open failed; the operation reports it", exc_info=True)
+            return False
 
 
 # ---------------------------------------------------------------------------
@@ -1907,8 +1972,13 @@ def _open_store_for_maintenance() -> None:
     maintenance wake schedules that work.
     """
     def open_store() -> None:
+        global _memory
         try:
-            _get_memory()._engine._ensure_connection()
+            with _memory_lock:
+                if _memory is None:
+                    _memory = Memory(path=_DB_PATH)
+            if not _open_waiting_for_maintenance(_memory, _STARTUP_OPEN_WAIT_SECONDS):
+                log.debug("Startup store open did not complete; the first tool call opens it")
         except Exception:
             log.debug("Startup store open failed; the first tool call opens it", exc_info=True)
 
