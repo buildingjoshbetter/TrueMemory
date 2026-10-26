@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import io
 import os
 import signal
 import stat
