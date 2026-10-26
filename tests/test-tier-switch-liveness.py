@@ -170,7 +170,8 @@ def run_scenario(body: str, *, tier: str = "base", timeout: float = 240) -> list
         (tm / "config.json").write_text(json.dumps({"tier": tier}), encoding="utf-8")
         env = {key: value for key, value in os.environ.items() if not key.startswith("TRUEMEMORY_")}
         env.update(
-            HOME=home, TRUEMEMORY_NO_MODEL_SERVER="1", HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1",
+            HOME=home, USERPROFILE=home,  # Path.home() reads USERPROFILE on Windows
+            TRUEMEMORY_NO_MODEL_SERVER="1", HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1",
             TRUEMEMORY_TELEMETRY="off", TRUEMEMORY_EMBED_MODEL=tier, TRUEMEMORY_PRELOAD_MODELS="0",
             TRUEMEMORY_DB_PATH=str(tm / "memories.db"),
             PYTHONPATH=os.pathsep.join(filter(None, (str(ROOT), os.environ.get("PYTHONPATH")))),

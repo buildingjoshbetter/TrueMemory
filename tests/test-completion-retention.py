@@ -55,6 +55,7 @@ def env(tmp_path, monkeypatch):
     projects.mkdir(parents=True)
     backlog = home / ".truememory" / "backlog"
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Path.home() on Windows
     monkeypatch.setenv("TRUEMEMORY_BACKLOG_DIR", str(backlog))
     monkeypatch.delenv("TRUEMEMORY_TRANSCRIPT_DIR", raising=False)
     monkeypatch.setattr(stop, "BACKLOG_DIR", backlog)
