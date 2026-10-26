@@ -19,6 +19,10 @@ import sqlite_vec
 
 from truememory import maintenance
 from truememory.client import Memory
+from tests.conftest import requires_sqlite_ext
+
+# These stores carry real vec0 tables; some interpreters cannot load extensions.
+pytestmark = requires_sqlite_ext
 
 ROOT = Path(__file__).resolve().parents[1]
 

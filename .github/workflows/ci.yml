@@ -20,7 +20,9 @@ jobs:
     # don't gate the merge; all stable entries default to false and remain
     # required.
     continue-on-error: ${{ matrix.experimental || false }}
-    timeout-minutes: 20
+    # The deterministic gate runs about 4,700 tests; on hosted Ubuntu runners
+    # it no longer fits in 20 minutes.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
