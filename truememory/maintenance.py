@@ -521,7 +521,10 @@ class _BackgroundRun:
     """
 
     def __init__(self) -> None:
-        self._gate = threading.Lock()
+        # Re-entrant: on Python 3.10 Cursor.executescript calls the
+        # connection's Python-level commit(), which re-enters the gate its
+        # own statement holds; a plain Lock deadlocked that thread.
+        self._gate = threading.RLock()
         self._closed = False
         self._connections: list[sqlite3.Connection] = []
         self._connections_lock = threading.Lock()
