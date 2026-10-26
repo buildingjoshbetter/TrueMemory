@@ -2024,6 +2024,12 @@ _REEMBED_PROGRESS_PREFIX = "vec_reembed_swapped:"
 # transaction for the whole swap held the writer 50 s; batches of 1024 held
 # it 0.27 s (median), 1.0 s at most.
 _REEMBED_SWAP_BATCH = 1024
+# Pause after each swap batch, with the writer and model fence released.
+# SQLite's busy handler sleeps up to 100 ms between retries, so back-to-back
+# batches starved writers in other processes: on 100k memories a hook add
+# waited out the whole 31 s swap and failed "database is locked". With this
+# pause 2,099 adds overlapped a 33 s swap, max 153 ms, 0 errors.
+_REEMBED_SWAP_PAUSE_SECONDS = 0.1
 
 
 def _complete_shadow(conn: sqlite3.Connection, shadow: str, identity: tuple[str, int]):
@@ -2073,6 +2079,7 @@ def _swap_shadow(conn: sqlite3.Connection, table: str, shadow: str) -> None:
                     conn.execute(f'INSERT INTO main."{table}"(rowid, embedding) VALUES (?, ?)', (mid, vector[0]))
             conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", (progress, str(end)))
         start = end
+        time.sleep(_REEMBED_SWAP_PAUSE_SECONDS)
 
 
 def reembed_served_vectors(conn: sqlite3.Connection, *, mark: tuple[str, str] | None = None) -> int:

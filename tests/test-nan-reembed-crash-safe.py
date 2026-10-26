@@ -170,6 +170,30 @@ def test_interrupted_swap_keeps_a_vector_for_every_memory_and_resumes(store: Pat
     finally:
         conn.close()
 
+def test_swap_pauses_between_batches_with_the_writer_free(store: Path, monkeypatch) -> None:
+    # Back-to-back batches starved writers in other processes (a hook add
+    # failed "database is locked" after a 31 s swap): every pause must leave
+    # the writer free for another connection to take at once.
+    monkeypatch.setattr(vector_search, "_REEMBED_SWAP_BATCH", 16, raising=False)
+    taken = []
+
+    def pause(seconds):
+        other = sqlite3.connect(store, timeout=0)
+        try:
+            other.execute("BEGIN IMMEDIATE")
+            other.execute("ROLLBACK")
+            taken.append(seconds)
+        finally:
+            other.close()
+
+    monkeypatch.setattr(vector_search.time, "sleep", pause)
+    with patch("truememory.vector_search.get_model", return_value=_model(NEW, [])):
+        _reembed(store, mark=("synthetic_reembed_done", "1"))
+    # Two served tables, MEMORIES / 16 batches each.
+    assert len(taken) >= 2 * (MEMORIES // 16)
+    assert all(seconds > 0 for seconds in taken)
+
+
 CHILD = textwrap.dedent('''
     import json, os, sqlite3, sys, threading, time
     import numpy as np
