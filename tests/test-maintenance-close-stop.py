@@ -368,3 +368,26 @@ def test_reuse_racing_close_keeps_the_engine_attached(store: Path, monkeypatch) 
     assert coordinator.status == ("success", None)
     maintenance.detach_engine(engine)  # Its next close is the last.
     assert not coordinator.request_layers(threshold=25)
+
+
+def test_a_statement_that_commits_inside_its_gate_does_not_deadlock() -> None:
+    # Python 3.10's executescript calls the fenced connection's commit() while
+    # its own statement holds the run's gate; that thread re-enters the gate.
+    run = maintenance._BackgroundRun()
+    done = threading.Event()
+
+    def nested() -> None:
+        with run.statement("CREATE TABLE synthetic(x)"):
+            with run.statement("COMMIT"):
+                done.set()
+
+    worker = threading.Thread(target=nested, daemon=True)
+    worker.start()
+    worker.join(5)
+    assert done.is_set(), "re-entering the run's gate from its own statement deadlocked"
+    run.fence()  # Another thread still waits for the gate, then refuses statements.
+    try:
+        with run.statement("COMMIT"):
+            raise AssertionError("a fenced run ran a statement")
+    except maintenance.MaintenanceClosedError:
+        pass
