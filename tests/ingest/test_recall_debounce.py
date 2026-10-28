@@ -137,7 +137,7 @@ class TestSessionStartMarker:
         """Happy path: recall produced context, it was emitted, marker written."""
         out = _run_session_start(monkeypatch, "sess-full", "<truememory-recall>x</truememory-recall>")
         data = json.loads(out)
-        assert "additionalContext" in data
+        assert data["hookSpecificOutput"]["additionalContext"]
         assert (marker_dir / "sess-full").exists()
         assert _shared.consume_recall_injected("sess-full") is True
 
@@ -146,7 +146,7 @@ class TestSessionStartMarker:
         recall returned nothing; that must not debounce the first prompt."""
         out = _run_session_start(monkeypatch, "sess-notice", "", update_notice="update available")
         data = json.loads(out)
-        assert "update available" in data["additionalContext"]
+        assert "update available" in data["hookSpecificOutput"]["additionalContext"]
         assert not (marker_dir / "sess-notice").exists()
 
 

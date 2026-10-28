@@ -77,7 +77,7 @@ def decode_fixture(host: str, event: str, response: str) -> str | None:
         if event != "sessionStart" or set(data) != {"additional_context"}:
             return None
         context = data["additional_context"]
-    elif host in {"gemini", "codex"}:
+    elif host in {"gemini", "codex", "claude"}:
         events = {"SessionStart", "BeforeAgent"} if host == "gemini" else {"SessionStart", "UserPromptSubmit"}
         if event not in events or set(data) != {"hookSpecificOutput"}:
             return None
@@ -88,9 +88,7 @@ def decode_fixture(host: str, event: str, response: str) -> str | None:
             return None
         context = specific["additionalContext"]
     else:
-        if event not in {"SessionStart", "UserPromptSubmit"} or set(data) != {"additionalContext"}:
-            return None
-        context = data["additionalContext"]
+        return None
     return context if isinstance(context, str) else None
 
 
@@ -235,7 +233,8 @@ class TestNativeOutput(unittest.TestCase):
 
     def test_legacy_payload_rejected_by_native_fixtures(self) -> None:
         legacy = json.dumps({"additionalContext": SYNTHETIC_CONTEXT})
-        for host, event in NATIVE_EVENTS:
+        # Claude Code drops a top-level additionalContext as unrecognized output.
+        for host, event in NATIVE_EVENTS + (("claude", "SessionStart"), ("claude", "UserPromptSubmit")):
             with self.subTest(host=host, event=event):
                 self.assertIsNone(decode_fixture(host, event, legacy))
 
