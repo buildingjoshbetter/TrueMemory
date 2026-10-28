@@ -55,7 +55,7 @@ def message(role: str, blocks: list[tuple[str, str, dict | None]], *, item: str,
 
 def turn_records(index: int, *, user_provenance: dict | None = None) -> list[dict]:
     turn, user_text, reply = f"synthetic-turn-{index}", f"synthetic question {index}", f"synthetic answer {index}"
-    provenance = user_provenance or {"type": "user"}
+    provenance = {"type": "user"} if user_provenance is None else user_provenance
     return [
         event("task_started", turn_id=turn, collaboration_mode_kind="default"),
         # Canonical id and event id differ, as codex-cli 0.164 writes them.
@@ -81,7 +81,8 @@ def rollout(turns: int = 5, **options: object) -> list[dict]:
         {"timestamp": "2026-01-01T00:00:00Z", "type": "session_meta", "payload": {"id": "synthetic-thread"}},
         event("thread_settings_applied", thread_id="synthetic-thread", thread_settings={"model": "synthetic"}),
         message("user", [(SCAFFOLD, "agents_md.instructions", {"type": "agents_md"}),
-                         (SCAFFOLD, "environments.environment_context", {"type": "harness", "hook": False})],
+                         (SCAFFOLD, "environments.environment_context", {"type": "harness", "hook": False}),
+                         (SCAFFOLD, "additional_content.codex_apps_open_page", {"type": "harness", "hook": False})],
                 item="msg_scaffold", turn="synthetic-turn-0"),
     ]
     for index in range(turns):
@@ -113,7 +114,18 @@ class CodexCli0164RolloutTests(unittest.TestCase):
             path.write_text("\n".join(json.dumps(r) for r in rollout(turns=4)), encoding="utf-8")
             self.assertIs(self.parser.has_human_messages(path, 5), False)
 
-    def test_user_text_label_without_user_provenance_is_not_a_human_turn(self) -> None:
+    def test_earlier_builds_label_user_text_without_provenance(self) -> None:
+        records = rollout()
+        for record in records:  # Earlier builds wrote kinds but no content_item_metadata.
+            if record["type"] == "response_item" and record["payload"]["role"] == "user":
+                del record["payload"]["internal_chat_message_metadata_passthrough"]["content_item_metadata"]
+        result = self.outcome(records)
+        self.assertEqual(result.status, "complete")
+        self.assertEqual([m.content for m in result.messages if m.role == "human"],
+                         [f"synthetic question {index}" for index in range(5)])
+        self.assertNotIn(SCAFFOLD, repr(result))
+
+    def test_user_text_label_with_other_provenance_is_not_a_human_turn(self) -> None:
         for provenance in ({"type": "harness", "hook": False}, {"type": "agents_md"}, {"type": "synthetic-new"}):
             with self.subTest(provenance=provenance["type"]):
                 result = self.outcome(rollout(turns=1, user_provenance=provenance))
