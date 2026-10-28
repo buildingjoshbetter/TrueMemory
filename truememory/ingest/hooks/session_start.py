@@ -17,7 +17,8 @@ Input (stdin JSON):
     {"session_id": "...", "cwd": "...", "transcript_path": "..."}
 
 Output (stdout JSON):
-    {"additionalContext": "<truememory-context>...</truememory-context>"}
+    {"hookSpecificOutput": {"hookEventName": "SessionStart",
+                            "additionalContext": "<truememory-context>...</truememory-context>"}}
 """
 
 import argparse

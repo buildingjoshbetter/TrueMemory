@@ -58,8 +58,8 @@ def test_first_run_hook_outputs_valid_json():
                 output = captured.getvalue().strip()
                 assert output, "Hook should produce output on first run"
                 data = json.loads(output)
-                assert "additionalContext" in data
-                assert "████████" in data["additionalContext"]
+                assert data["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+                assert "████████" in data["hookSpecificOutput"]["additionalContext"]
 
 
 def test_banner_not_shown_on_subsequent_runs():
@@ -78,4 +78,4 @@ def test_banner_not_shown_on_subsequent_runs():
                 output = captured.getvalue().strip()
                 if output:
                     data = json.loads(output)
-                    assert "████████" not in data.get("additionalContext", "")
+                    assert "████████" not in data["hookSpecificOutput"]["additionalContext"]

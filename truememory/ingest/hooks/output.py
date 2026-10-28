@@ -34,11 +34,11 @@ def emit_context(
         return False
 
     output: dict[str, object]
-    if host == "claude":
-        output = {"additionalContext": context}
-    elif host == "cursor":
+    if host == "cursor":
         output = {"additional_context": context}
     else:
+        # Claude Code also reads context only from hookSpecificOutput; a
+        # top-level additionalContext is reported as unrecognized and dropped.
         output = {
             "hookSpecificOutput": {
                 "hookEventName": event,
