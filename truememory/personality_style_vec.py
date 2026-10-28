@@ -26,6 +26,9 @@ import math
 import re
 import sqlite3
 import struct
+import sys
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 
@@ -35,6 +38,20 @@ def _stable_hash(s: str) -> int:
 
 DIM = 256
 NGRAM_SIZES = (3, 4, 5)
+_STYLE_ACCUMULATOR_VERSION = 1
+_STYLE_SUM = struct.Struct("<256d")
+
+
+class StyleVectorRebuildRequired(RuntimeError):
+    """The stored profile remains readable but cannot accept exact appends."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"Style accumulator rebuild required: {reason}")
+
+
+class _StyleSourceChanged(sqlite3.OperationalError):
+    """A verified source mismatch, distinct from unexpected SQLite failures."""
 
 
 def compute_style_vector(text: str) -> list[float]:
@@ -111,54 +128,251 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return num / (na * nb)
 
 
+@contextmanager
+def _l0_transaction(conn: sqlite3.Connection, *, write: bool = False) -> Iterator[None]:
+    """Own only this phase, retaining any transaction opened by the caller."""
+    owned = not conn.in_transaction
+    if owned:
+        conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+    else:
+        conn.execute("SAVEPOINT truememory_l0")
+    completed = False
+    try:
+        if write and not owned:
+            # Upgrade before validation: a stale WAL reader must not publish.
+            conn.execute("UPDATE messages SET sender = sender WHERE 0")
+        yield
+        conn.execute("COMMIT" if owned else "RELEASE SAVEPOINT truememory_l0")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                # If rollback fails, never RELEASE potentially partial writes.
+                conn.execute("ROLLBACK TO SAVEPOINT truememory_l0")
+                conn.execute("RELEASE SAVEPOINT truememory_l0")
+
+
+def _l0_source_schema(conn: sqlite3.Connection) -> tuple[tuple, ...]:
+    return tuple(tuple(row) for row in conn.execute("PRAGMA table_info(messages)"))
+
+
+def _l0_directive_filter(schema: tuple[tuple, ...]) -> str:
+    # Public builders also accept older standalone schemas without directives.
+    if any(column[1] == "directive" for column in schema):
+        return "(directive = 0 OR directive IS NULL)"
+    return "1"
+
+
+def _l0_validate_source(
+    conn: sqlite3.Connection,
+    schema: tuple[tuple, ...],
+    query: str,
+    source_rows: list[tuple],
+    check_cancel: Callable[[], None] | None = None,
+) -> None:
+    """Compare exact relevant source values while holding writer ownership."""
+    error = "L0 source changed during computation; retry the rebuild"
+    if _l0_source_schema(conn) != schema:
+        raise _StyleSourceChanged(error)
+    current = conn.execute(query)
+    try:
+        for expected in source_rows:
+            if check_cancel is not None:
+                check_cancel()
+            row = current.fetchone()
+            if row is None or tuple(row) != expected:
+                raise _StyleSourceChanged(error)
+        if current.fetchone() is not None:
+            raise _StyleSourceChanged(error)
+    finally:
+        current.close()
+
+
+def _compute_entity_style_vectors(
+    rows: list[tuple],
+    *, check_cancel: Callable[[], None] | None = None,
+) -> tuple[dict[str, list[float]], list[tuple]]:
+    from collections import defaultdict
+
+    by_sender: dict[str, list[str]] = defaultdict(list)
+    for sender, content, _timestamp, ordinary in rows:
+        if check_cancel is not None:
+            check_cancel()
+        if ordinary:
+            by_sender[sender.lower()].append(content)
+
+    result: dict[str, list[float]] = {}
+    stored_rows: list[tuple] = []
+    now = datetime.now(timezone.utc).isoformat()
+    for sender, contents in by_sender.items():
+        total = [0.0] * DIM
+        for content in contents:
+            if check_cancel is not None:
+                check_cancel()
+            vec = _validated_style_vector(compute_style_vector(content))
+            for index in range(DIM):
+                total[index] += vec[index]
+        mean_vec = _style_profile_from_sum(total, len(contents))
+        result[sender] = mean_vec
+        stored_rows.append((sender, json.dumps(mean_vec), len(contents), now,
+                            _STYLE_SUM.pack(*total), _STYLE_ACCUMULATOR_VERSION))
+    return result, stored_rows
+
+
+def _validated_style_vector(vector: list[float]) -> list[float]:
+    if not isinstance(vector, (list, tuple)) or len(vector) != DIM:
+        raise ValueError("Style vector must have 256 finite components")
+    if any(not isinstance(value, (int, float)) or isinstance(value, bool) for value in vector):
+        raise ValueError("Style vector must have 256 finite components")
+    try:
+        values = [float(value) for value in vector]
+    except (OverflowError, ValueError) as error:
+        raise ValueError("Style vector must have 256 finite components") from error
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("Style vector must have 256 finite components")
+    return values
+
+
+def _style_profile_from_sum(total: list[float], count: int) -> list[float]:
+    # Retain mean_pool_vectors' divide-then-normalize arithmetic exactly.
+    mean = [value / count for value in total]
+    norm = math.sqrt(sum(value * value for value in mean))
+    if not math.isfinite(norm):
+        raise ValueError("Style profile magnitude is not finite")
+    return [value / norm for value in mean] if norm > 0 else mean
+
+
+def _ensure_style_accumulator_schema(conn: sqlite3.Connection) -> None:
+    """Add format columns inside the caller's publication transaction."""
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS entity_style_vectors (
+            entity TEXT PRIMARY KEY,
+            vector TEXT,
+            message_count INTEGER DEFAULT 0,
+            updated_at TEXT,
+            vector_sum BLOB DEFAULT NULL,
+            accumulator_version INTEGER NOT NULL DEFAULT 0
+        )"""
+    )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(entity_style_vectors)")}
+    if "vector_sum" not in columns:
+        conn.execute("ALTER TABLE entity_style_vectors ADD COLUMN vector_sum BLOB DEFAULT NULL")
+    if "accumulator_version" not in columns:
+        conn.execute("ALTER TABLE entity_style_vectors ADD COLUMN accumulator_version INTEGER NOT NULL DEFAULT 0")
+
+
+def _decode_style_accumulator(row: tuple) -> tuple[list[float], int]:
+    raw, count, version = row
+    if type(version) is not int or version < 0:
+        raise StyleVectorRebuildRequired("invalid")
+    if version == 0:
+        raise StyleVectorRebuildRequired("legacy")
+    if version != _STYLE_ACCUMULATOR_VERSION:
+        raise StyleVectorRebuildRequired("unsupported_version")
+    if not isinstance(raw, bytes) or len(raw) != _STYLE_SUM.size or type(count) is not int or count < 1:
+        raise StyleVectorRebuildRequired("invalid")
+    total = list(_STYLE_SUM.unpack(raw))
+    if not all(math.isfinite(value) for value in total):
+        raise StyleVectorRebuildRequired("invalid")
+    try:
+        _style_profile_from_sum(total, count)
+    except ValueError as error:
+        raise StyleVectorRebuildRequired("invalid") from error
+    return total, count
+
+
+@contextmanager
+def _style_append_transaction(conn: sqlite3.Connection) -> Iterator[None]:
+    """Serialize read-modify-write without committing an append for its caller."""
+    owned = not conn.in_transaction
+    if owned:
+        conn.execute("BEGIN IMMEDIATE")
+    savepoint = False
+    completed = False
+    try:
+        conn.execute("SAVEPOINT truememory_style_append")
+        savepoint = True
+        yield
+        conn.execute("RELEASE SAVEPOINT truememory_style_append")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            elif savepoint:
+                conn.execute("ROLLBACK TO SAVEPOINT truememory_style_append")
+                conn.execute("RELEASE SAVEPOINT truememory_style_append")
+
+
+def _capture_style_source(
+    conn: sqlite3.Connection, check_cancel: Callable[[], None] | None = None,
+) -> tuple[tuple[tuple, ...], str, list[tuple]]:
+    schema = _l0_source_schema(conn)
+    query = (
+        f"SELECT sender, content, timestamp, {_l0_directive_filter(schema)} AS ordinary "
+        "FROM messages WHERE sender != '' ORDER BY sender, timestamp"
+    )
+    rows = []
+    cursor = conn.execute(query)
+    try:
+        for row in cursor:
+            if check_cancel is not None:
+                check_cancel()
+            rows.append(tuple(row))
+    finally:
+        cursor.close()
+    return schema, query, rows
+
+
+def _publish_style_vectors(
+    conn: sqlite3.Connection, schema: tuple[tuple, ...], query: str,
+    rows: list[tuple], stored_rows: list[tuple], *,
+    check_cancel: Callable[[], None] | None = None,
+    before_replace: Callable[[sqlite3.Connection], None] | None = None,
+) -> None:
+    """Publish only inside the transaction owned by the selected entry point."""
+    _l0_validate_source(conn, schema, query, rows, check_cancel)
+    _ensure_style_accumulator_schema(conn)
+    if before_replace is not None:
+        before_replace(conn)
+    if check_cancel is not None:
+        check_cancel()
+    conn.execute("DELETE FROM entity_style_vectors")
+    conn.executemany(
+        """INSERT INTO entity_style_vectors
+           (entity, vector, message_count, updated_at, vector_sum, accumulator_version)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        stored_rows,
+    )
+
+
 def build_entity_style_vectors(conn: sqlite3.Connection) -> dict[str, list[float]]:
     """Batch-build style vectors for every entity (sender) in the database.
 
     For each sender:
         1. Compute ``compute_style_vector(msg.content)`` for each message.
-        2. Mean-pool all per-message vectors via ``mean_pool_vectors``.
-        3. Store the result in the ``entity_style_vectors`` table.
+        2. Mean-pool with the same arithmetic as ``mean_pool_vectors``.
+        3. Store the profile and its raw sum in ``entity_style_vectors``.
 
     Args:
         conn: Open database connection (from :func:`truememory.storage.create_db`).
 
     Returns:
         ``{entity: vector}`` for every sender.
+
+    Only ordinary messages contribute. Computation starts no write transaction;
+    any transaction already held by the caller remains theirs. Publication
+    atomically replaces the complete table after checking the source snapshot.
+    A changed source raises ``sqlite3.OperationalError`` without retrying.
     """
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS entity_style_vectors (
-            entity TEXT PRIMARY KEY,
-            vector TEXT,
-            message_count INTEGER DEFAULT 0,
-            updated_at TEXT
-        )"""
-    )
+    with _l0_transaction(conn):
+        schema, query, rows = _capture_style_source(conn)
+    result, stored_rows = _compute_entity_style_vectors(rows)
 
-    rows = conn.execute(
-        "SELECT sender, content FROM messages WHERE sender != '' ORDER BY sender, timestamp"
-    ).fetchall()
-
-    from collections import defaultdict
-    by_sender: dict[str, list[str]] = defaultdict(list)
-    for sender, content in rows:
-        by_sender[sender.lower()].append(content)
-
-    result: dict[str, list[float]] = {}
-    now = datetime.now(timezone.utc).isoformat()
-
-    for sender, contents in by_sender.items():
-        vecs = [compute_style_vector(c) for c in contents]
-        mean_vec = mean_pool_vectors(vecs)
-        result[sender] = mean_vec
-
-        conn.execute(
-            """INSERT OR REPLACE INTO entity_style_vectors
-               (entity, vector, message_count, updated_at)
-               VALUES (?, ?, ?, ?)""",
-            (sender, json.dumps(mean_vec), len(contents), now),
-        )
-
-    conn.commit()
+    with _l0_transaction(conn, write=True):
+        _publish_style_vectors(conn, schema, query, rows, stored_rows)
     return result
 
 
@@ -168,12 +382,11 @@ def update_entity_style_vector_incremental(
 ) -> None:
     """Incrementally update an entity's style vector with a new message.
 
-    Uses a running weighted average: given the existing mean vector and
-    its message count, the new mean is::
-
-        new_mean = (existing * count + new_vec) / (count + 1)
-
-    Then re-L2-normalized.
+    Persist the sum of per-message vectors and normalize only the exposed
+    profile. A legacy, unsupported or invalid accumulator raises
+    ``StyleVectorRebuildRequired`` without changing its previous profile.
+    Rebuild explicitly with ``build_entity_style_vectors`` before appending.
+    This function never commits; successful writes remain the caller's.
 
     Args:
         conn:        Open database connection.
@@ -187,50 +400,109 @@ def update_entity_style_vector_incremental(
     # Normalize entity name to lowercase for case-insensitive matching (#467)
     entity = entity.lower()
 
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS entity_style_vectors (
-            entity TEXT PRIMARY KEY,
-            vector TEXT,
-            message_count INTEGER DEFAULT 0,
-            updated_at TEXT
-        )"""
+    new_vec = _validated_style_vector(
+        _pre_computed_vec if _pre_computed_vec is not None else compute_style_vector(new_message)
     )
-
-    new_vec = _pre_computed_vec if _pre_computed_vec is not None else compute_style_vector(new_message)
     now = datetime.now(timezone.utc).isoformat()
+    with _style_append_transaction(conn):
+        _ensure_style_accumulator_schema(conn)
+        # Existing callers may hold only a read snapshot. Upgrade before
+        # reading the accumulator so another connection cannot lose an append.
+        conn.execute("UPDATE entity_style_vectors SET entity=entity WHERE 0")
+        row = conn.execute(
+            "SELECT vector_sum, message_count, accumulator_version FROM entity_style_vectors WHERE entity = ?",
+            (entity,),
+        ).fetchone()
+        if row is None:
+            total, count = new_vec, 1
+        else:
+            previous, count = _decode_style_accumulator(row)
+            total = [previous[index] + new_vec[index] for index in range(DIM)]
+            count += 1
+        profile = _style_profile_from_sum(total, count)
+        conn.execute(
+            """INSERT OR REPLACE INTO entity_style_vectors
+               (entity, vector, message_count, updated_at, vector_sum, accumulator_version)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (entity, json.dumps(profile), count, now, _STYLE_SUM.pack(*total), _STYLE_ACCUMULATOR_VERSION),
+        )
 
-    row = conn.execute(
-        "SELECT vector, message_count FROM entity_style_vectors WHERE entity = ?",
-        (entity,),
+
+_STYLE_READ_TRIGGER_SHA256 = {
+    "messages_maintenance_ai": "b75f5431c0ce50627341f9afa36b4ad8920a56a561e19f42b3c6fd5d6a08c778",
+    "messages_maintenance_au": "e9626141915f0588897aaf24c97e184e0aeb47f8c3f1eb712c346638a9287749",
+    "messages_maintenance_unique_au": "3d8c28d2a9351bfaeed175dc6d058abaa77b7f0b64ab6b0c9e0e6999660fea1b",
+    "messages_maintenance_ad": "5d0f978eddd7fbad96c49b0c95942ea1d69526ed102bd0afb8229eb195263c0e",
+    "truememory_style_output_insert": "db594eb1ec763aba7557d220389f73cd19de26ac3b7456947cbd252fab9e4254",
+    "truememory_style_output_update": "8063fd739011d53ba809f39f6abfb01b11ac6069ccb1de58d533395fee7bb6a0",
+    "truememory_style_output_delete": "3174a45efdf4c34800e5434db139030399bd261d73b8c1279b53cf13e7a84922",
+}
+
+
+def _style_cached_readable(conn: sqlite3.Connection) -> bool:
+    """Validate an enrolled generation without importing its maintenance worker."""
+    enrolled = conn.execute(
+        "SELECT 1 FROM main.sqlite_master WHERE type='trigger' AND name IN (?,?,?) LIMIT 1",
+        tuple(_STYLE_READ_TRIGGER_SHA256)[4:],
+    ).fetchone() is not None
+    table = conn.execute(
+        "SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='maintenance_layers'"
     ).fetchone()
-
-    if row is None or row[0] is None:
-        conn.execute(
-            """INSERT OR REPLACE INTO entity_style_vectors
-               (entity, vector, message_count, updated_at)
-               VALUES (?, ?, ?, ?)""",
-            (entity, json.dumps(new_vec), 1, now),
-        )
-    else:
-        existing_vec = json.loads(row[0])
-        count = row[1] or 0
-
-        new_count = count + 1
-        merged = [
-            (existing_vec[i] * count + new_vec[i]) / new_count
-            for i in range(len(existing_vec))
-        ]
-
-        norm = math.sqrt(sum(x * x for x in merged))
-        if norm > 0:
-            merged = [x / norm for x in merged]
-
-        conn.execute(
-            """INSERT OR REPLACE INTO entity_style_vectors
-               (entity, vector, message_count, updated_at)
-               VALUES (?, ?, ?, ?)""",
-            (entity, json.dumps(merged), new_count, now),
-        )
+    if table is None:
+        return not enrolled
+    checkpoint = conn.execute(
+        "SELECT builder_version,successful_epoch,successful_revision,successful_dependency,"
+        "full_rebuild_required,successful_coverage,output_count FROM main.maintenance_layers "
+        "WHERE layer='style_vectors'"
+    ).fetchone()
+    if checkpoint is None:
+        return not enrolled
+    shadows = ("messages", "maintenance_source_state", "maintenance_layers", "metadata", "entity_style_vectors")
+    placeholders = ",".join("?" for _ in shadows)
+    if conn.execute("SELECT 1 FROM temp.sqlite_master WHERE type IN ('table','view') "
+                    f"AND lower(name) IN ({placeholders}) LIMIT 1", shadows).fetchone():
+        return False
+    source = conn.execute(
+        "SELECT epoch,revision,insert_count,correction_count,max_seen_message_id,"
+        "nonappend_revision,tracking_ready FROM main.maintenance_source_state WHERE singleton=1"
+    ).fetchone()
+    if (source is None or source[6] != 1 or not isinstance(source[0], str) or not source[0]
+            or any(type(value) is not int or value < 0 for value in source[1:6])
+            or source[1] != source[2] + source[3] or source[5] > source[1]):
+        return False
+    schema = list(conn.execute("PRAGMA main.table_xinfo(messages)"))
+    identifiers = [row for row in schema if row[5]]
+    definition = conn.execute("SELECT sql FROM main.sqlite_master WHERE type='table' AND name='messages'").fetchone()
+    if (len(identifiers) != 1 or identifiers[0][1:3] != ("id", "INTEGER")
+            or definition is None or "WITHOUT ROWID" in " ".join(definition[0].upper().split())):
+        return False
+    names = tuple(_STYLE_READ_TRIGGER_SHA256)
+    placeholders = ",".join("?" for _ in names)
+    installed = {name: hashlib.sha256(" ".join(sql.strip().rstrip(";").split()).encode()).hexdigest()
+                 for name, sql in conn.execute("SELECT name,sql FROM main.sqlite_master WHERE type='trigger' "
+                                               f"AND name IN ({placeholders})", names)}
+    if installed != _STYLE_READ_TRIGGER_SHA256:
+        return False
+    if conn.execute("SELECT 1 FROM temp.sqlite_master WHERE type='trigger' AND "
+                    "(lower(tbl_name) IN ('messages','entity_style_vectors','maintenance_layers','metadata') "
+                    f"OR name IN ({placeholders})) LIMIT 1", names).fetchone():
+        return False
+    output_names = names[4:]
+    if conn.execute("SELECT 1 FROM main.sqlite_master WHERE type='trigger' "
+                    "AND lower(tbl_name) IN ('entity_style_vectors','maintenance_layers','metadata') "
+                    "AND NOT (lower(tbl_name)='entity_style_vectors' AND name IN (?,?,?)) LIMIT 1",
+                    output_names).fetchone():
+        return False
+    dependency = json.dumps({"builder_version": 1, "parameters": {
+        "accumulator_version": 1, "hash_version": 2, "dimension": DIM,
+        "ngrams": list(NGRAM_SIZES), "sum_format": "<256d"},
+        "available": True, "error_category": None, "python": list(sys.version_info[:3])},
+        sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return (checkpoint[0] == 1 and checkpoint[1] == source[0]
+            and type(checkpoint[2]) is int and source[5] <= checkpoint[2] <= source[1]
+            and checkpoint[3] == dependency and checkpoint[4] == 0
+            and checkpoint[5] == "complete" and type(checkpoint[6]) is int and checkpoint[6] >= 0
+            and conn.execute("SELECT value FROM main.metadata WHERE key='style_vec_hash_version'").fetchone() == ("2",))
 
 
 def get_entity_style_vector(
@@ -247,11 +519,20 @@ def get_entity_style_vector(
     """
     # Normalize entity name to lowercase for case-insensitive matching (#467)
     entity = entity.lower()
+    owned = not conn.in_transaction
     try:
-        row = conn.execute(
-            "SELECT vector FROM entity_style_vectors WHERE entity = ?",
-            (entity,),
-        ).fetchone()
+        if owned:
+            conn.execute("BEGIN")
+        try:
+            if not _style_cached_readable(conn):
+                return None
+            row = conn.execute(
+                "SELECT vector FROM entity_style_vectors WHERE entity = ?",
+                (entity,),
+            ).fetchone()
+        finally:
+            if owned and conn.in_transaction:
+                conn.rollback()
     except sqlite3.OperationalError:
         return None
 

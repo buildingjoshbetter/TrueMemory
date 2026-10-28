@@ -390,7 +390,9 @@ class TestStatusFileProtocol:
         with patch("truememory.model_server.SOCK_PATH", sock_path), \
              patch("truememory.model_server.PID_PATH", pid_path), \
              patch("truememory.model_server.PORT_PATH", port_path), \
-             patch("truememory.model_server.TOKEN_PATH", token_path):
+             patch("truememory.model_server.TOKEN_PATH", token_path), \
+             patch("truememory.model_server.LOCK_PATH", tmp_path / "model_server.lock"):
+            srv._lock_fd = srv._acquire_bind_lock()
             srv._cleanup()
 
         for p in (sock_path, pid_path, port_path, token_path):

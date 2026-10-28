@@ -44,16 +44,25 @@ import os
 import re
 import struct
 import sqlite3
+import sys
 import threading
+import time
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 from truememory._platform import _env_int
+from truememory.memory_budget import LocalMemoryPolicy
 from truememory.storage import _deserialize_metadata, select_message_cols
 
+_LOCAL_MEMORY_POLICY = LocalMemoryPolicy()
+
 if TYPE_CHECKING:
-    pass
+    from truememory.embedding_target import EmbeddingTarget
+    from truememory.tier_switch.writer import WriterCapture
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +151,13 @@ def resolve_tier() -> str:
     should call this instead so that ``~/.truememory/config.json`` is
     honoured when the env var is absent.
     """
+    import sys
+    runtime = sys.modules.get("truememory.tier_switch.runtime")
+    operation = runtime.current_runtime_operation() if runtime is not None else None
+    if operation is not None:
+        return operation.tier
+    if globals().get("_runtime_policy_tier") is not None:
+        return _runtime_policy_tier
     env = os.environ.get("TRUEMEMORY_EMBED_MODEL", "").strip().lower()
     if env:
         return env
@@ -163,6 +179,9 @@ EMBEDDING_MODEL = _resolve_model_name(_raw_env)
 _model = None
 _embedding_dim: int = _MODEL_DIMS.get(EMBEDDING_MODEL, 256)
 _lock = threading.Lock()
+_model_generation = 0
+_frozen_embedding_target = None
+_runtime_policy_tier: str | None = None
 
 
 def _active_tier_group() -> str:
@@ -172,6 +191,11 @@ def _active_tier_group() -> str:
 
 def _active_vec_table(conn: sqlite3.Connection) -> str:
     """Return the active vec_messages table name for the current tier."""
+    import sys
+    runtime = sys.modules.get("truememory.tier_switch.runtime")
+    operation = runtime.current_operation(conn) if runtime is not None else None
+    if operation is not None:
+        return operation.tables[0]
     try:
         group = _active_tier_group()
         row = conn.execute(
@@ -187,6 +211,11 @@ def _active_vec_table(conn: sqlite3.Connection) -> str:
 
 def _active_sep_table(conn: sqlite3.Connection) -> str:
     """Return the active vec_messages_sep table name for the current tier."""
+    import sys
+    runtime = sys.modules.get("truememory.tier_switch.runtime")
+    operation = runtime.current_operation(conn) if runtime is not None else None
+    if operation is not None:
+        return operation.tables[1]
     try:
         group = _active_tier_group()
         row = conn.execute(
@@ -205,9 +234,13 @@ def set_embedding_model(name: str) -> None:
 
     Accepts tier names ("base", "pro") or internal model names.
     """
-    global EMBEDDING_MODEL, _model, _embedding_dim
-    with _lock:
+    global EMBEDDING_MODEL, _model, _embedding_dim, _model_generation, _frozen_embedding_target, _runtime_policy_tier
+    from truememory.tier_switch.serving import exclusive_activation
+    with exclusive_activation(), _lock:
+        _model_generation += 1
         _model = None  # Force reload
+        _frozen_embedding_target = None
+        _runtime_policy_tier = None
         EMBEDDING_MODEL = _resolve_model_name(name)
         _embedding_dim = get_embedding_dim(EMBEDDING_MODEL)
 
@@ -223,8 +256,10 @@ def get_embedding_dim(name: str | None = None) -> int:
 
 def unload_model() -> None:
     """Release the embedding model from memory."""
-    global _model
-    with _lock:
+    global _model, _model_generation
+    from truememory.tier_switch.serving import exclusive_activation
+    with exclusive_activation(), _lock:
+        _model_generation += 1
         _model = None
 
 
@@ -232,85 +267,556 @@ def get_model():
     """Lazy-load the embedding model (singleton).
 
     When the shared model server is enabled (default), returns a proxy
-    that routes inference to the server process. Falls back to local
-    loading if the server is unavailable.
+    that routes inference to the server process, including after idle exit.
+    Local loading requires explicit TRUEMEMORY_NO_MODEL_SERVER=1.
     """
     global _model, _embedding_dim
+    configured_memory = "_LOCAL_MEMORY_POLICY" in globals()
+    if configured_memory:
+        from truememory.memory_budget import validate_local_policy
+        validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
+    import sys
+    admitted = getattr(sys.modules.get("truememory.tier_switch.runtime"), "require_admitted_models", None)
+    if admitted is not None:
+        admitted()
     if _model is not None:
         return _model  # Fast path, no lock needed
-    with _lock:
-        if _model is not None:
-            return _model  # Another thread loaded it
+    from truememory.tier_switch.runtime import require_model_load_allowed
+    require_model_load_allowed()
+    from contextlib import nullcontext
+    from truememory.tier_switch.runtime import current_runtime_operation
+    from truememory.tier_switch.serving import exclusive_activation
+    with exclusive_activation() if current_runtime_operation() is None else nullcontext():
+        with _lock:
+            if _model is not None:
+                return _model  # Another thread loaded it
 
-        from truememory.model_client import use_model_server, get_embedding_proxy
-        if use_model_server():
-            try:
-                proxy = get_embedding_proxy(tier=EMBEDDING_MODEL)
-                _model = proxy
+            if _frozen_embedding_target is not None:
+                _model = _load_frozen_embedding_target(_frozen_embedding_target)
+                _embedding_dim = _frozen_embedding_target.dimension
                 return _model
-            except Exception:
-                logger.warning(
-                    "Model server available but embedding proxy failed — "
-                    "falling back to local model loading (high memory cost). "
-                    "Check ~/.truememory/model_server.stderr for details."
-                )
 
-        resolved = EMBEDDING_MODEL
-        if resolved == "model2vec":
-            from model2vec import StaticModel
-            _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
-            _embedding_dim = 256
-        elif resolved == "minilm":
-            from sentence_transformers import SentenceTransformer
-            _model = SentenceTransformer("all-MiniLM-L6-v2")
-            _embedding_dim = 384
-        elif resolved == "bge-small":
-            from sentence_transformers import SentenceTransformer
-            _model = SentenceTransformer("BAAI/bge-small-en-v1.5")
-            _embedding_dim = 384
-        elif resolved == "qwen3_256":
-            from sentence_transformers import SentenceTransformer
-            import sys as _sys
-            _mkwargs = {}
-            if _sys.platform == "darwin":
-                _mkwargs["attn_implementation"] = "eager"
-            _model = SentenceTransformer(
-                "Qwen/Qwen3-Embedding-0.6B",
-                truncate_dim=256,
-                model_kwargs=_mkwargs or None,
-            )
-            _embedding_dim = 256
-        elif resolved not in _MODEL_DIMS:
-            # Custom tier: load arbitrary SentenceTransformer model.
-            # Requires TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 (enforced by
-            # tier_config.resolve_custom_tier at config time).
-            if os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "").strip() != "1":
-                logger.warning(
-                    "Custom model %r requested without "
-                    "TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 -- "
-                    "falling back to model2vec.",
-                    resolved,
+            from truememory.model_client import use_model_server, get_embedding_proxy
+            if use_model_server():
+                _model = get_embedding_proxy(tier=EMBEDDING_MODEL)
+                return _model
+
+            from truememory.mps_utils import ensure_mps_memory_budget, resolve_device
+
+            budget_owner = None
+            if configured_memory:
+                from truememory.memory_budget import (
+                    ProfileKey, allocation_scope, bind_model_owner, configured_local_owner,
                 )
-                from model2vec import StaticModel
-                _model = StaticModel.from_pretrained(
-                    "minishlab/potion-base-8M", force_download=False
-                )
-                _embedding_dim = 256
-            else:
-                from sentence_transformers import SentenceTransformer
-                from truememory.tier_config import resolve_custom_tier
-                cfg = resolve_custom_tier()
-                custom_dim = cfg["embed_dim"]
-                _model = SentenceTransformer(
-                    resolved, truncate_dim=custom_dim,
-                    trust_remote_code=False,
-                )
-                _embedding_dim = custom_dim
-        else:
-            from model2vec import StaticModel
-            _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
-            _embedding_dim = 256
+                budget_owner = configured_local_owner(globals()["_LOCAL_MEMORY_POLICY"], kind="local_embedding")
+            try:
+                with allocation_scope(budget_owner) if configured_memory else nullcontext() as memory:
+                    if memory is not None:
+                        memory.charge(ProfileKey("local embedding construction", "local_embedding"))
+                    resolved = EMBEDDING_MODEL
+                    if resolved == "model2vec":
+                        from model2vec import StaticModel
+                        _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
+                        _embedding_dim = 256
+                    elif resolved == "minilm":
+                        device = resolve_device(None)
+                        ensure_mps_memory_budget(device)
+                        from sentence_transformers import SentenceTransformer
+                        _model = SentenceTransformer("all-MiniLM-L6-v2", device=device)
+                        _embedding_dim = 384
+                    elif resolved == "bge-small":
+                        device = resolve_device(None)
+                        ensure_mps_memory_budget(device)
+                        from sentence_transformers import SentenceTransformer
+                        _model = SentenceTransformer("BAAI/bge-small-en-v1.5", device=device)
+                        _embedding_dim = 384
+                    elif resolved == "qwen3_256":
+                        device = resolve_device(None)
+                        ensure_mps_memory_budget(device)
+                        from sentence_transformers import SentenceTransformer
+                        import sys as _sys
+                        _mkwargs = {}
+                        if _sys.platform == "darwin":
+                            _mkwargs["attn_implementation"] = "eager"
+                        _model = SentenceTransformer(
+                            "Qwen/Qwen3-Embedding-0.6B",
+                            truncate_dim=256,
+                            config_kwargs={"use_cache": False},
+                            model_kwargs=_mkwargs or None,
+                            device=device,
+                        )
+                        from truememory.mps_utils import prefer_float32_on_cpu
+                        prefer_float32_on_cpu(_model)
+                        _embedding_dim = 256
+                    elif resolved not in _MODEL_DIMS:
+                        # Custom tier: load arbitrary SentenceTransformer model.
+                        # Requires TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 (enforced by
+                        # tier_config.resolve_custom_tier at config time).
+                        if os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "").strip() != "1":
+                            logger.warning(
+                                "Custom model %r requested without "
+                                "TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD=1 -- "
+                                "falling back to model2vec.",
+                                resolved,
+                            )
+                            from model2vec import StaticModel
+                            _model = StaticModel.from_pretrained(
+                                "minishlab/potion-base-8M", force_download=False
+                            )
+                            _embedding_dim = 256
+                        else:
+                            from truememory.tier_config import resolve_custom_tier
+                            cfg = resolve_custom_tier()
+                            custom_dim = cfg["embed_dim"]
+                            device = resolve_device(None)
+                            ensure_mps_memory_budget(device)
+                            from sentence_transformers import SentenceTransformer
+                            _model = SentenceTransformer(
+                                resolved, truncate_dim=custom_dim,
+                                trust_remote_code=False,
+                                device=device,
+                            )
+                            _embedding_dim = custom_dim
+                    else:
+                        from model2vec import StaticModel
+                        _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
+                        _embedding_dim = 256
+                    if budget_owner is not None:
+                        bind_model_owner(_model, budget_owner)
+            except BaseException:
+                if budget_owner is not None:
+                    budget_owner.close()
+                raise
     return _model
+
+
+_prepared_target_slot = threading.Lock()
+
+
+def _load_frozen_embedding_target(target: EmbeddingTarget, *, timeout: float | None = None) -> object:
+    from contextlib import nullcontext
+    from truememory.embedding_target import TARGET_PROBE_TEXT, build_target_model, check_target_vectors
+    from truememory.model_client import EmbeddingProxy, PreparedEmbeddingProxy, use_model_server
+    from truememory.mps_utils import _own_model, resolve_device
+
+    configured_memory = "_LOCAL_MEMORY_POLICY" in globals()
+    if configured_memory:
+        from truememory.memory_budget import validate_local_policy
+        validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
+    expires = _target_deadline(timeout)
+    target.check_configuration()
+    if use_model_server():
+        if target.tier != "custom":
+            from truememory.model_client import CertifiedEmbeddingProxy
+            proxy = CertifiedEmbeddingProxy(target)
+            PreparedEmbeddingProxy(target).prepare(timeout=_target_remaining(expires))
+            return proxy
+
+        class FrozenProxy(EmbeddingProxy):
+            def __init__(self) -> None:
+                super().__init__(tier=target.model_id)
+                self._prepared = PreparedEmbeddingProxy(target)
+
+            def encode(self, texts: str | list[str], timeout: float | None = None, **kwargs: object) -> np.ndarray:
+                texts = [texts] if isinstance(texts, str) else list(texts)
+                values = self._prepared.encode(texts, timeout=timeout, batch_size=kwargs.get("batch_size", 32))
+                check_target_vectors(target, values, len(texts))
+                return values
+
+        proxy = FrozenProxy()
+        proxy._prepared.prepare(timeout=_target_remaining(expires))
+        return proxy
+    if not _prepared_target_slot.acquire(blocking=False):
+        raise RuntimeError("Another prepared embedding target lease is active")
+    budget_owner = None
+    try:
+        if configured_memory:
+            from truememory.memory_budget import (
+                ProfileKey, allocation_scope, bind_model_owner, configured_local_owner,
+                model_operation_scope,
+            )
+            budget_owner = configured_local_owner(globals()["_LOCAL_MEMORY_POLICY"], kind="local_prepared_embedding")
+        with allocation_scope(budget_owner) if configured_memory else nullcontext() as memory:
+            device = resolve_device(None)
+            if memory is not None:
+                memory.charge(ProfileKey("local prepared construction", "local_prepared_embedding",
+                                         model_identity=target.identity, device=device),
+                              deadline=lambda: _target_remaining(expires))
+            encoder = build_target_model(target, device, check=lambda: _target_remaining(expires))
+            if budget_owner is not None:
+                bind_model_owner(encoder, budget_owner)
+            if configured_memory:
+                scope = model_operation_scope(
+                    encoder, ProfileKey("local prepared probe", "local_prepared_embedding",
+                                        model_identity=target.identity, input_item_count=1, batch_size=1),
+                    deadline=lambda: _target_remaining(expires),
+                )
+            else:
+                scope = nullcontext()
+            with scope as memory:
+                with _own_model(encoder, remaining=lambda: _target_remaining(expires)):
+                    _target_remaining(expires)
+                    if memory is not None:
+                        memory.charge(ProfileKey("local probe result", "local_prepared_embedding",
+                                                 native_tensor_shape=(1, target.dimension)),
+                                      known_bytes=target.dimension * 4, retained_bytes=target.dimension * 4,
+                                      deadline=lambda: _target_remaining(expires), group="result assembly")
+                    values = encoder.encode([TARGET_PROBE_TEXT], batch_size=1, show_progress_bar=False)
+                    _target_remaining(expires)
+                    values = np.asarray(values, dtype=np.float32)
+                    check_target_vectors(target, values, 1)
+                    if memory is not None:
+                        memory.retain_buffer(values, deadline=lambda: _target_remaining(expires))
+        return encoder
+    except BaseException:
+        if budget_owner is not None:
+            budget_owner.close()
+        raise
+    finally:
+        _prepared_target_slot.release()
+
+
+def apply_embedding_policy(target: EmbeddingTarget, *, certified: bool, deadline: float | None = None,
+                           load: bool = False) -> None:
+    """Rebind same-space slots; construction is opt-in for ordinary admission."""
+    global _model, EMBEDDING_MODEL, _embedding_dim, _model_generation
+    global _frozen_embedding_target, _runtime_policy_tier
+    from truememory.embedding_target import EmbeddingTarget
+    from truememory.model_client import CertifiedEmbeddingProxy, EmbeddingProxy
+    from truememory.tier_switch.serving import exclusive_activation
+    if type(target) is not EmbeddingTarget or target.tier not in {"base", "pro"}:
+        raise ValueError("Policy projection requires an explicit same-space public target")
+    if type(certified) is not bool or type(load) is not bool:
+        raise TypeError("Policy projection controls must be boolean")
+    with exclusive_activation(deadline=deadline):
+        with _target_state_lock(deadline):
+            if (EMBEDDING_MODEL, _embedding_dim) != (target.model_id, target.dimension):
+                _model = None
+                _model_generation += 1
+            elif isinstance(_model, EmbeddingProxy):
+                _model = CertifiedEmbeddingProxy(target)
+            EMBEDDING_MODEL, _embedding_dim = target.model_id, target.dimension
+            _frozen_embedding_target = target if certified else None
+            _runtime_policy_tier = target.tier
+            needs_load = _model is None and load
+        if needs_load:
+            model = _load_frozen_embedding_target(target, timeout=_target_remaining(deadline))
+            with _target_state_lock(deadline):
+                _model = model
+
+
+def apply_frozen_embedding_target(target: EmbeddingTarget, *, timeout: float | None = None) -> None:
+    """Fill the existing active slot from exact prepared-target arguments."""
+    global _model, _embedding_dim, EMBEDDING_MODEL, _model_generation, _frozen_embedding_target, _runtime_policy_tier
+    from truememory.embedding_target import EmbeddingTarget
+    from truememory.tier_switch.serving import exclusive_activation
+    if type(target) is not EmbeddingTarget:
+        raise TypeError("Expected an immutable EmbeddingTarget")
+    expires = _target_deadline(timeout)
+    target.check_configuration()
+    with exclusive_activation(deadline=expires):
+        _runtime_policy_tier = target.tier
+        with _target_state_lock(expires):
+            if (_frozen_embedding_target is not None and _frozen_embedding_target.identity == target.identity
+                    and _model is not None):
+                _frozen_embedding_target = target
+                return
+            _model = None
+            _model_generation += 1
+            _frozen_embedding_target = target
+            EMBEDDING_MODEL, _embedding_dim = target.model_id, target.dimension
+        encoder = _load_frozen_embedding_target(target, timeout=_target_remaining(expires))
+        with _target_state_lock(expires):
+            _model = encoder
+
+
+@contextmanager
+def _target_state_lock(expires: float | None) -> Iterator[None]:
+    remaining = _target_remaining(expires)
+    if remaining is None:
+        _lock.acquire()
+    elif not _lock.acquire(timeout=min(remaining, threading.TIMEOUT_MAX)):
+        raise TimeoutError("Prepared embedding deadline exceeded")
+    try:
+        _target_remaining(expires)
+        yield
+    finally:
+        _lock.release()
+
+
+class _PreparedEmbeddingLease:
+    """An encode-only handle; closing drains work before releasing residency."""
+
+    def __init__(
+        self, target: EmbeddingTarget, encoder: object, *, shared: bool,
+        release_slot: Callable[[], None] | None = None,
+    ) -> None:
+        self._target = target
+        self._encoder = encoder
+        self._shared = shared
+        self._release_slot = release_slot
+        self._state_lock = threading.Lock()
+        self._encode_lock = threading.Lock()
+        self._closed = False
+        self._released = False
+
+    @property
+    def target(self) -> EmbeddingTarget:
+        return self._target
+
+    def encode(
+        self, texts: str | list[str], *, timeout: float | None = None, batch_size: int = 32,
+    ) -> np.ndarray:
+        from contextlib import nullcontext
+        from truememory.embedding_target import TARGET_PROBE_TEXT, check_target_vectors
+        from truememory.mps_utils import _own_model
+
+        configured_memory = "_LOCAL_MEMORY_POLICY" in globals()
+        if configured_memory:
+            from truememory.memory_budget import validate_local_policy
+            validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
+        expires = _target_deadline(timeout)
+        if type(batch_size) is not int or batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer")
+        if isinstance(texts, str):
+            texts = [texts]
+        texts = list(texts)
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("Prepared embedding target is closed")
+        remaining = _target_remaining(expires)
+        if remaining is None:
+            self._encode_lock.acquire()
+        elif not self._encode_lock.acquire(timeout=min(remaining, threading.TIMEOUT_MAX)):
+            raise TimeoutError("Prepared embedding deadline exceeded")
+        encoder = None
+        try:
+            with self._state_lock:
+                if self._closed:
+                    raise RuntimeError("Prepared embedding target is closed")
+                encoder = self._encoder
+            remaining = _target_remaining(expires)
+            if self._shared:
+                return encoder.encode(texts, timeout=remaining, batch_size=batch_size)
+            # The local tier worker owns its retry policy. Preserve exact-model
+            # exclusion without adding an independent native recovery loop.
+            probe = not texts
+            count = 1 if probe else len(texts)
+            if configured_memory:
+                from truememory.memory_budget import ProfileKey, model_operation_scope
+                scope = model_operation_scope(
+                    encoder, ProfileKey("local prepared forward", "local_prepared_embedding",
+                                        model_identity=self.target.identity, input_item_count=count,
+                                        batch_size=batch_size),
+                    deadline=lambda: _target_remaining(expires),
+                )
+            else:
+                scope = nullcontext()
+            with scope as memory:
+                with _own_model(encoder, remaining=lambda: _target_remaining(expires)):
+                    self.target.check_configuration()
+                    _target_remaining(expires)
+                    if memory is not None:
+                        payload_bytes = count * self.target.dimension * 4
+                        memory.charge(ProfileKey("local prepared result", "local_prepared_embedding",
+                                                 native_tensor_shape=(count, self.target.dimension)),
+                                      known_bytes=payload_bytes, retained_bytes=payload_bytes,
+                                      deadline=lambda: _target_remaining(expires), group="result assembly")
+                    values = encoder.encode(
+                        [TARGET_PROBE_TEXT] if probe else texts,
+                        batch_size=batch_size, show_progress_bar=False,
+                    )
+                    _target_remaining(expires)
+                    values = np.asarray(values, dtype=np.float32)
+                    check_target_vectors(self.target, values, count)
+                    if memory is not None:
+                        memory.retain_buffer(values, deadline=lambda: _target_remaining(expires))
+                    return values[:0] if probe else values
+        finally:
+            encoder = None
+            with self._state_lock:
+                closed = self._closed
+            if closed:
+                self._finish_close()
+            self._encode_lock.release()
+
+    def _finish_close(self) -> None:
+        # Called only by the encode-lock owner, including an encode that drains
+        # after its closing thread was cancelled while waiting.
+        self._encoder = None
+        release_slot, self._release_slot = self._release_slot, None
+        if release_slot is not None:
+            release_slot()
+        with self._state_lock:
+            self._released = True
+
+    def close(self) -> None:
+        with self._state_lock:
+            if self._released:
+                return
+            # Queued calls must see closure before the current call drains.
+            self._closed = True
+        try:
+            with self._encode_lock:
+                self._finish_close()
+        except BaseException:
+            if self._encode_lock.acquire(blocking=False):
+                try:
+                    self._finish_close()
+                finally:
+                    self._encode_lock.release()
+            raise
+
+
+def _target_deadline(timeout: float | None) -> float | None:
+    if timeout is None:
+        return None
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout):
+        raise ValueError("Prepared embedding timeout must be finite")
+    if timeout <= 0:
+        raise TimeoutError("Prepared embedding deadline exceeded")
+    return time.monotonic() + timeout
+
+
+def _target_remaining(expires: float | None) -> float | None:
+    if expires is None:
+        return None
+    remaining = expires - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Prepared embedding deadline exceeded")
+    return remaining
+
+
+@contextmanager
+def prepare_embedding_target(
+    target: EmbeddingTarget, *, timeout: float | None = None,
+) -> Iterator[_PreparedEmbeddingLease]:
+    """Prepare outside SQLite transactions; never activate a tier or expose weights."""
+    from contextlib import nullcontext
+    from truememory.embedding_target import EmbeddingTarget, TARGET_PROBE_TEXT, build_target_model
+    from truememory.model_client import PreparedEmbeddingProxy, use_model_server
+    from truememory.mps_utils import resolve_device
+
+    configured_memory = "_LOCAL_MEMORY_POLICY" in globals()
+    if configured_memory:
+        from truememory.memory_budget import validate_local_policy
+        validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
+    if not isinstance(target, EmbeddingTarget):
+        raise TypeError("Expected an immutable EmbeddingTarget")
+    expires = _target_deadline(timeout)
+    target.check_configuration()
+    shared = use_model_server()
+    owns_slot = False
+    encoder = lease = None
+    try:
+        if shared:
+            encoder = PreparedEmbeddingProxy(target)
+            encoder.prepare(timeout=_target_remaining(expires))
+        else:
+            if not _prepared_target_slot.acquire(blocking=False):
+                raise RuntimeError("Another prepared embedding target lease is active")
+            owns_slot = True
+            remaining = _target_remaining(expires)
+            if remaining is None:
+                _lock.acquire()
+            elif not _lock.acquire(timeout=min(remaining, threading.TIMEOUT_MAX)):
+                raise TimeoutError("Prepared embedding deadline exceeded")
+            try:
+                _target_remaining(expires)
+                # Legacy custom loaders may have fallen back despite their
+                # label. Only deterministic built-ins can borrow active weights.
+                if (target.model_id in {"model2vec", "qwen3_256"}
+                        and EMBEDDING_MODEL == target.model_id and _embedding_dim == target.dimension):
+                    encoder = _model
+            finally:
+                _lock.release()
+            if encoder is None:
+                device = resolve_device(None)
+                _target_remaining(expires)
+                budget_owner = None
+                if configured_memory:
+                    from truememory.memory_budget import (
+                        ProfileKey, allocation_scope, bind_model_owner, configured_local_owner,
+                    )
+                    budget_owner = configured_local_owner(globals()["_LOCAL_MEMORY_POLICY"], kind="local_prepared_embedding")
+                try:
+                    with allocation_scope(budget_owner) if configured_memory else nullcontext() as memory:
+                        if memory is not None:
+                            memory.charge(ProfileKey("local prepared construction", "local_prepared_embedding",
+                                                     model_identity=target.identity, device=device),
+                                          deadline=lambda: _target_remaining(expires))
+                        encoder = build_target_model(target, device, check=lambda: _target_remaining(expires))
+                        if budget_owner is not None:
+                            bind_model_owner(encoder, budget_owner)
+                except BaseException:
+                    if budget_owner is not None:
+                        budget_owner.close()
+                    raise
+                _target_remaining(expires)
+        lease = _PreparedEmbeddingLease(
+            target, encoder, shared=shared,
+            release_slot=_prepared_target_slot.release if owns_slot else None,
+        )
+        owns_slot = False
+        encoder = None
+        if not shared:
+            lease.encode([TARGET_PROBE_TEXT], timeout=_target_remaining(expires))
+        yield lease
+    finally:
+        encoder = None
+        if lease is not None:
+            lease.close()
+        elif owns_slot:
+            _prepared_target_slot.release()
+
+
+def init_prepared_target_tables(conn: sqlite3.Connection, target: EmbeddingTarget) -> tuple[str, str]:
+    """Initialize only the named main-schema pair; preserve a caller transaction."""
+    from truememory.embedding_target import EmbeddingTarget
+    import sqlite_vec
+
+    if not isinstance(target, EmbeddingTarget):
+        raise TypeError("Expected an immutable EmbeddingTarget")
+    conn.enable_load_extension(True)
+    try:
+        sqlite_vec.load(conn)
+    finally:
+        conn.enable_load_extension(False)
+    owned = not conn.in_transaction
+    conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT prepared_embedding_target")
+    try:
+        for name in target.tables:
+            if conn.execute("SELECT 1 FROM temp.sqlite_master WHERE name = ? COLLATE NOCASE", (name,)).fetchone():
+                raise ValueError("A temporary object shadows the prepared target table")
+            existing = conn.execute(
+                "SELECT type, sql FROM main.sqlite_master WHERE name = ?", (name,),
+            ).fetchone()
+            if existing is not None:
+                declaration = (
+                    r"CREATE\s+VIRTUAL\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+                    + r'(?:"' + name + r'"|`' + name + r'`|\[' + name + r'\]|' + name + r')'
+                    + r"\s+USING\s+vec0\s*\(\s*embedding\s+float\["
+                    + str(target.dimension) + r"\]\s+distance_metric\s*=\s*cosine\s*\)\s*"
+                )
+                if (existing[0] != "table" or not isinstance(existing[1], str)
+                        or re.fullmatch(declaration, existing[1], re.IGNORECASE) is None):
+                    raise ValueError("Existing table does not match the prepared target schema")
+            else:
+                conn.execute(
+                    f'CREATE VIRTUAL TABLE main."{name}" USING vec0({_vec0_column_decl(target.dimension)})'
+                )
+        if owned:
+            conn.commit()
+        else:
+            conn.execute("RELEASE SAVEPOINT prepared_embedding_target")
+    except BaseException:
+        if owned:
+            conn.rollback()
+        else:
+            conn.execute("ROLLBACK TO SAVEPOINT prepared_embedding_target")
+            conn.execute("RELEASE SAVEPOINT prepared_embedding_target")
+        raise
+    return target.tables
 
 
 # ---------------------------------------------------------------------------
@@ -342,22 +848,77 @@ def _write_embedder_metadata_no_commit(conn: sqlite3.Connection) -> None:
     metadata in the same transaction as clearing the in-progress marker, so the
     table is never "trusted" under stale metadata (issue #647).
     """
-    _ensure_metadata_table(conn)
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    conn.execute(
-        "INSERT OR REPLACE INTO metadata(key, value, updated_at) VALUES (?, ?, ?)",
-        ("embed_model", EMBEDDING_MODEL, now),
-    )
-    conn.execute(
-        "INSERT OR REPLACE INTO metadata(key, value, updated_at) VALUES (?, ?, ?)",
-        ("embed_dim", str(_embedding_dim), now),
-    )
+    from truememory.tier_switch.runtime import current_operation
+    operation = current_operation(conn)
+    if operation is not None and (operation.selection is not None or operation.policy is not None):
+        from truememory.tier_switch.writer import capture_writer_selection, require_writer_selection
+        require_writer_selection(conn, capture_writer_selection(conn), model_id=EMBEDDING_MODEL,
+                                 dimension=_embedding_dim, tables=operation.tables)
+        return
+    from truememory.tier_switch.runtime import legacy_vector_mutation
+    with legacy_vector_mutation(conn):
+        _ensure_metadata_table(conn)
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata(key, value, updated_at) VALUES (?, ?, ?)",
+            ("embed_model", EMBEDDING_MODEL, now),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata(key, value, updated_at) VALUES (?, ?, ?)",
+            ("embed_dim", str(_embedding_dim), now),
+        )
 
 
 def _write_embedder_metadata(conn: sqlite3.Connection) -> None:
     """Record `(embed_model, embed_dim)` so later opens can detect drift."""
-    _write_embedder_metadata_no_commit(conn)
-    conn.commit()
+    from truememory.tier_switch.runtime import legacy_vector_mutation
+    with legacy_vector_mutation(conn):
+        _write_embedder_metadata_no_commit(conn)
+        conn.commit()
+
+
+def _write_foreground_embedder_metadata_no_commit(
+    conn: sqlite3.Connection, identity: tuple[int, str, int], *, selection: WriterCapture,
+) -> None:
+    """Publish identity inside the caller's model fence and database writer.
+
+    Only add/update/embed_single call this after validating their vector target.
+    Their writer_transaction owns BEGIN IMMEDIATE or a writer-upgraded savepoint;
+    in_transaction alone cannot establish that ownership. Maintenance continues
+    independently, while rebuilds and standalone metadata writes keep its owner.
+    """
+    from truememory.tier_switch.runtime import current_operation
+    from truememory.tier_switch.writer import capture_writer_selection, require_writer_selection
+
+    operation = current_operation(conn)
+    if operation is None or selection != capture_writer_selection(conn):
+        raise VectorPublicationChanged("Foreground metadata requires the admitted writer selection")
+    if identity != (_model_generation, EMBEDDING_MODEL, _embedding_dim):
+        raise VectorPublicationChanged("Foreground metadata model identity changed")
+    require_writer_selection(conn, selection, model_id=identity[1], dimension=identity[2],
+                             tables=operation.tables)
+    if operation.selection is not None or operation.policy is not None:
+        return
+    if operation.key[:3] != ("legacy", identity[1], str(identity[2])):
+        raise VectorPublicationChanged("Foreground metadata disagrees with serving admission")
+    matches: list[int | None] = []
+    for key, value in (("embed_model", identity[1]), ("embed_dim", str(identity[2]))):
+        row = conn.execute(
+            "SELECT typeof(value)='text' AND value=? FROM main.metadata WHERE key=?", (value, key),
+        ).fetchone()
+        matches.append(None if row is None else row[0])
+    if matches == [1, 1]:
+        # Already published: a rewrite would change only updated_at, two row
+        # writes per add that readers of the metadata rows see as a change.
+        return
+    if matches != [None, None]:
+        raise VectorPublicationChanged("Foreground metadata is partial or uses another embedding identity")
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    for key, value in (("embed_model", identity[1]), ("embed_dim", str(identity[2]))):
+        conn.execute(
+            "INSERT OR REPLACE INTO main.metadata(key, value, updated_at) VALUES (?, ?, ?)",
+            (key, value, now),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -490,42 +1051,44 @@ def _check_embedder_compatibility(conn: sqlite3.Connection) -> None:
     so that explicit re-embed flows (truememory_configure dropping + rebuilding)
     aren't blocked by stale metadata from the previous embedder.
     """
-    existing_dim = _detect_existing_vec_dim(conn)
-    if existing_dim is None:
-        return  # fresh DB or dropped-for-re-embed — nothing to protect
+    from truememory.tier_switch.runtime import legacy_vector_mutation
+    with legacy_vector_mutation(conn):
+        existing_dim = _detect_existing_vec_dim(conn)
+        if existing_dim is None:
+            return  # fresh DB or dropped-for-re-embed — nothing to protect
 
-    stored_model, _stored_dim = _read_embedder_metadata(conn)
-    current_dim = _embedding_dim
+        stored_model, _stored_dim = _read_embedder_metadata(conn)
+        current_dim = _embedding_dim
 
-    if existing_dim != current_dim:
-        stored_hint = (
-            f" (stored embed_model={stored_model!r})"
-            if stored_model
-            else " (no metadata — likely a legacy v0.3.0 DB)"
-        )
-        raise TrueMemoryMigrationError(
-            f"Database has a {existing_dim}d vec_messages table but the "
-            f"current embedder produces {current_dim}d vectors{stored_hint}. "
-            f"This commonly happens when upgrading between tiers with "
-            f"different embedding dimensions (e.g. v0.3.0 Pro @ 1024d → "
-            f"v0.4.0 Pro @ 256d). " + _migration_hint()
-        )
+        if existing_dim != current_dim:
+            stored_hint = (
+                f" (stored embed_model={stored_model!r})"
+                if stored_model
+                else " (no metadata — likely a legacy v0.3.0 DB)"
+            )
+            raise TrueMemoryMigrationError(
+                f"Database has a {existing_dim}d vec_messages table but the "
+                f"current embedder produces {current_dim}d vectors{stored_hint}. "
+                f"This commonly happens when upgrading between tiers with "
+                f"different embedding dimensions (e.g. v0.3.0 Pro @ 1024d → "
+                f"v0.4.0 Pro @ 256d). " + _migration_hint()
+            )
 
-    if stored_model is not None and stored_model != EMBEDDING_MODEL:
-        raise TrueMemoryMigrationError(
-            f"Database was built with embed_model={stored_model!r}; current "
-            f"is {EMBEDDING_MODEL!r}. Matching dims ({current_dim}d) would "
-            f"otherwise mask a silent vector-space mismatch. " + _migration_hint()
-        )
+        if stored_model is not None and stored_model != EMBEDDING_MODEL:
+            raise TrueMemoryMigrationError(
+                f"Database was built with embed_model={stored_model!r}; current "
+                f"is {EMBEDDING_MODEL!r}. Matching dims ({current_dim}d) would "
+                f"otherwise mask a silent vector-space mismatch. " + _migration_hint()
+            )
 
-    if stored_model is None:
-        logger.warning(
-            "vec_messages exists without embedder metadata (legacy v0.3.0-style "
-            "DB). Current embedder=%r at %dd. If you have switched embedding "
-            "models since ingestion, re-embed via truememory_configure() — "
-            "otherwise new vectors will carry the %r marker going forward.",
-            EMBEDDING_MODEL, current_dim, EMBEDDING_MODEL,
-        )
+        if stored_model is None:
+            logger.warning(
+                "vec_messages exists without embedder metadata (legacy v0.3.0-style "
+                "DB). Current embedder=%r at %dd. If you have switched embedding "
+                "models since ingestion, re-embed via truememory_configure() — "
+                "otherwise new vectors will carry the %r marker going forward.",
+                EMBEDDING_MODEL, current_dim, EMBEDDING_MODEL,
+            )
 
 
 def _check_rebuild_allowed(conn: sqlite3.Connection) -> None:
@@ -646,41 +1209,58 @@ def init_vec_table(
         conn: An open SQLite connection (from :func:`truememory.storage.create_db`).
         tier_group: Optional explicit tier group name ("edge" or "basepro").
     """
-    import sqlite_vec
+    import sys
+    runtime = sys.modules.get("truememory.tier_switch.runtime")
+    operation = runtime.current_operation(conn) if runtime is not None else None
+    if operation is not None and operation.selection is not None:
+        from truememory.tier_switch.activation import _guard_pair
+        if tier_group is not None and tier_group != operation.selection.target.tier_group:
+            raise ValueError("Selected initialization requires the captured table group")
+        _guard_pair(conn, operation.selection.target)
+        return
+    if operation is not None and operation.policy is not None:
+        from truememory.tier_switch.activation import _guard_legacy_policy_pair
+        if tier_group is not None and operation.tables != (f"vec_messages_{tier_group}", f"vec_messages_sep_{tier_group}"):
+            raise ValueError("Policy initialization requires the captured table pair")
+        _guard_legacy_policy_pair(conn, operation.policy.target, operation.tables)
+        return
+    from truememory.tier_switch.runtime import legacy_vector_mutation
+    with legacy_vector_mutation(conn):
+        import sqlite_vec
 
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
 
-    _ensure_metadata_table(conn)
+        _ensure_metadata_table(conn)
 
-    if tier_group:
-        if tier_group not in _VALID_GROUPS:
-            raise ValueError(
-                f"Invalid tier_group: {tier_group!r}. "
-                f"Valid: {sorted(_VALID_GROUPS)}"
-            )
-        vec_name = f"vec_messages_{tier_group}"
-        sep_name = f"vec_messages_sep_{tier_group}"
-    else:
-        _check_embedder_compatibility(conn)
-        vec_name = _active_vec_table(conn)
-        sep_name = _active_sep_table(conn)
+        if tier_group:
+            if tier_group not in _VALID_GROUPS:
+                raise ValueError(
+                    f"Invalid tier_group: {tier_group!r}. "
+                    f"Valid: {sorted(_VALID_GROUPS)}"
+                )
+            vec_name = f"vec_messages_{tier_group}"
+            sep_name = f"vec_messages_sep_{tier_group}"
+        else:
+            _check_embedder_compatibility(conn)
+            vec_name = _active_vec_table(conn)
+            sep_name = _active_sep_table(conn)
 
-    dim = _embedding_dim
-    conn.execute(
-        f"CREATE VIRTUAL TABLE IF NOT EXISTS {vec_name} "
-        f"USING vec0({_vec0_column_decl(dim)})"
-    )
-    conn.execute(
-        f"CREATE VIRTUAL TABLE IF NOT EXISTS {sep_name} "
-        f"USING vec0({_vec0_column_decl(dim)})"
-    )
-    conn.commit()
+        dim = _embedding_dim
+        conn.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {vec_name} "
+            f"USING vec0({_vec0_column_decl(dim)})"
+        )
+        conn.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {sep_name} "
+            f"USING vec0({_vec0_column_decl(dim)})"
+        )
+        conn.commit()
 
-    # Upgrade any pre-#631 L2-default tables to cosine in place. Idempotent:
-    # a no-op once the active tables already declare distance_metric=cosine.
-    migrate_to_cosine_metric(conn)
+        # Upgrade any pre-#631 L2-default tables to cosine in place. Idempotent:
+        # a no-op once the active tables already declare distance_metric=cosine.
+        migrate_to_cosine_metric(conn)
 
 
 # ---------------------------------------------------------------------------
@@ -714,8 +1294,37 @@ def _is_mps_oom(exc: Exception) -> bool:
     return is_mps_oom(exc)
 
 
+def released_connection() -> AbstractContextManager[None]:
+    """Free this thread's engine connection lock for model or LLM work (no-op without an engine).
+
+    Other threads' statements run meanwhile; a connection with a transaction
+    open stays locked (see runtime.released_connection_locks).
+    """
+    runtime = sys.modules.get("truememory.tier_switch.runtime")
+    release = getattr(runtime, "released_connection_locks", None)
+    return release() if release is not None else nullcontext()
+
+
 def _encode_with_mps_fallback(model, texts, **kwargs):
     """Encode texts with MPS OOM fallback. Thread-safe device transitions."""
+    with released_connection():
+        return _encode_unlocked(model, texts, **kwargs)
+
+
+def _encode_unlocked(model, texts, **kwargs):
+    if "_LOCAL_MEMORY_POLICY" in globals():
+        from truememory.memory_budget import (
+            ProfileKey, budgeted_encode_with_mps_fallback, validate_local_policy,
+        )
+        validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
+        count = 1 if type(texts) is str else len(texts) if type(texts) in (list, tuple) else None
+        batch_size = kwargs.get("batch_size")
+        return budgeted_encode_with_mps_fallback(
+            model, texts, ProfileKey("local embedding operation", "local_embedding",
+                                     input_item_count=count,
+                                     batch_size=batch_size if type(batch_size) is int and batch_size >= 0 else None),
+            native_kwargs=kwargs,
+        )
     from truememory.mps_utils import encode_with_mps_fallback
     return encode_with_mps_fallback(model, texts, **kwargs)
 
@@ -724,10 +1333,471 @@ _BUILD_VECTORS_TXN_BATCH = 100
 """Number of embedding batches to accumulate before committing.
 
 Each embedding batch is ``_get_batch_size()`` messages (100 on CPU, 16 on
-MPS).  Every ``_BUILD_VECTORS_TXN_BATCH`` of those batches we commit the
-transaction and release the DB write lock so other writers (MCP servers,
-ingest pipeline) can proceed.
+MPS). Serialize a finite group before acquiring an owned DB writer transaction;
+publish the group and consumed-input checkpoint in one commit.
 """
+
+
+def _capture_rebuild_model(conn: sqlite3.Connection | None = None) -> tuple[object, tuple[int, str, int]]:
+    """Caller transactions can borrow a cached model, but cannot wait or load."""
+    if conn is not None and conn.in_transaction:
+        if not _lock.acquire(blocking=False):
+            raise VectorPublicationChanged("Embedding model is busy; retry outside the caller transaction")
+        try:
+            if _model is None:
+                raise VectorPublicationChanged("Embedding model is not loaded; load it outside the caller transaction")
+            return _model, (_model_generation, EMBEDDING_MODEL, _embedding_dim)
+        finally:
+            _lock.release()
+    with _lock:
+        before = (_model_generation, EMBEDDING_MODEL)
+    model = get_model()
+    with _lock:
+        if before != (_model_generation, EMBEDDING_MODEL):
+            raise VectorPublicationChanged("Embedding model changed while loading rebuild model")
+        return model, (_model_generation, EMBEDDING_MODEL, _embedding_dim)
+
+
+@contextmanager
+def _rebuild_model_fence(identity: tuple[int, str, int]) -> Iterator[None]:
+    # A writer must never wait for a model load that needs this state lock.
+    if not _lock.acquire(blocking=False):
+        raise RuntimeError("Embedding model is busy; retry rebuild publication")
+    try:
+        if identity != (_model_generation, EMBEDDING_MODEL, _embedding_dim):
+            raise RuntimeError("Embedding model changed during rebuild")
+        yield
+    finally:
+        _lock.release()
+
+
+class VectorPublicationChanged(RuntimeError):
+    """Precomputed vectors no longer match the active publication target."""
+
+
+@contextmanager
+def _foreground_model_fence(
+    identity: tuple[int, str, int], *, blocking: bool = False,
+) -> Iterator[Callable[[], AbstractContextManager[None]]]:
+    """Blocking admission is permitted only before an owned writer starts.
+
+    Yields what frees the fence while that writer's busy BEGIN waits to retry
+    (writer_transaction's ``release``); it takes the fence back and checks the
+    identity again before the next attempt.
+    """
+    if not _lock.acquire(blocking=blocking):
+        raise VectorPublicationChanged("Embedding model is busy; retry vector publication")
+    try:
+        if identity != (_model_generation, EMBEDDING_MODEL, _embedding_dim):
+            raise VectorPublicationChanged("Embedding model changed; retry vector publication")
+        yield lambda: _released_model_fence(identity)
+    finally:
+        _lock.release()
+
+
+@contextmanager
+def _released_model_fence(identity: tuple[int, str, int]) -> Iterator[None]:
+    _lock.release()
+    try:
+        yield
+    finally:
+        _lock.acquire()  # Held again for the fence's own release.
+    if identity != (_model_generation, EMBEDDING_MODEL, _embedding_dim):
+        raise VectorPublicationChanged("Embedding model changed; retry vector publication")
+
+
+def _validate_foreground_vector_target(
+    conn: sqlite3.Connection, identity: tuple[int, str, int], message_id: int,
+    *, selection=None,
+) -> tuple[str, str]:
+    """Validate while the caller owns both the database writer and model fence."""
+    from truememory.rebuild_source import RebuildSourceChanged, load_manifest, manifest_key
+
+    tables = (_active_vec_table(conn), _active_sep_table(conn))
+    from truememory.tier_switch.writer import WriterSelectionChanged, require_writer_selection
+    try:
+        require_writer_selection(conn, selection, model_id=identity[1], dimension=identity[2], tables=tables)
+    except WriterSelectionChanged as exc:
+        raise VectorPublicationChanged(str(exc)) from exc
+    for table in tables:
+        manifest = load_manifest(conn, manifest_key((table,)))
+        if manifest is not None and (manifest.model != identity[1] or manifest.dimension != identity[2]):
+            raise VectorPublicationChanged("Vector target uses a different embedding model; reopen with the active tier")
+        if not _build_in_progress(conn, table):
+            continue
+        if manifest is None:
+            raise VectorPublicationChanged("Vector target is rebuilding without matching source identity")
+        if manifest.source is None:
+            # Explicit caller input has no database prefix certificate.
+            raise VectorPublicationChanged("Vector target is rebuilding explicit input; retry after completion")
+        high = manifest.source.high_id
+        if high is None or message_id > high:
+            continue
+        try:
+            manifest.source.check(conn)
+        except RebuildSourceChanged:
+            # A corrected source invalidates this generation. Publish the
+            # correction normally; the rebuild cannot later certify it.
+            continue
+        raise VectorPublicationChanged("Vector row belongs to an active rebuild; retry after completion")
+    return tables
+
+
+@contextmanager
+def _foreground_vector_publication(
+    conn: sqlite3.Connection, identity: tuple[int, str, int], message_id: int,
+    *, selection=None, retry_busy: bool = False,
+) -> Iterator[tuple[str, str]]:
+    from truememory.tier_switch.writer import WriterSelectionChanged, writer_transaction
+
+    with _foreground_model_fence(identity, blocking=not conn.in_transaction) as release:
+        try:
+            with writer_transaction(conn, selection, model_id=identity[1], dimension=identity[2],
+                                    retry_busy=retry_busy, release=release):
+                yield _validate_foreground_vector_target(conn, identity, message_id, selection=selection)
+        except WriterSelectionChanged as exc:
+            raise VectorPublicationChanged(str(exc)) from exc
+
+
+# Smallest message id that may still lack vectors in the served pair. Written
+# inside the writer that stored a memory without them; consumed by bounded
+# backfill passes, so the work survives restarts.
+_BACKFILL_KEY = "vector_backfill_from"
+# Memories whose embedding came out non-finite (an fp16 NaN, for example) under
+# one model identity. They are skipped and reported instead of stalling every
+# later pass on the same rows; a different model retries them.
+_BACKFILL_SKIPPED_KEY = "vector_backfill_skipped"
+_BACKFILL_SKIPPED_LIMIT = 1000
+
+
+def note_vectorless(conn: sqlite3.Connection, message_id: int) -> None:
+    """Record, inside the caller's writer, that a stored memory needs vectors."""
+    try:
+        conn.execute(
+            "INSERT INTO metadata(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+            "value = CAST(MIN(CAST(value AS INTEGER), CAST(excluded.value AS INTEGER)) AS TEXT)",
+            (_BACKFILL_KEY, str(int(message_id))),
+        )
+    except sqlite3.OperationalError:
+        logger.debug("Vector backfill cursor was not recorded", exc_info=True)
+
+
+def backfill_pending(conn: sqlite3.Connection) -> bool:
+    return conn.execute("SELECT 1 FROM metadata WHERE key=?", (_BACKFILL_KEY,)).fetchone() is not None
+
+
+def _skipped_vectorless(conn: sqlite3.Connection) -> tuple[str | None, list[int]]:
+    import json
+    row = conn.execute("SELECT value FROM metadata WHERE key=?", (_BACKFILL_SKIPPED_KEY,)).fetchone()
+    try:
+        value = json.loads(row[0])
+        return str(value["model"]), [int(item) for item in value["ids"]]
+    except (TypeError, ValueError, KeyError):
+        return None, []
+
+
+def _first_gap(conn: sqlite3.Connection, table: str, start: int, skipped: list[int],
+               *, end: int | None = None) -> int | None:
+    import json
+    bound = "" if end is None else " AND m.id < ?"
+    return conn.execute(
+        f'SELECT min(m.id) FROM messages m WHERE m.id >= ?{bound} AND m.id NOT IN (SELECT value FROM json_each(?)) '
+        f'AND NOT EXISTS (SELECT 1 FROM main."{table}" v WHERE v.rowid = m.id)',
+        (start, json.dumps(skipped)) if end is None else (start, end, json.dumps(skipped)),
+    ).fetchone()[0]
+
+
+# Ids one seed query scans while it holds the connection: a fully covered
+# chunk costs about 25 ms on 100k memories (the whole scan 0.5 to 0.8 s).
+_SEED_CHUNK = 4096
+
+
+def seed_backfill_cursor(conn: sqlite3.Connection, table: str, *, write_lock: object,
+                         stop: threading.Event | None = None) -> int | None:
+    """Record the first memory missing from ``table`` when no cursor exists.
+
+    Releases before note_vectorless stored memories without vectors and
+    without a cursor, so no backfill pass ever reached them. The scan holds
+    ``write_lock`` for one _SEED_CHUNK of ids at a time; ``stop`` ends it
+    between chunks. Returns the id recorded, or None.
+    """
+    from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
+
+    with write_lock:
+        if backfill_pending(conn):
+            return None
+        _, skipped = _skipped_vectorless(conn)
+        high = conn.execute("SELECT max(id) FROM messages").fetchone()[0]
+    start = 0
+    while high is not None and start <= high:
+        if stop is not None and stop.is_set():
+            return None
+        with write_lock:
+            gap = _first_gap(conn, table, start, skipped, end=start + _SEED_CHUNK)
+        if gap is not None:
+            with write_lock, writer_transaction(conn, capture_writer_selection(conn)):
+                note_vectorless(conn, gap)  # Keeps a lower cursor noted meanwhile.
+            return gap
+        start += _SEED_CHUNK
+    return None
+
+
+def vector_coverage(conn: sqlite3.Connection, tables: tuple[str, str]) -> dict:
+    """Count memories without a vector in the served completion table."""
+    import json
+    _, skipped = _skipped_vectorless(conn)
+    vectorless = conn.execute(
+        f'SELECT count(*) FROM messages m WHERE NOT EXISTS '
+        f'(SELECT 1 FROM main."{tables[0]}" v WHERE v.rowid = m.id)'
+    ).fetchone()[0]
+    unembeddable = conn.execute(
+        f'SELECT count(*) FROM messages m WHERE m.id IN (SELECT value FROM json_each(?)) AND NOT EXISTS '
+        f'(SELECT 1 FROM main."{tables[0]}" v WHERE v.rowid = m.id)', (json.dumps(skipped),)
+    ).fetchone()[0]
+    cursor = conn.execute("SELECT value FROM metadata WHERE key=?", (_BACKFILL_KEY,)).fetchone()
+    return {"table": tables[0], "vectorless": vectorless, "skipped_nonfinite": unembeddable,
+            "first_vectorless_id": _first_gap(conn, tables[0], 0, skipped),
+            "backfill_from": None if cursor is None else cursor[0]}
+
+
+def backfill_missing_vectors(conn: sqlite3.Connection, *, write_lock: object,
+                             budget: int = 32, window: int = 256, stop: threading.Event | None = None) -> int:
+    """Embed a bounded, resumable batch of memories stored without vectors.
+
+    Runs inside an admitted operation whose models are ready. One pass scans at
+    most ``window`` ids from the recorded cursor and publishes at most
+    ``budget`` missing pairs, each under the writer and model fences with the
+    source row rechecked; encoding happens outside the engine writer lock.
+    Rows whose embedding is not finite are skipped and recorded, so the cursor
+    always moves past the scanned window. ``stop`` ends the pass between encode
+    calls and rows; the cursor is then left for the next pass.
+    """
+    import json
+    import sys
+    from truememory.tier_switch.writer import capture_writer_selection, writer_transaction
+
+    runtime = sys.modules.get("truememory.tier_switch.runtime")
+    operation = runtime.current_operation(conn) if runtime is not None else None
+    if operation is None or not operation.models_ready or operation.borrowed:
+        # A caller transaction must not absorb a batch of foreign writes. The
+        # admission recorded it; a live in_transaction may be another thread's read.
+        return 0
+    vec_table = operation.tables[0]
+    with write_lock:
+        cursor = conn.execute("SELECT value FROM metadata WHERE key=?", (_BACKFILL_KEY,)).fetchone()
+        if cursor is None:
+            return 0
+        try:
+            start = int(cursor[0])
+        except (TypeError, ValueError):
+            start = 0
+        skipped_model, skipped = _skipped_vectorless(conn)
+        rows = conn.execute(
+            "SELECT id, content, sender, recipient, timestamp FROM messages WHERE id >= ? ORDER BY id LIMIT ?",
+            (start, window),
+        ).fetchall()
+        missing = [row for row in rows
+                   if conn.execute(f'SELECT 1 FROM main."{vec_table}" WHERE rowid=?', (row[0],)).fetchone() is None]
+    with _lock:
+        model_label = f"{EMBEDDING_MODEL}:{_embedding_dim}"
+    if skipped_model != model_label:
+        skipped = []  # Another model may embed them.
+    missing = [row for row in missing if row[0] not in set(skipped)]
+    batch = missing[:budget]
+    published, nonfinite = 0, []
+    def stopped() -> bool:
+        return stop is not None and stop.is_set()
+
+    if batch:
+        if stopped():
+            return 0
+        with write_lock:
+            model, identity = _capture_rebuild_model(conn)
+        model_label = f"{identity[1]}:{identity[2]}"
+        completion = _encode_with_mps_fallback(model, [row[1] for row in batch])
+        if stopped():
+            return 0
+        separation = _encode_with_mps_fallback(model, [_build_sep_text(row[2], row[3], row[4], row[1]) for row in batch])
+        with write_lock:
+            selection = capture_writer_selection(conn)
+        for row, left, right in zip(batch, completion, separation):
+            if stopped():
+                return published
+            try:
+                blobs = serialize_f32(left), serialize_f32(right)
+            except ValueError:
+                nonfinite.append(row[0])
+                continue
+            with write_lock, _foreground_vector_publication(conn, identity, row[0], selection=selection) as tables:
+                current = conn.execute("SELECT id, content, sender, recipient, timestamp FROM messages WHERE id=?",
+                                       (row[0],)).fetchone()
+                if (current != tuple(row)
+                        or conn.execute(f'SELECT 1 FROM main."{tables[0]}" WHERE rowid=?', (row[0],)).fetchone()):
+                    continue  # Changed, deleted or published meanwhile.
+                conn.execute(f'INSERT INTO main."{tables[0]}"(rowid, embedding) VALUES (?, ?)', (row[0], blobs[0]))
+                conn.execute(f'DELETE FROM main."{tables[1]}" WHERE rowid=?', (row[0],))
+                conn.execute(f'INSERT INTO main."{tables[1]}"(rowid, embedding) VALUES (?, ?)', (row[0], blobs[1]))
+                _write_foreground_embedder_metadata_no_commit(conn, identity, selection=selection)
+                published += 1
+    if len(missing) > len(batch):
+        resume = batch[-1][0] + 1
+    elif len(rows) == window:
+        resume = rows[-1][0] + 1
+    else:
+        resume = None
+    if stopped():
+        return published
+    if nonfinite:
+        skipped = sorted(set(skipped) | set(nonfinite))[:_BACKFILL_SKIPPED_LIMIT]
+        logger.warning("Skipped %d memories whose embedding is not finite", len(nonfinite))
+    with write_lock, writer_transaction(conn, capture_writer_selection(conn)):
+        if nonfinite:
+            conn.execute("INSERT INTO metadata(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+                         "value=excluded.value",
+                         (_BACKFILL_SKIPPED_KEY, json.dumps({"model": model_label, "ids": skipped})))
+        if resume is None:
+            # Reached the end. Adds commit their row and cursor note together, so
+            # inside this writer every gap noted meanwhile is visible here.
+            resume = _first_gap(conn, vec_table, start, skipped)
+        now = conn.execute("SELECT value FROM metadata WHERE key=?", (_BACKFILL_KEY,)).fetchone()
+        if now is not None and now[0] != cursor[0]:
+            try:
+                lower = int(now[0])  # Noted or seeded meanwhile: never move past it.
+                resume = lower if resume is None else min(resume, lower)
+            except (TypeError, ValueError):
+                pass
+        if resume is None:
+            conn.execute("DELETE FROM metadata WHERE key=?", (_BACKFILL_KEY,))
+        else:
+            conn.execute("INSERT INTO metadata(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+                         "value=excluded.value", (_BACKFILL_KEY, str(resume)))
+    return published
+
+
+def _build_streamed_vectors(
+    conn: sqlite3.Connection, messages: list[dict] | None, *, table_name: str | None,
+    txn_batch: int | None, separation: bool,
+) -> int:
+    from truememory.maintenance import connection_database_path, maintenance_owner
+    from truememory.tier_switch.writer import capture_writer_selection, require_writer_selection
+    from truememory.rebuild_source import (
+        RebuildManifest, RebuildSourceChanged, capture_source, input_fingerprint,
+        ensure_rebuild_tracking, load_manifest, manifest_key, rebuild_transaction, save_manifest,
+    )
+
+    if messages is not None and not messages:
+        return 0
+    write_selection = capture_writer_selection(conn)
+    table = table_name or (_active_sep_table(conn) if separation else _active_vec_table(conn))
+    publication_tables = None if write_selection.selection is None else (
+        (write_selection.selection.tables[0], table) if separation else (table, write_selection.selection.tables[1])
+    )
+    quoted_table = '"' + table.replace('"', '""') + '"'
+    key = manifest_key((table,))
+    digest = input_fingerprint(messages, separation=separation) if messages is not None else None
+    with maintenance_owner(connection_database_path(conn)):
+        source_empty = False
+        if messages is None:
+            ensure_rebuild_tracking(conn)
+            with closing(conn.execute("SELECT 1 FROM messages LIMIT 1")) as cursor:
+                source_empty = cursor.fetchone() is None
+        if source_empty:
+            identity = (_model_generation, EMBEDDING_MODEL, _embedding_dim)
+            with rebuild_transaction(conn, write=True, publication_fence=_rebuild_model_fence(identity)):
+                require_writer_selection(conn, write_selection, model_id=identity[1], dimension=identity[2], tables=publication_tables)
+                empty_source = capture_source(conn)
+                if empty_source.total == 0:
+                    # An empty range needs no native model allocation. Recheck
+                    # under the writer so an append cannot slip through clear.
+                    conn.execute(f"DELETE FROM {quoted_table}")
+                    _ensure_metadata_table(conn)
+                    empty = RebuildManifest.new(identity[1], identity[2], (table,), source=empty_source)
+                    empty = replace(empty, complete=True,
+                                    schema_version=conn.execute("PRAGMA schema_version").fetchone()[0])
+                    save_manifest(conn, key, empty)
+                    _clear_build_in_progress(conn, table)
+                    return 0
+        model, identity = _capture_rebuild_model(conn)
+        with rebuild_transaction(conn, write=True, publication_fence=_rebuild_model_fence(identity)):
+            require_writer_selection(conn, write_selection, model_id=identity[1], dimension=identity[2], tables=publication_tables)
+            manifest = load_manifest(conn, key)
+            resumable = (manifest is not None and not manifest.complete
+                         and manifest.model == identity[1] and manifest.dimension == identity[2]
+                         and manifest.targets == (table,) and manifest.input_digest == digest
+                         and manifest.schema_version == conn.execute("PRAGMA schema_version").fetchone()[0]
+                         and (manifest.source is not None) == (messages is None))
+            if resumable and manifest.source is not None:
+                try:
+                    manifest.source.check(conn)
+                except RebuildSourceChanged:
+                    resumable = False
+            if not resumable:
+                source = capture_source(conn) if messages is None else None
+                manifest = RebuildManifest.new(identity[1], identity[2], (table,), source=source,
+                                               input_digest=digest, total=len(messages) if messages is not None else 0)
+                conn.execute(f"DELETE FROM {quoted_table}")
+                _mark_build_in_progress(conn, table)
+                manifest = replace(manifest, schema_version=conn.execute("PRAGMA schema_version").fetchone()[0])
+                save_manifest(conn, key, manifest)
+
+        batch_size = _get_batch_size()
+        commit_every = max(1, txn_batch if txn_batch is not None else _BUILD_VECTORS_TXN_BATCH)
+        total = 0
+        try:
+            import torch
+            no_grad = torch.no_grad()
+        except ImportError:
+            from contextlib import nullcontext
+            no_grad = nullcontext()
+
+        with no_grad:
+            while manifest.consumed < manifest.total:
+                next_manifest = manifest
+                rows_to_insert = []
+                for _ in range(commit_every):
+                    if next_manifest.consumed >= next_manifest.total:
+                        break
+                    if manifest.source is not None:
+                        batch = manifest.source.page(conn, next_manifest.cursor, batch_size, include_metadata=separation)
+                    else:
+                        batch = messages[next_manifest.consumed:next_manifest.consumed + batch_size]
+                    if not batch:
+                        raise RebuildSourceChanged("Rebuild source ended before its captured row count")
+                    ids = [message["id"] for message in batch]
+                    texts = ([_build_sep_text(message.get("sender", "?"), message.get("recipient", "?"),
+                                              message.get("timestamp", "?"), message["content"]) for message in batch]
+                             if separation else [message["content"] for message in batch])
+                    embeddings = _encode_with_mps_fallback(model, texts, show_progress_bar=False)
+                    if len(embeddings) != len(ids):
+                        raise ValueError("Embedding count does not match the rebuild batch")
+                    valid = 0
+                    for mid, embedding in zip(ids, embeddings):
+                        normed = _normalize_for_cosine(embedding)
+                        if normed is None:
+                            logger.warning("Skipping undefined cosine embedding during rebuild")
+                            continue
+                        rows_to_insert.append((mid, serialize_f32(normed)))
+                        valid += 1
+                    next_manifest = next_manifest.advance(ids[-1], len(batch), valid)
+                    del embeddings, batch, texts, ids
+                    _flush_mps_cache()
+                with rebuild_transaction(conn, write=True, publication_fence=_rebuild_model_fence(identity)):
+                    require_writer_selection(conn, write_selection, model_id=identity[1], dimension=identity[2], tables=publication_tables)
+                    manifest.check(conn, key)
+                    if rows_to_insert:
+                        conn.executemany(f"INSERT INTO {quoted_table}(rowid, embedding) VALUES (?, ?)", rows_to_insert)
+                    save_manifest(conn, key, next_manifest)
+                total += next_manifest.outputs - manifest.outputs
+                manifest = next_manifest
+                del rows_to_insert
+
+        with rebuild_transaction(conn, write=True, publication_fence=_rebuild_model_fence(identity)):
+            require_writer_selection(conn, write_selection, model_id=identity[1], dimension=identity[2], tables=publication_tables)
+            manifest.check(conn, key)
+            save_manifest(conn, key, replace(manifest, complete=True))
+            _clear_build_in_progress(conn, table)
+            _write_embedder_metadata_no_commit(conn)
+        return total
 
 
 def build_vectors(
@@ -744,14 +1814,13 @@ def build_vectors(
     ``messages`` table.  Otherwise it uses the supplied list (each dict must
     have an ``"id"`` and ``"content"`` key).
 
-    Batch size adapts to the device: 100 on CPU (Edge tier), 16 on MPS
-    (Base/Pro tier) to keep GPU memory under ~4GB on 8GB machines.
-    MPS cache is flushed between batches to prevent memory accumulation.
+    Database inputs are read in bounded ID pages. A source revision and model
+    fence protect every publication. Resume uses consumed input, including
+    skipped invalid vectors, rather than the maximum stored vector ID.
 
-    The write transaction is committed every *txn_batch* embedding batches
-    (default ``_BUILD_VECTORS_TXN_BATCH`` = 100) so that the DB write lock
-    is not held for the entire re-embedding run.  This lets other writers
-    (MCP servers, ingest pipeline) make progress between commits.
+    Serialize *txn_batch* embedding batches (default 100) before acquiring an
+    owned writer transaction. Caller-owned transactions remain caller-owned;
+    their existing locks cannot be released by this function.
 
     Args:
         conn:       Open database connection with sqlite-vec already loaded
@@ -765,108 +1834,19 @@ def build_vectors(
     Returns:
         Number of vectors inserted.
     """
-    if messages is None:
-        rows = conn.execute(
-            "SELECT id, content FROM messages ORDER BY id"
-        ).fetchall()
-        messages = [{"id": row[0], "content": row[1]} for row in rows]
+    return _build_streamed_vectors(conn, messages, table_name=table_name, txn_batch=txn_batch,
+                                   separation=False)
 
-    if not messages:
-        return 0
-
-    tbl = table_name or _active_vec_table(conn)
-
-    # Resume vs. fresh build (issue #647, M-21).
-    #
-    # If a prior run was interrupted it left an ``in_progress`` marker. The
-    # rows already written are valid (each is L2-normalized at write time), so
-    # we resume from ``max(rowid)`` instead of re-wiping — no data confusion,
-    # no redundant re-embedding. On a fresh build we wipe and set the marker in
-    # the SAME transaction, so a crash before completion never leaves an
-    # untracked partial/empty table that engine.open() would trust.
-    resume_after = 0
-    if _build_in_progress(conn, tbl):
-        try:
-            resume_after = conn.execute(
-                f"SELECT MAX(rowid) FROM {tbl}"
-            ).fetchone()[0] or 0
-        except sqlite3.OperationalError:
-            resume_after = 0
-    if resume_after > 0:
-        messages = [m for m in messages if m["id"] > resume_after]
-        if not messages:
-            # Everything was already embedded before the interruption; just
-            # finalize (clear marker + write metadata) so the table is trusted.
-            _clear_build_in_progress(conn, tbl)
-            _write_embedder_metadata(conn)
-            return 0
-    else:
-        conn.execute(f"DELETE FROM {tbl}")
-        _mark_build_in_progress(conn, tbl)
-        conn.commit()  # DELETE + marker land atomically
-
-    model = get_model()
-    batch_size = _get_batch_size()
-    commit_every = txn_batch if txn_batch is not None else _BUILD_VECTORS_TXN_BATCH
-    total = 0
-    batches_since_commit = 0
-
-    try:
-        import torch
-        no_grad = torch.no_grad()
-    except ImportError:
-        from contextlib import nullcontext
-        no_grad = nullcontext()
-
-    with no_grad:
-        for start in range(0, len(messages), batch_size):
-            batch = messages[start : start + batch_size]
-            texts = [m["content"] for m in batch]
-            ids = [m["id"] for m in batch]
-
-            embeddings = _encode_with_mps_fallback(model, texts, show_progress_bar=False)
-
-            rows_to_insert = []
-            for mid, emb in zip(ids, embeddings):
-                normed = _normalize_for_cosine(emb)
-                if normed is None:
-                    # Zero/NaN vector: undefined cosine — skip so it can't
-                    # poison the cosine table with NULL distances (C2-8).
-                    logger.warning(
-                        "Skipping message %s: zero-norm/non-finite embedding "
-                        "(undefined cosine)", mid,
-                    )
-                    continue
-                rows_to_insert.append((mid, serialize_f32(normed)))
-            if rows_to_insert:
-                conn.executemany(
-                    f"INSERT INTO {tbl}(rowid, embedding) VALUES (?, ?)",
-                    rows_to_insert,
-                )
-
-            total += len(rows_to_insert)
-            batches_since_commit += 1
-            del embeddings
-            _flush_mps_cache()
-
-            if batches_since_commit >= commit_every:
-                conn.commit()
-                batches_since_commit = 0
-
-    # Final commit: clear the in-progress marker and stamp embedder metadata in
-    # the SAME transaction so the table is only ever "trusted" once it is fully
-    # built under the current embedder (issue #647: no NEW vectors under OLD
-    # metadata, no empty/partial table accepted as built).
-    _clear_build_in_progress(conn, tbl)
-    _write_embedder_metadata_no_commit(conn)
-    conn.commit()
-    return total
 
 
 # ---------------------------------------------------------------------------
 # Vector search
 # ---------------------------------------------------------------------------
 
+from truememory.tier_switch.runtime import database_operation
+
+
+@database_operation
 def search_vector(
     conn: sqlite3.Connection,
     query: str,
@@ -959,6 +1939,7 @@ def search_vector(
     return results[:limit]
 
 
+@database_operation
 def search_vector_raw(
     conn: sqlite3.Connection,
     query: str,
@@ -1054,101 +2035,119 @@ def build_separation_vectors(
     Returns:
         Number of separation vectors inserted.
     """
-    if messages is None:
-        rows = conn.execute(
-            "SELECT id, content, sender, recipient, timestamp FROM messages ORDER BY id"
-        ).fetchall()
-        messages = [
-            {"id": r[0], "content": r[1], "sender": r[2], "recipient": r[3], "timestamp": r[4]}
-            for r in rows
-        ]
+    return _build_streamed_vectors(conn, messages, table_name=table_name, txn_batch=txn_batch,
+                                   separation=True)
 
-    if not messages:
-        return 0
 
-    tbl = table_name or _active_sep_table(conn)
+# Suffix of the tables a re-embed builds before it replaces the served pair.
+_REEMBED_SUFFIX = "_reembed"
+# Metadata key prefix of a shadow's swap cursor: ids below it are swapped.
+_REEMBED_PROGRESS_PREFIX = "vec_reembed_swapped:"
+# Ids one swap transaction replaces. On 100k synthetic memories one
+# transaction for the whole swap held the writer 50 s; batches of 1024 held
+# it 0.27 s (median), 1.0 s at most.
+_REEMBED_SWAP_BATCH = 1024
+# Pause after each swap batch, with the writer and model fence released.
+# SQLite's busy handler sleeps up to 100 ms between retries, so back-to-back
+# batches starved writers in other processes: on 100k memories a hook add
+# waited out the whole 31 s swap and failed "database is locked". With this
+# pause 2,099 adds overlapped a 33 s swap, max 153 ms, 0 errors.
+_REEMBED_SWAP_PAUSE_SECONDS = 0.1
 
-    # Resume vs. fresh build — same durability contract as build_vectors
-    # (issue #647, M-21 + M-45). Marker + DELETE land atomically; batched
-    # commits below release the write lock during the run (#619 treatment).
-    resume_after = 0
-    if _build_in_progress(conn, tbl):
-        try:
-            resume_after = conn.execute(
-                f"SELECT MAX(rowid) FROM {tbl}"
-            ).fetchone()[0] or 0
-        except sqlite3.OperationalError:
-            resume_after = 0
-    if resume_after > 0:
-        messages = [m for m in messages if m["id"] > resume_after]
-        if not messages:
-            _clear_build_in_progress(conn, tbl)
-            _write_embedder_metadata(conn)
-            return 0
-    else:
-        conn.execute(f"DELETE FROM {tbl}")
-        _mark_build_in_progress(conn, tbl)
-        conn.commit()  # DELETE + marker land atomically
 
-    model = get_model()
-    batch_size = _get_batch_size()
-    commit_every = txn_batch if txn_batch is not None else _BUILD_VECTORS_TXN_BATCH
-    total = 0
-    batches_since_commit = 0
+def _complete_shadow(conn: sqlite3.Connection, shadow: str, identity: tuple[str, int]):
+    """The shadow's finished build manifest for ``identity``, if no row it covers changed since."""
+    from truememory.rebuild_source import RebuildSourceChanged, load_manifest, manifest_key
 
+    manifest = load_manifest(conn, manifest_key((shadow,)))
+    if (manifest is None or not manifest.complete or manifest.source is None
+            or (manifest.model, manifest.dimension) != identity):
+        return None
     try:
-        import torch
-        no_grad = torch.no_grad()
-    except ImportError:
-        from contextlib import nullcontext
-        no_grad = nullcontext()
+        manifest.source.check(conn)  # Only appends since it was captured.
+    except RebuildSourceChanged:
+        return None
+    return manifest
 
-    with no_grad:
-        for start in range(0, len(messages), batch_size):
-            batch = messages[start : start + batch_size]
 
-            texts = []
-            ids = []
-            for m in batch:
-                sep_text = _build_sep_text(
-                    m.get("sender", "?"), m.get("recipient", "?"),
-                    m.get("timestamp", "?"), m["content"],
-                )
-                texts.append(sep_text)
-                ids.append(m["id"])
+def _swap_shadow(conn: sqlite3.Connection, table: str, shadow: str) -> None:
+    """Replace the served rows a complete shadow covers, _REEMBED_SWAP_BATCH ids per writer transaction.
 
-            embeddings = _encode_with_mps_fallback(model, texts, show_progress_bar=False)
+    Each memory keeps a vector throughout: the old one until its batch, the
+    new one after. The batch cursor is stored with each batch, so an
+    interrupted swap continues where it stopped.
+    """
+    from truememory.rebuild_source import RebuildSourceChanged, rebuild_transaction
 
-            rows_to_insert = []
-            for mid, emb in zip(ids, embeddings):
-                normed = _normalize_for_cosine(emb)
-                if normed is None:
-                    logger.warning(
-                        "Skipping separation vector for message %s: "
-                        "zero-norm/non-finite embedding (undefined cosine)", mid,
-                    )
-                    continue
-                rows_to_insert.append((mid, serialize_f32(normed)))
-            if rows_to_insert:
-                conn.executemany(
-                    f"INSERT INTO {tbl}(rowid, embedding) VALUES (?, ?)",
-                    rows_to_insert,
-                )
+    progress = _REEMBED_PROGRESS_PREFIX + shadow
+    row = conn.execute("SELECT value FROM metadata WHERE key = ?", (progress,)).fetchone()
+    start = int(row[0]) if row is not None else 0
+    while True:
+        with _lock:
+            identity = (_model_generation, EMBEDDING_MODEL, _embedding_dim)
+        # The model fence is taken before the writer, so waiting for it holds no lock.
+        with _foreground_model_fence(identity, blocking=True), rebuild_transaction(conn, write=True):
+            manifest = _complete_shadow(conn, shadow, identity[1:])
+            if manifest is None:
+                raise RebuildSourceChanged("Re-embed source changed before it was published; run it again")
+            high = manifest.source.high_id
+            if high is None or start > high:
+                return
+            end = min(start + _REEMBED_SWAP_BATCH, high + 1)
+            ids = [row[0] for row in conn.execute("SELECT id FROM messages WHERE id >= ? AND id < ?", (start, end))]
+            conn.executemany(f'DELETE FROM main."{table}" WHERE rowid = ?', [(mid,) for mid in ids])
+            for mid in ids:
+                vector = conn.execute(f'SELECT embedding FROM main."{shadow}" WHERE rowid = ?', (mid,)).fetchone()
+                if vector is not None:  # None: a non-finite embedding the build skipped.
+                    conn.execute(f'INSERT INTO main."{table}"(rowid, embedding) VALUES (?, ?)', (mid, vector[0]))
+            conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", (progress, str(end)))
+        start = end
+        time.sleep(_REEMBED_SWAP_PAUSE_SECONDS)
 
-            total += len(rows_to_insert)
-            batches_since_commit += 1
-            del embeddings
-            _flush_mps_cache()
 
-            if batches_since_commit >= commit_every:
-                conn.commit()
-                batches_since_commit = 0
+def reembed_served_vectors(conn: sqlite3.Connection, *, mark: tuple[str, str] | None = None) -> int:
+    """Re-embed every memory of the served pair without ever emptying it, resumably.
 
-    # Final commit: clear the in-progress marker + stamp embedder metadata
-    # atomically (issue #647).
-    _clear_build_in_progress(conn, tbl)
-    _write_embedder_metadata_no_commit(conn)
+    Each served table's replacement is built in a shadow vec0 table with the
+    same definition; build_vectors resumes a shadow that an interrupted run
+    left. The served rows are then replaced in short batches (_swap_shadow),
+    and a last transaction drops the shadows and writes the ``mark``
+    metadata row. Searches use the old vectors until their batch, and
+    memories added meanwhile keep the vectors their add stored.
+    """
+    from truememory.rebuild_source import manifest_key, rebuild_transaction
+
+    pairs = []
+    for table, builder in ((_active_vec_table(conn), build_vectors),
+                           (_active_sep_table(conn), build_separation_vectors)):
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+        if row is None or " USING " not in row[0].upper():
+            raise RuntimeError("Re-embed requires the served vector tables; initialize them first")
+        shadow = table + _REEMBED_SUFFIX
+        # Both shadows exist before either build: a build's manifest is bound
+        # to the schema version, so later DDL would restart it.
+        conn.execute(f'CREATE VIRTUAL TABLE IF NOT EXISTS main."{shadow}"'
+                     f'{row[0][row[0].upper().index(" USING "):]}')
+        pairs.append((table, shadow, builder))
     conn.commit()
+    total = 0
+    for _, shadow, builder in pairs:
+        with _lock:
+            identity = (EMBEDDING_MODEL, _embedding_dim)
+        if _complete_shadow(conn, shadow, identity) is None:
+            # A new generation: no batch of it was swapped yet.
+            conn.execute("DELETE FROM metadata WHERE key = ?", (_REEMBED_PROGRESS_PREFIX + shadow,))
+            conn.commit()
+            total += builder(conn, table_name=shadow)
+    for table, shadow, _ in pairs:
+        _swap_shadow(conn, table, shadow)
+    with rebuild_transaction(conn, write=True):
+        for _, shadow, _ in pairs:
+            conn.execute(f'DROP TABLE main."{shadow}"')
+            conn.execute("DELETE FROM metadata WHERE key IN (?, ?)",
+                         (manifest_key((shadow,)), _REEMBED_PROGRESS_PREFIX + shadow))
+        if mark is not None:
+            conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES (?, ?)", mark)
     return total
 
 
@@ -1159,6 +2158,7 @@ def _build_sep_text(sender: str, recipient: str, timestamp: str, content: str) -
     )
 
 
+@database_operation
 def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> None:
     """
     Embed a single message and insert into ``vec_messages`` and ``vec_messages_sep``.
@@ -1173,50 +2173,47 @@ def embed_single(conn: sqlite3.Connection, message_id: int, content: str) -> Non
         message_id: The ``messages.id`` of the row being embedded.
         content:    The text to embed.
     """
-    model = get_model()
-    embedding = _encode_with_mps_fallback(model, [content])[0]  # shape (dim,)
+    from truememory.tier_switch.writer import capture_writer_selection
+    write_selection = capture_writer_selection(conn)
+    model, identity = _capture_rebuild_model(conn)
+    embedding = _encode_with_mps_fallback(model, [content])[0]
     normed = _normalize_for_cosine(embedding)
     if normed is None:
-        # Zero/NaN vector has undefined cosine — skip rather than poison the
-        # cosine table with NULL distances (C2-8).
-        logger.warning(
-            "Skipping message %d: zero-norm/non-finite embedding "
-            "(undefined cosine)", message_id,
-        )
+        logger.warning("Skipping undefined cosine embedding during incremental publication")
         return
-    vec_tbl = _active_vec_table(conn)
-    conn.execute(
-        f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)",
-        (message_id, serialize_f32(normed)),
-    )
-
+    completion = serialize_f32(normed)
+    separation = None
     try:
         row = conn.execute(
-            "SELECT sender, recipient, timestamp FROM messages WHERE id = ?",
-            (message_id,),
+            "SELECT sender, recipient, timestamp FROM messages WHERE id = ?", (message_id,),
         ).fetchone()
         if row:
             sep_text = _build_sep_text(row[0], row[1], row[2], content)
             sep_embedding = _encode_with_mps_fallback(model, [sep_text])[0]
             sep_normed = _normalize_for_cosine(sep_embedding)
-            if sep_normed is None:
-                logger.warning(
-                    "Skipping separation vector for message %d: "
-                    "zero-norm/non-finite embedding (undefined cosine)",
-                    message_id,
-                )
-                return
-            sep_tbl = _active_sep_table(conn)
-            conn.execute(
-                f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)",
-                (message_id, serialize_f32(sep_normed)),
-            )
-    except Exception:
-        logger.warning("Failed to create separation vector for message %d", message_id, exc_info=True)
-    _write_embedder_metadata(conn)
-    # Caller is responsible for committing
+            if sep_normed is not None:
+                separation = serialize_f32(sep_normed)
+    except Exception as _serving_error:
+        if "_LOCAL_MEMORY_POLICY" in globals():
+            from truememory.memory_budget import InvalidAllocationPlan, MemoryAdmissionRefused, StaleBudgetOwner
+            if isinstance(_serving_error, (MemoryAdmissionRefused, StaleBudgetOwner, InvalidAllocationPlan)):
+                raise
+        from truememory.tier_switch.runtime import raise_if_serving_rejection
+        raise_if_serving_rejection(_serving_error)
+        logger.warning("Failed to prepare separation vector during incremental publication", exc_info=True)
+    with _foreground_vector_publication(conn, identity, message_id, selection=write_selection) as (vec_tbl, sep_tbl):
+        conn.execute(f"INSERT INTO {vec_tbl}(rowid, embedding) VALUES (?, ?)", (message_id, completion))
+        if separation is not None:
+            try:
+                conn.execute(f"INSERT INTO {sep_tbl}(rowid, embedding) VALUES (?, ?)", (message_id, separation))
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
+                logger.warning("Failed to create separation vector during incremental publication", exc_info=True)
+        _write_foreground_embedder_metadata_no_commit(conn, identity, selection=write_selection)
 
 
+@database_operation
 def search_vector_separation(
     conn: sqlite3.Connection,
     query: str,
@@ -1333,61 +2330,63 @@ def _rebuild_table_as_cosine(conn: sqlite3.Connection, table_name: str) -> int:
 
     Returns the number of vectors carried over.
     """
-    dim = _detect_existing_vec_dim(conn, table_name)
-    if dim is None:
-        return 0
+    from truememory.tier_switch.runtime import legacy_vector_mutation
+    with legacy_vector_mutation(conn):
+        dim = _detect_existing_vec_dim(conn, table_name)
+        if dim is None:
+            return 0
 
-    stage = f"{table_name}_cos_stage"
-    stage_done = f"{stage}_done"
-    fmt = f"{dim}f"
+        stage = f"{table_name}_cos_stage"
+        stage_done = f"{stage}_done"
+        fmt = f"{dim}f"
 
-    # Phase 1: copy normalized vectors into a durable plain staging table.
-    # D1-2 crash-safety: a separate "done" marker row is written in the SAME
-    # commit as the staged rows. An interrupted stage (crash mid-copy) leaves an
-    # empty/partial stage with NO done marker, so resume can tell it apart from a
-    # complete stage and re-stage from the still-intact original instead of
-    # swapping an empty stage over it and losing every vector.
-    conn.execute(f"DROP TABLE IF EXISTS {stage}")
-    conn.execute(f"DROP TABLE IF EXISTS {stage_done}")
-    conn.execute(
-        f"CREATE TABLE {stage} (rowid INTEGER PRIMARY KEY, embedding BLOB)"
-    )
-    conn.execute(f"CREATE TABLE {stage_done} (done INTEGER PRIMARY KEY)")
-    rows = conn.execute(
-        f"SELECT rowid, embedding FROM {table_name}"
-    ).fetchall()
-    skipped = 0
-    staged = 0
-    for rowid, blob in rows:
-        if blob is None or len(blob) != dim * 4:
-            skipped += 1
-            continue
-        normed = _normalize_for_cosine(struct.unpack(fmt, blob))
-        if normed is None:
-            skipped += 1
-            continue
+        # Phase 1: copy normalized vectors into a durable plain staging table.
+        # D1-2 crash-safety: a separate "done" marker row is written in the SAME
+        # commit as the staged rows. An interrupted stage (crash mid-copy) leaves an
+        # empty/partial stage with NO done marker, so resume can tell it apart from a
+        # complete stage and re-stage from the still-intact original instead of
+        # swapping an empty stage over it and losing every vector.
+        conn.execute(f"DROP TABLE IF EXISTS {stage}")
+        conn.execute(f"DROP TABLE IF EXISTS {stage_done}")
         conn.execute(
-            f"INSERT INTO {stage}(rowid, embedding) VALUES (?, ?)",
-            (rowid, serialize_f32(normed)),
+            f"CREATE TABLE {stage} (rowid INTEGER PRIMARY KEY, embedding BLOB)"
         )
-        staged += 1
-    # Mark staging complete in the SAME transaction as the staged rows, so the
-    # marker is durable iff every row is.
-    conn.execute(f"INSERT INTO {stage_done}(done) VALUES (1)")
-    conn.commit()  # staged rows + completeness marker durable before we touch the original
+        conn.execute(f"CREATE TABLE {stage_done} (done INTEGER PRIMARY KEY)")
+        rows = conn.execute(
+            f"SELECT rowid, embedding FROM {table_name}"
+        ).fetchall()
+        skipped = 0
+        staged = 0
+        for rowid, blob in rows:
+            if blob is None or len(blob) != dim * 4:
+                skipped += 1
+                continue
+            normed = _normalize_for_cosine(struct.unpack(fmt, blob))
+            if normed is None:
+                skipped += 1
+                continue
+            conn.execute(
+                f"INSERT INTO {stage}(rowid, embedding) VALUES (?, ?)",
+                (rowid, serialize_f32(normed)),
+            )
+            staged += 1
+        # Mark staging complete in the SAME transaction as the staged rows, so the
+        # marker is durable iff every row is.
+        conn.execute(f"INSERT INTO {stage_done}(done) VALUES (1)")
+        conn.commit()  # staged rows + completeness marker durable before we touch the original
 
-    # Phase 2: replace the vec0 table with a cosine one and refill it.
-    carried = _finish_cosine_swap(conn, table_name, dim)
+        # Phase 2: replace the vec0 table with a cosine one and refill it.
+        carried = _finish_cosine_swap(conn, table_name, dim)
 
-    if skipped:
-        logger.warning(
-            "Cosine migration for %s dropped %d zero-norm/invalid vector(s)",
-            table_name, skipped,
+        if skipped:
+            logger.warning(
+                "Cosine migration for %s dropped %d zero-norm/invalid vector(s)",
+                table_name, skipped,
+            )
+        logger.info(
+            "Rebuilt %s as cosine (%d vectors carried over)", table_name, carried
         )
-    logger.info(
-        "Rebuilt %s as cosine (%d vectors carried over)", table_name, carried
-    )
-    return carried
+        return carried
 
 
 def _finish_cosine_swap(
@@ -1398,24 +2397,26 @@ def _finish_cosine_swap(
     Assumes ``{table_name}_cos_stage`` exists and is populated. Idempotent /
     resumable: safe to call after a crash that left the staging table behind.
     """
-    stage = f"{table_name}_cos_stage"
-    conn.execute(f"DROP TABLE IF EXISTS {table_name}")
-    conn.execute(
-        f"CREATE VIRTUAL TABLE {table_name} USING vec0({_vec0_column_decl(dim)})"
-    )
-    carried = 0
-    staged_rows = conn.execute(
-        f"SELECT rowid, embedding FROM {stage}"
-    ).fetchall()
-    if staged_rows:
-        conn.executemany(
-            f"INSERT INTO {table_name}(rowid, embedding) VALUES (?, ?)",
-            staged_rows,
+    from truememory.tier_switch.runtime import legacy_vector_mutation
+    with legacy_vector_mutation(conn):
+        stage = f"{table_name}_cos_stage"
+        conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+        conn.execute(
+            f"CREATE VIRTUAL TABLE {table_name} USING vec0({_vec0_column_decl(dim)})"
         )
-        carried = len(staged_rows)
-    conn.execute(f"DROP TABLE IF EXISTS {stage}")
-    conn.execute(f"DROP TABLE IF EXISTS {stage}_done")
-    return carried
+        carried = 0
+        staged_rows = conn.execute(
+            f"SELECT rowid, embedding FROM {stage}"
+        ).fetchall()
+        if staged_rows:
+            conn.executemany(
+                f"INSERT INTO {table_name}(rowid, embedding) VALUES (?, ?)",
+                staged_rows,
+            )
+            carried = len(staged_rows)
+        conn.execute(f"DROP TABLE IF EXISTS {stage}")
+        conn.execute(f"DROP TABLE IF EXISTS {stage}_done")
+        return carried
 
 
 def migrate_to_cosine_metric(conn: sqlite3.Connection) -> bool:
@@ -1432,67 +2433,69 @@ def migrate_to_cosine_metric(conn: sqlite3.Connection) -> bool:
     """
     # Ensure the extension is loaded (callers from engine.open already load it,
     # but init_vec_table is the common entry and loads it just above).
-    try:
-        import sqlite_vec
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
-    except Exception:
-        # If the extension cannot load, there are no vec0 tables to migrate.
-        return False
+    from truememory.tier_switch.runtime import legacy_vector_mutation
+    with legacy_vector_mutation(conn):
+        try:
+            import sqlite_vec
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+        except Exception:
+            # If the extension cannot load, there are no vec0 tables to migrate.
+            return False
 
-    migrated = False
-    for table in _KNOWN_VEC_TABLES:
-        stage = f"{table}_cos_stage"
-        has_stage = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE name = ? AND type='table'",
-            (stage,),
-        ).fetchone()
-        if has_stage:
-            # A prior run was interrupted between staging and swap. Only finish
-            # the swap if the staging completed durably (the "done" marker is
-            # present); otherwise the stage is empty/partial and the ORIGINAL
-            # table is still intact, so drop the partial stage and re-stage from
-            # scratch below rather than swapping an empty stage over the original
-            # and losing every vector (D1-2).
-            stage_done = f"{stage}_done"
-            stage_complete = bool(
-                conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE name = ? AND type='table'",
-                    (stage_done,),
-                ).fetchone()
-                and conn.execute(f"SELECT 1 FROM {stage_done} LIMIT 1").fetchone()
-            )
-            if stage_complete:
-                dim = (
-                    _detect_existing_vec_dim(conn, table)
-                    or _detect_existing_vec_dim(conn, stage)
-                    or _embedding_dim
+        migrated = False
+        for table in _KNOWN_VEC_TABLES:
+            stage = f"{table}_cos_stage"
+            has_stage = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = ? AND type='table'",
+                (stage,),
+            ).fetchone()
+            if has_stage:
+                # A prior run was interrupted between staging and swap. Only finish
+                # the swap if the staging completed durably (the "done" marker is
+                # present); otherwise the stage is empty/partial and the ORIGINAL
+                # table is still intact, so drop the partial stage and re-stage from
+                # scratch below rather than swapping an empty stage over the original
+                # and losing every vector (D1-2).
+                stage_done = f"{stage}_done"
+                stage_complete = bool(
+                    conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE name = ? AND type='table'",
+                        (stage_done,),
+                    ).fetchone()
+                    and conn.execute(f"SELECT 1 FROM {stage_done} LIMIT 1").fetchone()
                 )
-                _finish_cosine_swap(conn, table, dim)
+                if stage_complete:
+                    dim = (
+                        _detect_existing_vec_dim(conn, table)
+                        or _detect_existing_vec_dim(conn, stage)
+                        or _embedding_dim
+                    )
+                    _finish_cosine_swap(conn, table, dim)
+                    conn.commit()
+                    migrated = True
+                    continue
+                # Incomplete stage from an interrupted copy — discard it and fall
+                # through to a fresh rebuild from the intact original table.
+                conn.execute(f"DROP TABLE IF EXISTS {stage}")
+                conn.execute(f"DROP TABLE IF EXISTS {stage_done}")
                 conn.commit()
-                migrated = True
+
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = ? AND type='table'",
+                (table,),
+            ).fetchone()
+            if not exists:
                 continue
-            # Incomplete stage from an interrupted copy — discard it and fall
-            # through to a fresh rebuild from the intact original table.
-            conn.execute(f"DROP TABLE IF EXISTS {stage}")
-            conn.execute(f"DROP TABLE IF EXISTS {stage_done}")
+            if _table_uses_cosine(conn, table):
+                continue
+            _rebuild_table_as_cosine(conn, table)
+            migrated = True
+
+        if migrated:
             conn.commit()
-
-        exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE name = ? AND type='table'",
-            (table,),
-        ).fetchone()
-        if not exists:
-            continue
-        if _table_uses_cosine(conn, table):
-            continue
-        _rebuild_table_as_cosine(conn, table)
-        migrated = True
-
-    if migrated:
-        conn.commit()
-    return migrated
+        return migrated
 
 
 # ---------------------------------------------------------------------------
@@ -1512,82 +2515,84 @@ def migrate_legacy_vec_tables(conn: sqlite3.Connection) -> bool:
 
     Returns True if migration occurred, False if nothing to migrate.
     """
-    from truememory.tier_switch.cache import VectorCacheRegistry
+    from truememory.tier_switch.runtime import legacy_vector_mutation
+    with legacy_vector_mutation(conn):
+        from truememory.tier_switch.cache import VectorCacheRegistry
 
-    has_old = conn.execute(
-        "SELECT name FROM sqlite_master WHERE name='vec_messages' AND type='table'"
-    ).fetchone()
-    if not has_old:
-        return False
-
-    stored_model, _ = _read_embedder_metadata(conn)
-    group = _MODEL_TO_GROUP.get(stored_model, "edge")
-    if group not in _VALID_GROUPS:
-        group = "edge"
-
-    new_vec = f"vec_messages_{group}"
-    new_sep = f"vec_messages_sep_{group}"
-
-    count = conn.execute("SELECT COUNT(*) FROM vec_messages").fetchone()[0]
-    if count == 0:
-        has_tiered = conn.execute(
-            "SELECT name FROM sqlite_master WHERE name=? AND type='table'",
-            (new_vec,),
+        has_old = conn.execute(
+            "SELECT name FROM sqlite_master WHERE name='vec_messages' AND type='table'"
         ).fetchone()
-        if not has_tiered:
+        if not has_old:
             return False
-        conn.execute("DROP TABLE IF EXISTS vec_messages")
-        conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
-        conn.commit()
+
+        stored_model, _ = _read_embedder_metadata(conn)
+        group = _MODEL_TO_GROUP.get(stored_model, "edge")
+        if group not in _VALID_GROUPS:
+            group = "edge"
+
+        new_vec = f"vec_messages_{group}"
+        new_sep = f"vec_messages_sep_{group}"
+
+        count = conn.execute("SELECT COUNT(*) FROM vec_messages").fetchone()[0]
+        if count == 0:
+            has_tiered = conn.execute(
+                "SELECT name FROM sqlite_master WHERE name=? AND type='table'",
+                (new_vec,),
+            ).fetchone()
+            if not has_tiered:
+                return False
+            conn.execute("DROP TABLE IF EXISTS vec_messages")
+            conn.execute("DROP TABLE IF EXISTS vec_messages_sep")
+            conn.commit()
+            return True
+
+        dim = _detect_existing_vec_dim(conn, "vec_messages") or 256
+
+        import sqlite_vec
+
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+
+        conn.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {new_vec} "
+            f"USING vec0({_vec0_column_decl(dim)})"
+        )
+        conn.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {new_sep} "
+            f"USING vec0({_vec0_column_decl(dim)})"
+        )
+
+        conn.execute(f"INSERT INTO {new_vec} SELECT * FROM vec_messages")
+        try:
+            conn.execute(f"INSERT INTO {new_sep} SELECT * FROM vec_messages_sep")
+        except sqlite3.OperationalError:
+            pass
+
+        conn.execute("DROP TABLE vec_messages")
+        try:
+            conn.execute("DROP TABLE vec_messages_sep")
+        except sqlite3.OperationalError:
+            pass
+
+        max_id = conn.execute(
+            f"SELECT MAX(rowid) FROM {new_vec}"
+        ).fetchone()[0] or 0
+
+        model_map = {"edge": "potion-base-8M", "basepro": "Qwen3-Embedding-0.6B"}
+        VectorCacheRegistry.set(
+            conn,
+            group,
+            vec_table=new_vec,
+            sep_table=new_sep,
+            last_embedded_id=max_id,
+            vector_count=count,
+            model_name=model_map.get(group, "potion-base-8M"),
+            embedding_dim=dim,
+        )
+
+        logger.info(
+            "Migrated %d vectors from vec_messages → %s (group=%s)",
+            count, new_vec, group,
+        )
         return True
-
-    dim = _detect_existing_vec_dim(conn, "vec_messages") or 256
-
-    import sqlite_vec
-
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
-
-    conn.execute(
-        f"CREATE VIRTUAL TABLE IF NOT EXISTS {new_vec} "
-        f"USING vec0({_vec0_column_decl(dim)})"
-    )
-    conn.execute(
-        f"CREATE VIRTUAL TABLE IF NOT EXISTS {new_sep} "
-        f"USING vec0({_vec0_column_decl(dim)})"
-    )
-
-    conn.execute(f"INSERT INTO {new_vec} SELECT * FROM vec_messages")
-    try:
-        conn.execute(f"INSERT INTO {new_sep} SELECT * FROM vec_messages_sep")
-    except sqlite3.OperationalError:
-        pass
-
-    conn.execute("DROP TABLE vec_messages")
-    try:
-        conn.execute("DROP TABLE vec_messages_sep")
-    except sqlite3.OperationalError:
-        pass
-
-    max_id = conn.execute(
-        f"SELECT MAX(rowid) FROM {new_vec}"
-    ).fetchone()[0] or 0
-
-    model_map = {"edge": "potion-base-8M", "basepro": "Qwen3-Embedding-0.6B"}
-    VectorCacheRegistry.set(
-        conn,
-        group,
-        vec_table=new_vec,
-        sep_table=new_sep,
-        last_embedded_id=max_id,
-        vector_count=count,
-        model_name=model_map.get(group, "potion-base-8M"),
-        embedding_dim=dim,
-    )
-
-    logger.info(
-        "Migrated %d vectors from vec_messages → %s (group=%s)",
-        count, new_vec, group,
-    )
-    return True

@@ -14,6 +14,75 @@ from pathlib import Path
 from truememory.hooks.adapters.base import CLIAdapter
 
 
+_HOOK_MODULES = {
+    "SessionStart": "truememory.ingest.hooks.session_start",
+    "UserPromptSubmit": "truememory.ingest.hooks.user_prompt_submit",
+    "SessionEnd": "truememory.ingest.hooks.stop",
+    "Stop": "truememory.ingest.hooks.stop",
+    "PreCompact": "truememory.ingest.hooks.compact",
+}
+
+
+def claude_hook_settings(python_path: str, user_id: str = "", db_path: str = "", *,
+                         preserve_stop: bool = False) -> dict:
+    import shlex
+    import subprocess
+    events = ["SessionStart", "UserPromptSubmit", "SessionEnd", "PreCompact"]
+    if preserve_stop or os.environ.get("TRUEMEMORY_CLAUDE_STOP_FALLBACK") == "1":
+        events.append("Stop")
+    settings = {"hooks": {}}
+    for event in events:
+        parts = [python_path, "-m", _HOOK_MODULES[event], "--host", "claude", "--event", event]
+        if user_id:
+            parts.extend(["--user", user_id])
+        if db_path:
+            parts.extend(["--db", db_path])
+        command = subprocess.list2cmdline(parts) if sys.platform == "win32" else " ".join(shlex.quote(part) for part in parts)
+        settings["hooks"][event] = [{"matcher": "", "hooks": [{"type": "command", "command": command}]}]
+    return settings
+
+
+def _owned_hook_module(command: object, hooks_dir: Path, python_path: str) -> str | None:
+    import re
+    import shlex
+    if type(command) is not str:
+        return None
+    try:
+        parts = shlex.split(command, posix=sys.platform != "win32")
+        if sys.platform == "win32":
+            parts = [part[1:-1] if len(part) >= 2 and part[0] == part[-1] == '"' else part for part in parts]
+    except ValueError:
+        return None
+    if len(parts) < 2:
+        return None
+    executable = Path(parts[0]).name.lower()
+    if parts[0] != python_path and re.fullmatch(r"(?:python(?:[0-9]+(?:\.[0-9]+)*)?|py)(?:\.exe)?", executable) is None:
+        return None
+    modules = set(_HOOK_MODULES.values())
+    if len(parts) >= 3 and parts[1] == "-m" and parts[2] in modules:
+        module, tail = parts[2], parts[3:]
+    else:
+        scripts = {str((hooks_dir / (module.rsplit(".", 1)[1] + ".py")).resolve()): module for module in modules}
+        try:
+            module = scripts.get(str(Path(parts[1]).resolve()))
+        except (OSError, ValueError):
+            return None
+        tail = parts[2:]
+        if module is None:
+            return None
+    if len(tail) % 2 or any(tail[index] not in ("--user", "--db", "--host", "--event") for index in range(0, len(tail), 2)):
+        return None
+    return module
+
+
+def _group_has_module(group: object, module: str, hooks_dir: Path, python_path: str) -> bool:
+    if type(group) is not dict:
+        return False
+    commands = group.get("hooks", [group])
+    return type(commands) is list and any(type(hook) is dict and hook.get("type") == "command"
+        and _owned_hook_module(hook.get("command"), hooks_dir, python_path) == module for hook in commands)
+
+
 class ClaudeAdapter(CLIAdapter):
     """Adapter for Claude Code CLI."""
 
@@ -147,43 +216,8 @@ class ClaudeAdapter(CLIAdapter):
         if missing:
             raise FileNotFoundError(f"Missing hook files: {', '.join(missing)}")
 
-        import shlex
         py = python_path or sys.executable
-
-        _HOOK_MODULES = {
-            "session_start.py": "truememory.ingest.hooks.session_start",
-            "user_prompt_submit.py": "truememory.ingest.hooks.user_prompt_submit",
-            "stop.py": "truememory.ingest.hooks.stop",
-            "compact.py": "truememory.ingest.hooks.compact",
-        }
-
-        def _build_command(hook_path: Path) -> str:
-            module = _HOOK_MODULES.get(hook_path.name)
-            if module:
-                parts: list[str] = [py, "-m", module]
-            else:
-                parts = [py, str(hook_path)]
-            if user_id:
-                parts.extend(["--user", user_id])
-            if db_path:
-                parts.extend(["--db", db_path])
-            if sys.platform == "win32":
-                import subprocess as _sp
-                return _sp.list2cmdline(parts)
-            return " ".join(shlex.quote(p) for p in parts)
-
-        settings = {
-            "hooks": {
-                event: [{
-                    "matcher": "",
-                    "hooks": [{
-                        "type": "command",
-                        "command": _build_command(path),
-                    }],
-                }]
-                for event, path in hook_files.items()
-            }
-        }
+        settings = claude_hook_settings(py, user_id, db_path)
 
         # Merge into existing settings (preserves other config)
         settings_path = self.config_path
@@ -203,54 +237,34 @@ class ClaudeAdapter(CLIAdapter):
         if not isinstance(existing["hooks"], dict):
             existing["hooks"] = {}
 
-        # Migration: earlier versions of this installer registered the compact
-        # hook under the event name "compact", but Claude Code's canonical event
-        # name is "PreCompact". Any hook registered under "compact" is silently
-        # ignored by the runtime. Strip stale "compact" entries that point at
-        # our hook file so users upgrading from 0.1.0 don't end up with dead
-        # config alongside the correct PreCompact entry.
-        _legacy_compact = existing["hooks"].get("compact")
-        if isinstance(_legacy_compact, list):
-            _cleaned = [
-                h for h in _legacy_compact
-                if not (
-                    isinstance(h, dict)
-                    and "truememory" in str(h.get("command", "")).lower()
-                )
-            ]
-            if _cleaned:
-                existing["hooks"]["compact"] = _cleaned
+        # Only exact owned commands migrate from the unsupported event. Foreign
+        # hooks remain untouched, including commands mentioning TrueMemory.
+        legacy = existing["hooks"].get("compact")
+        if isinstance(legacy, list):
+            cleaned = []
+            for group in legacy:
+                if not isinstance(group, dict):
+                    cleaned.append(group)
+                    continue
+                if "hooks" in group and isinstance(group["hooks"], list):
+                    inner = [hook for hook in group["hooks"] if not (
+                        isinstance(hook, dict) and hook.get("type") == "command"
+                        and _owned_hook_module(hook.get("command"), hooks_dir, py) == _HOOK_MODULES["PreCompact"])]
+                    if inner:
+                        cleaned.append({**group, "hooks": inner})
+                elif not _group_has_module(group, _HOOK_MODULES["PreCompact"], hooks_dir, py):
+                    cleaned.append(group)
+            if cleaned:
+                existing["hooks"]["compact"] = cleaned
             else:
-                del existing["hooks"]["compact"]
-            if len(_cleaned) != len(_legacy_compact):
-                print(
-                    "  Migrated legacy 'compact' hook entry to 'PreCompact' "
-                    "(earlier versions registered the wrong event name)."
-                )
+                existing["hooks"].pop("compact", None)
 
-        # Migration: earlier versions wired the transcript extraction hook to
-        # Claude Code's "Stop" event, but "Stop" fires after every assistant
-        # response (per-turn), not once at session end. The correct event is
-        # "SessionEnd". Strip stale "Stop" entries that point at our hook file
-        # so upgrading users don't get double-fires.
-        _legacy_stop = existing["hooks"].get("Stop")
-        if isinstance(_legacy_stop, list):
-            _cleaned = [
-                h for h in _legacy_stop
-                if not (
-                    isinstance(h, dict)
-                    and "truememory" in str(h.get("command", "")).lower()
-                )
-            ]
-            if _cleaned:
-                existing["hooks"]["Stop"] = _cleaned
-            else:
-                del existing["hooks"]["Stop"]
-            if len(_cleaned) != len(_legacy_stop):
-                print(
-                    "  Migrated truememory extraction hook from 'Stop' (per-turn) "
-                    "to 'SessionEnd' (per-session)."
-                )
+        # A supported Stop fallback may already be the only firing trigger on
+        # a host. Preserve it while always installing SessionEnd as default.
+        prior_stop = existing["hooks"].get("Stop", [])
+        viable_stop = isinstance(prior_stop, list) and any(
+            _group_has_module(group, _HOOK_MODULES["Stop"], hooks_dir, py) for group in prior_stop)
+        settings = claude_hook_settings(py, user_id, db_path, preserve_stop=viable_stop)
 
         # Migration: earlier versions wrote hooks in the flat format
         # {type, command} instead of the required {matcher, hooks: [{type, command}]}.
@@ -278,34 +292,33 @@ class ClaudeAdapter(CLIAdapter):
                 existing["hooks"][event] = migrated
                 print(f"  Migrated '{event}' hook entries from old format to new {{matcher, hooks}} schema.")
 
-        for event, hooks in settings["hooks"].items():
-            existing["hooks"].setdefault(event, [])
-            if not isinstance(existing["hooks"][event], list):
-                existing["hooks"][event] = []
-            # Don't add duplicates. Match on the "truememory" substring rather
-            # than the absolute .py file path: _build_command emits module-form
-            # commands ("-m truememory.ingest.hooks.X"), so the .py path never
-            # appears in the command and the old check matched nothing — every
-            # re-install appended another entry. The "truememory" needle is the
-            # same one the migration/uninstall code already uses, keeping
-            # install idempotent across upgrades.
-            for hook in hooks:
-                already_present = False
-                for h in existing["hooks"][event]:
-                    if not isinstance(h, dict):
-                        continue
-                    inner_hooks = h.get("hooks", [])
-                    if isinstance(inner_hooks, list):
-                        for ih in inner_hooks:
-                            if isinstance(ih, dict) and "truememory" in str(ih.get("command", "")).lower():
-                                already_present = True
-                                break
-                    if "truememory" in str(h.get("command", "")).lower():
-                        already_present = True
-                    if already_present:
-                        break
-                if not already_present:
-                    existing["hooks"][event].append(hook)
+        for event, desired_groups in settings["hooks"].items():
+            entries = existing["hooks"].get(event, [])
+            if not isinstance(entries, list):
+                entries = []
+            module = _HOOK_MODULES[event]
+            desired = desired_groups[0]["hooks"][0]
+            merged = []
+            replaced = False
+            for group in entries:
+                if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                    merged.append(group)
+                    continue
+                inner = []
+                for hook in group["hooks"]:
+                    owned = (isinstance(hook, dict) and hook.get("type") == "command"
+                             and _owned_hook_module(hook.get("command"), hooks_dir, py) == module)
+                    if owned:
+                        if not replaced:
+                            inner.append({**hook, "command": desired["command"]})
+                            replaced = True
+                    else:
+                        inner.append(hook)
+                if inner:
+                    merged.append({**group, "hooks": inner})
+            if not replaced:
+                merged.extend(desired_groups)
+            existing["hooks"][event] = merged
 
         settings_tmp = settings_path.with_suffix(".json.tmp")
         settings_tmp.write_text(json.dumps(existing, indent=2), encoding="utf-8")

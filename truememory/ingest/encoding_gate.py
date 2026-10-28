@@ -61,6 +61,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from truememory.memory_budget import LocalMemoryPolicy
+
 # Shared correction/update marker vocabulary (issue #649) — single source
 # of truth used by BOTH this gate and the dedup stage so the two never
 # disagree about what counts as a correction.
@@ -68,6 +70,8 @@ from truememory.ingest.markers import (
     UPDATE_MARKERS as _CONTRADICTION_MARKERS,  # noqa: F401  (exported; shared vocab)
     has_update_markers as _has_update_markers,
 )
+
+_LOCAL_MEMORY_POLICY = LocalMemoryPolicy()
 
 log = logging.getLogger(__name__)
 
@@ -232,12 +236,23 @@ class EncodingGate:
         self._norm = total if total > 0 else 1.0
         self._last_search_results: list[dict] = []
         self._embed_model = None
+        self._serving_key = None
         self._pe_available: bool = True   # assume available until first failure
         self._pe_degradation_count: int = 0  # track PE failures for status (#585)
         self._batch_scores: list[float] = []
         self._batch_novelties: list[float] = []
         self._batch_saliences: list[float] = []
         self._batch_pes: list[float] = []
+
+    def _refresh_serving_generation(self) -> None:
+        import sys
+        runtime = sys.modules.get("truememory.tier_switch.runtime")
+        operation = runtime.current_runtime_operation() if runtime is not None else None
+        if operation is not None and getattr(self, "_serving_key", None) != operation.key:
+            self._embed_model = None
+            self._last_search_results = []
+            self._pe_available = True
+            self._serving_key = operation.key
 
     def evaluate(self, fact: str, category: str = "") -> EncodingDecision:
         """
@@ -252,6 +267,7 @@ class EncodingGate:
         """
         # Contradiction bypass: corrections are critical for memory accuracy
         # and must never be dropped by the gate (#585).
+        EncodingGate._refresh_serving_generation(self)
         is_contradiction = _is_contradiction(fact, category)
 
         novelty = self._compute_novelty(fact)
@@ -365,7 +381,9 @@ class EncodingGate:
         if hasattr(self.memory, "search_vectors"):
             try:
                 results = self.memory.search_vectors(fact, limit=10)
-            except Exception:
+            except Exception as _serving_error:
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(_serving_error)
                 pass
         if results is None:
             # search_vectors() fell back to the full pipeline (no vectors).
@@ -419,6 +437,8 @@ class EncodingGate:
             return max(0.05, novelty)
 
         except Exception as e:
+            from truememory.tier_switch.runtime import raise_if_serving_rejection
+            raise_if_serving_rejection(e)
             log.warning("Compression novelty failed: %s — returning neutral 0.5", e)
             return 0.5
 
@@ -485,6 +505,14 @@ class EncodingGate:
 
         Independent of novelty (r=0.30) and salience (r=0.23).
         """
+        configured_memory = "_LOCAL_MEMORY_POLICY" in globals()
+        if configured_memory:
+            from truememory.memory_budget import (
+                InvalidAllocationPlan, MemoryAdmissionRefused, ProfileKey, StaleBudgetOwner,
+                budgeted_encode_with_model_ownership, validate_local_policy,
+            )
+            validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
+        EncodingGate._refresh_serving_generation(self)
         if not fact or fact.lower().strip().rstrip("!?.… ") in _PE_NOISE:
             return 0.0
         if len(fact.strip()) < 3:
@@ -493,11 +521,20 @@ class EncodingGate:
         if not self._last_search_results:
             return 0.0
 
+        nearest = self._last_search_results[0]
+        mem_content = nearest.get("content", "")
+        if not mem_content:
+            return 0.0
+
         if self._embed_model is None:
             try:
                 from truememory.vector_search import get_model
                 self._embed_model = get_model()
             except Exception as e:
+                if configured_memory and isinstance(e, (MemoryAdmissionRefused, StaleBudgetOwner, InvalidAllocationPlan)):
+                    raise
+                from truememory.tier_switch.runtime import raise_if_serving_rejection
+                raise_if_serving_rejection(e)
                 # PE model failed to load — degrade open (#585)
                 if self._pe_available:
                     log.warning(
@@ -509,15 +546,18 @@ class EncodingGate:
                 return 0.0
         model = self._embed_model
 
-        nearest = self._last_search_results[0]
-        mem_content = nearest.get("content", "")
-        if not mem_content:
-            return 0.0
-
         try:
-            embeddings = model.encode([fact, mem_content,
-                                       fact + " [SEP] " + mem_content,
-                                       mem_content + " [SEP] " + mem_content])
+            from truememory.mps_utils import encode_with_model_ownership
+            texts = [fact, mem_content, fact + " [SEP] " + mem_content,
+                     mem_content + " [SEP] " + mem_content]
+            if configured_memory:
+                validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
+                embeddings = budgeted_encode_with_model_ownership(
+                    model, texts, ProfileKey("encoding gate prediction embedding", "local_embedding",
+                                             input_item_count=4),
+                )
+            else:
+                embeddings = encode_with_model_ownership(model, texts)
             emb_fact = embeddings[0]
             emb_mem = embeddings[1]
 
@@ -542,6 +582,10 @@ class EncodingGate:
             return pe
 
         except Exception as e:
+            if configured_memory and isinstance(e, (MemoryAdmissionRefused, StaleBudgetOwner, InvalidAllocationPlan)):
+                raise
+            from truememory.tier_switch.runtime import raise_if_serving_rejection
+            raise_if_serving_rejection(e)
             log.debug("PE embedding scorer failed: %s", e)
             # Runtime encode failure — mark PE as degraded (#585)
             if self._pe_available:
@@ -551,6 +595,10 @@ class EncodingGate:
             self._pe_available = False
             self._pe_degradation_count += 1
             return 0.0
+        finally:
+            # The process singleton remains the cache. A gate must not pin an
+            # old native model between facts while activation replaces it.
+            self._embed_model = None
 
     # ------------------------------------------------------------------
     # Helpers
@@ -575,6 +623,8 @@ class EncodingGate:
                     pass  # backing search() lacks the kwarg — fall through
             return self.memory.search(query, **kwargs)
         except Exception as e:
+            from truememory.tier_switch.runtime import raise_if_serving_rejection
+            raise_if_serving_rejection(e)
             log.warning("Memory search failed during encoding gate: %s", e)
             return []
 

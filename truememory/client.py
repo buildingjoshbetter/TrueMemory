@@ -53,12 +53,19 @@ class Memory:
               resolves to the ``TRUEMEMORY_ALPHA_SURPRISE`` env var
               (or 0.2). Set explicitly to ``0`` to disable.
               See MEMORIST-L5 research for rationale.
+        auto_maintenance: Start background work (maintenance passes, the
+              vector backfill, the Qwen3 NaN re-embed) from this instance.
+              Pass ``False`` in a process that exits right after its call,
+              such as a hook; a long-lived process (the MCP server, the
+              ingest pipeline) runs it instead.
     """
 
     def __init__(
         self,
         path: str | Path | None = None,
         alpha_surprise: float | None = None,
+        *,
+        auto_maintenance: bool = True,
     ):
         if path is None:
             path = _DEFAULT_DB
@@ -66,6 +73,7 @@ class Memory:
         self._engine = TrueMemoryEngine(
             db_path=db_path,
             alpha_surprise=alpha_surprise,
+            auto_maintenance=auto_maintenance,
         )
 
     # ------------------------------------------------------------------
@@ -120,9 +128,10 @@ class Memory:
             try:
                 from truememory.storage import find_directive_by_content
                 self._engine._ensure_connection()
-                existing_id = find_directive_by_content(
-                    self._engine.conn, content, sender=user_id or ""
-                )
+                with self._engine._write_lock:
+                    existing_id = find_directive_by_content(
+                        self._engine.conn, content, sender=user_id or ""
+                    )
             except Exception:
                 existing_id = None
             if existing_id is not None:
@@ -176,6 +185,7 @@ class Memory:
             query, limit=limit * 3 if user_id else limit,
             include_directives=include_directives,
             _skip_reranker=_skip_reranker,
+            **({"landmark_sender": user_id} if user_id else {}),
         )
 
         if user_id:
@@ -250,6 +260,7 @@ class Memory:
         results = self._engine.search_agentic(
             query, limit=limit * 3 if user_id else limit, llm_fn=llm_fn,
             include_directives=include_directives,
+            **({"landmark_sender": user_id} if user_id else {}),
         )
 
         if user_id:
@@ -259,6 +270,26 @@ class Memory:
             r["user_id"] = r.get("sender", "")
 
         return results[:limit]
+
+    def resolve_temporal_query(self, query: str, user_id: str | None = None) -> dict:
+        """Inspect date/landmark resolution without retrieving or inventing memories."""
+        from truememory.temporal import resolve_temporal_intent, _SOURCE_INTERVAL_ROW_LIMIT, _source_interval_candidates
+
+        self._engine._ensure_connection()
+        with self._engine._write_lock:
+            intent = resolve_temporal_intent(self._engine.conn, query, user_id)
+            diagnostic = None
+            if intent.get("after") or intent.get("before"):
+                _, diagnostic = _source_interval_candidates(self._engine.conn)
+        if intent.get("after") or intent.get("before"):
+            if diagnostic is not None:
+                intent["source_interval_coverage"] = diagnostic
+            intent["source_interval_lookup_policy"] = {
+                "candidate_limit": _SOURCE_INTERVAL_ROW_LIMIT,
+                "visited_row_limit": _SOURCE_INTERVAL_ROW_LIMIT + 1,
+                "overflow": "incomplete", "complete_archive": False,
+            }
+        return intent
 
     def get(self, memory_id: int) -> dict | None:
         """Retrieve a single memory by ID."""

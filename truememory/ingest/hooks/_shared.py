@@ -31,39 +31,117 @@ log = logging.getLogger(__name__)
 # compact hook only; it is hoisted here so stop.py and the SessionStart
 # backlog drain share the same check.
 
-def _transcript_roots() -> list[Path]:
-    """Directories a ``transcript_path`` is allowed to live under.
+def normalize_transcript_host(host: object) -> str:
+    """Validate the installed command identity; never infer it from stdin."""
+    if isinstance(host, str) and host in ("claude", "codex", "gemini", "cursor"):
+        return host
+    return ""
 
-    Defaults to Claude Code's ``~/.claude/projects``. An explicit
-    ``TRUEMEMORY_TRANSCRIPT_DIR`` override (tests / non-default installs) is
-    honored when set.
+
+def hook_session_id(payload: object, host: str = "claude", *, default: str = "unknown") -> str:
+    """Read native identity using the trusted host, retaining caller fallback."""
+    host = normalize_transcript_host(host)
+    if not host or not isinstance(payload, dict):
+        return default
+    keys = ("conversation_id", "session_id") if host == "cursor" else ("session_id",)
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip() and "\0" not in value:
+            return value.strip()
+    return default
+
+
+def transcript_input_path(value: object) -> str:
+    """Reject malformed source paths before any filesystem probe."""
+    if not isinstance(value, str) or not value.strip() or "\0" in value:
+        return ""
+    return value
+
+
+def _transcript_roots(host: str = "claude", transcript_path: str = "") -> list[Path]:
+    """Native transcript roots scoped to the trusted installed host.
+
+    Gemini's tmp directory also contains non-transcript state. Derive only
+    the candidate's single-workspace ``chats`` subtree after canonical
+    containment, without enumerating workspace directories.
     """
-    roots = [Path.home() / ".claude" / "projects"]
+    host = normalize_transcript_host(host)
+    if not host:
+        return []
+    roots: list[Path] = []
+    if host == "claude":
+        roots.append(Path.home() / ".claude" / "projects")
+    elif host == "codex":
+        codex_home = os.environ.get("CODEX_HOME", "")
+        roots.append((Path(codex_home) if codex_home else Path.home() / ".codex") / "sessions")
+    elif host == "gemini" and transcript_input_path(transcript_path):
+        gemini_home = os.environ.get("GEMINI_CLI_HOME", "")
+        home = Path(gemini_home) if gemini_home else Path.home()
+        runtime = home / ".gemini"
+        if os.environ.get("SANDBOX") == "sandbox-exec":
+            runtime = home / ".cache" / ".gemini"
+        try:
+            temp_root = (runtime / "tmp").resolve()
+            relative = Path(transcript_path).resolve().relative_to(temp_root)
+            if len(relative.parts) >= 3 and relative.parts[1] == "chats":
+                roots.append(temp_root / relative.parts[0] / "chats")
+        except (OSError, ValueError, RuntimeError):
+            pass
     override = os.environ.get("TRUEMEMORY_TRANSCRIPT_DIR", "")
     if override:
-        roots.insert(0, Path(override))
+        try:
+            override_root = Path(override).resolve()
+            # A directory override cannot turn the allowlist into all of home.
+            if not Path.home().resolve().is_relative_to(override_root):
+                roots.insert(0, override_root)
+        except (OSError, ValueError, RuntimeError):
+            pass
     return roots
 
 
-def is_allowed_transcript(transcript_path: str) -> bool:
+def is_allowed_transcript(transcript_path: str, host: str = "claude") -> bool:
     """Return True only if *transcript_path* resolves inside a transcripts root.
 
     Resolves symlinks (``.resolve()``) and requires containment, so neither a
     ``..`` escape nor a symlink whose target is outside the root passes.
     """
-    if not transcript_path:
+    transcript_path = transcript_input_path(transcript_path)
+    if not transcript_path or not normalize_transcript_host(host):
         return False
     try:
-        resolved = Path(transcript_path).resolve()
-    except (OSError, ValueError):
+        source = Path(transcript_path)
+        if ".." in source.parts:
+            return False
+        resolved = source.resolve()
+        # Non-strict resolution can leave cyclic/dangling links unresolved
+        # on newer Python versions. Such paths have no canonical admission.
+        if resolved.is_symlink() or any(parent.is_symlink() for parent in resolved.parents):
+            return False
+    except (OSError, ValueError, RuntimeError):
         return False
-    for root in _transcript_roots():
+    for root in _transcript_roots(host, str(resolved)):
         try:
-            if resolved.is_relative_to(root.resolve()):
+            if resolved != root.resolve() and resolved.is_relative_to(root.resolve()):
                 return True
-        except (OSError, ValueError):
+        except (OSError, ValueError, RuntimeError):
             continue
     return False
+
+
+def backlog_transcript_source(data: object, host: str = "claude") -> tuple[str, str] | None:
+    """Validate marker shape/source without letting markers select another host."""
+    active_host = normalize_transcript_host(host)
+    if not active_host or not isinstance(data, dict):
+        return None
+    marker_host = normalize_transcript_host(data.get("transcript_host", "claude"))
+    transcript = transcript_input_path(data.get("transcript_path", ""))
+    if marker_host != active_host or not is_allowed_transcript(transcript, host=active_host):
+        return None
+    for key in ("session_id", "user_id", "db_path"):
+        value = data.get(key, "")
+        if not isinstance(value, str) or "\0" in value:
+            return None
+    return transcript, _safe_session_id(data.get("session_id", ""))
 
 
 EXTRACTED_DIR = Path.home() / ".truememory" / "extracted"
@@ -82,6 +160,8 @@ _BUDGET_FILE = Path.home() / ".truememory" / ".extraction_budget"
 _MAX_EXTRACTIONS_PER_HOUR = _env_int("TRUEMEMORY_MAX_EXTRACTIONS_PER_HOUR", 20, lo=0)
 
 _STALE_PROCESSING_THRESHOLD = 1800  # 30 minutes
+# A claim whose recorded worker is provably gone needs no 30-minute wait.
+_DEAD_CLAIM_GRACE = 120
 
 # How long after SessionStart injects recall the first user prompt is treated
 # as redundant. SessionStart writes the marker just before the first prompt
@@ -118,6 +198,8 @@ def get_recall_deadline() -> float | None:
 
 def _safe_session_id(session_id: str) -> str:
     """Sanitize session_id to prevent path traversal."""
+    if not isinstance(session_id, str):
+        return ""
     return "".join(c for c in session_id if c.isalnum() or c in "-_")[:64]
 
 
@@ -341,13 +423,39 @@ def refund_extraction_budget() -> None:
 
 
 def record_stale_processing_pid(processing_path: Path, pid: int) -> None:
-    """Write the spawned PID into a .processing file for liveness checks."""
+    """Write the spawned PID and its birth time into a .processing file for liveness checks."""
     try:
         data = json.loads(processing_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return
         data["claimed_pid"] = pid
+        try:
+            born = _platform.process_birth(pid)
+        except OSError:
+            born = None
+        data.pop("claimed_born", None)
+        if born is not None:
+            data["claimed_born"] = born
         _atomic_write_text(processing_path, json.dumps(data))
     except (OSError, json.JSONDecodeError):
         pass
+
+
+def claim_worker_alive(data: dict, age: float) -> bool:
+    """Whether the worker a ``.processing`` claim records may still be running.
+
+    The claim records the worker's birth time with its pid, so a pid reused
+    by an unrelated live process does not keep the claim. A claim without one
+    (written before birth times were recorded) trusts a live-looking pid only
+    until the 30-minute threshold.
+    """
+    pid = data.get("claimed_pid", 0)
+    if not _pid_is_alive(pid):
+        return False
+    born = data.get("claimed_born")
+    if type(born) in (int, float):
+        return _platform.same_process(pid, born)
+    return age <= _STALE_PROCESSING_THRESHOLD
 
 
 def clear_backlog_processing(session_id: str, backlog_dir: Path | None = None) -> bool:
@@ -357,8 +465,8 @@ def clear_backlog_processing(session_id: str, backlog_dir: Path | None = None) -
     that the claim marker for that session is deleted. If the worker instead
     crashes / exits non-zero, this is NOT called, the ``.processing`` marker is
     left in place, and ``cleanup_stale_processing`` later restores it to
-    ``.json`` (once the claiming PID is dead and the 30-minute threshold has
-    elapsed) so the session is re-queued rather than silently lost.
+    ``.json`` (minutes after the claiming PID dies, or after 30 minutes when
+    no PID was recorded) so the session is re-queued rather than silently lost.
 
     The drainers (``session_start._drain_backlog`` and ``cli._cascade_next``)
     name claim markers ``{sanitized_session_id}.processing``, mirroring how
@@ -382,6 +490,50 @@ def clear_backlog_processing(session_id: str, backlog_dir: Path | None = None) -
         return False
     except OSError:
         return False
+
+
+def _requeue_claim(claim: Path, data: dict, reason: str) -> None:
+    """Return a claim to the queue as ``.json``, counting the attempt it used."""
+    attempts = data.get("attempts", 0)
+    if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 0:
+        attempts = 0
+    data["attempts"] = attempts + 1
+    data["requeued"] = reason
+    data.pop("claimed_pid", None)
+    data.pop("claimed_born", None)
+    _atomic_write_text(claim, json.dumps(data))
+    target = claim.with_suffix(".json")
+    if target.exists():
+        # A newer pointer already queues this session.
+        claim.unlink()
+    else:
+        os.replace(claim, target)
+
+
+def release_backlog_processing(session_id: str, reason: str, backlog_dir: Path | None = None) -> bool:
+    """Give this worker's own claim back to the queue instead of leaving it to go stale.
+
+    Only a claim recording this process (or, for a Windows venv launcher,
+    its parent) is released. Returns True if the claim was requeued.
+    """
+    if not session_id or session_id == "unknown":
+        return False
+    safe_id = _safe_session_id(session_id)
+    if not safe_id:
+        return False
+    claim = (backlog_dir or BACKLOG_DIR) / f"{safe_id}.processing"
+    try:
+        data = json.loads(claim.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    owner = data.get("claimed_pid") if isinstance(data, dict) else None
+    if type(owner) is not int or owner <= 0 or owner not in (os.getpid(), os.getppid()):
+        return False
+    try:
+        _requeue_claim(claim, data, reason)
+    except OSError:
+        return False
+    return True
 
 
 def _quarantine_marker(path: Path) -> None:
@@ -408,27 +560,44 @@ def _quarantine_marker(path: Path) -> None:
 def cleanup_stale_processing(backlog_dir: Path) -> None:
     """Restore .processing files whose owning process has died.
 
-    Uses a 30-minute threshold AND PID liveness check. Only restores
-    if the file is old enough AND the claiming process is no longer running.
+    A claim whose recorded worker is no longer running (see
+    claim_worker_alive) returns to the queue after _DEAD_CLAIM_GRACE. A claim
+    with no recorded worker, or one that cannot be read, waits for the
+    30-minute threshold. A live worker keeps its claim. A restored claim
+    counts the attempt it used.
     """
     for stale in backlog_dir.glob("*.processing"):
         try:
             age = time.time() - stale.stat().st_mtime
-            if age <= _STALE_PROCESSING_THRESHOLD:
+            if age <= _DEAD_CLAIM_GRACE:
                 continue
             try:
                 data = json.loads(stale.read_text(encoding="utf-8"))
-                pid = data.get("claimed_pid", 0)
-                if pid and _pid_is_alive(pid):
-                    continue
-            except (json.JSONDecodeError, OSError):
-                pass
-            stale.rename(stale.with_suffix(".json"))
+            except (ValueError, OSError):
+                data = None
+            pid = data.get("claimed_pid", 0) if isinstance(data, dict) else 0
+            valid = isinstance(pid, int) and not isinstance(pid, bool) and pid >= 0
+            try:
+                dead = valid and pid > 0 and not claim_worker_alive(data, age)
+            except OverflowError:
+                valid = dead = False
+            if age <= _STALE_PROCESSING_THRESHOLD and not dead:
+                continue
+            if data is None:
+                stale.rename(stale.with_suffix(".json"))
+                continue
+            if not isinstance(data, dict) or not valid:
+                _quarantine_marker(stale)
+                continue
+            if pid and not dead:
+                continue
+            _requeue_claim(stale, data, "worker_lost")
         except OSError:
             pass
 
 
-def mark_session_extracted(session_id: str, transcript_path: str, spawned_pid: int = 0) -> None:
+def mark_session_extracted(session_id: str, transcript_path: str, spawned_pid: int = 0, *,
+                           running: bool = True) -> None:
     """Record that a session's transcript was extracted at its current size.
 
     Written by the ingest CLI on successful completion, and also by
@@ -440,6 +609,8 @@ def mark_session_extracted(session_id: str, transcript_path: str, spawned_pid: i
             from a hook, pass the Popen PID so the liveness check in
             should_extract_session() can detect a running extraction.
             When called from the CLI itself, defaults to os.getpid().
+        running: False records that the session is handled without naming a
+            live extraction, so a long-lived caller never blocks later ones.
     """
     if not session_id or session_id == "unknown":
         return
@@ -457,7 +628,7 @@ def mark_session_extracted(session_id: str, transcript_path: str, spawned_pid: i
         _atomic_write_text(marker, json.dumps({
             "size": current_size,
             "timestamp": time.time(),
-            "pid": spawned_pid or os.getpid(),
+            "pid": (spawned_pid or os.getpid()) if running else 0,
         }))
     except OSError:
         pass

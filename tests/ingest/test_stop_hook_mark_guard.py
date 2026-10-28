@@ -28,13 +28,25 @@ def _allow_tmp_transcripts(tmp_path, monkeypatch):
 
 def _make_transcript(tmp_path, n=6):
     p = tmp_path / "transcript.jsonl"
-    p.write_text(
-        "\n".join(
-            json.dumps({"type": "user", "message": {"content": f"message number {i}"}})
-            for i in range(n)
-        ),
-        encoding="utf-8",
-    )
+    import os
+    if os.name == "nt":
+        from truememory._windows_private import create_private_file
+        fd = create_private_file(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(
+                "\n".join(
+                    json.dumps({"type": "user", "message": {"content": f"message number {i}"}})
+                    for i in range(n)
+                )
+            )
+    else:
+        p.write_text(
+            "\n".join(
+                json.dumps({"type": "user", "message": {"content": f"message number {i}"}})
+                for i in range(n)
+            ),
+            encoding="utf-8",
+        )
     return p
 
 

@@ -17,7 +17,11 @@ import json
 import logging
 import os
 import sqlite3
+import sys
+import threading
 import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -27,9 +31,103 @@ log = logging.getLogger(__name__)
 # Schema DDL
 # ---------------------------------------------------------------------------
 
-_SCHEMA_SQL = """
--- Core messages table
-CREATE TABLE IF NOT EXISTS messages (
+_MESSAGES_FTS_FIELDS = ("id", "content", "sender", "recipient", "category", "modality")
+_MESSAGES_UNIQUE_GUARD = 'EXISTS (SELECT 1 FROM pragma_index_list(\'messages\') WHERE "unique" = 1)'
+
+
+def _message_value_changed(fields: tuple[str, ...]) -> str:
+    # BLOB casts format REALs with insufficient precision. BINARY comparison
+    # preserves that precision, but SQL cannot distinguish signed REAL zero.
+    return " OR ".join(
+        f"typeof(old.{field}) IS NOT typeof(new.{field}) "
+        f"OR old.{field} COLLATE BINARY IS NOT new.{field} COLLATE BINARY "
+        f"OR (typeof(old.{field}) = 'real' AND old.{field} = 0)"
+        for field in fields
+    )
+
+
+def _message_update_columns(conn: sqlite3.Connection | None, fields: tuple[str, ...]) -> str:
+    columns = {} if conn is None else {
+        row[1].lower(): row[6] for row in conn.execute("PRAGMA table_xinfo(messages)")
+    }
+    if any(columns.get(field, 0) for field in fields):
+        # A generated source can depend on any otherwise-derived column.
+        return ""
+    aliases = tuple(alias for alias in ("rowid", "_rowid_", "oid") if alias not in columns)
+    return " OF " + ", ".join((*fields, *aliases))
+
+
+def _messages_have_rowid_id(conn: sqlite3.Connection) -> bool:
+    columns = [tuple(row) for row in conn.execute("PRAGMA table_xinfo(messages)")]
+    identifier = next((row for row in columns if row[1].lower() == "id"), None)
+    table = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='messages'").fetchone()
+    return bool(
+        table and table[0] and not table[0].upper().startswith("CREATE VIRTUAL TABLE")
+        and identifier and identifier[2].upper() == "INTEGER" and identifier[5] == 1
+        and identifier[6] == 0 and sum(row[5] > 0 for row in columns) == 1
+        # WITHOUT ROWID and inline INTEGER PRIMARY KEY DESC have a separate
+        # primary-key index. Their id does not provide the required rowid alias.
+        and not any(row[3] == "pk" for row in conn.execute("PRAGMA index_list(messages)"))
+    )
+
+
+def _messages_fts_trigger_definitions(conn: sqlite3.Connection | None = None) -> dict[str, str]:
+    definitions = {
+        "messages_ai": """CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+            INSERT INTO messages_fts(rowid, content, sender, recipient, category, modality)
+            VALUES (new.id, new.content, new.sender, new.recipient, new.category, new.modality);
+        END""",
+        "messages_ad": """CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+            DELETE FROM messages_fts WHERE rowid = old.id;
+        END""",
+        "messages_au": f"""CREATE TRIGGER messages_au AFTER UPDATE{_message_update_columns(conn, _MESSAGES_FTS_FIELDS)} ON messages
+            WHEN {_message_value_changed(_MESSAGES_FTS_FIELDS)} BEGIN
+            DELETE FROM messages_fts WHERE rowid = old.id;
+            INSERT INTO messages_fts(rowid, content, sender, recipient, category, modality)
+            VALUES (new.id, new.content, new.sender, new.recipient, new.category, new.modality);
+        END""",
+    }
+    for suffix, event in (("ai", "INSERT"), ("au", "UPDATE")):
+        name = f"messages_fts_cleanup_{suffix}"
+        # The trigger-level guard avoids an FTS scan on ordinary schemas.
+        # Source fencing is independent of this cleanup and its trigger order.
+        definitions[name] = f"""CREATE TRIGGER {name} AFTER {event} ON messages
+            WHEN {_MESSAGES_UNIQUE_GUARD} BEGIN
+            DELETE FROM messages_fts WHERE NOT EXISTS (
+                SELECT 1 FROM messages WHERE messages.id = messages_fts.rowid
+            );
+        END"""
+    return definitions
+
+
+_MESSAGES_FTS_UPDATE_TRIGGER_SQL = _messages_fts_trigger_definitions()["messages_au"].replace(
+    "CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1,
+) + ";\n"
+
+_DUNBAR_OWNERSHIP_SQL = """
+CREATE TABLE IF NOT EXISTS dunbar_generated_relationships (
+    relationship_id INTEGER PRIMARY KEY,
+    generation TEXT NOT NULL,
+    row_fingerprint BLOB NOT NULL CHECK (length(row_fingerprint) = 32),
+    FOREIGN KEY (relationship_id) REFERENCES entity_relationships(id) ON DELETE CASCADE
+)
+"""
+_DUNBAR_OWNERSHIP_TRIGGERS = {
+    "dunbar_relationships_ai": """CREATE TRIGGER dunbar_relationships_ai AFTER INSERT ON entity_relationships BEGIN
+        DELETE FROM dunbar_generated_relationships WHERE relationship_id=new.id;
+    END""",
+    "dunbar_relationships_au": """CREATE TRIGGER dunbar_relationships_au AFTER UPDATE ON entity_relationships
+    WHEN old.id IS NOT new.id OR old.entity_a IS NOT new.entity_a OR old.entity_b IS NOT new.entity_b
+      OR old.relationship_type IS NOT new.relationship_type OR old.strength IS NOT new.strength
+      OR old.dunbar_layer IS NOT new.dunbar_layer OR old.last_interaction IS NOT new.last_interaction BEGIN
+        DELETE FROM dunbar_generated_relationships WHERE relationship_id=old.id OR relationship_id=new.id;
+    END""",
+    "dunbar_relationships_ad": """CREATE TRIGGER dunbar_relationships_ad AFTER DELETE ON entity_relationships BEGIN
+        DELETE FROM dunbar_generated_relationships WHERE relationship_id=old.id;
+    END""",
+}
+
+_MESSAGES_TABLE_SQL = """CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     content TEXT NOT NULL,
     sender TEXT DEFAULT '',
@@ -42,7 +140,9 @@ CREATE TABLE IF NOT EXISTS messages (
     embedding_separation BLOB DEFAULT NULL,
     directive INTEGER DEFAULT 0,
     metadata TEXT DEFAULT '{}'
-);
+);"""
+
+_SCHEMA_SQL = "\n-- Core messages table\n" + _MESSAGES_TABLE_SQL + """
 
 -- FTS5 virtual table for full-text search
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -61,11 +161,7 @@ CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
     DELETE FROM messages_fts WHERE rowid = old.id;
 END;
 
-CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-    DELETE FROM messages_fts WHERE rowid = old.id;
-    INSERT INTO messages_fts(rowid, content, sender, recipient, category, modality)
-    VALUES (new.id, new.content, new.sender, new.recipient, new.category, new.modality);
-END;
+""" + _MESSAGES_FTS_UPDATE_TRIGGER_SQL + """
 
 -- Entity profiles (L0 Personality Engram)
 CREATE TABLE IF NOT EXISTS entity_profiles (
@@ -83,7 +179,9 @@ CREATE TABLE IF NOT EXISTS entity_style_vectors (
     entity TEXT PRIMARY KEY,
     vector TEXT,
     message_count INTEGER DEFAULT 0,
-    updated_at TEXT
+    updated_at TEXT,
+    vector_sum BLOB DEFAULT NULL,
+    accumulator_version INTEGER NOT NULL DEFAULT 0
 );
 
 -- Fact timeline (L5 contradiction tracking)
@@ -241,7 +339,314 @@ CREATE TABLE IF NOT EXISTS rebuild_status (
 );
 CREATE INDEX IF NOT EXISTS idx_rebuild_status_active
     ON rebuild_status(tier_group, status);
+
+CREATE TABLE IF NOT EXISTS maintenance_source_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    epoch TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (typeof(revision) = 'integer' AND revision >= 0),
+    insert_count INTEGER NOT NULL DEFAULT 0 CHECK (typeof(insert_count) = 'integer' AND insert_count >= 0),
+    correction_count INTEGER NOT NULL DEFAULT 0 CHECK (typeof(correction_count) = 'integer' AND correction_count >= 0),
+    max_seen_message_id INTEGER NOT NULL DEFAULT 0,
+    nonappend_revision INTEGER NOT NULL DEFAULT 0,
+    tracking_ready INTEGER NOT NULL DEFAULT 0 CHECK (tracking_ready IN (0, 1))
+);
+
+CREATE TABLE IF NOT EXISTS maintenance_layers (
+    layer TEXT PRIMARY KEY,
+    builder_version INTEGER NOT NULL DEFAULT 1,
+    outcome TEXT NOT NULL DEFAULT 'pending' CHECK (outcome IN
+        ('pending', 'running', 'success', 'success_empty', 'failed', 'unavailable', 'disabled', 'abandoned')),
+    successful_epoch TEXT,
+    successful_revision INTEGER,
+    successful_dependency TEXT,
+    successful_coverage TEXT NOT NULL DEFAULT 'unverified' CHECK (successful_coverage IN
+        ('unverified', 'complete', 'legacy_contacts_unowned', 'vector_generation_unverified')),
+    attempted_epoch TEXT,
+    attempted_revision INTEGER,
+    attempted_dependency TEXT,
+    attempted_insert_count INTEGER CHECK (attempted_insert_count IS NULL OR
+        (typeof(attempted_insert_count) = 'integer' AND attempted_insert_count >= 0)),
+    full_rebuild_required INTEGER NOT NULL DEFAULT 1 CHECK (full_rebuild_required IN (0, 1)),
+    output_count INTEGER,
+    run_generation TEXT,
+    error_category TEXT
+);
 """
+
+_MAINTENANCE_LAYERS = (
+    "clusters", "summaries", "contradictions", "structured_facts",
+    "surprise", "episodes", "landmarks", "dunbar",
+)
+
+_STYLE_OUTPUT_INVALIDATE_SQL = """UPDATE maintenance_layers SET
+    outcome='pending',full_rebuild_required=1,successful_coverage='unverified',
+    attempted_epoch=NULL,attempted_revision=NULL,attempted_dependency=NULL,
+    attempted_insert_count=NULL,run_generation=NULL,error_category=NULL
+    WHERE layer='style_vectors'"""
+_STYLE_OUTPUT_TRIGGERS = {
+    "truememory_style_output_" + operation.lower():
+        "CREATE TRIGGER truememory_style_output_" + operation.lower()
+        + " AFTER " + operation + " ON entity_style_vectors BEGIN "
+        + _STYLE_OUTPUT_INVALIDATE_SQL + "; END"
+    for operation in ("INSERT", "UPDATE", "DELETE")
+}
+
+
+def _style_output_tracking_ready(conn: sqlite3.Connection) -> bool:
+    expected = {name: " ".join(sql.split()) for name, sql in _STYLE_OUTPUT_TRIGGERS.items()}
+    installed = {name: " ".join(sql.strip().rstrip(";").split()) for name, sql in conn.execute(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN (?,?,?)", tuple(expected),
+    )}
+    return installed == expected and conn.execute(
+        "SELECT 1 FROM maintenance_layers WHERE layer='style_vectors'").fetchone() is not None
+
+
+def _prepare_style_maintenance(
+    conn: sqlite3.Connection, *, _on_safe_failure: Callable[[sqlite3.OperationalError], None] | None = None,
+) -> None:
+    """Explicitly enroll style output; ordinary schema initialization stays lazy."""
+    expected = {name: " ".join(sql.split()) for name, sql in _STYLE_OUTPUT_TRIGGERS.items()}
+
+    def installed() -> dict[str, str]:
+        return {name: " ".join(sql.strip().rstrip(";").split()) for name, sql in conn.execute(
+            "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN (?,?,?)",
+            tuple(expected),
+        )}
+
+    owned = not conn.in_transaction
+    try:
+        if _style_output_tracking_ready(conn):
+            return
+        conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT truememory_style_tracking")
+    except sqlite3.OperationalError as error:
+        # No preparation writes precede admission. A failed admission is safe
+        # only while the original transaction boundary remains unchanged.
+        if _on_safe_failure is not None and conn.in_transaction == (not owned):
+            _on_safe_failure(error)
+        raise
+    try:
+        conn.execute("UPDATE maintenance_layers SET layer=layer WHERE 0")
+        conn.execute("INSERT OR IGNORE INTO maintenance_layers(layer) VALUES ('style_vectors')")
+        current = installed()
+        if current != expected:
+            for name, sql in _STYLE_OUTPUT_TRIGGERS.items():
+                if current.get(name) != expected[name]:
+                    conn.execute("DROP TRIGGER IF EXISTS " + name)
+                    conn.execute(sql)
+            # Missing/replaced triggers make even v1 output unverified. This
+            # metadata-only invalidation also supersedes a failed attempt.
+            conn.execute(_STYLE_OUTPUT_INVALIDATE_SQL)
+        conn.execute("COMMIT" if owned else "RELEASE SAVEPOINT truememory_style_tracking")
+    except BaseException as error:
+        if conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO SAVEPOINT truememory_style_tracking")
+                conn.execute("RELEASE SAVEPOINT truememory_style_tracking")
+            if (_on_safe_failure is not None and isinstance(error, sqlite3.OperationalError)
+                    and conn.in_transaction == (not owned)):
+                _on_safe_failure(error)
+        # An ended transaction, failed rollback or failed savepoint release
+        # cannot attest that preparation left the previous generation intact.
+        raise
+
+
+_SCHEMA_SQL += _DUNBAR_OWNERSHIP_SQL + ";\n"
+
+
+def _initialize_style_accumulator_schema(conn: sqlite3.Connection) -> None:
+    """Add raw-sum storage without upgrading or rebuilding legacy profiles."""
+    required = {"vector_sum", "accumulator_version"}
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(entity_style_vectors)")}
+    if required <= columns:
+        return
+    owned = not conn.in_transaction
+    conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT truememory_style_schema")
+    completed = False
+    try:
+        conn.execute("UPDATE entity_style_vectors SET entity=entity WHERE 0")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(entity_style_vectors)")}
+        if "vector_sum" not in columns:
+            conn.execute("ALTER TABLE entity_style_vectors ADD COLUMN vector_sum BLOB DEFAULT NULL")
+        if "accumulator_version" not in columns:
+            conn.execute("ALTER TABLE entity_style_vectors ADD COLUMN accumulator_version INTEGER NOT NULL DEFAULT 0")
+        conn.execute("COMMIT" if owned else "RELEASE SAVEPOINT truememory_style_schema")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO SAVEPOINT truememory_style_schema")
+                conn.execute("RELEASE SAVEPOINT truememory_style_schema")
+
+
+def _dunbar_ownership_ready(conn: sqlite3.Connection) -> bool:
+    definitions = {name: " ".join(sql.split()) for name, sql in _DUNBAR_OWNERSHIP_TRIGGERS.items()}
+    installed = {row[0]: " ".join(row[1].strip().rstrip(";").split()) for row in conn.execute(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN "
+        "('dunbar_relationships_ai','dunbar_relationships_au','dunbar_relationships_ad')"
+    )}
+    return installed == definitions and conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dunbar_generated_relationships'"
+    ).fetchone() is not None
+
+
+def _initialize_dunbar_ownership(conn: sqlite3.Connection) -> None:
+    """Repair ownership tracking without trusting rows from an untracked interval."""
+    if _dunbar_ownership_ready(conn):
+        return
+    owned = not conn.in_transaction
+    conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT truememory_dunbar_schema")
+    completed = False
+    try:
+        if not owned:
+            conn.execute("UPDATE entity_relationships SET id=id WHERE 0")
+        if not _dunbar_ownership_ready(conn):
+            conn.execute(_DUNBAR_OWNERSHIP_SQL)
+            # Identical ID/value replacements cannot be detected retrospectively.
+            # Preserve those relationships and relinquish all uncertain ownership.
+            conn.execute("DELETE FROM dunbar_generated_relationships")
+            for name, definition in _DUNBAR_OWNERSHIP_TRIGGERS.items():
+                conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+                conn.execute(definition)
+        conn.execute("COMMIT" if owned else "RELEASE truememory_dunbar_schema")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO truememory_dunbar_schema")
+                conn.execute("RELEASE truememory_dunbar_schema")
+
+
+_MAINTENANCE_SOURCE_FIELDS = (
+    "id", "content", "sender", "recipient", "timestamp", "category",
+    "modality", "directive", "metadata",
+)
+
+
+def _maintenance_trigger_definitions(conn: sqlite3.Connection | None = None) -> dict[str, str]:
+    changed = _message_value_changed(_MAINTENANCE_SOURCE_FIELDS)
+    correction = """UPDATE maintenance_source_state SET
+                nonappend_revision = revision + 1,
+                max_seen_message_id = MAX(max_seen_message_id, new.id),
+                revision = revision + 1, correction_count = correction_count + 1
+            WHERE singleton = 1;"""
+    return {
+        "messages_maintenance_ai": f"""CREATE TRIGGER messages_maintenance_ai AFTER INSERT ON messages BEGIN
+            UPDATE maintenance_source_state SET
+                nonappend_revision = CASE WHEN new.id <= max_seen_message_id OR {_MESSAGES_UNIQUE_GUARD}
+                    THEN revision + 1 ELSE nonappend_revision END,
+                max_seen_message_id = MAX(max_seen_message_id, new.id),
+                revision = revision + 1, insert_count = insert_count + 1
+            WHERE singleton = 1;
+        END""",
+        "messages_maintenance_au": f"""CREATE TRIGGER messages_maintenance_au AFTER UPDATE{_message_update_columns(conn, _MAINTENANCE_SOURCE_FIELDS)} ON messages
+            WHEN NOT {_MESSAGES_UNIQUE_GUARD} AND ({changed}) BEGIN
+            {correction}
+        END""",
+        "messages_maintenance_unique_au": f"""CREATE TRIGGER messages_maintenance_unique_au AFTER UPDATE ON messages
+            WHEN {_MESSAGES_UNIQUE_GUARD} BEGIN
+            {correction}
+        END""",
+        "messages_maintenance_ad": """CREATE TRIGGER messages_maintenance_ad AFTER DELETE ON messages BEGIN
+            UPDATE maintenance_source_state SET
+                nonappend_revision = revision + 1,
+                revision = revision + 1, correction_count = correction_count + 1
+            WHERE singleton = 1;
+        END""",
+    }
+
+
+def _initialize_maintenance_tracking(conn: sqlite3.Connection) -> None:
+    """Install revision tracking atomically; incomplete legacy schemas stay open."""
+    definitions = _maintenance_trigger_definitions(conn)
+
+    def available() -> bool:
+        columns = {row[1].lower() for row in conn.execute("PRAGMA table_xinfo(messages)")}
+        return set(_MAINTENANCE_SOURCE_FIELDS).issubset(columns) and _messages_have_rowid_id(conn)
+
+    def installed() -> dict[str, str]:
+        placeholders = ",".join("?" for _ in definitions)
+        return {row[0]: " ".join(row[1].strip().rstrip(";").split()) for row in conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
+            f"AND name IN ({placeholders})", tuple(definitions),
+        )}
+
+    expected = {name: " ".join(sql.split()) for name, sql in definitions.items()}
+    ready = conn.execute("SELECT tracking_ready FROM maintenance_source_state WHERE singleton = 1").fetchone()
+    layers = {row[0] for row in conn.execute("SELECT layer FROM maintenance_layers")}
+    layer_columns = {row[1] for row in conn.execute("PRAGMA table_info(maintenance_layers)")}
+    if (ready and ready[0] and available() and installed() == expected and set(_MAINTENANCE_LAYERS).issubset(layers)
+            and {"attempted_insert_count", "successful_coverage"}.issubset(layer_columns)):
+        return
+
+    owned = not conn.in_transaction
+    conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT truememory_maintenance_schema")
+    completed = False
+    try:
+        # Recheck after writer admission: a concurrent opener may migrate first.
+        if not owned:
+            conn.execute("UPDATE maintenance_source_state SET tracking_ready=tracking_ready WHERE 0")
+        definitions = _maintenance_trigger_definitions(conn)
+        expected = {name: " ".join(sql.split()) for name, sql in definitions.items()}
+        if "attempted_insert_count" not in {row[1] for row in conn.execute("PRAGMA table_info(maintenance_layers)")}:
+            conn.execute(
+                "ALTER TABLE maintenance_layers ADD COLUMN attempted_insert_count INTEGER "
+                "CHECK (attempted_insert_count IS NULL OR "
+                "(typeof(attempted_insert_count) = 'integer' AND attempted_insert_count >= 0))"
+            )
+        if "successful_coverage" not in {row[1] for row in conn.execute("PRAGMA table_info(maintenance_layers)")}:
+            conn.execute(
+                "ALTER TABLE maintenance_layers ADD COLUMN successful_coverage TEXT NOT NULL DEFAULT 'unverified' "
+                "CHECK (successful_coverage IN "
+                "('unverified','complete','legacy_contacts_unowned','vector_generation_unverified'))"
+            )
+        supported = available()
+        initial_max = "MAX(0, COALESCE(MAX(id), 0)) FROM messages" if _messages_have_rowid_id(conn) else "0"
+        conn.execute(
+            "INSERT OR IGNORE INTO maintenance_source_state(singleton, epoch, max_seen_message_id) "
+            f"SELECT 1, lower(hex(randomblob(16))), {initial_max}"
+        )
+        conn.executemany("INSERT OR IGNORE INTO maintenance_layers(layer) VALUES (?)",
+                         ((layer,) for layer in _MAINTENANCE_LAYERS))
+        current = installed()
+        if supported:
+            # Missing/replaced triggers or an untracked legacy interval cannot
+            # attest the preceding source history. Invalidate old tokens.
+            invalidate = current != expected or not conn.execute(
+                "SELECT tracking_ready FROM maintenance_source_state WHERE singleton = 1"
+            ).fetchone()[0]
+            if invalidate:
+                conn.execute("UPDATE maintenance_source_state SET tracking_ready = 0 WHERE singleton = 1")
+                conn.execute("UPDATE maintenance_layers SET outcome = 'pending', full_rebuild_required = 1")
+            conn.execute(
+                "UPDATE maintenance_source_state SET epoch = lower(hex(randomblob(16))), "
+                "revision = 0, insert_count = 0, correction_count = 0, nonappend_revision = 0, "
+                "max_seen_message_id = (SELECT MAX(0, COALESCE(MAX(id), 0)) FROM messages), tracking_ready = 1 "
+                "WHERE singleton = 1 AND tracking_ready = 0"
+            )
+            for name, definition in definitions.items():
+                if current.get(name) != expected[name]:
+                    conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+                    conn.execute(definition)
+        else:
+            conn.execute("UPDATE maintenance_source_state SET tracking_ready = 0 WHERE singleton = 1 AND tracking_ready != 0")
+            for name in current:
+                conn.execute(f"DROP TRIGGER {name}")
+            log.warning("Source revision tracking unavailable for unsupported or incomplete messages schema")
+        conn.execute("COMMIT" if owned else "RELEASE truememory_maintenance_schema")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO truememory_maintenance_schema")
+                conn.execute("RELEASE truememory_maintenance_schema")
 
 
 # single source of truth for the sqlite busy_timeout pragma.
@@ -250,6 +655,39 @@ CREATE INDEX IF NOT EXISTS idx_rebuild_status_active
 # sporadic "database is locked" errors under concurrent ingest + MCP
 # search load. Both paths now import this constant.
 DEFAULT_BUSY_TIMEOUT_MS = 10_000
+
+
+# The maintenance runner builds a layer in a read snapshot and registers a hook
+# here for the builder's connection. A builder calls begin_layer_publication
+# right before its first write, outside any savepoint of its own: the runner then
+# trades the snapshot for SQLite's writer, so the compute never holds the lock.
+_layer_publication = threading.local()
+
+
+def push_layer_publication(conn: sqlite3.Connection, hook: Callable[[bool], int]) -> None:
+    hooks = _layer_publication.__dict__.setdefault("hooks", [])
+    hooks.append((conn, hook))
+
+
+def pop_layer_publication(conn: sqlite3.Connection) -> None:
+    hooks = _layer_publication.__dict__.get("hooks", [])
+    if not hooks or hooks[-1][0] is not conn:
+        raise RuntimeError("Layer publication hooks are unbalanced")
+    hooks.pop()
+
+
+def begin_layer_publication(conn: sqlite3.Connection, *, appends: bool = True) -> int | None:
+    """Take the writer for a runner-built layer; None outside such a build.
+
+    Inside a build, returns the highest message id the build's snapshot could
+    see. With ``appends`` the runner accepts messages appended since the
+    snapshot (their ids are all higher), so a builder's own source check must
+    compare only ids up to this watermark. Without it any change defers.
+    """
+    for connection, hook in reversed(getattr(_layer_publication, "hooks", ())):
+        if connection is conn:
+            return hook(appends)
+    return None
 
 
 class DatabaseOpenError(sqlite3.DatabaseError):
@@ -413,6 +851,182 @@ def newest_backup(db_path: str | Path) -> Path | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# SQLite WAL-reset bug guard
+# ---------------------------------------------------------------------------
+# SQLite 3.7.0 through 3.51.2 (fixed in 3.51.3, backported to 3.50.7 and
+# 3.44.6) can lose committed pages when a checkpoint starts while another
+# connection's commit restarts the WAL: the checkpoint misses the restart and
+# marks the new frames as already copied (https://sqlite.org/wal.html).
+#
+# A WAL restart only happens in a writer holding SQLite's WAL write lock. On an
+# affected build no TrueMemory connection checkpoints automatically; a
+# checkpoint runs only while a sibling connection holds that lock through
+# BEGIN IMMEDIATE, so no writer in any process can restart the WAL during it.
+# Closing the last connection still checkpoints; SQLite does that only after
+# taking an EXCLUSIVE lock on the database file, which every open connection
+# blocks, so no writer can exist then.
+
+# Guarded connections set journal_size_limit=0, so the writer that restarts the
+# WAL after a complete checkpoint truncates it to what it has just written: the
+# file size is the WAL's current length. From SQLite's default autocheckpoint
+# size (1000 pages of 4 KiB) a commit tries a checkpoint at most every 0.2 s;
+# past 16 MiB on every commit, since writers keep winning the lock; past the
+# 64 MiB cap the committing writer waits up to a second for it.
+_WAL_LIMIT_BYTES = 4 * 1024 * 1024
+_WAL_INTERVAL_SECONDS = 0.2
+_WAL_HOLD_SECONDS = 0.05
+_WAL_FORCE_BYTES = 4 * _WAL_LIMIT_BYTES
+_WAL_CAP_BYTES = 16 * _WAL_LIMIT_BYTES
+_WAL_CAP_HOLD_SECONDS = 1.0
+
+
+def wal_reset_affected(version: tuple[int, int, int] | None = None) -> bool:
+    version = sqlite3.sqlite_version_info if version is None else version
+    if version >= (3, 51, 3):
+        return False
+    return not ((3, 50, 7) <= version < (3, 51, 0) or (3, 44, 6) <= version < (3, 45, 0))
+
+
+# TRUEMEMORY_WAL_GUARD=force exercises the guarded path on a fixed build (tests).
+WAL_RESET_GUARD = wal_reset_affected() or os.environ.get("TRUEMEMORY_WAL_GUARD") == "force"
+
+_wal_lock = threading.Lock()
+_wal_running: set[str] = set()
+_wal_stats = {"checkpoints": 0, "skipped_busy": 0, "failed": 0, "max_wal_bytes": 0}
+_wal_last_attempt: dict[str, float] = {}
+
+
+def configure_connection(conn: sqlite3.Connection) -> sqlite3.Connection:
+    """Wrap every TrueMemory sqlite3.connect: no automatic checkpoints on affected builds.
+
+    Applied before any other statement; closes the connection if it fails.
+    The audit event lets the test suite check that no writer skipped this.
+    """
+    if WAL_RESET_GUARD:
+        try:
+            conn.execute("PRAGMA wal_autocheckpoint=0")
+            conn.execute("PRAGMA journal_size_limit=0")
+        except BaseException:
+            conn.close()
+            raise
+    sys.audit("truememory.configure_connection", conn)
+    return conn
+
+
+_existing_opens = threading.local()
+
+
+@contextmanager
+def existing_database_opens(factory: Callable[..., sqlite3.Connection] | None = None) -> Iterator[None]:
+    """Make this thread's database opens fail on a missing file instead of creating it.
+
+    For background threads, whose store already exists: a store deleted
+    under them must stay deleted. create_db, its pre-migration backup source
+    and the serving and style openers honor it. ``factory`` (a
+    sqlite3.Connection subclass) builds those connections.
+    """
+    previous = getattr(_existing_opens, "scope", None)
+    _existing_opens.scope = (factory,)
+    try:
+        yield
+    finally:
+        _existing_opens.scope = previous
+
+
+def existing_connect_options() -> dict:
+    """Extra sqlite3.connect options inside existing_database_opens, else none."""
+    scope = getattr(_existing_opens, "scope", None)
+    return {} if scope is None or scope[0] is None else {"factory": scope[0]}
+
+
+def _connect_target(db_path: str | Path) -> tuple[str, dict]:
+    """sqlite3.connect arguments that create a missing file only outside existing_database_opens."""
+    if getattr(_existing_opens, "scope", None) is None or str(db_path) == ":memory:":
+        return str(db_path), {}
+    return Path(str(db_path)).absolute().as_uri() + "?mode=rw", {"uri": True, **existing_connect_options()}
+
+
+def wal_checkpoint_stats() -> dict:
+    with _wal_lock:
+        return dict(_wal_stats, affected=WAL_RESET_GUARD, sqlite_version=sqlite3.sqlite_version)
+
+
+def checkpoint_if_due(path: str | os.PathLike[str] | None, *, hold_wait: float = _WAL_HOLD_SECONDS) -> bool | None:
+    """Checkpoint a WAL past the limit (rate-limited below 16 MiB). Call it outside any transaction.
+
+    Returns None when nothing was due, else whether the checkpoint ran. It
+    never raises: a skipped checkpoint is retried after a later commit. Only
+    os.stat touches the files: opening and closing a database, WAL or -shm
+    file in this process would drop every POSIX lock SQLite holds on it.
+    """
+    if not WAL_RESET_GUARD or path is None or str(path) == ":memory:":
+        return None
+    try:
+        size = os.stat(f"{path}-wal").st_size
+    except OSError:
+        return None
+    key, now = str(path), time.monotonic()
+    with _wal_lock:
+        _wal_stats["max_wal_bytes"] = max(_wal_stats["max_wal_bytes"], size)
+        if size < _WAL_LIMIT_BYTES or (size < _WAL_FORCE_BYTES and now - _wal_last_attempt.get(
+                key, -_WAL_INTERVAL_SECONDS) < _WAL_INTERVAL_SECONDS):
+            return None
+        _wal_last_attempt[key] = now
+    if size >= _WAL_CAP_BYTES:
+        hold_wait = max(hold_wait, _WAL_CAP_HOLD_SECONDS)
+    try:
+        return protected_checkpoint(path, hold_wait=hold_wait)
+    except Exception:
+        with _wal_lock:
+            _wal_stats["failed"] += 1
+        log.debug("Protected WAL checkpoint failed", exc_info=True)
+        return False
+
+
+def protected_checkpoint(path: str | os.PathLike[str], *, hold_wait: float = _WAL_HOLD_SECONDS) -> bool:
+    """Copy the WAL into the database while holding the WAL write lock elsewhere.
+
+    The holder takes the write lock without waiting longer than ``hold_wait``
+    and the checkpoint is skipped when a writer has it. Both connections are
+    private to this call and run in autocommit mode.
+    """
+    key = str(Path(path).absolute())
+    with _wal_lock:
+        if key in _wal_running:
+            return False
+        _wal_running.add(key)
+    try:
+        uri = Path(key).as_uri() + "?mode=rw"
+        holder = sqlite3.connect(uri, uri=True, timeout=hold_wait, isolation_level=None)
+        try:
+            holder.execute("PRAGMA wal_autocheckpoint=0")
+            try:
+                holder.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError:  # A writer has the lock; a later commit retries.
+                with _wal_lock:
+                    _wal_stats["skipped_busy"] += 1
+                return False
+            try:
+                checkpointer = sqlite3.connect(uri, uri=True, timeout=0, isolation_level=None)
+                try:
+                    if checkpointer.in_transaction:
+                        raise RuntimeError("Checkpoint connection opened inside a transaction")
+                    checkpointer.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+                finally:
+                    checkpointer.close()
+            finally:
+                holder.execute("ROLLBACK")
+        finally:
+            holder.close()
+        with _wal_lock:
+            _wal_stats["checkpoints"] += 1
+        return True
+    finally:
+        with _wal_lock:
+            _wal_running.discard(key)
+
+
 def _backup_database(db_path: Path) -> Path | None:
     """Create a complete backup of the database including WAL/SHM files.
 
@@ -436,7 +1050,8 @@ def _backup_database(db_path: Path) -> Path | None:
     # restore is a single `cp backup db` with no sibling files.
     src = dst = None
     try:
-        src = sqlite3.connect(str(db_path))
+        target, options = _connect_target(db_path)
+        src = configure_connection(sqlite3.connect(target, **options))
         dst = sqlite3.connect(str(backup))
         with dst:
             src.backup(dst)
@@ -548,6 +1163,64 @@ def _migrate_messages_schema(conn: sqlite3.Connection, db_path: str | Path) -> N
                 pass
 
 
+def _migrate_messages_fts_trigger(conn: sqlite3.Connection) -> None:
+    """Repair owned FTS triggers and refill legacy contents once, atomically."""
+    def available() -> bool:
+        columns = {row[1].lower() for row in conn.execute("PRAGMA table_xinfo(messages)")}
+        return set(_MESSAGES_FTS_FIELDS).issubset(columns) and _messages_have_rowid_id(conn)
+
+    if not available():
+        log.warning("FTS synchronization repair unavailable for unsupported or incomplete messages schema")
+        return
+    definitions = _messages_fts_trigger_definitions(conn)
+
+    def installed() -> dict[str, str]:
+        placeholders = ",".join("?" for _ in definitions)
+        return {row[0]: " ".join(row[1].strip().rstrip(";").split()) for row in conn.execute(
+            f"SELECT name, sql FROM sqlite_master WHERE type='trigger' AND name IN ({placeholders})",
+            tuple(definitions),
+        )}
+
+    expected = {name: " ".join(sql.split()) for name, sql in definitions.items()}
+    if installed() == expected:
+        return
+
+    owned = not conn.in_transaction
+    conn.execute("BEGIN IMMEDIATE" if owned else "SAVEPOINT truememory_fts_trigger")
+    completed = False
+    try:
+        # Another opener can complete this migration while BEGIN waits.
+        if not owned:
+            conn.execute("UPDATE messages SET id=id WHERE 0")
+        if not available():
+            log.warning("FTS synchronization repair unavailable for unsupported or incomplete messages schema")
+            return
+        definitions = _messages_fts_trigger_definitions(conn)
+        expected = {name: " ".join(sql.split()) for name, sql in definitions.items()}
+        current = installed()
+        if current != expected:
+            for name, definition in definitions.items():
+                if current.get(name) != expected[name]:
+                    conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+                    conn.execute(definition)
+            # This FTS table owns its content. Its 'rebuild' command would
+            # rebuild the stale copy rather than restore current messages.
+            conn.execute("DELETE FROM messages_fts")
+            conn.execute(
+                "INSERT INTO messages_fts(rowid, content, sender, recipient, category, modality) "
+                "SELECT id, content, sender, recipient, category, modality FROM messages"
+            )
+        conn.execute("COMMIT" if owned else "RELEASE truememory_fts_trigger")
+        completed = True
+    finally:
+        if not completed and conn.in_transaction:
+            if owned:
+                conn.rollback()
+            else:
+                conn.execute("ROLLBACK TO truememory_fts_trigger")
+                conn.execute("RELEASE truememory_fts_trigger")
+
+
 def create_db(db_path: str | Path) -> sqlite3.Connection:
     """
     Create (or open) a TrueMemory database with the full schema.
@@ -575,7 +1248,8 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
     # misleading raw error on the first WAL write.
     _check_dir_writable(db_path)
 
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    target, options = _connect_target(db_path)
+    conn = configure_connection(sqlite3.connect(target, check_same_thread=False, **options))
     # S1-2 (#688): the DB file holds every stored memory (PII). Restrict it to
     # owner-only so it isn't world-readable on a multi-user host. No-op on
     # Windows (POSIX modes don't apply) and for :memory:.
@@ -637,9 +1311,36 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
                 "TrueMemory processes (hooks, MCP server, CLI) and retry."
             ) from e
         raise DatabaseOpenError(_integrity_message(db_path, str(e))) from e
+    except BaseException:
+        # Not only sqlite errors: a fenced background connection refuses
+        # statements with MaintenanceClosedError.
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
 
+    try:
+        _apply_schema_migrations(conn, db_path)
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def _apply_schema_migrations(conn: sqlite3.Connection, db_path: str | Path) -> None:
+    """Idempotent schema upgrades shared by create_db and controlled opens.
+
+    A database with a committed tier selection is opened without create_db,
+    so its upgrades must not depend on that path. Each step is a no-op once
+    applied; callers own maintenance (schema decisions) for the database.
+    """
     _migrate_messages_schema(conn, db_path)
     conn.executescript(_SCHEMA_SQL)
+    _migrate_messages_fts_trigger(conn)
+    _initialize_maintenance_tracking(conn)
+    _initialize_dunbar_ownership(conn)
+    _initialize_style_accumulator_schema(conn)
     # The directive index lives outside _SCHEMA_SQL on purpose: if a legacy
     # DB's migration could not add messages.directive (e.g. a rolled-back
     # ALTER), an unconditional CREATE INDEX inside executescript would turn a
@@ -672,7 +1373,6 @@ def create_db(db_path: str | Path) -> sqlite3.Connection:
         log.debug("fact_timeline status migration skipped", exc_info=True)
 
     conn.commit()
-    return conn
 
 
 # ---------------------------------------------------------------------------
@@ -1047,13 +1747,15 @@ def insert_message(conn: sqlite3.Connection, msg: dict) -> int:
     return cursor.lastrowid
 
 
-def delete_message(conn: sqlite3.Connection, msg_id: int) -> bool:
+def delete_message(conn: sqlite3.Connection, msg_id: int, *, commit: bool = True) -> bool:
     """
     Delete a single message and its vector embedding.
 
     The FTS5 DELETE trigger automatically removes the full-text index entry.
     The vector embedding in ``vec_messages`` is also removed if the table
     exists.
+
+    ``commit=False`` leaves publication inside the caller's writer transaction.
 
     Args:
         conn:   Open database connection.
@@ -1129,7 +1831,8 @@ def delete_message(conn: sqlite3.Connection, msg_id: int) -> bool:
     for _ent in _entities:
         for _tbl in ("summaries", "entity_profiles", "entity_style_vectors"):
             try:
-                conn.execute(f"DELETE FROM {_tbl} WHERE entity = ?", (_ent,))
+                conn.execute(f"DELETE FROM {_tbl} WHERE entity = ?",
+                             (_ent.lower() if _tbl == "entity_style_vectors" else _ent,))
             except sqlite3.OperationalError:
                 pass
         try:
@@ -1143,11 +1846,12 @@ def delete_message(conn: sqlite3.Connection, msg_id: int) -> bool:
     cursor = conn.execute("DELETE FROM messages WHERE id = ?", (msg_id,))
     deleted = cursor.rowcount > 0
 
-    conn.commit()
+    if commit:
+        conn.commit()
     return deleted
 
 
-def update_message(conn: sqlite3.Connection, msg_id: int, **fields) -> bool:
+def update_message(conn: sqlite3.Connection, msg_id: int, *, commit: bool = True, **fields) -> bool:
     """
     Update fields on an existing message.
 
@@ -1157,6 +1861,8 @@ def update_message(conn: sqlite3.Connection, msg_id: int, **fields) -> bool:
 
     The AFTER UPDATE trigger on ``messages`` automatically keeps the
     FTS5 index in sync.
+
+    ``commit=False`` leaves the source update inside the caller's writer fence.
 
     Args:
         conn:    Open database connection.
@@ -1178,5 +1884,6 @@ def update_message(conn: sqlite3.Connection, msg_id: int, **fields) -> bool:
     cursor = conn.execute(f"UPDATE messages SET {set_clause} WHERE id = ?", values)
 
     # The AFTER UPDATE trigger on messages keeps FTS5 in sync automatically.
-    conn.commit()
+    if commit:
+        conn.commit()
     return cursor.rowcount > 0

@@ -50,6 +50,11 @@ def ingest(
     gate_threshold: float = 0.30,
     llm_config: LLMConfig | None = None,
     session_id: str = "",
+    *,
+    require_complete: bool = False,
+    byte_limit: int | None = None,
+    maintenance_wait: float = 0.0,
+    extraction: dict | None = None,
 ) -> IngestionResult:
     """
     Ingest a conversation transcript into TrueMemory.
@@ -66,6 +71,12 @@ def ingest(
         session_id: Optional session identifier used to tag stored facts
             and the decision trace (the Stop hook passes Claude Code's
             session UUID here).
+        byte_limit: Ingest only this prefix of an append-only source; the
+            completion worker passes it for captures that reference their
+            source instead of copying it.
+        maintenance_wait: Seconds to wait for another process's maintenance
+            before storing (background workers only).
+        extraction: A completed extraction of the same bytes to reuse.
 
     Returns:
         IngestionResult with statistics and per-fact decision trace.
@@ -76,6 +87,15 @@ def ingest(
         gate_threshold=gate_threshold,
         llm_config=llm_config,
     )
+    retry = {name: value for name, value in (("maintenance_wait", maintenance_wait), ("extraction", extraction)) if value}
+    if retry:
+        return pipeline.ingest_transcript(transcript_path, session_id=session_id, require_complete=require_complete,
+                                          byte_limit=byte_limit, **retry)
+    if byte_limit is not None:
+        return pipeline.ingest_transcript(transcript_path, session_id=session_id, require_complete=require_complete,
+                                          byte_limit=byte_limit)
+    if require_complete:
+        return pipeline.ingest_transcript(transcript_path, session_id=session_id, require_complete=True)
     return pipeline.ingest_transcript(transcript_path, session_id=session_id)
 
 

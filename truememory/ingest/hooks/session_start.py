@@ -17,7 +17,8 @@ Input (stdin JSON):
     {"session_id": "...", "cwd": "...", "transcript_path": "..."}
 
 Output (stdout JSON):
-    {"additionalContext": "<truememory-context>...</truememory-context>"}
+    {"hookSpecificOutput": {"hookEventName": "SessionStart",
+                            "additionalContext": "<truememory-context>...</truememory-context>"}}
 """
 
 import argparse
@@ -30,6 +31,7 @@ from pathlib import Path
 from truememory import _platform
 from truememory._platform import _env_int
 from truememory._sanitize import sanitize_injection_content
+from truememory.ingest.hooks.output import HOOK_HOSTS, emit_context
 
 try:
     import fcntl
@@ -38,6 +40,7 @@ except ImportError:
     _HAS_FCNTL = False
 
 log = logging.getLogger(__name__)
+_COMPLETION_ACCOUNT: tuple[str, str] | None = None
 
 _BASE_MEMORY_LIMIT = _env_int("TRUEMEMORY_RECALL_LIMIT", 25, lo=1)
 
@@ -116,7 +119,7 @@ def _intensity_budget(intensity: str) -> int:
         return RECALL_BUDGET_CHARS
     return int(RECALL_BUDGET_CHARS * _INTENSITY_BUDGET_MULTIPLIER.get(intensity, 1.0))
 ONBOARDED_MARKER = Path.home() / ".truememory" / ".onboarded"
-BACKLOG_DIR = Path.home() / ".truememory" / "backlog"
+BACKLOG_DIR = Path(os.environ.get("TRUEMEMORY_BACKLOG_DIR", str(Path.home() / ".truememory" / "backlog")))
 _DRAIN_CAP = 3
 _SCAN_MARKER = Path.home() / ".truememory" / ".last_stale_scan"
 _SCAN_INTERVAL = 900  # 15 minutes
@@ -170,6 +173,8 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--user", default=os.environ.get("TRUEMEMORY_USER_ID", ""))
     p.add_argument("--db", default=os.environ.get("TRUEMEMORY_DB_PATH", ""))
+    p.add_argument("--host", choices=HOOK_HOSTS, default="claude")
+    p.add_argument("--event", default="SessionStart")
     p.add_argument("--scan-stale", action="store_true", help=argparse.SUPPRESS)
     args, _ = p.parse_known_args()
     return args
@@ -231,7 +236,13 @@ def _check_email_needed() -> str:
     return ""
 
 
-def _drain_backlog() -> None:
+def _completion_scope() -> tuple[str, str]:
+    """The account the installed hook writes to, as passed to the maintenance child."""
+    return (os.environ.get("TRUEMEMORY_COMPLETION_USER", os.environ.get("TRUEMEMORY_USER_ID", "")),
+            os.environ.get("TRUEMEMORY_COMPLETION_DB", os.environ.get("TRUEMEMORY_DB_PATH", "")))
+
+
+def _drain_backlog(host: str = "claude") -> None:
     """Process queued sessions from the backlog directory.
 
     Uses the flock-based spawn gate from core to prevent the avalanche
@@ -241,6 +252,15 @@ def _drain_backlog() -> None:
     Uses atomic rename (.json → .processing) to prevent TOCTOU races where
     multiple drainers read the same marker before either acquires the flock.
     """
+    if os.environ.get("TRUEMEMORY_MAINTENANCE_CHILD") == "1":
+        from truememory.ingest.completion import drain, convert_legacy_pointers
+        user_id, db_path = _completion_scope()
+        try:
+            drain(user_id, db_path, host)
+            convert_legacy_pointers(user_id, db_path, host)
+        except OSError as error:
+            log.warning("Drain retained incomplete capture (%s)", type(error).__name__)
+        return
     if not BACKLOG_DIR.exists():
         return
 
@@ -252,17 +272,25 @@ def _drain_backlog() -> None:
         mark_session_extracted,
         _quarantine_marker,
         is_allowed_transcript,
+        backlog_transcript_source,
+        normalize_transcript_host,
     )
+    host = normalize_transcript_host(host)
+    if not host:
+        return
     cleanup_stale_processing(BACKLOG_DIR)
 
     try:
-        markers = sorted(BACKLOG_DIR.glob("*.json"))[:_DRAIN_CAP]
+        markers = sorted(BACKLOG_DIR.glob("*.json"))
     except Exception:
         return
 
     from truememory.hooks.core import spawn_gate, register_spawned_pid
 
+    drained = 0
     for marker_path in markers:
+        if drained >= _DRAIN_CAP:
+            return
         claimed_path = marker_path.with_suffix(".processing")
         try:
             marker_path.rename(claimed_path)
@@ -287,16 +315,24 @@ def _drain_backlog() -> None:
             continue
 
         try:
-            transcript = data.get("transcript_path", "")
-            if not transcript or not Path(transcript).exists():
-                claimed_path.unlink(missing_ok=True)
-                continue
             # M-90: a backlog marker's transcript_path is attacker-influenceable;
             # confirm containment in an allowed transcripts root before parsing
             # (parse_transcript's plaintext fallback would read any readable file).
-            if not is_allowed_transcript(transcript):
-                log.warning("Drain: transcript_path %r outside allowed roots; dropping marker", transcript)
-                claimed_path.unlink(missing_ok=True)
+            if (
+                isinstance(data, dict)
+                and normalize_transcript_host(data.get("transcript_host", "claude"))
+                and data.get("transcript_host", "claude") != host
+            ):
+                claimed_path.rename(marker_path)
+                continue
+            source = backlog_transcript_source(data, host=host)
+            if source is None:
+                log.warning("Drain: rejected backlog transcript source for host=%s", host)
+                _quarantine_marker(claimed_path)
+                continue
+            transcript, session_id = source
+            if not is_allowed_transcript(transcript, host=host) or not Path(transcript).is_file():
+                _quarantine_marker(claimed_path)
                 continue
 
             if not check_extraction_budget():
@@ -323,8 +359,9 @@ def _drain_backlog() -> None:
                 cmd = [
                     sys.executable, "-m", "truememory.ingest.cli",
                     "ingest", transcript,
+                    "--transcript-host", host,
+                    "--automatic",
                 ]
-                session_id = data.get("session_id", "")
                 if session_id:
                     cmd.extend(["--session", session_id])
                 if data.get("user_id"):
@@ -334,7 +371,7 @@ def _drain_backlog() -> None:
                 from truememory.ingest.hooks._shared import _safe_session_id
                 _log_dir = Path.home() / ".truememory" / "logs"
                 _log_dir.mkdir(parents=True, exist_ok=True)
-                _safe_sid = _safe_session_id(data.get('session_id', 'unknown')) or 'unknown'
+                _safe_sid = _safe_session_id(session_id) or 'unknown'
                 _log_file = open(
                     _log_dir / f"{_safe_sid}.log",
                     "a", encoding="utf-8",
@@ -347,6 +384,7 @@ def _drain_backlog() -> None:
                         stdin=subprocess.DEVNULL,
                         **_platform.spawn_kwargs(),
                     )
+                    drained += 1
                 finally:
                     _log_file.close()
                 register_spawned_pid(proc.pid)
@@ -363,8 +401,8 @@ def _drain_backlog() -> None:
             # claim for cleanup_stale_processing to recover, silently dropping
             # the session. We now leave the claim in place: the ingest CLI
             # deletes it on confirmed success (clear_backlog_processing), and a
-            # dead worker leaves it so the 30-minute stale watcher restores it
-            # to .json and re-queues the session.
+            # dead worker leaves it so the stale watcher restores it to .json
+            # within minutes and re-queues the session.
             log.info("Drained backlog session: %s", data.get("session_id", "?"))
         except Exception as e:
             try:
@@ -520,7 +558,9 @@ def _scan_stale_sessions() -> None:
             _commit_watermark(now)
             return
 
-        from truememory.ingest.hooks._shared import EXTRACTED_DIR, _safe_session_id, mark_session_extracted
+        from truememory.ingest.hooks._shared import (
+            _safe_session_id, mark_session_extracted, should_extract_session,
+        )
         from truememory.ingest.hooks.stop import _queue_to_backlog
 
         uuid_re = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
@@ -561,8 +601,10 @@ def _scan_stale_sessions() -> None:
                 if not safe_id:
                     continue
 
-                marker = EXTRACTED_DIR / safe_id
-                if marker.exists():
+                # A handled session is skipped only until it grows, so a live
+                # session adopted mid-way and then killed without SessionEnd
+                # still has its later content queued.
+                if not should_extract_session(session_id, entry.path):
                     continue
 
                 # M-15: skip if a backlog claim already exists for this session.
@@ -591,8 +633,11 @@ def _scan_stale_sessions() -> None:
                     oldest_deferred_mtime = cutoff
                     break
 
+                # These transcripts belong to the Claude install whose hook
+                # started this scan, so they are queued for its account.
+                user_id, db_path = _completion_scope()
                 _queue_to_backlog(
-                    str(transcript), session_id, "", "",
+                    str(transcript), session_id, user_id, db_path,
                     reason="stale_session_recovery",
                 )
                 queued += 1
@@ -624,7 +669,7 @@ def _scan_stale_sessions() -> None:
             pass
 
 
-def _run_maintenance_background() -> None:
+def _run_maintenance_background(host: str = "claude") -> None:
     """Spawn backlog drain + stale-session scan in a detached subprocess.
 
     Uses ``Popen(start_new_session=True)`` so the child survives hook exit
@@ -637,8 +682,13 @@ def _run_maintenance_background() -> None:
     # storm). The flag was previously set but never read.
     if os.environ.get("TRUEMEMORY_MAINTENANCE_CHILD") == "1":
         return
+    from truememory.ingest.hooks._shared import normalize_transcript_host
+    host = normalize_transcript_host(host)
+    if not host:
+        return
 
     import subprocess
+    completion_account = globals().get("_COMPLETION_ACCOUNT")
 
     _log_dir = Path.home() / ".truememory" / "logs"
     _log_dir.mkdir(parents=True, exist_ok=True)
@@ -646,8 +696,8 @@ def _run_maintenance_background() -> None:
 
     script = (
         "from truememory.ingest.hooks.session_start import _drain_backlog, _scan_stale_sessions; "
-        "_drain_backlog(); "
-        "_scan_stale_sessions()"
+        f"_drain_backlog({host!r}); "
+        + ("_scan_stale_sessions()" if host == "claude" else "")
     )
 
     try:
@@ -658,7 +708,9 @@ def _run_maintenance_background() -> None:
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
-                env={**os.environ, "TRUEMEMORY_MAINTENANCE_CHILD": "1"},
+                env={**os.environ, "TRUEMEMORY_MAINTENANCE_CHILD": "1",
+                     **({"TRUEMEMORY_COMPLETION_USER": completion_account[0],
+                         "TRUEMEMORY_COMPLETION_DB": completion_account[1]} if completion_account else {})},
                 **_platform.spawn_kwargs(),
             )
         finally:
@@ -706,13 +758,15 @@ def main():
         return
 
     args = _parse_args()
+    global _COMPLETION_ACCOUNT
+    _COMPLETION_ACCOUNT = (args.user, args.db)
 
     # --scan-stale: background-only entry point (issue #558).
     if args.scan_stale:
         _scan_stale_sessions()
         return
 
-    _run_maintenance_background()
+    _run_maintenance_background(args.host)
 
     try:
         input_data = json.load(sys.stdin)
@@ -748,16 +802,15 @@ def main():
         if email_notice:
             context = (context or "") + "\n\n" + email_notice
 
-        if context:
-            output = {"additionalContext": context}
-            print(json.dumps(output))
+        if context and emit_context(context, host=args.host, event=args.event):
             # Mark recall as injected so the first UserPromptSubmit can skip
             # its redundant per-message auto-recall (issue #561). Written only
-            # after the context has actually been emitted, and only when the
+            # after the supported response has been flushed, and only when the
             # recall portion was non-empty — an empty/failed recall must not
             # suppress the first prompt's targeted recall.
             if recall_injected:
-                session_id = input_data.get("session_id", "")
+                from truememory.ingest.hooks._shared import hook_session_id
+                session_id = hook_session_id(input_data, args.host, default="")
                 if session_id:
                     from truememory.ingest.hooks._shared import mark_recall_injected
                     mark_recall_injected(session_id)
@@ -816,9 +869,10 @@ def _count_directives(memory, user_id: str = "") -> int:
     """Total stored directives in scope (cheap COUNT on idx_messages_directive)."""
     try:
         scope_sql, params = _directive_scope_sql(user_id)
-        row = memory._engine.conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE directive = 1" + scope_sql, params
-        ).fetchone()
+        with memory._engine._write_lock:  # The backfill thread shares this connection.
+            row = memory._engine.conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE directive = 1" + scope_sql, params
+            ).fetchone()
         return int(row[0]) if row else 0
     except Exception:
         log.warning("Failed to count directives", exc_info=True)
@@ -842,7 +896,8 @@ def _load_directives(memory, user_id: str = "") -> list[dict]:
         # truncation is detectable) then re-sort ascending for stable display.
         query += " ORDER BY id DESC LIMIT ?"
         params.append(DIRECTIVE_LIMIT + 1)
-        rows = memory._engine.conn.execute(query, params).fetchall()
+        with memory._engine._write_lock:
+            rows = memory._engine.conn.execute(query, params).fetchall()
         if len(rows) > DIRECTIVE_LIMIT:
             log.warning(
                 "Directive injection capped at %d (more are stored). Prune "
@@ -956,7 +1011,7 @@ def recall_memories(
         pass
 
     db = db_path or None
-    memory = Memory(path=db) if db else Memory()
+    memory = Memory(path=db, auto_maintenance=False) if db else Memory(auto_maintenance=False)
 
     # Load directives first — these are always injected (cheap SQL query,
     # not cached since they change infrequently and the query is fast).

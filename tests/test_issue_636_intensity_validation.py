@@ -307,6 +307,6 @@ def _run_main(monkeypatch, ups, prompt: str) -> str:
     if not captured:
         return ""
     try:
-        return json.loads(captured[0]).get("additionalContext", "")
+        return json.loads(captured[0]).get("hookSpecificOutput", {}).get("additionalContext", "")
     except (json.JSONDecodeError, IndexError):
         return ""

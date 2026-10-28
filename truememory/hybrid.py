@@ -41,6 +41,11 @@ import logging
 import sqlite3
 from collections import defaultdict
 
+from truememory.memory_budget import LocalMemoryPolicy
+from truememory.tier_switch.runtime import database_operation
+
+_LOCAL_MEMORY_POLICY = LocalMemoryPolicy()
+
 log = logging.getLogger(__name__)
 
 
@@ -123,6 +128,7 @@ def reciprocal_rank_fusion(
 _CANDIDATE_POOL = 200
 
 
+@database_operation
 def search_hybrid(
     conn: sqlite3.Connection,
     query: str,
@@ -176,7 +182,9 @@ def search_hybrid(
             sep_tbl = _active_sep_table(conn)
             conn.execute(f"SELECT rowid FROM {sep_tbl} LIMIT 1").fetchone()
             _has_sep = True
-        except Exception:
+        except Exception as exc:
+            from truememory.tier_switch.runtime import raise_if_serving_rejection
+            raise_if_serving_rejection(exc)
             pass
     except ImportError:
         pass
@@ -184,10 +192,23 @@ def search_hybrid(
     # ------------------------------------------------------------------
     # 1. Retrieve candidates from all engines.
     # ------------------------------------------------------------------
-    from truememory.vector_search import get_model, serialize_f32
+    from truememory.vector_search import get_model, released_connection, serialize_f32
     from truememory.mps_utils import encode_with_mps_fallback
+    configured_memory = "_LOCAL_MEMORY_POLICY" in globals()
+    if configured_memory:
+        from truememory.memory_budget import (
+            ProfileKey, budgeted_encode_with_mps_fallback, validate_local_policy,
+        )
+        validate_local_policy(globals()["_LOCAL_MEMORY_POLICY"])
     _q_model = get_model()
-    _q_emb = encode_with_mps_fallback(_q_model, [query])[0]
+    with released_connection():  # Other threads may use the connection while the query encodes.
+        if configured_memory:
+            _q_values = budgeted_encode_with_mps_fallback(
+                _q_model, [query], ProfileKey("hybrid query embedding", "local_embedding", input_item_count=1),
+            )
+        else:
+            _q_values = encode_with_mps_fallback(_q_model, [query])
+    _q_emb = _q_values[0]
     _q_blob = serialize_f32(_q_emb)
 
     fts_results = search_fts(conn, query, limit=_CANDIDATE_POOL, include_directives=include_directives)
@@ -206,7 +227,9 @@ def search_hybrid(
             sender_count = unique_senders_row[0] if unique_senders_row else 0
             if sender_count > 5:
                 sep_results = search_vector_separation(conn, query, limit=_CANDIDATE_POOL, _query_blob=_q_blob, include_directives=include_directives)
-        except Exception:
+        except Exception as exc:
+            from truememory.tier_switch.runtime import raise_if_serving_rejection
+            raise_if_serving_rejection(exc)
             pass
 
     # ------------------------------------------------------------------

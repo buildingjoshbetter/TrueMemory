@@ -219,7 +219,7 @@ class TestScannerWatermark:
             assert sid in queued_sessions
 
     def test_already_extracted_sessions_skipped(self, scanner_env, monkeypatch):
-        """Files with an extraction marker should still be skipped."""
+        """Files with an extraction marker are skipped until they grow."""
         env = scanner_env
         proj = env["claude_dir"] / "test-project"
         proj.mkdir()
@@ -230,9 +230,16 @@ class TestScannerWatermark:
         env["marker"].write_text(str(watermark_time), encoding="utf-8")
         os.utime(str(env["marker"]), (now - _scan_interval_plus(), now - _scan_interval_plus()))
 
-        sid, _ = _make_transcript(proj, mtime=now - 60)
-        # Create extraction marker
-        (env["extracted"] / sid).write_text("done", encoding="utf-8")
+        from truememory.ingest.hooks import _shared
+
+        sid, path = _make_transcript(proj, mtime=now - 60)
+        # The marker every extraction path writes: the size it handled.
+        _shared.mark_session_extracted(sid, str(path), running=False)
+        grown, grown_path = _make_transcript(proj, mtime=now - 60)
+        _shared.mark_session_extracted(grown, str(grown_path), running=False)
+        with grown_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "user", "message": {"content": "later " + "y" * 2000}}) + "\n")
+        os.utime(str(grown_path), (now - 30, now - 30))
 
         queued_sessions = []
         from truememory.ingest.hooks import stop as stop_mod
@@ -242,6 +249,8 @@ class TestScannerWatermark:
         ss._scan_stale_sessions()
 
         assert sid not in queued_sessions
+        # Content written after the session was handled is still queued.
+        assert grown in queued_sessions
 
     def test_scan_respects_interval(self, scanner_env, monkeypatch):
         """Scanner should not run if the marker mtime is within the interval."""

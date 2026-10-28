@@ -60,8 +60,20 @@ def engine_with_surprise(tmp_path, monkeypatch):
     conn.close()
 
     eng = TrueMemoryEngine(db_path)
-    eng.open(rebuild_vectors=False)
-    return eng
+    # These tests own their surprise rows and do not exercise maintenance.
+    eng._has_consolidation = False
+    eng._has_style_vec = False
+    try:
+        eng.open(rebuild_vectors=False)
+        yield eng
+    finally:
+        coordinator = eng._maintenance_coordinator
+        try:
+            if coordinator is not None:
+                coordinator.cancel()
+                assert coordinator.wait(10), "Fixture maintenance worker did not stop"
+        finally:
+            eng.close()
 
 
 def _fake_results(ids_and_scores, source=None):
@@ -316,7 +328,7 @@ def test_search_default_path_applies_boost(tmp_path, monkeypatch):
     )
 
 
-def test_alpha_zero_byte_identical_through_pipeline(tmp_path, monkeypatch):
+def test_alpha_zero_byte_identical_through_pipeline(tmp_path, monkeypatch, request):
     """Both explicit α=0 (constructor) and α=0 (env var) produce
     identical no-op results through _apply_surprise_boost."""
     from truememory.engine import TrueMemoryEngine
@@ -330,15 +342,23 @@ def test_alpha_zero_byte_identical_through_pipeline(tmp_path, monkeypatch):
 
     monkeypatch.delenv("TRUEMEMORY_ALPHA_SURPRISE", raising=False)
     eng = TrueMemoryEngine(db_path, alpha_surprise=0.0)
+    request.addfinalizer(eng.close)
+    eng._has_consolidation = False
+    eng._has_style_vec = False
     eng.open(rebuild_vectors=False)
     r_ctor = eng._apply_surprise_boost([dict(r) for r in sample])
     assert [(r["id"], r["score"]) for r in r_ctor] == expected
 
     monkeypatch.setenv("TRUEMEMORY_ALPHA_SURPRISE", "0")
     eng2 = TrueMemoryEngine(db_path)
+    request.addfinalizer(eng2.close)
+    eng2._has_consolidation = False
+    eng2._has_style_vec = False
     eng2.open(rebuild_vectors=False)
     r_env = eng2._apply_surprise_boost([dict(r) for r in sample])
     assert [(r["id"], r["score"]) for r in r_env] == expected
+    eng2.close()
+    eng.close()
 
 
 def test_composite_source_refined_is_excluded(engine_with_surprise):

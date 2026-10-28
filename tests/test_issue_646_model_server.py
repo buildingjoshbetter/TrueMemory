@@ -59,6 +59,7 @@ class TestM20CleanupOwnership:
         ms.PORT_PATH.write_text("12345")
 
         server = ms.ModelServer()
+        server._lock_fd = server._acquire_bind_lock()
         server._cleanup()
 
         # All four artifacts survive — they belong to the successor.
@@ -77,6 +78,7 @@ class TestM20CleanupOwnership:
         ms.PORT_PATH.write_text("12345")
 
         server = ms.ModelServer()
+        server._lock_fd = server._acquire_bind_lock()
         server._cleanup()
 
         assert not ms.PID_PATH.exists()
@@ -170,11 +172,11 @@ class TestM43ThrottlerToctou:
 
         fake_model = MagicMock()
         fake_model.encode.return_value = np.zeros((2, 4), dtype=np.float32)
-        monkeypatch.setattr(server, "_get_embed_model", lambda tier: fake_model)
+        monkeypatch.setattr(server, "_get_embed_model", lambda tier, deadline=None: fake_model)
 
         class FakeThrottler:
             def before_batch(self):
-                pass
+                return 2, {}
 
             def after_batch(self, n, t):
                 pass
@@ -204,7 +206,7 @@ class TestM44ServerDeadline:
 
         encode_called = {"n": 0}
 
-        def boom(tier):
+        def boom(tier, deadline=None):
             encode_called["n"] += 1
             raise AssertionError("encode must not run for expired request")
 
@@ -227,7 +229,7 @@ class TestM44ServerDeadline:
         server = ModelServer()
         fake_model = MagicMock()
         fake_model.encode.return_value = np.zeros((1, 4), dtype=np.float32)
-        monkeypatch.setattr(server, "_get_embed_model", lambda tier: fake_model)
+        monkeypatch.setattr(server, "_get_embed_model", lambda tier, deadline=None: fake_model)
 
         resp = server.handle_request({
             "op": "embed",
