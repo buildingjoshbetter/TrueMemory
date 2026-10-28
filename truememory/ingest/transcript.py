@@ -114,15 +114,19 @@ _CODEX_EVENT_CONTEXT = {
     "dynamic_tool_call_response", "patch_apply_begin", "patch_apply_end", "patch_apply_updated",
     "web_search_begin", "web_search_end", "view_image_tool_call", "image_generation_begin",
     "image_generation_end", "stream_error", "stream_info", "error", "warning",
+    "thread_settings_applied",
 }
 _CODEX_ITEM_CONTEXT = {
     "FunctionCallOutput", "HookPrompt", "Reasoning", "CommandExecution", "DynamicToolCall",
     "CollabAgentToolCall", "SubAgentActivity", "WebSearch", "ImageView", "ImageGeneration",
     "EnteredReviewMode", "ExitedReviewMode", "FileChange", "McpToolCall", "ContextCompaction",
+    "Extension",
 }
 _CODEX_SCAFFOLD_KINDS = {
     "agents_md.instructions", "hooks.additional_context", "guardian.retained_instructions",
 }
+# codex-cli 0.164 labels typed input "user.text"; it counts only with user provenance.
+_CODEX_USER_KINDS = {"user.text"}
 _CODEX_PHASES = {"commentary", "partial_answer", "final_answer"}
 _CODEX_START = {"task_started", "turn_started"}
 _CODEX_END = {"task_complete", "turn_complete"}
@@ -462,7 +466,11 @@ def _decode_codex_record(entry: dict) -> _CodexRecord | None:
                 record.reject("codex_unrecognized_provenance")
             projection_allowed = False
             continue
-        if block_kind not in ("", "unknown"):
+        if block_kind in _CODEX_USER_KINDS and (attribution != "user" or role != "user"):
+            record.reject("codex_unrecognized_provenance")
+            projection_allowed = False
+            continue
+        if block_kind not in ("", "unknown") and block_kind not in _CODEX_USER_KINDS:
             record.reject("codex_unrecognized_provenance")
             projection_allowed = False
             continue
@@ -567,6 +575,10 @@ def _decode_codex_event(record: _CodexRecord) -> _CodexRecord:
         if record.turn_id is None or record.item_id is None:
             record.reject("codex_unmatched_conversation_event")
         record.role = "human" if item_kind == "UserMessage" else "assistant"
+        if record.role == "human":
+            # codex-cli 0.164 gives a UserMessage item its own id, never the
+            # canonical message id, so it matches on turn and exact text only.
+            record.item_id = None
         record.phase = _codex_optional_string(record, item, "phase")
         content = item.get("content")
         expected_type = "text" if record.role == "human" else "Text"
