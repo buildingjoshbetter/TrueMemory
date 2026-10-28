@@ -125,6 +125,40 @@ class _MpsBuildRefused(_ProcessMemoryRefused):
         self.mps_oom = oom
 
 
+def _run_in_pieces(run: Callable[[list, int], object], items: list, lengths: list[int] | None,
+                   budget: int) -> object:
+    """Run *items* in longest-first pieces whose batch x tokens^2 fits *budget*.
+
+    Results come back in item order. Without lengths, one call runs them all.
+    """
+    from truememory._rerank_budget import budgeted_slices
+    slices = None if lengths is None else budgeted_slices(lengths, max(1, len(items)), budget)
+    if slices is None:
+        return run(items, max(1, len(items)))
+    results: list = [None] * len(items)
+    for group in slices:
+        values = run([items[index] for index in group], len(group))
+        for position, index in enumerate(group):
+            results[index] = values[position]
+    return np.stack(results)
+
+
+def _reslice_remaining(order: np.ndarray | None, lengths: list[int], start: int, total: int, limit: int,
+                       budget: int) -> tuple[np.ndarray, dict[int, int]]:
+    """Order and piece sizes for positions from *start* on, under a new budget."""
+    from truememory._rerank_budget import budgeted_slices
+    done = [int(index) for index in order[:start]] if order is not None else list(range(start))
+    remaining = [int(index) for index in order[start:]] if order is not None else list(range(start, total))
+    slices = budgeted_slices([lengths[index] for index in remaining], limit, budget)
+    groups = ([[remaining[position] for position in group] for group in slices] if slices is not None
+              else [remaining[offset:offset + limit] for offset in range(0, len(remaining), limit)])
+    steps, position = {}, start
+    for group in groups:
+        steps[position] = len(group)
+        position += len(group)
+    return np.array(done + [index for group in groups for index in group], dtype=np.intp), steps
+
+
 def _array_metadata(shape: tuple, encoded: str = "") -> dict:
     return {"__ndarray__": encoded, "dtype": "float32", "shape": list(shape)}
 
@@ -815,13 +849,17 @@ class ModelServer:
             mkwargs = {}
             if sys.platform == "darwin":
                 mkwargs["attn_implementation"] = "eager"
-            return SentenceTransformer(
+            model = SentenceTransformer(
                 "Qwen/Qwen3-Embedding-0.6B",
                 truncate_dim=256,
                 config_kwargs={"use_cache": False},
                 model_kwargs=mkwargs or None,
                 device=device,
             )
+            if type(getattr(model, "max_seq_length", None)) is int:
+                from truememory._embed_budget import cap_embed_length
+                cap_embed_length(model)
+            return model
         if model_id not in ("model2vec", "minilm", "bge-small", "qwen3_256"):
             # Custom model: require explicit opt-in for arbitrary downloads
             if os.environ.get("TRUEMEMORY_CUSTOM_ALLOW_DOWNLOAD", "").strip() != "1":
@@ -841,11 +879,15 @@ class ModelServer:
             from truememory.mps_utils import ensure_mps_memory_budget
             ensure_mps_memory_budget(device)
             from sentence_transformers import SentenceTransformer
-            return SentenceTransformer(
+            model = SentenceTransformer(
                 model_id, truncate_dim=custom_dim,
                 trust_remote_code=False,
                 device=device,
             )
+            if type(getattr(model, "max_seq_length", None)) is int:
+                from truememory._embed_budget import cap_embed_length
+                cap_embed_length(model)
+            return model
         from model2vec import StaticModel
         return StaticModel.from_pretrained(
             "minishlab/potion-base-8M", force_download=False
@@ -2083,6 +2125,8 @@ class ModelServer:
                     vectors = None
                     offset = 0
                     order = None
+                    steps = None
+                    lengths = None
                     while offset < len(texts) or vectors is None:
                         retry = None
                         with deadline.locked(self._lock):
@@ -2101,18 +2145,36 @@ class ModelServer:
                                          else self._get_prepared_embed_model(target, deadline))
                                 self._check_serving_embed_model(model, expected_target)
                                 order = self._embed_global_order(model, texts, limit, deadline)
+                                if (getattr(model, "tokenizer", None) is not None
+                                        and type(getattr(model, "max_seq_length", None)) is int):
+                                    from truememory._embed_budget import embed_token_budget, text_token_lengths
+                                    from truememory._rerank_budget import accelerator_token_budget, budgeted_slices
+                                    lengths = text_token_lengths(model, texts)
+                                    slices = (None if lengths is None else budgeted_slices(
+                                        lengths, limit, accelerator_token_budget(model, embed_token_budget())))
+                                    if slices is not None:
+                                        # Long texts: smaller longest-first batches bound attention memory.
+                                        order = np.array([index for group in slices for index in group], dtype=np.intp)
+                                        steps, start = {}, 0
+                                        for group in slices:
+                                            steps[start] = len(group)
+                                            start += len(group)
                             while offset < len(texts) or vectors is None:
                                 deadline.check()
-                                indices = None if order is None else self._embed_slice_indices(
-                                    model, texts, order, offset, limit, deadline,
-                                )
+                                step = limit if steps is None else steps[offset]
+                                if steps is not None:
+                                    indices = order[offset:offset + step]
+                                else:
+                                    indices = None if order is None else self._embed_slice_indices(
+                                        model, texts, order, offset, limit, deadline,
+                                    )
                                 batch = (texts[offset:offset + limit] if indices is None else
                                          [texts[index] for index in indices])
                                 self._check_process_memory("embed slice", deadline)
                                 deadline.check()
                                 recover = False
                                 try:
-                                    values = model.encode(batch, batch_size=limit, show_progress_bar=False)
+                                    values = model.encode(batch, batch_size=step, show_progress_bar=False)
                                 except RuntimeError as exc:
                                     from truememory.mps_utils import is_mps_oom
                                     if not is_mps_oom(exc):
@@ -2136,7 +2198,20 @@ class ModelServer:
                             self._check_process_memory("embed CPU retry", deadline)
                             deadline.check()
                             log.warning("MPS OOM during encoding; retrying microbatch on CPU")
-                            values = model.encode(retry, batch_size=limit, show_progress_bar=False)
+                            if lengths is None:
+                                values = model.encode(retry, batch_size=len(retry) or limit, show_progress_bar=False)
+                            else:
+                                # MPS-sized pieces do not fit CPU memory: size the retry and
+                                # every remaining piece against the RSS budget instead.
+                                from truememory._embed_budget import embed_token_budget
+                                from truememory._rerank_budget import accelerator_token_budget
+                                budget = accelerator_token_budget(model, embed_token_budget())
+                                retry_lengths = ([lengths[int(index)] for index in indices] if indices is not None
+                                                 else lengths[offset:offset + len(retry)])
+                                values = _run_in_pieces(
+                                    lambda items, size: model.encode(items, batch_size=size, show_progress_bar=False),
+                                    retry, retry_lengths, budget,
+                                )
                             if target is not None or expected_target is not None:
                                 check_target_vectors(target or expected_target, values, len(retry))
                             vectors = _store_batch_result(
@@ -2144,6 +2219,8 @@ class ModelServer:
                                 **result_options,
                             )
                             offset += len(retry)
+                            if lengths is not None and offset < len(texts):
+                                order, steps = _reslice_remaining(order, lengths, offset, len(texts), limit, budget)
                     self._after_request_batches(throttler, len(texts), encode_start, deadline)
 
                     with deadline.locked(self._lock):
@@ -2181,6 +2258,7 @@ class ModelServer:
                     offset = 0
                     order = None
                     steps = None
+                    lengths = None
                     recovery_name = model_name
                     while offset < len(pairs) or scores is None:
                         retry = None
@@ -2200,11 +2278,12 @@ class ModelServer:
                                         type(getattr(reranker, "max_seq_length", None)) is int
                                         or hasattr(reranker, "max_length")):
                                     from truememory._rerank_budget import (
-                                        budgeted_slices, pair_token_lengths, rerank_token_budget,
+                                        accelerator_token_budget, budgeted_slices, pair_token_lengths,
+                                        rerank_token_budget,
                                     )
                                     lengths = pair_token_lengths(reranker, pairs)
-                                    slices = (None if lengths is None else
-                                              budgeted_slices(lengths, limit, rerank_token_budget()))
+                                    slices = (None if lengths is None else budgeted_slices(
+                                        lengths, limit, accelerator_token_budget(reranker, rerank_token_budget())))
                                 if slices is not None:
                                     # Long pairs: smaller longest-first batches bound attention scratch.
                                     order = np.array([index for group in slices for index in group], dtype=np.intp)
@@ -2267,7 +2346,18 @@ class ModelServer:
                         if retry is not None:
                             self._check_process_memory("reranker CPU retry", deadline)
                             deadline.check()
-                            values = reranker.predict(retry, batch_size=len(retry) or limit, show_progress_bar=False)
+                            if lengths is None:
+                                values = reranker.predict(retry, batch_size=len(retry) or limit, show_progress_bar=False)
+                            else:
+                                # Size the retry and remaining pieces for the CPU replacement.
+                                from truememory._rerank_budget import accelerator_token_budget, rerank_token_budget
+                                budget = accelerator_token_budget(reranker, rerank_token_budget())
+                                retry_lengths = ([lengths[int(index)] for index in indices] if indices is not None
+                                                 else lengths[offset:offset + len(retry)])
+                                values = _run_in_pieces(
+                                    lambda items, size: reranker.predict(items, batch_size=size, show_progress_bar=False),
+                                    retry, retry_lengths, budget,
+                                )
                             if indices is None:
                                 scores = _store_batch_result(scores, values, offset, len(retry), len(pairs),
                                                              "scores", **result_options)
@@ -2277,6 +2367,8 @@ class ModelServer:
                                     **result_options,
                                 )
                             offset += len(retry)
+                            if lengths is not None and offset < len(pairs):
+                                order, steps = _reslice_remaining(order, lengths, offset, len(pairs), limit, budget)
                     self._after_request_batches(throttler, len(pairs), predict_start, deadline)
                     return ({"ok": True, "scores": scores} if expected_name is None else
                             {"ok": True, "scores": scores, "protocol": PROTOCOL_VERSION,

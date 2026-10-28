@@ -37,19 +37,98 @@ def cap_reranker_length(model: object) -> None:
         setattr(model, name, RERANK_MAX_TOKENS)
 
 
-def rerank_token_budget(available: int | None = None) -> int:
-    """Per-batch attention budget, reduced while the host is short of memory."""
+def memory_pressure_divisor(available: int | None = None) -> int:
+    """1 normally, 2 below 6 GiB available and 4 below 2 GiB."""
     if available is None:
         try:
             import psutil
             available = psutil.virtual_memory().available
         except (ImportError, OSError):
-            return RERANK_TOKEN_BUDGET
+            return 1
     if available < 2 * 1024 ** 3:
-        return RERANK_TOKEN_BUDGET // 4
+        return 4
     if available < 6 * 1024 ** 3:
-        return RERANK_TOKEN_BUDGET // 2
-    return RERANK_TOKEN_BUDGET
+        return 2
+    return 1
+
+
+# Peak MPS footprint per batch x tokens^2 x attention head, measured on Apple
+# silicon for Qwen3-Embedding and the ModernBERT reranker with both resident
+# (scores, masks, softmax and the allocator's heaps), with a fifth in reserve.
+_MPS_BYTES_PER_SCORE = 48
+_MPS_HEADROOM_SHARE = 0.8
+
+
+def _attention_heads(model: object) -> int | None:
+    configs = [getattr(model, "config", None), getattr(getattr(model, "model", None), "config", None)]
+    first = getattr(model, "_first_module", None)
+    if callable(first):
+        try:
+            configs.append(getattr(getattr(first(), "auto_model", None), "config", None))
+        except (AttributeError, IndexError, KeyError, StopIteration, TypeError):
+            pass
+    for config in configs:
+        heads = getattr(config, "num_attention_heads", None)
+        if type(heads) is int and heads > 0:
+            return heads
+    return None
+
+
+# Peak CPU bytes per batch x tokens^2 x attention head: eager attention keeps
+# two float32 score tensors alive at its softmax (11 x 1,718 tokens x 16 heads
+# is 4.16 GB per layer).
+_CPU_BYTES_PER_SCORE = 8
+
+
+def _cpu_token_budget(model: object, budget: int) -> int:
+    """Lower *budget* so one CPU batch's attention fits the process RSS budget.
+
+    CPU attention lands in resident memory. Pieces are sized against the RSS
+    budget minus what is already resident, not against free system memory.
+    """
+    heads = _attention_heads(model)
+    if heads is None:
+        return budget
+    try:
+        import psutil
+        from truememory.memory_budget import process_rss_limit
+        room = process_rss_limit() - psutil.Process().memory_info().rss
+    except Exception:
+        return budget
+    fit = int(max(0, room) * _MPS_HEADROOM_SHARE) // (heads * _CPU_BYTES_PER_SCORE)
+    return max(1, min(budget, fit))
+
+
+def accelerator_token_budget(model: object, budget: int) -> int:
+    """Lower *budget* so one batch's attention fits where the model runs.
+
+    MPS allocations are capped per process: a batch above the remaining cap
+    fails with an OOM that degrades the model to CPU. On CPU the attention is
+    resident memory, so a batch must fit the process RSS budget.
+    """
+    device = getattr(model, "device", None)
+    kind = getattr(device, "type", device)
+    if kind == "cpu":
+        return _cpu_token_budget(model, budget)
+    if kind != "mps":
+        return budget
+    from truememory.mps_utils import get_mps_memory_budget
+    policy = get_mps_memory_budget()
+    heads = _attention_heads(model)
+    if policy is None or not policy.effective_bytes or heads is None:
+        return budget
+    try:
+        import torch
+        free = policy.effective_bytes - torch.mps.current_allocated_memory()
+    except (ImportError, AttributeError, RuntimeError):
+        return budget
+    fit = int(max(0, free) * _MPS_HEADROOM_SHARE) // (heads * _MPS_BYTES_PER_SCORE)
+    return max(1, min(budget, fit))
+
+
+def rerank_token_budget(available: int | None = None) -> int:
+    """Per-batch attention budget, reduced while the host is short of memory."""
+    return RERANK_TOKEN_BUDGET // memory_pressure_divisor(available)
 
 
 def pair_token_lengths(model: object, pairs: list) -> list[int] | None:
@@ -92,7 +171,8 @@ def budgeted_predict(model: object, pairs: list, batch_size: int):
     """CrossEncoder.predict with long pairs scored in smaller batches."""
     lengths = (pair_token_lengths(model, pairs)
                if type(batch_size) is int and batch_size > 0 else None)
-    slices = None if lengths is None else budgeted_slices(lengths, batch_size, rerank_token_budget())
+    slices = (None if lengths is None else
+              budgeted_slices(lengths, batch_size, accelerator_token_budget(model, rerank_token_budget())))
     if slices is None:
         return model.predict(pairs, batch_size=batch_size, show_progress_bar=False)
     import numpy as np

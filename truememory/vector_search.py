@@ -381,6 +381,9 @@ def get_model():
                         from model2vec import StaticModel
                         _model = StaticModel.from_pretrained("minishlab/potion-base-8M", force_download=False)
                         _embedding_dim = 256
+                    if type(getattr(_model, "max_seq_length", None)) is int:
+                        from truememory._embed_budget import cap_embed_length
+                        cap_embed_length(_model)
                     if budget_owner is not None:
                         bind_model_owner(_model, budget_owner)
             except BaseException:
@@ -622,10 +625,16 @@ class _PreparedEmbeddingLease:
                                                  native_tensor_shape=(count, self.target.dimension)),
                                       known_bytes=payload_bytes, retained_bytes=payload_bytes,
                                       deadline=lambda: _target_remaining(expires), group="result assembly")
-                    values = encoder.encode(
-                        [TARGET_PROBE_TEXT] if probe else texts,
-                        batch_size=batch_size, show_progress_bar=False,
-                    )
+                    if (getattr(encoder, "tokenizer", None) is not None
+                            and type(getattr(encoder, "max_seq_length", None)) is int):
+                        from truememory._embed_budget import budgeted_encode
+                        values = budgeted_encode(encoder, [TARGET_PROBE_TEXT] if probe else texts,
+                                                 batch_size=batch_size, show_progress_bar=False)
+                    else:
+                        values = encoder.encode(
+                            [TARGET_PROBE_TEXT] if probe else texts,
+                            batch_size=batch_size, show_progress_bar=False,
+                        )
                     _target_remaining(expires)
                     values = np.asarray(values, dtype=np.float32)
                     check_target_vectors(self.target, values, count)

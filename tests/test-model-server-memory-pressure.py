@@ -349,6 +349,30 @@ def test_session_release_returns_one_stage(budgeted):
 
 
 
+def test_short_deadline_bounds_the_bookkeeping_wait(plain, monkeypatch):
+    plain._publish_embed_state(ms._EmbedState(model=Model("cpu"), tier="", model_id="model2vec"))
+    monkeypatch.setattr(plain, "_build_embed_model", lambda model_id, device: Model(device))
+    held, done = threading.Event(), threading.Event()
+
+    def bookkeeping():
+        with plain._lock:
+            held.set()
+            done.wait(5)
+
+    worker = threading.Thread(target=bookkeeping)
+    worker.start()
+    held.wait()
+    try:
+        started = time.monotonic()
+        plain._handle_fast_embed(["synthetic"], "", ms._RequestDeadline(time.monotonic() + 0.05))
+        assert time.monotonic() - started < 0.25
+    except ms._RequestDeadlineExceeded:
+        assert time.monotonic() - started < 0.25
+    finally:
+        done.set()
+        worker.join()
+
+
 def test_loading_model_does_not_reserve_its_size_against_concurrent_work(budgeted, monkeypatch):
     server, rss = budgeted
     monkeypatch.setattr(mps_utils, "auto_detect_device", lambda: "cpu")

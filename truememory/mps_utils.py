@@ -397,6 +397,9 @@ def encode_with_model_ownership(model: object, texts: object, **kwargs: object) 
     if isinstance(model, EmbeddingProxy):
         return model.encode(texts, **kwargs)
     with _own_model(model):
+        if getattr(model, "tokenizer", None) is not None and type(getattr(model, "max_seq_length", None)) is int:
+            from truememory._embed_budget import budgeted_encode
+            return budgeted_encode(model, texts, **kwargs)
         return model.encode(texts, **kwargs)
 
 
@@ -409,8 +412,12 @@ def encode_with_mps_fallback(model: object, texts: object, **kwargs: object) -> 
         # prevent recall from using the daemon's independent fast lane.
         return model.encode(texts, **kwargs)
 
+    bounded = getattr(model, "tokenizer", None) is not None and type(getattr(model, "max_seq_length", None)) is int
     with _own_model(model):
         try:
+            if bounded:
+                from truememory._embed_budget import budgeted_encode
+                return budgeted_encode(model, texts, **kwargs)
             return model.encode(texts, **kwargs)
         except RuntimeError as exc:
             if not is_mps_oom(exc):
@@ -422,4 +429,7 @@ def encode_with_mps_fallback(model: object, texts: object, **kwargs: object) -> 
             model.to("cpu")
             prefer_float32_on_cpu(model)
         flush_mps_cache()
+        if bounded:
+            from truememory._embed_budget import budgeted_encode
+            return budgeted_encode(model, texts, **kwargs)
         return model.encode(texts, **kwargs)

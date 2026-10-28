@@ -198,3 +198,28 @@ def test_model_server_caps_and_slices_legacy_crossencoder(monkeypatch):
     assert response["ok"] is True
     assert server._reranker.max_length == RERANK_MAX_TOKENS
     assert server._reranker.calls[0][0] == RERANK_TOKEN_BUDGET // RERANK_MAX_TOKENS ** 2
+
+
+def test_server_rerank_loop_fits_the_free_mps_allocation(monkeypatch):
+    import sys
+    import types
+
+    from truememory import mps_utils
+    from truememory.model_server import ModelServer
+
+    fake = FakeCrossEncoder()
+    fake.device = types.SimpleNamespace(type="mps")
+    fake.config = types.SimpleNamespace(num_attention_heads=12)
+    monkeypatch.setattr(mps_utils, "get_mps_memory_budget",
+                        lambda: types.SimpleNamespace(effective_bytes=4096 * 1024 ** 2))
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(
+        mps=types.SimpleNamespace(current_allocated_memory=lambda: 1790 * 1024 ** 2)))
+    monkeypatch.setattr(ModelServer, "_get_reranker", lambda self, model_name=None, deadline=None: fake)
+    monkeypatch.setattr(rerank_budget, "rerank_token_budget", lambda: RERANK_TOKEN_BUDGET)
+    pairs = _pairs(*([30] * 90 + [2000] * 10))
+    response = ModelServer().handle_request({"op": "rerank", "pairs": pairs, "model_name": "m"})
+    assert response["ok"] is True
+    assert np.allclose(response["scores"], FakeCrossEncoder().predict(pairs, batch_size=len(pairs)), rtol=0, atol=0)
+    # 80% of the free 2,306 MiB over 12 heads x 48 bytes: 3,358,665 tokens^2, three 1,024-token pairs.
+    fit = int(2306 * 1024 ** 2 * 0.8) // (12 * 48)
+    assert fake.calls[0][0] == fit // RERANK_MAX_TOKENS ** 2 == 3
