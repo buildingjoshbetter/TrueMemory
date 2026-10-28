@@ -124,8 +124,10 @@ _CODEX_ITEM_CONTEXT = {
 }
 _CODEX_SCAFFOLD_KINDS = {
     "agents_md.instructions", "hooks.additional_context", "guardian.retained_instructions",
+    "environments.environment_context", "additional_content.codex_apps_open_page",
 }
-# codex-cli 0.164 labels typed input "user.text"; it counts only with user provenance.
+# codex-cli 0.16x labels typed input "user.text", with user provenance or none
+# (earlier builds); any other provenance contradicts the label.
 _CODEX_USER_KINDS = {"user.text"}
 _CODEX_PHASES = {"commentary", "partial_answer", "final_answer"}
 _CODEX_START = {"task_started", "turn_started"}
@@ -466,7 +468,7 @@ def _decode_codex_record(entry: dict) -> _CodexRecord | None:
                 record.reject("codex_unrecognized_provenance")
             projection_allowed = False
             continue
-        if block_kind in _CODEX_USER_KINDS and (attribution != "user" or role != "user"):
+        if block_kind in _CODEX_USER_KINDS and (attribution not in ("user", "absent") or role != "user"):
             record.reject("codex_unrecognized_provenance")
             projection_allowed = False
             continue
